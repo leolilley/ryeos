@@ -1,8 +1,7 @@
-# ryeos:signed:2026-09-21T02:33:03Z:6e02751a71adeedbc382da7b37b60043f3214b65ad318697e0a8cdc3c0644775:ps9XGJ1iOfe59psxadrnpzQhLDPEXhQL6Onfs2r38upUafTwDRqXOdkDEVvzj7ibYIOg3ivWt8cdiBJop3/6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 {
   "category": "development/ryeos",
   "name": "repository-validation",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "schema": "ryeos.development.repository-validation.v1",
   "limits": {
     "max_file_bytes": 16777216,
@@ -53,40 +52,105 @@
         "ryeos-ui"
       ],
       "ryeos-external-execution-contract": [
-        "ryeos-state", "ryeos-engine", "ryeos-runtime", "ryeos-app",
-        "ryeos-executor", "ryeos-api", "ryeos-node"
+        "ryeos-state",
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-external-execution": [
-        "ryeos-engine", "ryeos-runtime", "ryeos-app", "ryeos-executor",
-        "ryeos-api", "ryeos-node"
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-project-capture": [
-        "ryeos-engine", "ryeos-runtime", "ryeos-app", "ryeos-executor",
-        "ryeos-api", "ryeos-node"
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-external-candidate-launcher": [
-        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-external-candidate-supervisor": [
-        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-external-candidate-connector": [
-        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-codex-external-configuration": [
-        "ryeos-state", "ryeos-engine", "ryeos-runtime", "ryeos-app",
-        "ryeos-executor", "ryeos-api", "ryeos-node"
+        "ryeos-state",
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node"
       ],
       "ryeos-app": [
         "ryeos-executor",
         "ryeos-api",
         "ryeos-node",
-        "ryeos-ui"
+        "ryeos-ui",
+        "ryeos-scheduler",
+        "ryeos-scheduler-service"
+      ],
+      "ryeos-scheduler-contract": [
+        "ryeos-scheduler",
+        "ryeos-scheduler-service",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui",
+        "ryeos-cli",
+        "ryeosd"
+      ],
+      "ryeos-scheduler-service": [
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui",
+        "ryeos-cli",
+        "ryeosd"
       ],
       "ryeos-executor": [
         "ryeos-api",
         "ryeos-node",
         "ryeos-ui"
+      ],
+      "lillux-sqlite": [
+        "ryeos-external-execution-contract",
+        "ryeos-external-execution",
+        "ryeos-project-capture",
+        "ryeos-state",
+        "ryeos-engine",
+        "ryeos-runtime",
+        "ryeos-app",
+        "ryeos-executor",
+        "ryeos-api",
+        "ryeos-node",
+        "ryeos-ui",
+        "ryeos-scheduler-contract",
+        "ryeos-scheduler",
+        "ryeos-scheduler-service",
+        "ryeos-cli",
+        "ryeosd"
       ]
     }
   },
@@ -246,7 +310,9 @@
           "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/routed_guest.rs"
         ],
         "exclude": [],
-        "suffixes": [".rs"],
+        "suffixes": [
+          ".rs"
+        ],
         "patterns": [
           "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
           "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
@@ -263,7 +329,9 @@
           "crates/tools/structured-session/src/workload_client_broker.rs"
         ],
         "exclude": [],
-        "suffixes": [".rs"],
+        "suffixes": [
+          ".rs"
+        ],
         "patterns": [
           "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
           "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
@@ -282,7 +350,9 @@
           "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/provider.rs"
         ],
         "exclude": [],
-        "suffixes": [".rs"],
+        "suffixes": [
+          ".rs"
+        ],
         "patterns": [
           "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
           "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
@@ -299,7 +369,9 @@
           "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/routed_guest.rs"
         ],
         "exclude": [],
-        "suffixes": [".rs"],
+        "suffixes": [
+          ".rs"
+        ],
         "patterns": [
           "\\b(?:std::)?io\\s*::\\s*(?:stdin|stdout)\\b",
           "\\b(?:stdin|stdout)\\s*(?:as\\s+\\w+)?\\s*[,}]",

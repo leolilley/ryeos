@@ -5,7 +5,7 @@
 //! durable capture floor, publishes immutable blobs and objects under a
 //! staged root, and inserts only the bounded derived projection.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, ensure};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -16,12 +16,19 @@ use ryeos_engine::source_closure::{
     AuthoritativeSourceContent, CapturedSourceCandidate, SourceClosureProof, SourceClosureStore,
     SourceRootRequest, SourceRootSelection,
 };
+use ryeos_engine::source_closure::source_view::{
+    DirectorySourceContent, canonical_item_source_path, executor_source_request,
+    item_directory_binding_root,
+};
 use ryeos_state::PendingCasPublication;
 use ryeos_state::objects::{
     AdmittedStructuredSessionProfile, EffectiveSourceClosureProjection, SOURCE_CLOSURE_DERIVED_KEY,
 };
 
 use crate::state::AppState;
+
+mod observation;
+pub use observation::{StructuredSourceValidationObservation, observe_bundle_structured_source};
 
 pub struct AdmittedSourceClosure {
     proof: SourceClosureProof,
@@ -44,6 +51,43 @@ pub struct SourceClosureValidationPreview {
 }
 
 impl AdmittedSourceClosure {
+    /// Reproduce request DATA from this exact recovered signed source, never
+    /// from a mutable registry or the caller's current request carrier.
+    pub(crate) fn verify_retained_worker_target_data(
+        &self,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        plan: &ryeos_engine::contracts::ExecutionPlan,
+    ) -> anyhow::Result<()> {
+        plan.validate_current_target_data()?;
+        let schema = require_current_kind_testimony(
+            &engine.node_trust_store, &engine.trust_store, &self.binding)?;
+        let opted = schema.execution.as_ref().and_then(|e| e.target.as_ref())
+            .is_some_and(|t| t.request_format.is_some());
+        if !opted && plan.current_target_request.is_none() { return Ok(()); }
+        ensure!(self.binding.owner == source_owner_identity(resolution)?,
+            "current request source owner contradicts exact retained resolution");
+        ensure!(self.binding.owner.item_kind == "worker"
+            && self.binding.owner.canonical_ref == plan.root_ref
+            && plan.root_ref == resolution.root.resolved_ref && plan.item_kind == "worker",
+            "current request lacks SAME signed Worker root");
+        ensure!(matches!(&self.binding.execution_policy,
+            ryeos_state::objects::SourceExecutionPolicyIdentity::Worker { .. }),
+            "current request source is not a Worker source policy");
+        require_current_source_policy(&engine.node_trust_store, &engine.trust_store,
+            resolution, &self.binding, &schema)?;
+        let execution = schema.execution.as_ref()
+            .context("retained Worker lacks execution schema")?;
+        let (expected_ordinary, expected_current) = execution.project_target_data(&resolution.composed.composed)?;
+        ensure!(expected_ordinary == plan.target_requirement,
+            "retained signed Worker target contradicts admitted ordinary target");
+        let expected = expected_current.as_ref().map(|v| v.canonical_bytes()).transpose()?;
+        let observed = plan.current_target_request.as_ref().map(|v| v.canonical_bytes()).transpose()?;
+        ensure!(expected == observed,
+            "retained signed Worker current request differs or was dropped");
+        Ok(())
+    }
+
     pub fn finalization_evidence(&self) -> (&SourceClosureProof, &dyn SourceClosureStore) {
         (&self.proof, &self.store)
     }
@@ -65,6 +109,48 @@ impl AdmittedSourceClosure {
     pub fn into_publication(mut self) -> Option<PendingCasPublication> {
         self.publication.take()
     }
+}
+
+/// Raw owned bytes beneath an ACTUAL recovered source. The original input owner
+/// must retain this value before content validation/parsing or late checks.
+pub(crate) struct LoadedStartupContractMember {
+    pub(crate) file: ryeos_state::objects::SourceClosureFile,
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) fn load_selected_startup_contract_member(
+    captured: &AdmittedSourceClosure,
+    selection: &ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection,
+    guard: &ryeos_state::CasMutationGuard,
+) -> anyhow::Result<LoadedStartupContractMember> {
+    selection.validate().map_err(anyhow::Error::msg)?;
+    let authority = captured.source_authority()?;
+    // Recovery acquired its own authority: join that ACTUAL authority to the
+    // original owner's SAME guard BEFORE any selected blob read.
+    authority.ensure_guard(guard)?;
+    captured
+        .binding()
+        .validate_content_manifest(captured.manifest())?;
+    let file = captured
+        .manifest()
+        .entries
+        .iter()
+        .find(|file| file.root == selection.source_root && file.path == selection.member)
+        .context("signed startup contract member absent from actual source")?;
+    ensure!(
+        file.blob_hash == selection.sha256 && file.size > 0 && file.size <= 16 * 1024,
+        "signed startup contract member identity/size mismatch"
+    );
+    let cas = authority.cas_store()?;
+    let bytes = cas
+        .get_blob_bounded(&file.blob_hash, file.size)?
+        .context("signed startup contract blob absent")?;
+    // Raw bytes are returned for deposit before validation. This helper cannot
+    // issue accepted startup authority or a qualified device/provider value.
+    Ok(LoadedStartupContractMember {
+        file: file.clone(),
+        bytes,
+    })
 }
 
 /// Compile a structured-session Worker only from its admitted source blobs.
@@ -127,16 +213,40 @@ fn compile_structured_worker_from_cas(
     binding: &ryeos_state::objects::EffectiveSourceBinding,
     manifest: &ryeos_state::objects::SourceClosureManifest,
 ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
+    compile_structured_worker_from_blobs(binding, manifest, |hash, size| {
+        cas.get_blob_bounded(hash, size)?
+            .context("captured Worker source blob is absent")
+    })
+}
+
+/// Admission and source observation compile the same exact manifest-owned
+/// bytes. The loader supplies either retained CAS bytes or the original capture;
+/// it never resolves a profile path from the live filesystem.
+fn compile_structured_worker_from_blobs(
+    binding: &ryeos_state::objects::EffectiveSourceBinding,
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+    load: impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<AdmittedStructuredSessionProfile> {
     binding.validate_content_manifest(manifest)?;
     let entry = match &binding.logical_binding {
         ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
         _ => anyhow::bail!("structured-session source has a non-Worker logical binding"),
     };
+    let source_files = load_profile_source_files(manifest, load)?;
+    let profile_bytes = source_files.get(entry).ok_or_else(|| {
+        anyhow::anyhow!("structured-session entry is absent from captured source")
+    })?;
+    ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
+}
+
+fn load_profile_source_files(
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+    mut load: impl FnMut(&str, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    manifest.validate()?;
     let mut source_files = std::collections::BTreeMap::new();
     for file in &manifest.entries {
-        let bytes = cas
-            .get_blob_bounded(&file.blob_hash, file.size)?
-            .ok_or_else(|| anyhow::anyhow!("captured Worker source blob is absent"))?;
+        let bytes = load(&file.blob_hash, file.size)?;
         ensure!(
             bytes.len() as u64 == file.size && lillux::sha256_hex(&bytes) == file.blob_hash,
             "retained Worker source blob differs from exact manifest"
@@ -146,10 +256,7 @@ fn compile_structured_worker_from_cas(
             "structured-session source has duplicate logical paths"
         );
     }
-    let profile_bytes = source_files.get(entry).ok_or_else(|| {
-        anyhow::anyhow!("structured-session entry is absent from captured source")
-    })?;
-    ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
+    Ok(source_files)
 }
 
 /// One current signed Bundle Worker, captured before product selection. The
@@ -332,8 +439,109 @@ pub fn admit_source_closure_in_publication(
     project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
     executor_policy: Option<&ExecutorSourcePolicyProjection>,
     publication: &mut Option<PendingCasPublication>,
-    mut preview: Option<&mut Option<SourceClosureValidationPreview>>,
+    preview: Option<&mut Option<SourceClosureValidationPreview>>,
 ) -> anyhow::Result<Option<AdmittedSourceClosure>> {
+    let Some(captured) = capture_source_closure(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        project,
+        executor_policy,
+        preview,
+    )?
+    else {
+        return Ok(None);
+    };
+    let CapturedSourceClosure { candidate, binding } = captured;
+    let content_manifest_hash = binding.content_manifest_hash.clone();
+
+    if publication.is_none() {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let staged = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
+        drop(guard);
+        *publication = Some(PendingCasPublication::new(authority, staged));
+    }
+    let authority = publication
+        .as_ref()
+        .expect("source admission initialized its publication")
+        .authority()
+        .try_clone()?;
+    let proof_authority = authority.try_clone()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas = authority.cas_store()?;
+    let staged = publication
+        .as_mut()
+        .expect("source admission initialized its publication")
+        .staged_roots_mut();
+    for blob in &candidate.blobs {
+        let outcome = cas.put_blob(&blob.bytes)?;
+        if outcome.hash != blob.blob_hash {
+            anyhow::bail!("stored source blob contradicts its captured identity");
+        }
+        staged.protect_blob_hash_admitted(&guard, &outcome.hash)?;
+    }
+    let stored_manifest_hash =
+        staged.store_object_admitted(&guard, &cas, &candidate.manifest.to_value()?)?;
+    if stored_manifest_hash != content_manifest_hash {
+        anyhow::bail!("stored source manifest contradicts its captured identity");
+    }
+    let binding_hash = staged.store_object_admitted(&guard, &cas, &binding.to_value()?)?;
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection {
+        schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+        binding_hash,
+        content_manifest_hash,
+        owner_key: binding.owner_key()?,
+        file_count: candidate.manifest.totals.file_count,
+        total_bytes: candidate.manifest.totals.total_bytes,
+    };
+    resolution.composed.derived.insert(
+        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+        projection.to_value()?,
+    );
+    let store = RetainedSourceClosureStore {
+        authority: proof_authority,
+    };
+    let proof = ryeos_engine::source_closure::prove_source_closure(projection, &store)?;
+    drop(_permit);
+    drop(guard);
+    Ok(Some(AdmittedSourceClosure {
+        proof,
+        store,
+        publication: None,
+        binding,
+        manifest: candidate.manifest,
+    }))
+}
+
+/// Original bounded bytes and their checked testimony. This private value has
+/// no CAS roots, publication, derived executable projection or launch authority.
+struct CapturedSourceClosure {
+    candidate: CapturedSourceCandidate,
+    binding: ryeos_state::objects::EffectiveSourceBinding,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_source_closure(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
+    executor_policy: Option<&ExecutorSourcePolicyProjection>,
+    mut preview: Option<&mut Option<SourceClosureValidationPreview>>,
+) -> anyhow::Result<Option<CapturedSourceClosure>> {
     if resolution
         .composed
         .derived
@@ -650,6 +858,11 @@ pub fn admit_source_closure_in_publication(
     };
     binding.validate()?;
     binding.validate_content_manifest(&candidate.manifest)?;
+    ensure!(
+        candidate.revalidate(source.as_ref(), &requests, contract)
+            == ryeos_engine::source_closure::SourceAuthorityStatus::Current,
+        "source authority changed during capture and testimony"
+    );
 
     if let Some(preview) = preview {
         let expected_digest = match &binding.testimony {
@@ -671,71 +884,7 @@ pub fn admit_source_closure_in_publication(
         return Ok(None);
     }
 
-    if publication.is_none() {
-        let authority = state.state_store.pinned_state_authority()?;
-        let guard = authority.acquire_shared_guard()?;
-        authority.ensure_guard(&guard)?;
-        let staged = authority
-            .require_recovery()?
-            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
-        drop(guard);
-        *publication = Some(PendingCasPublication::new(authority, staged));
-    }
-    let authority = publication
-        .as_ref()
-        .expect("source admission initialized its publication")
-        .authority()
-        .try_clone()?;
-    let proof_authority = authority.try_clone()?;
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let _permit = state
-        .write_barrier
-        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
-    let cas = authority.cas_store()?;
-    let staged = publication
-        .as_mut()
-        .expect("source admission initialized its publication")
-        .staged_roots_mut();
-    for blob in &candidate.blobs {
-        let outcome = cas.put_blob(&blob.bytes)?;
-        if outcome.hash != blob.blob_hash {
-            anyhow::bail!("stored source blob contradicts its captured identity");
-        }
-        staged.protect_blob_hash_admitted(&guard, &outcome.hash)?;
-    }
-    let stored_manifest_hash =
-        staged.store_object_admitted(&guard, &cas, &candidate.manifest.to_value()?)?;
-    if stored_manifest_hash != content_manifest_hash {
-        anyhow::bail!("stored source manifest contradicts its captured identity");
-    }
-    let binding_hash = staged.store_object_admitted(&guard, &cas, &binding.to_value()?)?;
-    let projection = ryeos_state::objects::EffectiveSourceClosureProjection {
-        schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
-        binding_hash,
-        content_manifest_hash,
-        owner_key: binding.owner_key()?,
-        file_count: candidate.manifest.totals.file_count,
-        total_bytes: candidate.manifest.totals.total_bytes,
-    };
-    resolution.composed.derived.insert(
-        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
-        projection.to_value()?,
-    );
-    let store = RetainedSourceClosureStore {
-        authority: proof_authority,
-    };
-    let proof = ryeos_engine::source_closure::prove_source_closure(projection, &store)?;
-    drop(_permit);
-    drop(guard);
-    Ok(Some(AdmittedSourceClosure {
-        proof,
-        store,
-        publication: None,
-        binding,
-        manifest: candidate.manifest,
-    }))
+    Ok(Some(CapturedSourceClosure { candidate, binding }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -999,175 +1148,6 @@ fn verify_owner_signed_files(
     )
 }
 
-/// Resolve the root executable from the canonical item coordinate and the
-/// signed kind's extension order. Host paths are deliberately absent: the
-/// typed content root has already selected the authority, while the kind
-/// schema defines the only filenames that may represent this canonical ref.
-/// Select the canonical source unit for both admission and owner signing.
-/// This only selects bytes from the supplied authoritative view; it grants no
-/// execution, signing, or publication authority to its caller.
-pub fn item_namespace_source_request(
-    source: &dyn AuthoritativeSourceContent,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<(SourceRootRequest, String)> {
-    let selected = canonical_item_source_path(
-        source,
-        expected_kind,
-        kind_schema,
-        canonical_ref,
-        expected_source_digest,
-        max_file_bytes,
-    )?;
-    let (_, bare_id) = canonical_ref
-        .split_once(':')
-        .expect("canonical item lookup validated the ref");
-    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
-    let components = Path::new(bare_id).components().collect::<Vec<_>>();
-    if components.len() == 1 {
-        let entry = selected
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-            .to_owned();
-        return Ok((
-            SourceRootRequest {
-                id: "source".to_owned(),
-                selection: SourceRootSelection::File { path: selected },
-            },
-            entry,
-        ));
-    }
-
-    let prefix = kind_root.join(components[0].as_os_str());
-    let entry = selected
-        .strip_prefix(&prefix)
-        .map_err(|_| anyhow::anyhow!("source item escaped its canonical namespace"))?
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-        .to_owned();
-    Ok((
-        SourceRootRequest {
-            id: "source".to_owned(),
-            selection: SourceRootSelection::Tree { prefix },
-        },
-        entry,
-    ))
-}
-
-/// Select a source unit no broader than the signed kind's item-namespace
-/// ceiling. `item_directory` is the closed narrow form: it captures only the
-/// canonical item's containing directory while retaining the same exact root
-/// item and owner-signed-files testimony.
-pub fn executor_source_request(
-    source: &dyn AuthoritativeSourceContent,
-    location: ryeos_engine::source_closure::ExecutorSourceLocation,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<(SourceRootRequest, String)> {
-    match location {
-        ryeos_engine::source_closure::ExecutorSourceLocation::ItemNamespace => {
-            item_namespace_source_request(
-                source,
-                expected_kind,
-                kind_schema,
-                canonical_ref,
-                expected_source_digest,
-                max_file_bytes,
-            )
-        }
-        ryeos_engine::source_closure::ExecutorSourceLocation::ItemDirectory => {
-            item_directory_binding_root(canonical_ref)?;
-            let selected = canonical_item_source_path(
-                source,
-                expected_kind,
-                kind_schema,
-                canonical_ref,
-                expected_source_digest,
-                max_file_bytes,
-            )?;
-            let (prefix, entry) = item_directory_selection(&selected)?;
-            Ok((
-                SourceRootRequest {
-                    id: "source".to_owned(),
-                    selection: SourceRootSelection::Tree { prefix },
-                },
-                entry,
-            ))
-        }
-    }
-}
-
-fn item_directory_binding_root(canonical_ref: &str) -> anyhow::Result<String> {
-    let bare_id = canonical_ref
-        .split_once(':')
-        .map(|(_, bare_id)| bare_id)
-        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
-    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
-    Path::new(bare_id)
-        .parent()
-        .and_then(Path::to_str)
-        .filter(|root| !root.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("item_directory source owner has no containing directory"))
-}
-
-fn item_directory_selection(selected: &Path) -> anyhow::Result<(PathBuf, String)> {
-    let prefix = selected
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("source item has no containing directory"))?
-        .to_path_buf();
-    let entry = selected
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-        .to_owned();
-    Ok((prefix, entry))
-}
-
-fn canonical_item_source_path(
-    source: &dyn AuthoritativeSourceContent,
-    expected_kind: &str,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_ref: &str,
-    expected_source_digest: &str,
-    max_file_bytes: u64,
-) -> anyhow::Result<PathBuf> {
-    let (kind, bare_id) = canonical_ref
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
-    if kind != expected_kind {
-        anyhow::bail!("source owner ref contradicts its signed kind");
-    }
-    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
-    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
-
-    let mut selected = None;
-    for format in &kind_schema.extensions {
-        let relative = kind_root.join(format!("{bare_id}{}", format.ext));
-        let Some(bytes) = source.read_file(&relative, max_file_bytes)? else {
-            continue;
-        };
-        if lillux::sha256_hex(&bytes) != expected_source_digest {
-            anyhow::bail!(
-                "canonical source coordinate contradicts the resolved executable identity"
-            );
-        }
-        selected = Some(relative);
-        break;
-    }
-    let selected = selected.ok_or_else(|| {
-        anyhow::anyhow!("canonical source coordinate is absent from its typed content root")
-    })?;
-    Ok(selected)
-}
-
 fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> anyhow::Result<()> {
     if !candidate
         .manifest
@@ -1180,7 +1160,7 @@ fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> a
     Ok(())
 }
 
-fn source_owner_identity(
+pub(crate) fn source_owner_identity(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> anyhow::Result<ryeos_state::objects::SourceOwnerIdentity> {
     let signer =
@@ -1256,127 +1236,236 @@ impl AuthoritativeSourceContent for ProjectSourceContent<'_> {
     }
 }
 
-/// Read-only, path-pinned source view shared by admission and owner signing.
-/// Constructing this view does not authorize signing or execution.
-pub struct DirectorySourceContent<'a> {
-    root: lillux::PinnedDirectory,
-    identity: String,
-    configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
-}
+/// Temporary C2 source-only fixture. It uses production admission/publication
+/// and recovery; it supplies no protected backend, product or funded owner.
+#[cfg(test)]
+pub(crate) mod temporary_source_fixture {
+    use super::*;
+    use ryeos_engine::resolution::{
+        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
 
-impl<'a> DirectorySourceContent<'a> {
-    pub fn new(
-        root: &Path,
-        identity: String,
-        configured_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
-    ) -> anyhow::Result<Self> {
-        let root = lillux::PinnedDirectory::open(root)?
-            .ok_or_else(|| anyhow::anyhow!("source content root is unavailable"))?;
-        Ok(Self {
-            root,
-            identity,
-            configured_ignore,
+    pub(crate) struct Fixture {
+        pub(crate) resolution: ResolutionOutput,
+        pub(crate) recovered: AdmittedSourceClosure,
+        // Keep the actual staged CAS roots alive through every member read.
+        pub(crate) publication: PendingCasPublication,
+        pub(crate) bundle: tempfile::TempDir,
+    }
+
+    pub(crate) fn admit(state: &mut AppState, member: &[u8]) -> anyhow::Result<Fixture> {
+        admit_with_logical_root(state, member, "source")
+    }
+
+    pub(crate) fn admit_with_logical_root(
+        state: &mut AppState,
+        member: &[u8],
+        logical_root: &str,
+    ) -> anyhow::Result<Fixture> {
+        admit_with_logical_root_and_member(state, member, logical_root, "startup.json")
+    }
+
+    pub(crate) fn admit_with_logical_root_and_member(
+        state: &mut AppState,
+        member: &[u8],
+        logical_root: &str,
+        member_path: &str,
+    ) -> anyhow::Result<Fixture> {
+        admit_variant(state, member, logical_root, member_path, false)
+    }
+
+    pub(crate) fn admit_current_target(state: &mut AppState, member: &[u8]) -> anyhow::Result<Fixture> {
+        admit_variant(state, member, "source", "startup.json", true)
+    }
+
+    fn admit_variant(state: &mut AppState, member: &[u8], logical_root: &str,
+        member_path: &str, current: bool) -> anyhow::Result<Fixture> {
+        // Validate both relative coordinates before allocation or writes.
+        ryeos_state::objects::validate_canonical_project_relative_path(logical_root)?;
+        ryeos_state::objects::validate_canonical_project_relative_path(member_path)?;
+        anyhow::ensure!(
+            member_path != "bootstrap.py",
+            "temporary member replaces entry"
+        );
+        let bundle = tempfile::tempdir()?;
+        let kinds = bundle.path().join("fixture-kinds");
+        std::fs::create_dir_all(kinds.join("worker"))?;
+        let key = lillux::crypto::SigningKey::from_bytes(&[113; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let schema = r##"location:
+  directory: workers
+execution:
+  aliases:
+    "@base": "tool:ryeos/base/base"
+  source_closure:
+    derived: effective_source_closure
+    location: {type: owner_relative_source, path: [source]}
+    testimony: owner_signed_digest
+    max_files: 8
+    max_total_bytes: 65536
+    max_file_bytes: 32768
+    max_depth: 8
+formats:
+  - extensions: [".yaml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+composed_value_contract:
+  root_type: mapping
+  required: {}
+effective_trust:
+  include_references: false
+resolution: []
+composer: handler:ryeos/core/identity
+"##;
+        let schema = if current {
+            schema.replace("execution:\n", "execution:\n  target:\n    path: [supported_target]\n    required: true\n    request_format: ryeos.execution_target.v1\n    limits: {max_requirements: 1, max_resource_count: 1, max_facts_per_requirement: 16}\n")
+        } else { schema.to_owned() };
+        std::fs::write(
+            kinds.join("worker/worker.kind-schema.yaml"),
+            lillux::signature::sign_content(&schema, &key, "#", None),
+        )?;
+        let registry = ryeos_engine::kind_registry::KindRegistry::load_base(&[kinds], &trust)?;
+        let contract = registry
+            .get("worker")
+            .and_then(|kind| kind.execution.as_ref())
+            .and_then(|execution| execution.source_closure.as_ref())
+            .context("temporary signed kind has no source contract")?;
+        let prefix = Path::new(".ai/workers/test").join(logical_root);
+        std::fs::create_dir_all(bundle.path().join(&prefix))?;
+        // An inert test entry, never executed and never a production consumer.
+        std::fs::write(
+            bundle.path().join(&prefix).join("bootstrap.py"),
+            b"# C2 source only\n",
+        )?;
+        let member_file = bundle.path().join(&prefix).join(member_path);
+        std::fs::create_dir_all(
+            member_file
+                .parent()
+                .context("temporary member parent absent")?,
+        )?;
+        std::fs::write(member_file, member)?;
+        let source = DirectorySourceContent::new(
+            bundle.path(),
+            "bundle:factory-fixture".into(),
+            state.ignore_matcher.as_ref(),
+        )?;
+        let candidate = ryeos_engine::source_closure::capture_source_candidate(
+            &source,
+            &[SourceRootRequest {
+                id: "source".into(),
+                selection: SourceRootSelection::Tree { prefix },
+            }],
+            contract,
+        )?;
+        let declaration = ryeos_engine::source_closure::WorkerSourceDeclaration {
+            root: logical_root.into(),
+            entry: "bootstrap.py".into(),
+            digest: candidate.manifest.digest()?,
+        };
+        declaration.validate()?;
+        let mut definition = serde_json::json!({
+            "kind": "worker", "name": "factory", "category": "test", "source": declaration,
+        });
+        if current {
+            definition["supported_target"] = serde_json::json!({"schema":"ryeos.execution_target.v1",
+                "os":"linux","arch":"x86_64","resources":[],"original_physical_bounds":null});
+        }
+        let body = serde_yaml::to_string(&definition)?;
+        let document = lillux::signature::sign_content(&body, &key, "#", None);
+        let header = lillux::signature::parse_signature_line(
+            document
+                .lines()
+                .next()
+                .context("temporary signature absent")?,
+            "#",
+            None,
+        )
+        .context("temporary signature malformed")?;
+        ensure!(
+            lillux::signature::is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                &body,
+                &key.verifying_key(),
+                &fingerprint,
+            ),
+            "temporary Worker signature invalid"
+        );
+        let descriptor = bundle.path().join(".ai/workers/test/factory.yaml");
+        std::fs::write(&descriptor, &document)?;
+        // Resolution is test input derived from the verified actual document;
+        // no admitted source/proof owner is constructed here.
+        let mut resolution = ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: "worker:test/factory".into(),
+                resolved_ref: "worker:test/factory".into(),
+                source_path: descriptor,
+                source_space: ItemSpace::Bundle,
+                source_root: ItemSourceRoot::Bundle {
+                    name: "factory-fixture".into(),
+                },
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: Some(fingerprint),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content: body.clone(),
+                source_content_digest: lillux::sha256_hex(document.as_bytes()),
+                raw_content_digest: lillux::sha256_hex(body.as_bytes()),
+            },
+            ancestors: vec![],
+            references_edges: vec![],
+            referenced_items: vec![],
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView::identity(serde_yaml::from_str(&body)?),
+        };
+        let mut engine = (*state.engine).clone();
+        engine.kinds = registry;
+        engine.node_trust_store = trust.clone();
+        engine.trust_store = trust;
+        state.engine = std::sync::Arc::new(engine);
+        let roots = ryeos_engine::item_resolution::ResolutionRoots::from_registered(
+            None,
+            &[ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: "factory-fixture".into(),
+                canonical_root: bundle.path().canonicalize()?,
+            }],
+        );
+        let admitted = admit_source_closure(
+            state,
+            &state.engine,
+            "worker",
+            &mut resolution,
+            &roots,
+            None,
+            None,
+        )?
+        .context("actual temporary source admission returned None")?;
+        let publication = admitted
+            .into_publication()
+            .context("actual admission did not retain its CAS publication")?;
+        let recovered = recover_source_closure(state, &state.engine, &resolution)?
+            .context("actual temporary source recovery returned None")?;
+        Ok(Fixture {
+            resolution,
+            recovered,
+            publication,
+            bundle,
         })
     }
-
-    fn included(&self, relative: &Path) -> anyhow::Result<bool> {
-        let relative = relative
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("source content path is not UTF-8"))?;
-        Ok(
-            !ryeos_state::project_sync::is_durable_content_capture_floor_excluded(relative)
-                && !self.configured_ignore.is_ignored(relative),
-        )
-    }
-}
-
-impl AuthoritativeSourceContent for DirectorySourceContent<'_> {
-    fn authority_identity(&self) -> Result<String, ryeos_engine::error::EngineError> {
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        Ok(self.identity.clone())
-    }
-
-    fn list_files(
-        &self,
-        prefix: &Path,
-        max_entries: usize,
-    ) -> Result<Vec<ProjectContentEntry>, ryeos_engine::error::EngineError> {
-        let path = self.root.path().join(prefix);
-        let mut entries = Vec::new();
-        let present = lillux::visit_regular_files_no_follow_bounded(
-            &path,
-            lillux::DirectoryTraversalBudget::new(max_entries.saturating_mul(2), 64),
-            |relative, _is_directory| {
-                let full = prefix.join(relative);
-                self.included(&full).map(|included| !included)
-            },
-            |relative, file| {
-                if entries.len() >= max_entries {
-                    anyhow::bail!("source content exceeds its signed file ceiling");
-                }
-                let full = prefix.join(relative);
-                if !self.included(&full)? {
-                    return Ok(());
-                }
-                let metadata = file.metadata()?;
-                #[cfg(unix)]
-                let normalized_mode = {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        0o644
-                    } else {
-                        0o755
-                    }
-                };
-                #[cfg(not(unix))]
-                let normalized_mode = 0o644;
-                let bytes = lillux::read_open_regular_file_bounded(
-                    file,
-                    ryeos_state::objects::MAX_SOURCE_FILE_BYTES,
-                )?;
-                entries.push(ProjectContentEntry {
-                    relative_path: relative.to_path_buf(),
-                    content_hash: lillux::sha256_hex(&bytes),
-                    size: bytes.len() as u64,
-                    normalized_mode,
-                });
-                Ok(())
-            },
-        )
-        .map_err(engine_internal)?;
-        if !present {
-            return Err(ryeos_engine::error::EngineError::Internal(
-                "source content root is absent".to_owned(),
-            ));
-        }
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-        Ok(entries)
-    }
-
-    fn read_file(
-        &self,
-        path: &Path,
-        max_bytes: u64,
-    ) -> Result<Option<Vec<u8>>, ryeos_engine::error::EngineError> {
-        if !self.included(path).map_err(engine_internal)? {
-            return Ok(None);
-        }
-        let file = self
-            .root
-            .open_pinned_regular_descendant(path, false)
-            .map_err(engine_internal)?;
-        let bytes = file
-            .map(|file| file.read_bounded(max_bytes))
-            .transpose()
-            .map_err(engine_internal)?;
-        self.root.ensure_path_binding().map_err(engine_internal)?;
-        Ok(bytes)
-    }
-}
-
-fn engine_internal(error: anyhow::Error) -> ryeos_engine::error::EngineError {
-    ryeos_engine::error::EngineError::Internal(error.to_string())
 }
 
 #[cfg(test)]
@@ -1384,71 +1473,33 @@ mod directory_source_tests {
     use super::*;
 
     #[test]
-    fn item_directory_selection_is_exactly_the_owner_directory() {
-        let selected = Path::new(".ai/tools/ryeos/development/runtime/runtime.yaml");
-        let (prefix, entry) = item_directory_selection(selected).unwrap();
-        assert_eq!(prefix, Path::new(".ai/tools/ryeos/development/runtime"));
-        assert_eq!(entry, "runtime.yaml");
-        assert!(!Path::new(".ai/tools/ryeos/development/sibling/tool.py").starts_with(prefix));
-        assert_eq!(
-            item_directory_binding_root(
-                "tool:ryeos/development/authoring-environment-production/runtime"
-            )
-            .unwrap(),
-            "ryeos/development/authoring-environment-production"
-        );
-        assert!(item_directory_binding_root("tool:runtime").is_err());
+    fn actual_source_cas_authority_refuses_foreign_original_guard() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        // A thread holds one test Store at a time. The foreign node's
+        // descriptor-pinned authority outlives its Store, so that node is
+        // opened, pinned and closed before the actual node opens.
+        let foreign = {
+            let (_second_state_owner, second_state) =
+                crate::state::test_support::build(second.path()).unwrap();
+            second_state.state_store.pinned_state_authority().unwrap()
+        };
+        let (_first_state_owner, first_state) =
+            crate::state::test_support::build(first.path()).unwrap();
+        let actual = first_state.state_store.pinned_state_authority().unwrap();
+        let same_guard = actual.acquire_shared_guard().unwrap();
+        actual.ensure_guard(&same_guard).unwrap();
+        // A thread nests shared guards of one runtime only, so release the
+        // actual guard before taking the foreign one.
+        drop(same_guard);
+        let foreign_guard = foreign.acquire_shared_guard().unwrap();
+        assert!(actual.ensure_guard(&foreign_guard).is_err());
+        // Actual state/CAS authority control for the helper's pre-read gate.
+        // No recovered source or protected original input owner is fabricated;
+        // full recovered-member/binder custody controls are still required.
     }
 
-    #[test]
-    fn absent_extension_candidate_is_not_a_read_failure() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
-        std::fs::write(root.path().join(".ai/tools/test/item.yaml"), b"descriptor").unwrap();
-        let ignore =
-            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-                patterns: Vec::new(),
-            })
-            .unwrap();
-        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
-        assert_eq!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.py"), 32)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.yaml"), 32)
-                .unwrap(),
-            Some(b"descriptor".to_vec())
-        );
-        assert!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.yaml"), 2)
-                .is_err()
-        );
-        assert!(source.read_file(Path::new("../outside"), 32).is_err());
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn unsafe_extension_candidate_is_not_treated_as_absent() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".ai/tools/test")).unwrap();
-        std::os::unix::fs::symlink("missing", root.path().join(".ai/tools/test/item.py")).unwrap();
-        let ignore =
-            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-                patterns: Vec::new(),
-            })
-            .unwrap();
-        let source = DirectorySourceContent::new(root.path(), "test".into(), &ignore).unwrap();
-        assert!(
-            source
-                .read_file(Path::new(".ai/tools/test/item.py"), 32)
-                .is_err()
-        );
-    }
 }
 
 struct RetainedSourceClosureStore {
@@ -1475,5 +1526,47 @@ impl SourceClosureStore for RetainedSourceClosureStore {
             ryeos_state::object_closure::ObjectClosureLimits::default(),
         )?;
         Ok(closure.is_complete())
+    }
+}
+
+#[cfg(test)]
+mod retained_current_worker_source_controls {
+    use super::*;
+    fn plan(resolution: &ryeos_engine::resolution::ResolutionOutput,
+        engine: &ryeos_engine::engine::Engine) -> ryeos_engine::contracts::ExecutionPlan {
+        let (ordinary, current) = engine.kinds.get("worker").unwrap().execution.as_ref().unwrap()
+            .project_target_data(&resolution.composed.composed).unwrap();
+        let value = serde_json::json!({"plan_id":"source-data-only", "root_executor_id":"tool:test/runtime",
+            "root_ref":resolution.root.resolved_ref,"item_kind":"worker", "nodes":[],"entrypoint":"entry",
+            "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
+            "materialization_requirements":[], "network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
+            "target_requirement":ordinary,"current_target_request":current,"endpoint_requirement":{"kind":"local"},
+            "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
+            "cache_key":"data","executor_authorities":[]});
+        serde_json::from_value(value).unwrap()
+    }
+    #[test]
+    fn genuine_signed_source_reproduction_detects_dropped_carrier_owner_and_schema_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
+        let mut fixture = super::temporary_source_fixture::admit_current_target(&mut state, b"{}").unwrap();
+        let current = plan(&fixture.resolution, &state.engine);
+        // Real signed kind/subject and actual CAS admission/recovery; plan is
+        // DATA only, not an actual verified original/native session owner.
+        fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &current).unwrap();
+        assert!(current.validate_endpoint_for_sealing().is_err());
+        let mut dropped = current.clone(); dropped.current_target_request = None;
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &dropped).is_err());
+        let mut foreign = fixture.resolution.clone(); foreign.root.resolved_ref = "worker:test/foreign".into();
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &foreign, &current).is_err());
+        let old = fixture.recovered.binding.kind_ceiling.schema_body.clone();
+        fixture.recovered.binding.kind_ceiling.schema_body = old.replace("ryeos.execution_target.v1", "unknown");
+        assert!(fixture.recovered.verify_retained_worker_target_data(&state.engine, &fixture.resolution, &current).is_err());
+        fixture.recovered.binding.kind_ceiling.schema_body = old;
+        let mut revoked = (*state.engine).clone();
+        revoked.node_trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![]);
+        assert!(fixture.recovered.verify_retained_worker_target_data(&revoked, &fixture.resolution, &current).is_err());
+        // Fixture constructs resolution from signature-verified real document;
+        // it does not execute an actual composer handler or native factory.
     }
 }

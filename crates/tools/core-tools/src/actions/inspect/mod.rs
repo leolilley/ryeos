@@ -26,7 +26,7 @@ use ryeos_engine::trust::TrustStore;
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
     let app_root = roots::app_root().context("resolve app root for node isolation policy")?;
-    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root)
         .context("load retained node isolation generation")?;
     let bundle_roots = isolation
         .registered_generation_bundle_roots()

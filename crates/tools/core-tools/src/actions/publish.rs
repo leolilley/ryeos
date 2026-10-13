@@ -519,7 +519,7 @@ fn write_publisher_bytes(path: &Path, bytes: &[u8], create_mode: u32) -> Result<
             }
         }
     } else {
-        parent.atomic_write_if_same(name, None, bytes, create_mode)?;
+        parent.atomic_write_if_same(name, None, bytes, create_mode, crate::TOOLS_TEMP_PURPOSE)?;
     }
     parent.ensure_path_binding()?;
     Ok(())

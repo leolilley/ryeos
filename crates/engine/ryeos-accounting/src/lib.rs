@@ -36,9 +36,9 @@ pub use resource::{
     RESOURCE_USAGE_OBSERVATION_VERSION, RESOURCE_USAGE_PARTITION_VERSION,
     ResourceAccountingAuthority, ResourceAttributedShare, ResourceBudgetState,
     ResourceBudgetTransitionV1, ResourceChargeClass, ResourceMeterContract, ResourceMeterKind,
-    ResourceOperationBinding, ResourceRatedCharge, ResourceRequestAttribution,
-    ResourceSpendAuthority, ResourceTariffDocument, ResourceUsageCoverage, ResourceUsageInterval,
-    ResourceUsageObservation, ResourceUsagePartition,
+    ResourceOperationBinding, ResourcePrecontactBudgetTransitionV1, ResourceRatedCharge,
+    ResourceRequestAttribution, ResourceSpendAuthority, ResourceTariffDocument,
+    ResourceUsageCoverage, ResourceUsageInterval, ResourceUsageObservation, ResourceUsagePartition,
 };
 pub use rpc::{
     MAX_DIAGNOSTIC_LEN, MAX_RAW_DECIMAL_LEN, ProviderAttemptBudgetRecord, ProviderAttemptGetParams,

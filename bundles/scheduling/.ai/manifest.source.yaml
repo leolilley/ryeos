@@ -1,0 +1,6 @@
+name: scheduling
+version: "0.1.0"
+description: "Durable schedules, authenticated dispatch, fire history and recovery"
+requires_kinds:
+  - service
+uses_kinds: []

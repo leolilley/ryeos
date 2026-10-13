@@ -42,7 +42,10 @@ pub async fn handle(
         }));
     };
 
-    let specs = state.scheduler_db.list_specs_filtered(
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())?;
+    let _read_guard = scheduler.acquire_read().await?;
+    let db = scheduler.scheduler_db();
+    let specs = db.list_specs_filtered(
         req.enabled_only,
         req.schedule_type.as_deref(),
         Some(filter_requester),
@@ -50,19 +53,13 @@ pub async fn handle(
 
     // Batch-load last fires to avoid N+1 queries
     let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
-    let last_fires = state.scheduler_db.get_last_fires_batch(&schedule_ids)?;
-    let cursors = state.scheduler_db.get_cursors_batch(&schedule_ids)?;
+    let last_fires = db.get_last_fires_batch(&schedule_ids)?;
+    let cursors = db.get_cursors_batch(&schedule_ids)?;
 
     // Batch-load fire counts
     let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
         .iter()
-        .filter_map(|id| {
-            state
-                .scheduler_db
-                .count_fires(id, None)
-                .ok()
-                .map(|c| (id.clone(), c))
-        })
+        .filter_map(|id| db.count_fires(id, None).ok().map(|c| (id.clone(), c)))
         .collect();
 
     let now = lillux::time::timestamp_millis();

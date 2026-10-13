@@ -45,8 +45,101 @@ impl ResourceScratchPhysicalReceipt {
     }
 }
 
+/// Authoritative original no-birth + physical removal join. No Clone/serde,
+/// decoded-record constructor, process proof or driver retirement authority.
+pub(crate) struct NeverBornResourceFundingReceipt {
+    state_store: Arc<StateStore>,
+    removed: runtime_db::ProcessResourceReservationRecord,
+}
+
+impl NeverBornResourceFundingReceipt {
+    pub(crate) fn matches_original(
+        self,
+        state: &Arc<StateStore>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        self.matches_original_of(&Arc::downgrade(state), original)
+    }
+
+    /// [`Self::matches_original`] against the identity of a Store owner:
+    /// every owner but the Store that minted the receipt is refused.
+    fn matches_original_of(
+        self,
+        state: &std::sync::Weak<StateStore>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        if !std::ptr::eq(Arc::as_ptr(&self.state_store), state.as_ptr()) {
+            bail!("no-birth funding receipt belongs to another StateStore owner");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(&self.removed)?;
+        if custody.physical_state
+            != runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved
+        {
+            bail!("no-birth funding receipt lacks actual original physical removal");
+        }
+        let mut expected = original.clone();
+        expected
+            .runtime_custody
+            .as_mut()
+            .context("original funding lacks physical custody")?
+            .physical_state =
+            runtime_db::process_resource_custody::ProcessCustodyPhysicalState::PhysicallyRemoved;
+        if self.removed != expected {
+            bail!("no-birth funding receipt differs from exact original reservation");
+        }
+        Ok(())
+    }
+}
+
+impl StateStore {
+    /// Wrap the existing winning never-issued Reserved/CleanupIntent physical
+    /// owner, rather than accepting a raw receipt JSON or PID absence. The
+    /// existing physical removal path's finite acquisition/SQL/traversal join
+    /// is still required before enabling the trusted executable route.
+    pub(crate) fn remove_never_born_scratch_for_funding(
+        self: &Arc<Self>,
+        original: &runtime_db::ProcessResourceReservationRecord,
+        scratch: &crate::temp_dir_guard::TempDirGuard,
+    ) -> Result<NeverBornResourceFundingReceipt> {
+        let removed = self.remove_never_issued_resource_scratch(original, scratch)?;
+        Ok(NeverBornResourceFundingReceipt {
+            state_store: Arc::clone(self),
+            removed,
+        })
+    }
+}
+
 mod projection_access;
+mod live_destination_join;
+pub use live_destination_join::{quote_store_leaf_transfers, quote_store_parent_transfer,
+    quote_store_receiver};
+mod live_outside;
+pub use live_outside::{LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource, StoreExhausted,
+    MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES, MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES,
+    MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
+    quote_destination_retries, quote_packet_parts, quote_packet_metadata_pin_retirements,
+    quote_retired_packet_metadata_pin_receipts, quote_retired_packet_source_parts};
+mod live_close;
+pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure, StateStoreCensus};
+mod live_native;
+pub use live_native::{
+    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure, abandoned_state_store_openings,
+    LiveAccountingNativeAdmission,
+    LiveSchedulerNativeAdmission, LiveSchedulerNativeAdmissionFailure,
+    LiveSchedulerNativeAdmissionOutsideSources,
+    ReleasedLiveStateStoreStartup, quote_store_child_parent_alias_retirement,
+    quote_store_completed_parent_root_membership, quote_store_destination_join_preparation,
+    quote_store_direct_operational_handoff, quote_store_operator_lock_membership,
+    quote_store_operator_lock_registration, quote_store_packet_vector_handoff,
+    quote_store_parent_alias_retirement, quote_store_parent_authority_handoff,
+    quote_store_parent_facade_retirement, quote_store_parent_finalization_parts,
+    quote_store_parent_root_membership, quote_store_physical_parent,
+    quote_store_root_registration_handoff,
+};
 mod scoped_child;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 
 use projection_access::committed_value;
 
@@ -55,6 +148,157 @@ use projection_access::committed_value;
 /// remaining package is abandoned; never retain its bootstrap secret across
 /// daemon restart. Refuse unexpected shapes rather than sweeping unrelated
 /// state or following a replaced path.
+/// Hand every terminal to an in-process census; return the refused ones
+/// with their reasons.
+fn retain_all_terminals(
+    terminals: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> std::result::Result<(), (Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, String)> {
+    let mut refused = Vec::new();
+    let mut reasons = Vec::new();
+    for terminal in terminals {
+        if let Err((terminal, reason)) = retain(terminal) {
+            refused.push(terminal);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    if refused.is_empty() { Ok(()) } else { Err((refused, reasons.join("; "))) }
+}
+
+/// Close an in-process Runtime store into its host's census. A refusal
+/// carries the remaining owners.
+fn close_runtime_into(
+    runtime: runtime_db::RuntimeDb,
+    factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+) -> Result<()> {
+    use ryeos_state::operational::CarriedOwners;
+    let closed = match runtime.close_original_runtime(Arc::clone(factory)) {
+        Ok(closed) => closed,
+        Err(failure) => {
+            let error = anyhow!("close in-process Runtime store: {failure:#}");
+            return Err(CarriedOwners::carry(error, failure));
+        }
+    };
+    let terminals = match closed.native_terminals() {
+        Ok(terminals) => terminals,
+        Err(refusal) => {
+            return Err(CarriedOwners::carry(refusal.context("closed Runtime census refused"), closed));
+        }
+    };
+    if let Err((refused, reasons)) = retain_all_terminals(terminals, retain) {
+        return Err(CarriedOwners::carry(
+            anyhow!("Runtime terminal not retained: {reasons}"),
+            (closed, refused),
+        ));
+    }
+    // Its terminals are in the census; the closed facade ends here.
+    drop(closed);
+    Ok(())
+}
+
+/// Records one closed projection generation lease in an in-process host's
+/// census; a refusal hands it back with the reason.
+pub type RetainLease<'a> = &'a dyn Fn(Arc<lillux_sqlite::ClosedOriginalProjectionLease>)
+    -> std::result::Result<(), (Arc<lillux_sqlite::ClosedOriginalProjectionLease>, anyhow::Error)>;
+
+/// Hands a closed State's generation lease owners to an in-process host,
+/// which retires them against its finished native backend before release.
+pub type RetireLeasesAfterBackend<'a> = &'a dyn Fn(ryeos_state::state_db::GenerationLeaseRetirement);
+
+/// Settle a closed in-process State's census: every terminal reaches
+/// `retain`, every lease `retain_lease` and the lease owners
+/// `retire_after`; a recorded earlier refusal is an error. A State refused
+/// before close is carried whole; a refusal that already carries its owners
+/// passes through.
+fn retain_state_census(
+    closed: std::result::Result<ryeos_state::state_db::LiveStateCensus, (Option<StateDb>, anyhow::Error)>,
+    retain: ryeos_state::operational::RetainTerminal<'_>,
+    retain_lease: RetainLease<'_>,
+    retire_after: RetireLeasesAfterBackend<'_>,
+    what: &str,
+) -> Result<()> {
+    use ryeos_state::operational::CarriedOwners;
+    let census = match closed {
+        Ok(census) => census,
+        Err((Some(state), refusal)) => {
+            return Err(CarriedOwners::carry(refusal.context(format!("close {what}")), state));
+        }
+        Err((None, refusal)) => return Err(refusal.context(format!("close {what}"))),
+    };
+    let ryeos_state::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+    retire_after(lease_retirement);
+    let mut refused_leases = Vec::new();
+    let mut reasons = Vec::new();
+    for lease in leases {
+        if let Err((lease, reason)) = retain_lease(lease) {
+            refused_leases.push(lease);
+            reasons.push(format!("{reason:#}"));
+        }
+    }
+    let refused_terminals = match retain_all_terminals(terminals, retain) {
+        Ok(()) => Vec::new(),
+        Err((refused, terminal_reasons)) => {
+            reasons.push(terminal_reasons);
+            refused
+        }
+    };
+    if !reasons.is_empty() {
+        return Err(CarriedOwners::carry(
+            anyhow!("{what} census not retained: {}", reasons.join("; ")),
+            (refused_terminals, refused_leases),
+        ));
+    }
+    match prior_refusal {
+        Some(prior) => Err(prior.context(format!("{what} recorded an earlier refusal"))),
+        None => Ok(()),
+    }
+}
+
+/// One durable process attachment as it was committed: the exact identity
+/// and the cancellation policy of its launch. Read without SQL by a stop
+/// whose service SQL is refused.
+#[derive(Debug, Clone)]
+pub struct AttachedProcess {
+    pub thread_id: String,
+    /// `None` only for a durable attachment row that carries no identity;
+    /// such an attachment can never be proved dead from memory.
+    pub process_identity: Option<crate::process::ExecutionProcessIdentity>,
+    pub cancellation_mode: Option<ryeos_engine::contracts::CancellationMode>,
+}
+
+/// Rebuild the attachment records from durable runtime rows.
+fn attached_processes_from_runtime(
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<BTreeMap<String, AttachedProcess>> {
+    let mut attached = BTreeMap::new();
+    for thread_id in runtime_db.list_attached_thread_ids()? {
+        let (process_identity, cancellation_mode) = match runtime_db.get_runtime_info(&thread_id)? {
+            Some(runtime) => (
+                runtime.process_identity,
+                runtime.launch_metadata.and_then(|metadata| metadata.cancellation_mode),
+            ),
+            None => (None, None),
+        };
+        attached.insert(
+            thread_id.clone(),
+            AttachedProcess { thread_id, process_identity, cancellation_mode },
+        );
+    }
+    Ok(attached)
+}
+
+/// Rebuild the live dedicated worker records from durable runtime rows.
+fn live_workers_from_runtime(
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<BTreeMap<String, runtime_db::WorkerProcessRecord>> {
+    Ok(runtime_db
+        .live_worker_processes()?
+        .into_iter()
+        .map(|record| (record.worker_instance_id.clone(), record))
+        .collect())
+}
+
 fn discard_abandoned_external_guest_packages(
     runtime_state: &lillux::PinnedDirectory,
 ) -> Result<()> {
@@ -101,7 +345,9 @@ fn discard_abandoned_external_guest_packages(
             );
             child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
             anyhow::ensure!(
-                parent.remove_empty_child_if_same(&name, &child)?,
+                parent
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?,
                 "abandoned guest package changed during recovery"
             );
         }
@@ -151,7 +397,9 @@ fn discard_abandoned_runtime_snapshot_staging(
                 1024, 4,
             ))?;
             anyhow::ensure!(
-                parent.remove_empty_child_if_same(&name, &child)?,
+                parent
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?,
                 "runtime snapshot stage changed during startup recovery"
             );
         }
@@ -189,6 +437,7 @@ impl Drop for RuntimeSnapshotStageLease {
             .and_then(|_| {
                 self.parent
                     .remove_empty_child_if_same(&self.name, &self.stage)
+                    .map(|receipt| receipt.is_some())
                     .and_then(|removed| {
                         anyhow::ensure!(removed, "runtime snapshot stage changed before cleanup");
                         Ok(())
@@ -383,15 +632,13 @@ pub struct PersistedEventNavigation {
 }
 
 pub struct NodeIdentitySigner {
-    fingerprint: String,
-    signing_key: lillux::crypto::SigningKey,
+    identity: ryeos_node_runtime::identity::NodeIdentity,
 }
 
 impl NodeIdentitySigner {
-    pub fn from_identity(identity: &crate::identity::NodeIdentity) -> Self {
+    pub fn from_identity(identity: &ryeos_node_runtime::identity::NodeIdentity) -> Self {
         Self {
-            fingerprint: identity.fingerprint().to_string(),
-            signing_key: identity.signing_key().clone(),
+            identity: identity.clone(),
         }
     }
 }
@@ -399,15 +646,15 @@ impl NodeIdentitySigner {
 impl Signer for NodeIdentitySigner {
     fn sign(&self, data: &[u8]) -> Vec<u8> {
         use lillux::crypto::Signer as Ed25519Signer;
-        self.signing_key.sign(data).to_bytes().to_vec()
+        self.identity.signing_key().sign(data).to_bytes().to_vec()
     }
 
     fn fingerprint(&self) -> &str {
-        &self.fingerprint
+        self.identity.fingerprint()
     }
 
     fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
-        self.signing_key.verifying_key()
+        *self.identity.verifying_key()
     }
 }
 
@@ -813,7 +1060,7 @@ fn project_follow_action_result(item_ref: &str, result: Value, outputs: Value) -
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
         .with_context(|| format!("parse followed item reference `{item_ref}`"))?;
     if canonical.kind == "graph" {
-        return ryeos_graph_definition::project_graph_action_result(result, outputs)
+        return ryeos_runtime::graph_result::project_graph_action_result(result, outputs)
             .map_err(anyhow::Error::msg)
             .context("project followed graph return");
     }
@@ -1393,6 +1640,8 @@ impl<'a> ProcessAttachmentMode<'a> {
 }
 
 struct Inner {
+    // Exact live owners share the Store linearization point with durable claims.
+    active_launch_owners: HashSet<String>,
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
     signer: Arc<dyn Signer>,
@@ -1423,6 +1672,34 @@ impl VerifiedExternalDirectOwner {
                 runtime_db::external_execution::ExternalAllocationOwner::DirectThread { chain_root_id, launch_owner, program }
                 if chain_root_id == &self.chain_root_id && launch_owner == &self.launch_owner
                     && program.digest().ok().as_ref() == Some(&self.program_digest))
+    }
+}
+
+/// Ephemeral bridge from an authenticated accepted consumer root and the
+/// current restored occurrence to one exact qualification-only allocation.
+/// It is neither serializable nor renewable without accepted-root admission.
+pub(crate) struct VerifiedExternalQualificationOwner {
+    reservation: runtime_db::external_execution::ExternalAllocationReservation,
+    callback_launch_owner: Option<String>,
+    canary_request: Option<ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest>,
+}
+
+impl VerifiedExternalQualificationOwner {
+    pub(crate) fn canary_request(&self) -> Option<&ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest>{
+        self.canary_request.as_ref()
+    }
+    pub(crate) fn callback_launch_owner(&self) -> Option<&str> {
+        self.callback_launch_owner.as_deref()
+    }
+
+    pub(crate) fn matches(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+    ) -> bool {
+        matches!(
+            &reservation.owner,
+            runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(_)
+        ) && self.reservation == *reservation
     }
 }
 
@@ -1517,10 +1794,114 @@ fn persist_credential_profile_authority_locked(inner: &Inner, profile_id: &str) 
 /// descriptor table. The order is always descriptor lease, then StateStore
 /// mutex.
 struct StateStoreGuard<'a> {
+    store_mutex: &'a Mutex<Inner>,
     inner: std::sync::MutexGuard<'a, Inner>,
     _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
-    acquired_at: std::time::Instant,
+    acquired_at: lillux::time::MonotonicTimer,
     caller: &'static std::panic::Location<'static>,
+}
+
+/// Only StateStore can mint this capability while its exact guard is held.
+/// No registry snapshot, raw connection or caller generation is authority.
+///
+/// ```compile_fail
+/// let permit = ryeos_app::state_store::SelectedMutationPermit::default();
+/// ```
+/// ```compile_fail
+/// let authority = ryeos_app::execution_history_reset::OfflineResetAuthority::default();
+/// ```
+pub(crate) struct SelectedMutationPermit<'guard, 'store> {
+    guard: &'guard StateStoreGuard<'store>,
+    db: &'guard runtime_db::RuntimeDb,
+    operation: SelectedMutationOperation<'guard>,
+}
+
+#[derive(PartialEq, Eq)]
+enum SelectedMutationOperation<'a> {
+    Claim(&'a str, &'a str, &'a str),
+    Release(&'a str, &'a str),
+    Rotate(&'a str, &'a str, &'a str, &'a str, u32),
+    ClearStale(&'a str),
+    DeleteThread(&'a str),
+    DiscardBirth(&'a str),
+    DeleteChain(&'a str, &'a [String]),
+}
+
+impl SelectedMutationPermit<'_, '_> {
+    fn authorize(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        operation: SelectedMutationOperation<'_>,
+    ) -> Result<()> {
+        if !std::ptr::eq(db, self.db)
+            || !std::ptr::eq(self.db, &self.guard.runtime_db)
+            || self.operation != operation
+        {
+            bail!("selected mutation permit target or operation changed");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authorize_claim(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        claim: &str,
+        owner: &str,
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::Claim(thread, claim, owner))
+    }
+    pub(crate) fn authorize_release(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        claim: &str,
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::Release(thread, claim))
+    }
+    pub(crate) fn authorize_rotate(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+        owner: &str,
+        claim: &str,
+        generation: &str,
+        attempts: u32,
+    ) -> Result<()> {
+        self.authorize(
+            db,
+            SelectedMutationOperation::Rotate(thread, owner, claim, generation, attempts),
+        )
+    }
+    pub(crate) fn authorize_sweep(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        generation: &str,
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::ClearStale(generation))
+    }
+    pub(crate) fn authorize_delete_thread(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::DeleteThread(thread))
+    }
+    pub(crate) fn authorize_discard_birth(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        thread: &str,
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::DiscardBirth(thread))
+    }
+    pub(crate) fn authorize_delete_chain(
+        &self,
+        db: &runtime_db::RuntimeDb,
+        root: &str,
+        threads: &[String],
+    ) -> Result<()> {
+        self.authorize(db, SelectedMutationOperation::DeleteChain(root, threads))
+    }
 }
 
 impl std::ops::Deref for StateStoreGuard<'_> {
@@ -1656,8 +2037,41 @@ fn cooperate_while_blocking<T>(operation: impl FnOnce() -> T) -> T {
     }
 }
 
+enum SelectedMetadataAccess {
+    Start,
+    Return,
+}
+
+/// Current signer trust that admits installed Bundles and their native
+/// executors at launch. Retained Bundle member-source proofs are revalidated
+/// against this authority, never against head trust, which authenticates only
+/// state-chain and execution-realization signatures. A store opened without
+/// this binding refuses every retained Bundle executor.
+#[derive(Clone, Debug)]
+pub struct BundleAdmissionTrust(Option<Arc<ryeos_engine::trust::TrustStore>>);
+
+impl BundleAdmissionTrust {
+    /// Bind the exact node trust snapshot the launch path admits Bundles with.
+    pub fn bound(node_trust: ryeos_engine::trust::TrustStore) -> Self {
+        Self(Some(Arc::new(node_trust)))
+    }
+
+    /// No admitting trust: offline and fixture stores.
+    pub fn unbound() -> Self {
+        Self(None)
+    }
+
+    fn require(&self) -> Result<&ryeos_engine::trust::TrustStore> {
+        self.0.as_deref().ok_or_else(|| {
+            anyhow!("this StateStore has no Bundle admission trust; retained Bundle executors are refused")
+        })
+    }
+}
+
 pub struct StateStore {
+    live_native_open: Option<Arc<live_native::LiveStateOpen>>,
     state_authority: ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: BundleAdmissionTrust,
     thread_runtime_authority: Option<ThreadRuntimeAuthority>,
     inner: Mutex<Inner>,
     projection_health: Arc<ThreadProjectionHealth>,
@@ -1675,12 +2089,19 @@ pub struct StateStore {
     /// store mutex prevents periodic recovery and shutdown audits from scanning
     /// the accumulated runtime table while blocking unrelated chain commits.
     /// Attach and clear update it at the same existing StateStore linearization
-    /// points as the durable row.
-    attached_thread_ids: Mutex<BTreeSet<String>>,
-    /// Exact durable owners whose executor guards are alive in this process.
-    /// Persisted claims prove fencing identity; this registry separately proves
-    /// that a current task still owns the post-exit settlement window.
-    active_launch_owners: Mutex<HashSet<String>>,
+    /// points as the durable row. Each entry keeps the exact identity and
+    /// cancellation policy committed with it, so a stop whose service SQL is
+    /// refused can still prove the process dead without reading the database.
+    attached_processes: Mutex<BTreeMap<String, AttachedProcess>>,
+    /// Dedicated worker processes recorded live in durable runtime state,
+    /// keyed by worker instance. Inserted after the durable attach commits and
+    /// removed after the settle or fence commits, so it never claims a process
+    /// the durable rows do not; it may briefly hold one already settled.
+    live_workers: Mutex<BTreeMap<String, runtime_db::WorkerProcessRecord>>,
+    /// Shared across all AppState clones; metadata owns no native resources.
+    /// Active-owner data lives inside Inner under the same Store mutex.
+    selected_invocations:
+        Mutex<crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping>,
     /// Process-local cancellation signals for durable, still-unbound launch
     /// admissions. Persisted planning state remains the authority; this map
     /// only stops work promptly after that state commits cancelled.
@@ -1703,6 +2124,28 @@ pub(crate) struct TestWorkspaceBinding {
     pub mount_identity: Option<String>,
     pub workspace_output_partition_identity: Option<String>,
     pub base_output_capture_hash: Option<String>,
+}
+
+/// Project root recorded by external placement fixtures that have no real
+/// retained workspace.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT: &str = "/external-placement-test";
+
+#[cfg(any(test, feature = "test-support"))]
+fn external_placement_test_workspace_binding(
+    reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+) -> Result<TestWorkspaceBinding> {
+    Ok(TestWorkspaceBinding {
+        workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
+        thread_id: reservation.placement_thread_id.clone(),
+        launch_owner: None,
+        backend_id: Some("fixture".into()),
+        backend_version: Some("fixture".into()),
+        pinned_root_identities: Some("fixture".into()),
+        mount_identity: Some("view:external-composed-controller".into()),
+        workspace_output_partition_identity: None,
+        base_output_capture_hash: None,
+    })
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2116,10 +2559,14 @@ fn attach_admitted_launch_capsule(
             state_authority.trust_store(),
         )
         .context("verify admitted execution realization before thread birth")?;
-    let expected_hash = capsule.content_hash()?;
+    let canonical_capsule = capsule.to_canonical_bytes()?;
+    let expected_hash = lillux::sha256_hex(&canonical_capsule);
     let stored_hash = state_authority
         .cas_store()?
-        .store_object(&capsule.to_value())
+        .store_canonical_object_bytes_bounded(
+            &canonical_capsule,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )
         .context("store admitted launch capsule before thread birth")?;
     if stored_hash != expected_hash {
         bail!(
@@ -2132,13 +2579,20 @@ fn attach_admitted_launch_capsule(
 
 fn load_admitted_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     capsule_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
-    Ok(load_admitted_launch_capsule_with_realization(state_authority, capsule_hash)?.0)
+    Ok(load_admitted_launch_capsule_with_realization(
+        state_authority,
+        bundle_admission_trust,
+        capsule_hash,
+    )?
+    .0)
 }
 
 fn load_admitted_launch_capsule_with_realization(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     capsule_hash: &str,
 ) -> Result<(
     ryeos_state::objects::AdmittedLaunchCapsule,
@@ -2146,7 +2600,10 @@ fn load_admitted_launch_capsule_with_realization(
 )> {
     let value = state_authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
         .context("decode supported admitted launch capsule")?;
@@ -2160,7 +2617,64 @@ fn load_admitted_launch_capsule_with_realization(
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
+    verify_rooted_bundle_member_source_proof(&capsule, bundle_admission_trust)
+        .context("revalidate rooted retained Bundle member-source signatures")?;
     Ok((capsule, realization))
+}
+
+fn verify_rooted_bundle_member_source_proof(
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    bundle_admission_trust: &BundleAdmissionTrust,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        executable_identity:
+            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                content_hash,
+                executor_manifest_hash,
+                executor_manifest_signer_fingerprint,
+                member_source_proof,
+            },
+        ..
+    } = &capsule.artifact_identity
+    else {
+        return Ok(());
+    };
+    // The selected Bundle identity is historical evidence in the exact
+    // authenticated capsule/plan root; this durable proof does not retain the
+    // signed Bundle manifest bytes needed to authenticate that identity alone.
+    // Revalidate the retained executor-manifest ref and ItemSource sidecar,
+    // while requiring the runtime-owner, Bundle-selection and executor-
+    // manifest signer identities to remain in the current trust that admits
+    // Bundles at launch.
+    let trust_store = bundle_admission_trust.require()?;
+    let owner = &member_source_proof.runtime_selection.definition_owner;
+    if !matches!(
+        owner.trust_class,
+        ryeos_state::objects::RetainedTrustClassV1::TrustedBundle
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedProject
+            | ryeos_state::objects::RetainedTrustClassV1::TrustedNode
+    ) || owner
+        .signer_fingerprint
+        .as_ref()
+        .map_or(true, |fingerprint| !trust_store.is_trusted(fingerprint))
+    {
+        bail!("retained Bundle runtime owner is no longer trusted");
+    }
+    if !trust_store.is_trusted(&member_source_proof.selected_bundle.signer_fingerprint) {
+        bail!("retained Bundle selection signer is no longer trusted");
+    }
+    let verifier = &trust_store
+        .get(executor_manifest_signer_fingerprint)
+        .ok_or_else(|| anyhow!("retained executor manifest signer was revoked"))?
+        .verifying_key;
+    ryeos_engine::binary_resolver::verify_retained_bundle_executor_member_proof(
+        member_source_proof,
+        executor_manifest_hash,
+        executor_manifest_signer_fingerprint,
+        content_hash,
+        verifier,
+    )?;
+    Ok(())
 }
 
 struct ContinuationCapsuleTransition<'a> {
@@ -2173,6 +2687,7 @@ struct ContinuationCapsuleTransition<'a> {
 
 fn attach_continuation_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     cas_guard: &ryeos_state::CasMutationGuard,
     inner: &Inner,
     snapshot: ThreadSnapshot,
@@ -2197,6 +2712,7 @@ fn attach_continuation_launch_capsule(
             })?;
         verify_admitted_launch_capsule(
             state_authority,
+            bundle_admission_trust,
             &source_snapshot,
             Some(&source_metadata),
         )
@@ -2244,7 +2760,13 @@ fn attach_continuation_launch_capsule(
     let source_capsule = source_snapshot
         .admitted_launch_capsule_hash
         .as_deref()
-        .map(|hash| load_admitted_launch_capsule_with_realization(state_authority, hash))
+        .map(|hash| {
+            load_admitted_launch_capsule_with_realization(
+                state_authority,
+                bundle_admission_trust,
+                hash,
+            )
+        })
         .transpose()?;
     let successor_capsule = launch_metadata
         .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
@@ -2295,6 +2817,7 @@ fn attach_continuation_launch_capsule(
 
 fn verify_admitted_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    bundle_admission_trust: &BundleAdmissionTrust,
     snapshot: &ThreadSnapshot,
     launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
 ) -> Result<()> {
@@ -2314,7 +2837,7 @@ fn verify_admitted_launch_capsule(
         ),
         (Some(rooted_hash), Some(expected)) => {
             let expected_hash = expected.content_hash()?;
-            let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
+            let rooted = load_admitted_launch_capsule(state_authority, bundle_admission_trust, rooted_hash)?;
             if rooted.schema == expected.schema && rooted_hash != expected_hash {
                 bail!(
                     "thread {} admitted capsule drift: authoritative {}, attempted {}",
@@ -3048,6 +3571,14 @@ fn persisted_from_stored_events(
 fn persisted_event_from_projection_row(
     row: ryeos_state::queries::EventRow,
 ) -> Result<PersistedEventRecord> {
+    // The projection stores the State durability vocabulary ("durable"),
+    // not the App event API's storage class ("indexed"). Decode it strictly;
+    // accepting API names here would hide a corrupt projection.
+    let durability = ryeos_state::objects::EventDurability::deserialize(
+        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&row.durability),
+    )
+    .context("invalid projected event durability")?;
+    let storage_class = persisted_event_storage_class(durability)?;
     let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
         format!(
             "malformed JSON payload for event {} (chain_seq {})",
@@ -3062,7 +3593,7 @@ fn persisted_event_from_projection_row(
         thread_id: row.thread_id,
         thread_seq: row.thread_seq,
         event_type: row.event_type,
-        storage_class: row.durability,
+        storage_class: storage_class.to_owned(),
         ts: row.ts,
         prev_chain_event_hash: row.prev_chain_event_hash,
         prev_thread_event_hash: row.prev_thread_event_hash,
@@ -3390,13 +3921,7 @@ fn persisted_event_from_authoritative(
         .context("authoritative event chain_seq exceeds SQLite range")?;
     let thread_seq = i64::try_from(event.thread_seq)
         .context("authoritative event thread_seq exceeds SQLite range")?;
-    let storage_class = match event.durability {
-        ryeos_state::objects::EventDurability::Durable => "indexed",
-        ryeos_state::objects::EventDurability::Journal => "journal",
-        ryeos_state::objects::EventDurability::Ephemeral => {
-            bail!("authoritative snapshot cannot reference an ephemeral event")
-        }
-    };
+    let storage_class = persisted_event_storage_class(event.durability)?;
     Ok(PersistedEventRecord {
         event_id: chain_seq,
         event_hash: Some(event_hash),
@@ -3411,6 +3936,18 @@ fn persisted_event_from_authoritative(
         prev_thread_event_hash: event.prev_thread_event_hash,
         payload: event.payload,
     })
+}
+
+fn persisted_event_storage_class(
+    durability: ryeos_state::objects::EventDurability,
+) -> Result<&'static str> {
+    match durability {
+        ryeos_state::objects::EventDurability::Durable => Ok("indexed"),
+        ryeos_state::objects::EventDurability::Journal => Ok("journal"),
+        ryeos_state::objects::EventDurability::Ephemeral => {
+            bail!("persisted event cannot have ephemeral durability")
+        }
+    }
 }
 
 fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
@@ -4339,7 +4876,10 @@ fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<u
                 deleted = deleted
                     .checked_add(delete_runtime_tree_contents(&child)?)
                     .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-                if !directory.remove_empty_child_if_same(&name, &child)? {
+                if !directory
+                    .remove_empty_child_if_same(&name, &child)
+                    .map(|receipt| receipt.is_some())?
+                {
                     bail!(
                         "thread runtime directory changed during cleanup: {}",
                         child.path().display()
@@ -4369,7 +4909,8 @@ fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> 
             .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
         if !target
             .threads_root
-            .remove_empty_child_if_same(&target.name, &target.directory)?
+            .remove_empty_child_if_same(&target.name, &target.directory)
+            .map(|receipt| receipt.is_some())?
         {
             bail!(
                 "thread runtime cleanup target changed during deletion: {}",
@@ -4495,127 +5036,397 @@ impl StateStore {
             .ok_or_else(|| anyhow!("this StateStore has no destructive thread-runtime authority"))
     }
 
-    /// Open production state with the trust authority used to verify every
-    /// authoritative chain head during baseline rebuild and journal replay.
-    pub fn new_with_head_trust(
+    /// Production startup under its actual prepaid factory and node exclusion.
+    /// The StateStore opening owner admits Runtime in the original namespace.
+    /// # Safety
+    /// Supply the real original node issuer as lease authority for this same
+    /// admitted factory and process, with its authentic funding, captured
+    /// service/cleanup clocks and retained exclusions. A trait implementation
+    /// or decoded report cannot establish these facts. Keep original custody
+    /// through failed startup, shutdown and actual resource settlement.
+    pub unsafe fn new_live_with_head_trust_and_recovery_observer(
         app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
+        recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
-        Self::open(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            None,
-        )
+        let original = live_native::LiveStateOpen::capture(
+            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
+            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+        )?;
+        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
+            write_barrier, head_trust, bundle_admission_trust, Some(recovery_observer), original)
     }
 
-    /// Strict standalone verification store. Only established on-disk
-    /// authoritative/projection state is opened; runtime scaffolding is
-    /// in-memory and every mutation API is rejected at its common permit gate.
-    pub fn new_for_projection_verification(
-        runtime_state_dir: PathBuf,
-        signer: Arc<dyn Signer>,
-        write_barrier: WriteBarrier,
-        head_trust: Arc<ryeos_state::refs::TrustStore>,
-    ) -> Result<Self> {
-        let projection_health = Arc::new(ThreadProjectionHealth::default());
-        let state_db = StateDb::open_for_projection_verification(&runtime_state_dir, head_trust)?;
-        let runtime_db = runtime_db::RuntimeDb::new_in_memory()?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
-        Ok(Self {
-            state_authority,
-            thread_runtime_authority: None,
-            inner: Mutex::new(Inner {
-                state_db,
-                runtime_db,
-                signer,
-            }),
-            projection_health,
-            read_only: true,
-            allow_projection_rebuild: false,
-            write_barrier,
-            process_attachment_admission_open: AtomicBool::new(true),
-            process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(BTreeSet::new()),
-            active_launch_owners: Mutex::new(HashSet::new()),
-            launch_task_abort_handles: Mutex::new(HashMap::new()),
-            active_in_process_handlers: Mutex::new(HashMap::new()),
-        })
-    }
-
-    /// Offline projection-rebuild control store. Opens the authoritative roots,
-    /// durable recovery journal, and persisted RuntimeDb liveness state, but
-    /// deliberately does not read a generation pointer, replay a transition,
-    /// or build a baseline. The verified service invocation owns that one
-    /// explicit rebuild; all unrelated mutation APIs remain fail-closed.
-    pub fn new_for_projection_rebuild(
+    /// Offline projection-rebuild control store on an in-process native host,
+    /// in the stopped-node maintenance shape: the caller holds the runtime
+    /// namespace lock. The authority roots and recovery journal open with a
+    /// transient projection on a host ticket, and the established Runtime
+    /// store opens existing-only on another, for liveness. Nothing is
+    /// selected, replayed or rebuilt by opening; every unrelated mutation API
+    /// stays fail-closed. Close it with
+    /// [`StateStore::close_projection_rebuild_native`].
+    /// # Safety
+    /// The caller holds the exclusive node StateLock and `namespace`, the
+    /// exclusive lock of `runtime_state_directory`, for the Store's whole
+    /// life; `factory` and `destination` come from one in-process host the
+    /// caller funded under that exclusion, and `destination` revalidates it on
+    /// every native boundary. `retain` records terminals in that host's census.
+    pub unsafe fn new_for_projection_rebuild_native(
         app_root: PathBuf,
-        runtime_state_dir: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
     ) -> Result<Self> {
-        let projection_health = Arc::new(ThreadProjectionHealth::default());
-        let runtime_state_authority = lillux::PinnedDirectory::open(&runtime_state_dir)?
-            .ok_or_else(|| anyhow!("runtime state directory is absent"))?;
+        let state_factory = Arc::clone(factory);
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            Self::open_offline_native_store(
+                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
+                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, true,
+                move |directory, namespace| {
+                    // SAFETY: the caller holds the StateLock and `namespace`,
+                    // the host was funded under that exclusion, and the lease
+                    // authority admits only this host's factory.
+                    unsafe {
+                        StateDb::open_offline_native_for_rebuild(
+                            directory, namespace, head_trust, &state_factory, lease_authority,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /// Strict standalone verification store on an in-process native host, in
+    /// the stopped-node maintenance shape: the caller holds the runtime
+    /// namespace lock. Only the established selected projection generation
+    /// opens, read-only, on host tickets; the established Runtime store opens
+    /// existing-only for the same liveness reads the live node makes, and
+    /// every mutation API is rejected at its common permit gate. Close it
+    /// with [`StateStore::close_offline_native_control`].
+    /// # Safety
+    /// As [`StateStore::new_for_projection_rebuild_native`]; `lease_authority`
+    /// must admit only `factory`'s generation leases.
+    pub unsafe fn new_for_projection_verification_native(
+        app_root: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+    ) -> Result<Self> {
+        let state_factory = Arc::clone(factory);
+        // SAFETY: forwarded from this function's own contract.
+        unsafe {
+            Self::open_offline_native_store(
+                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
+                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, false,
+                move |directory, namespace| {
+                    // SAFETY: the caller holds the StateLock and `namespace`;
+                    // the lease authority admits only this host's factory.
+                    unsafe {
+                        StateDb::open_offline_native_verification(
+                            directory, namespace, head_trust, &state_factory, lease_authority,
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    /// The shared body of the stopped-node native control stores: Runtime
+    /// opens existing-only for liveness, and `open_state` opens the State
+    /// side on the same host under the same held `namespace`.
+    /// # Safety
+    /// As [`StateStore::new_for_projection_rebuild_native`].
+    unsafe fn open_offline_native_store(
+        app_root: PathBuf,
+        runtime_state_directory: lillux::PinnedDirectory,
+        namespace: lillux::PinnedDirectoryLock,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        destination: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+        allow_projection_rebuild: bool,
+        open_state: impl FnOnce(lillux::PinnedDirectory, &lillux::PinnedDirectoryLock) -> Result<StateDb>,
+    ) -> Result<Self> {
+        use ryeos_state::operational::CarriedOwners;
+        namespace.ensure_protects(&runtime_state_directory)?;
         let thread_runtime_authority =
-            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_authority, false)?;
-        let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
-        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
-        let state_db = StateDb::open_for_projection_rebuild(&runtime_state_dir, head_trust)?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
+            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, false)?;
+        let root = Arc::new(runtime_state_directory.try_clone()?);
+        anyhow::ensure!(
+            runtime_db_path.parent() == Some(root.path()),
+            "native rebuild Runtime database must belong to the locked State namespace"
+        );
+        let name = runtime_db_path.file_name().context("Runtime database path has no basename")?;
+        // SAFETY: the caller's funded host issues these tickets under the
+        // exclusion this function's contract requires; the fixed Runtime role
+        // and the existing-only mode are chosen here.
+        let reference_inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+                destination.clone(),
+            )
+        }?;
+        let reference = match ryeos_state::sqlite_schema::prepare_native_schema_sql_reference(
+            Arc::clone(factory),
+            reference_inputs,
+            lillux_sqlite::OriginalNativeDomain::NodeRuntimeSchemaReference,
+            &runtime_db::runtime_schema_sql(),
+        ) {
+            Ok(reference) => reference,
+            Err(failure) => {
+                return Err(ryeos_state::operational::release_schema_reference_failure(
+                    factory, failure, retain, "Runtime",
+                ));
+            }
+        };
+        // SAFETY: as above.
+        let issued = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                Arc::clone(&root),
+                name,
+                lillux_sqlite::OriginalNativeBoundMode::Existing,
+                lillux_sqlite::OriginalNativeDomain::NodeRuntime,
+                destination.clone(),
+                None,
+            )
+        };
+        let inputs = match issued {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                // The closed reference's terminal joins the census before the
+                // refusal returns.
+                let (_definition, terminal) = reference.into_original_parts();
+                return Err(match retain(terminal) {
+                    Ok(()) => error,
+                    Err((terminal, reason)) => CarriedOwners::carry(
+                        error.context(format!("Runtime schema reference terminal not retained: {reason:#}")),
+                        terminal,
+                    ),
+                });
+            }
+        };
+        let runtime_db = match runtime_db::RuntimeDb::open_live_with_namespace_authority(
+            &runtime_db_path,
+            Arc::clone(&root),
+            namespace.clone(),
+            Arc::clone(factory),
+            inputs,
+            deadline,
+            reference,
+        ) {
+            Ok(db) => db,
+            Err(failure) => {
+                let original = anyhow!("open Runtime store for projection rebuild: {failure:#}");
+                return Err(match failure.retry_close() {
+                    Ok(released) => match released.native_terminals(factory) {
+                        Ok(terminals) => match retain_all_terminals(terminals, retain) {
+                            Ok(()) => {
+                                drop(released);
+                                original
+                            }
+                            Err((refused, reasons)) => CarriedOwners::carry(
+                                original.context(format!("Runtime terminal not retained: {reasons}")),
+                                (released, refused),
+                            ),
+                        },
+                        Err(refusal) => CarriedOwners::carry(
+                            original.context(format!("released Runtime census refused: {refusal:#}")),
+                            released,
+                        ),
+                    },
+                    Err(failure) => CarriedOwners::carry(
+                        original.context("refused Runtime acquisition release retained"),
+                        failure,
+                    ),
+                });
+            }
+        };
+        drop(destination);
+        let opened = (|| -> Result<_> {
+            let attached_processes = attached_processes_from_runtime(&runtime_db)?;
+            let live_workers = live_workers_from_runtime(&runtime_db)?;
+            let state_db = open_state(runtime_state_directory, &namespace)?;
+            Ok((attached_processes, live_workers, state_db))
+        })();
+        let (attached_processes, live_workers, state_db) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                return Err(match close_runtime_into(runtime_db, factory, retain) {
+                    Ok(()) => error,
+                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                });
+            }
+        };
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let state_authority = match state_db.pinned_authority() {
+            Ok(authority) => authority,
+            Err(error) => {
+                let closed = if allow_projection_rebuild {
+                    state_db.close_offline_native(factory)
+                } else {
+                    state_db.close_verification_native(factory)
+                };
+                let state = retain_state_census(closed, retain, retain_lease, retire_after, "refused control-store State");
+                let runtime = close_runtime_into(runtime_db, factory, retain);
+                return Err(match state.and(runtime) {
+                    Ok(()) => error,
+                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                });
+            }
+        };
         Ok(Self {
+            live_native_open: None,
             state_authority,
+            bundle_admission_trust: BundleAdmissionTrust::unbound(),
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
                 signer,
+                active_launch_owners: HashSet::new(),
             }),
             projection_health,
             read_only: true,
-            allow_projection_rebuild: true,
+            allow_projection_rebuild,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(attached_thread_ids),
-            active_launch_owners: Mutex::new(HashSet::new()),
+            attached_processes: Mutex::new(attached_processes),
+            live_workers: Mutex::new(live_workers),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Open production state with trusted head verification plus observable,
-    /// cancellable projection recovery. The observer is called from the
-    /// blocking open task and must remain non-blocking.
-    pub fn new_with_head_trust_and_recovery_observer(
+    /// Close a Store opened by [`StateStore::new_for_projection_rebuild_native`]
+    /// or [`StateStore::new_for_projection_verification_native`] into its
+    /// host's census: every State and Runtime terminal reaches `retain` and
+    /// every closed generation lease reaches `retain_lease`. The Store must be
+    /// the sole alias. A refusal carries every remaining owner.
+    pub fn close_offline_native_control(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        retain: ryeos_state::operational::RetainTerminal<'_>,
+        retain_lease: RetainLease<'_>,
+        retire_after: RetireLeasesAfterBackend<'_>,
+    ) -> Result<()> {
+        use ryeos_state::operational::CarriedOwners;
+        let store = match Arc::try_unwrap(self) {
+            Ok(store) => store,
+            Err(shared) => {
+                return Err(CarriedOwners::carry(
+                    anyhow!("projection rebuild Store still has service owners"),
+                    shared,
+                ));
+            }
+        };
+        if store.live_native_open.is_some() || !store.read_only {
+            return Err(CarriedOwners::carry(
+                anyhow!("Store was not opened as a native stopped-node control store"),
+                store,
+            ));
+        }
+        let StateStore { live_native_open, state_authority, bundle_admission_trust,
+            thread_runtime_authority, inner, projection_health, read_only: _,
+            allow_projection_rebuild, write_barrier, process_attachment_admission_open: _,
+            process_attachment_admission_closed, attached_processes, live_workers,
+            selected_invocations, launch_task_abort_handles, active_in_process_handlers } = store;
+        let Inner { state_db, runtime_db, signer, active_launch_owners } =
+            inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // In-memory registries, admission and bookkeeping own no descriptor.
+        drop((live_native_open, bundle_admission_trust, projection_health, write_barrier,
+            process_attachment_admission_closed, attached_processes, live_workers,
+            selected_invocations, launch_task_abort_handles, active_in_process_handlers,
+            signer, active_launch_owners));
+        let closed = if allow_projection_rebuild {
+            state_db.close_offline_native(factory)
+        } else {
+            state_db.close_verification_native(factory)
+        };
+        let state = retain_state_census(closed, retain, retain_lease, retire_after, "control-store State");
+        let runtime = close_runtime_into(runtime_db, factory, retain);
+        // The pinned authority roots and the thread-runtime authority end
+        // after both databases closed.
+        drop((state_authority, thread_runtime_authority));
+        state.and(runtime)
+    }
+
+    /// A Store opened through the native gate on an in-process host: Runtime,
+    /// State, Operational and the projection each on a ticket of `factory`,
+    /// exactly as a live node opens them, without the node finalizer. Close
+    /// it with [`StateStore::close_in_process_census`] into that host's census.
+    /// # Safety
+    /// `factory` must be the admitted factory of an in-process host this
+    /// caller owns and finishes, `lease_authority` must admit only that
+    /// factory's generation leases, and `exclusion` must be the exclusion of
+    /// this exact App root, held for the Store's whole life.
+    pub unsafe fn new_in_process_native(
         app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
-        recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
-        Self::open(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            Some(recovery_observer),
-        )
+        let original = live_native::LiveStateOpen::capture(
+            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
+            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+        )?;
+        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
+            write_barrier, head_trust, BundleAdmissionTrust::unbound(), None, original)
+    }
+
+    /// Close a Store opened by [`StateStore::new_in_process_native`] into its
+    /// native census: every connection terminal and closed generation lease,
+    /// for the in-process host to record before it finishes its backend. The
+    /// usual close audit applies; a refusal retains the whole close custody.
+    pub fn close_in_process_census(
+        self: Arc<Self>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> std::result::Result<StateStoreCensus, LiveStateStoreCloseFailure> {
+        self.close_live(Arc::clone(&factory))?.into_census(factory)
     }
 
     fn open(
@@ -4625,13 +5436,11 @@ impl StateStore {
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
         recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
+        live: Arc<live_native::LiveStateOpen>,
     ) -> Result<Self> {
-        let runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
-            .context("failed to establish no-follow runtime_state_dir")?;
-        let runtime_state_lock = runtime_state_directory
-            .lock_exclusive()
-            .context("lock live runtime-state namespace")?;
+        let (runtime_state_directory, runtime_state_lock) = (live.directory()?, live.namespace());
         discard_abandoned_external_guest_packages(&runtime_state_directory)
             .context("discard abandoned secret-bearing guest packages")?;
         discard_abandoned_runtime_snapshot_staging(&runtime_state_directory)
@@ -4645,60 +5454,62 @@ impl StateStore {
 
         let projection_health = Arc::new(ThreadProjectionHealth::default());
         // Runtime state must be readable before projection recovery can decide
-        // whether a headless Set's replaceable rows are safe to discard.
-        let runtime_db_parent_path = runtime_db_path.parent().unwrap_or_else(|| Path::new("."));
-        let runtime_db_parent = lillux::PinnedDirectory::open_or_create(runtime_db_parent_path)
-            .context("pin runtime database namespace")?;
-        let runtime_db = if runtime_state_directory.is_same_directory(&runtime_db_parent)? {
-            runtime_db::RuntimeDb::open_with_namespace_authority(
-                &runtime_db_path,
-                runtime_db_parent,
-                runtime_state_lock.clone(),
-            )?
-        } else {
-            runtime_db::RuntimeDb::open(&runtime_db_path)?
+        // whether a headless Set's replaceable rows are safe to discard. The
+        // opening owner already bound the Runtime path to its State namespace.
+        let _ = runtime_db_path;
+        // Establish the real outside checkout before schema/native Runtime
+        // acquisition, so early failures reach the same startup recovery owner.
+        let mut custody = live_native::StateOpenCustody { original: Some(live), runtime: None, state: None };
+        let opened_runtime = custody.original.as_ref().expect("actual Store opening owner").open_runtime();
+        let runtime_db = match opened_runtime {
+            Ok(runtime) => runtime,
+            Err(error) => return Err(custody.fail(error)),
         };
+        custody.runtime = Some(runtime_db);
         // Launch claims are durable owner evidence. They must survive process
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = match recovery_observer {
-            Some(recovery_observer) => {
-                StateDb::open_with_recovery_observer_runtime_liveness_and_namespace_authority(
-                    &runtime_state_dir,
-                    runtime_state_directory,
-                    runtime_state_lock,
-                    projection_health.clone(),
-                    head_trust,
-                    recovery_observer,
-                    &runtime_db,
-                )
-            }
-            None => {
-                StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
-                    &runtime_state_dir,
-                    runtime_state_directory,
-                    runtime_state_lock,
-                    projection_health.clone(),
-                    head_trust,
-                    &runtime_db,
-                )
-            }
-        }
-        .map_err(with_execution_schema_cutover_hint)?;
-        reconcile_credential_profile_authority(&state_db, &runtime_db)
-            .context("reconcile stable credential-profile authority")?;
-        ensure_current_external_content_bindings(&state_db)?;
-        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
-        let state_authority = state_db.pinned_authority()?;
-        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
+        let state_db = custody.original.as_ref().expect("actual Store opening owner")
+            .open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
+                head_trust, recovery_observer, custody.runtime.as_ref().expect("acquired Runtime owner"))
+            .map_err(with_execution_schema_cutover_hint);
+        let state_db = match state_db {
+            Ok(state_db) => state_db,
+            Err(error) => return Err(custody.fail(error)),
+        };
+        custody.state = Some(state_db);
+        let completed = (|| -> Result<_> {
+            let state_db = custody.state.as_ref().expect("acquired State owner");
+            let runtime_db = custody.runtime.as_ref().expect("acquired Runtime owner");
+            reconcile_credential_profile_authority(state_db, runtime_db)
+                .context("reconcile stable credential-profile authority")?;
+            ensure_current_external_content_bindings(state_db)?;
+            projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
+            let state_authority = state_db.pinned_authority()?;
+            let attached_processes = attached_processes_from_runtime(runtime_db)?;
+            let live_workers = live_workers_from_runtime(runtime_db)?;
+            Ok((state_authority, attached_processes, live_workers))
+        })();
+        let (state_authority, attached_processes, live_workers) = match completed {
+            Ok(completed) => completed,
+            Err(error) => return Err(custody.fail(error)),
+        };
+        let state_db = custody.state.take().expect("completed State owner");
+        let runtime_db = custody.runtime.take().expect("completed Runtime owner");
+        // Transfer the actual opening owner from the same successful checkout;
+        // `live` already moved into custody before State/recovery effects.
+        let live_native_open = custody.original.take();
         Ok(Self {
+            live_native_open,
             state_authority,
+            bundle_admission_trust,
             thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
                 signer,
+                active_launch_owners: HashSet::new(),
             }),
             projection_health,
             read_only: false,
@@ -4706,11 +5517,40 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
-            attached_thread_ids: Mutex::new(attached_thread_ids),
-            active_launch_owners: Mutex::new(HashSet::new()),
+            attached_processes: Mutex::new(attached_processes),
+            live_workers: Mutex::new(live_workers),
+            selected_invocations: Mutex::new(
+                crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping::new(),
+            ),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Issue the fixed scheduler role once from the same live namespace and
+    /// factory used for State/Runtime. Offline stores cannot issue admission.
+    pub fn live_scheduler_native_admission(&self) -> Result<LiveSchedulerNativeAdmission> {
+        anyhow::ensure!(self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed");
+        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+            .scheduler_admission()
+    }
+
+    /// Issue the fixed accounting ledger role once from the same live
+    /// namespace and factory used for State/Runtime.
+    pub fn live_accounting_native_admission(&self) -> Result<LiveAccountingNativeAdmission> {
+        anyhow::ensure!(self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed");
+        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+            .accounting_admission()
+    }
+
+    /// Monotonic local denial for composition shutdown, without Store locks
+    /// or native effects. Existing tickets still need their actual drain.
+    pub fn close_live_scheduler_metadata_admission(&self) {
+        if let Some(original) = &self.live_native_open {
+            original.close_scheduler_admission();
+        }
     }
 
     /// Publish current-daemon ownership before an in-process handler root
@@ -5065,10 +5905,14 @@ impl StateStore {
     }
 
     pub fn is_launch_owner_active(&self, launch_owner: &str) -> bool {
-        self.active_launch_owners
-            .lock()
-            .map(|active| active.contains(launch_owner))
+        self.lock()
+            .map(|g| Self::is_launch_owner_active_locked(&g, launch_owner))
             .unwrap_or(false)
+    }
+
+    // Callers already holding Store must not acquire it recursively.
+    fn is_launch_owner_active_locked(g: &Inner, launch_owner: &str) -> bool {
+        g.active_launch_owners.contains(launch_owner)
     }
 
     /// Persist a bounded post-exit settlement observation only while the
@@ -5086,7 +5930,7 @@ impl StateStore {
         if !claim.as_ref().is_some_and(|claim| {
             claim.claim_id == claim_id
                 && claim.claimed_by == launch_owner
-                && self.is_launch_owner_active(launch_owner)
+                && Self::is_launch_owner_active_locked(&g, launch_owner)
         }) {
             return Ok(None);
         }
@@ -5129,6 +5973,22 @@ impl StateStore {
         Ok(parent)
     }
 
+    /// Private one-use Q input namespace beneath the original pinned state
+    /// generation. A child is created only after its placement-keyed intent
+    /// is durable; the parent path cannot reconstruct a lost child owner.
+    pub(crate) fn qualification_guest_scratch_parent(&self) -> Result<lillux::PinnedDirectory> {
+        anyhow::ensure!(
+            !self.read_only,
+            "read-only state cannot create Q guest scratch"
+        );
+        let parent = self
+            .state_authority
+            .runtime_directory()
+            .open_or_create_child(std::ffi::OsStr::new("qualification-guest-inputs"), 0o700)?;
+        parent.require_owner_private_directory()?;
+        Ok(parent)
+    }
+
     /// Resolve current admitted persistent-session authority from the exact
     /// pinned CAS generation. Callers never reopen a project or source path.
     pub fn admitted_persistent_session_capsule(
@@ -5143,7 +6003,10 @@ impl StateStore {
         authority.ensure_guard(&guard)?;
         let value = authority
             .cas_store()?
-            .get_object(capsule_hash)?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
             .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
         authority.ensure_guard(&guard)?;
         if ryeos_state::objects::canonical_value_digest(&value)? != capsule_hash {
@@ -6638,7 +7501,22 @@ impl StateStore {
             &record.placement_thread_id,
             &session.workspace_id,
         )?;
-        g.runtime_db.attach_worker_process(record)
+        g.runtime_db.attach_worker_process(record)?;
+        self.live_worker_registry()
+            .insert(record.worker_instance_id.clone(), record.clone());
+        Ok(())
+    }
+
+    /// Same pooled attachment under the actual original launch window.
+    pub fn attach_pooled_resource_owner_until(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.attach_pooled_resource_owner(owner_coordinate, process_identity)
+        })
     }
 
     pub fn attach_pooled_resource_owner(
@@ -6660,6 +7538,19 @@ impl StateStore {
     /// Linearization point between a durable pooled-owner attachment and held
     /// process release. Shutdown closes the same gate under this lock; only the
     /// exact current process incarnation may consume its one-shot fence.
+    /// Consume the SAME release fence under the original launch window.
+    /// Existing native/scope qualification checks are not bypassed.
+    pub fn authorize_pooled_resource_owner_release_until(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.consume_pooled_resource_owner_release_fence(owner_coordinate, process_identity)
+        })
+    }
+
     pub fn authorize_pooled_resource_owner_release(
         &self,
         owner_coordinate: &str,
@@ -6822,6 +7713,28 @@ impl StateStore {
         g.runtime_db.reserve_process_resource_launch(reservation)
     }
 
+    /// SAME original scratch reservation under the original connection window.
+    /// Physical guard validation is still the existing separate unbounded seam.
+    pub(crate) fn reserve_process_resource_launch_with_scratch_until(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+        original: &crate::temp_dir_guard::TempDirGuard,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        if self.read_only || deadline.has_elapsed() {
+            bail!("original scratch reservation unavailable or expired");
+        }
+        let custody =
+            runtime_db::process_resource_custody::never_issued_scratch_custody(reservation)?;
+        custody.require_retained()?;
+        let parent = self.resource_scratch_parent(custody)?;
+        self.require_original_resource_scratch(custody, &parent, original)?;
+        original.preserve_for_explicit_cleanup();
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.reserve_process_resource_launch(reservation)
+        })
+    }
+
     /// Only a stored NEVER-ISSUED reservation can use this finite first cut.
     /// The receipt records physical disposal; pins/capacity remain retained.
     pub fn remove_never_issued_resource_scratch(
@@ -6900,7 +7813,10 @@ impl StateStore {
                     original.remove_now()?;
                 } else {
                     directory.remove_contents_recursive()?;
-                    if !parent.remove_empty_child_if_same(name, &directory)? {
+                    if !parent
+                        .remove_empty_child_if_same(name, &directory)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         bail!("recovered scratch remained nonempty");
                     }
                 }
@@ -7001,6 +7917,16 @@ impl StateStore {
             bail!("trusted resource spawn intent is closed for daemon shutdown");
         }
         g.runtime_db.begin_trusted_process_resource_spawn(expected)
+    }
+
+    pub(crate) fn begin_trusted_process_resource_spawn_until(
+        &self,
+        expected: &runtime_db::ProcessResourceReservationRecord,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<runtime_db::process_resource_launch::TrustedResourceSpawnPermit> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            db.begin_trusted_process_resource_spawn(expected)
+        })
     }
 
     pub fn reserve_thread_process_scope(
@@ -7221,7 +8147,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("dedicated workspace contact has no launch owner"))?;
-        if !self.is_launch_owner_active(&claim.claimed_by) {
+        if !Self::is_launch_owner_active_locked(&g, &claim.claimed_by) {
             bail!("dedicated workspace contact requires its active launch owner");
         }
         Self::authorize_thread_workspace_contact_locked(g, thread_id)
@@ -7267,7 +8193,21 @@ impl StateStore {
             placement_thread_id,
             boot_epoch,
             cleanup_state,
-        )
+        )?;
+        self.forget_live_worker(worker_instance_id, boot_epoch);
+        Ok(())
+    }
+
+    /// Drop the in-memory live record of one exact worker epoch after its
+    /// durable settle or fence committed.
+    fn forget_live_worker(&self, worker_instance_id: &str, boot_epoch: u64) {
+        let mut workers = self.live_worker_registry();
+        if workers
+            .get(worker_instance_id)
+            .is_some_and(|record| record.boot_epoch == boot_epoch)
+        {
+            workers.remove(worker_instance_id);
+        }
     }
 
     pub fn complete_worker_binding(
@@ -7296,7 +8236,9 @@ impl StateStore {
             boot_epoch,
             cleanup_state,
             terminal_reason,
-        )
+        )?;
+        self.forget_live_worker(worker_instance_id, boot_epoch);
+        Ok(())
     }
 
     pub fn terminalize_dedicated_session(
@@ -7561,7 +8503,7 @@ impl StateStore {
     pub fn verify_projection_generation(
         &self,
     ) -> Result<ryeos_state::rebuild::ProjectionVerificationReport> {
-        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let _cas_guard = self
             .state_authority
             .acquire_exclusive_guard(!self.read_only)?;
@@ -7571,7 +8513,7 @@ impl StateStore {
             .map_err(|error| {
                 anyhow!("cannot acquire write permit for projection verification: {error}")
             })?;
-        let g = self.lock()?;
+        let mut g = self.lock()?;
         g.state_db.verify_projection_generation()
     }
 
@@ -7585,7 +8527,7 @@ impl StateStore {
                 "projection rebuild is available only in the authored offline rebuild bootstrap mode"
             );
         }
-        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let _fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_exclusive_guard(true)?;
         let _write_permit = self
             .write_barrier
@@ -8617,7 +9559,12 @@ impl StateStore {
             validate_target_preparation_job_transition(&job, transfer_manifest_hash, progress)?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let cas = self.state_authority.cas_store()?;
-        if cas.put_object(&target_capsule.to_value())?.hash != capsule_hash {
+        let target_capsule_bytes = target_capsule.to_canonical_bytes()?;
+        if cas.store_canonical_object_bytes_bounded(
+            &target_capsule_bytes,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )? != capsule_hash
+        {
             bail!("stored target placement capsule digest changed");
         }
         if cas.put_blob(&prepared_seed.launch_metadata_bytes)?.hash
@@ -8729,9 +9676,9 @@ impl StateStore {
 
     #[track_caller]
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
-        let started = std::time::Instant::now();
+        let started = lillux::time::MonotonicTimer::start();
         let caller = std::panic::Location::caller();
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let inner = cooperate_while_blocking(|| {
             self.inner
                 .lock()
@@ -8742,15 +9689,80 @@ impl StateStore {
             record_store_contention(StoreContentionKind::Wait, waited, caller);
         }
         Ok(StateStoreGuard {
+            store_mutex: &self.inner,
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
-            acquired_at: std::time::Instant::now(),
+            acquired_at: lillux::time::MonotonicTimer::start(),
             caller,
         })
     }
 
-    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.attached_thread_ids.lock().unwrap_or_else(|poisoned| {
+    /// Bound BOTH original descriptor lease and StateStore mutex acquisition.
+    /// The returned guard preserves the original descriptor-before-store order.
+    #[track_caller]
+    fn lock_until(&self, deadline: lillux::time::MonotonicDeadline) -> Result<StateStoreGuard<'_>> {
+        let started = lillux::time::MonotonicTimer::start();
+        let caller = std::panic::Location::caller();
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("original StateStore deadline waiting for descriptor lease")?;
+        let inner = cooperate_while_blocking(|| {
+            loop {
+                if deadline.has_elapsed() {
+                    bail!("original StateStore deadline expired waiting for mutex");
+                }
+                match self.inner.try_lock() {
+                    Ok(inner) => {
+                        if deadline.has_elapsed() {
+                            bail!("original StateStore deadline expired at mutex acquisition");
+                        }
+                        break Ok(inner);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => bail!("StateStore lock poisoned"),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        lillux::time::sleep(
+                            deadline
+                                .remaining()
+                                .min(lillux::time::Duration::from_millis(1)),
+                        );
+                    }
+                }
+            }
+        })?;
+        let waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(100) {
+            record_store_contention(StoreContentionKind::Wait, waited, caller);
+        }
+        Ok(StateStoreGuard {
+            store_mutex: &self.inner,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            inner,
+            acquired_at: lillux::time::MonotonicTimer::start(),
+            caller,
+        })
+    }
+
+    fn with_runtime_original_deadline<T>(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+        operation: impl FnOnce(&runtime_db::RuntimeDb) -> Result<T>,
+    ) -> Result<T> {
+        let g = self.lock_until(deadline)?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("original RuntimeDb operation is fenced for process attachment");
+        }
+        g.runtime_db.with_original_deadline(
+            deadline,
+            &self.process_attachment_admission_open,
+            &self.process_attachment_admission_closed,
+            operation,
+        )
+    }
+
+    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, AttachedProcess>> {
+        self.attached_processes.lock().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "attached process registry mutex was poisoned; retaining its derived state"
             );
@@ -8758,12 +9770,110 @@ impl StateStore {
         })
     }
 
+    fn live_worker_registry(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<String, runtime_db::WorkerProcessRecord>> {
+        self.live_workers.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("live worker registry mutex was poisoned; retaining its derived state");
+            poisoned.into_inner()
+        })
+    }
+
+    /// The in-memory attachment records, read without SQL.
+    pub fn attached_process_snapshot(&self) -> Vec<AttachedProcess> {
+        self.attached_process_registry().values().cloned().collect()
+    }
+
+    /// Drop the in-memory attachment records of processes a stop proved dead
+    /// without writing their rows, each only while it still holds exactly
+    /// the proved identity. The durable rows stay attached for next-start
+    /// recovery; the live Store's close then sees no live attachment.
+    pub fn forget_proven_dead_attachments(
+        &self,
+        proved: &BTreeMap<String, crate::process::ExecutionProcessIdentity>,
+    ) {
+        let mut attached = self.attached_process_registry();
+        for (thread_id, identity) in proved {
+            if attached
+                .get(thread_id)
+                .is_some_and(|record| record.process_identity.as_ref() == Some(identity))
+            {
+                attached.remove(thread_id);
+            }
+        }
+    }
+
+    /// The in-memory live dedicated worker records, read without SQL.
+    pub fn live_worker_snapshot(&self) -> Vec<runtime_db::WorkerProcessRecord> {
+        self.live_worker_registry().values().cloned().collect()
+    }
+
+    /// Check occupancy under this exact Store guard, then retain only the
+    /// lexical operation capability; no registry lock crosses SQL or files.
+    fn selected_mutation_permit<'guard, 'store>(
+        &self,
+        g: &'guard StateStoreGuard<'store>,
+        operation: SelectedMutationOperation<'guard>,
+    ) -> Result<SelectedMutationPermit<'guard, 'store>> {
+        if !self.owns_store_mutex(g.store_mutex) {
+            bail!("selected mutation requires this SAME StateStore guard");
+        }
+        let selected = self
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned; mutation refused"))?;
+        let blocked = match &operation {
+            SelectedMutationOperation::Claim(thread, ..)
+            | SelectedMutationOperation::Release(thread, ..)
+            | SelectedMutationOperation::Rotate(thread, ..)
+            | SelectedMutationOperation::DeleteThread(thread)
+            | SelectedMutationOperation::DiscardBirth(thread) => selected.has_thread(thread),
+            SelectedMutationOperation::ClearStale(_)
+            | SelectedMutationOperation::DeleteChain(..) => selected.has_any(),
+        };
+        if blocked {
+            bail!("selected invocation retains destructive mutation ownership");
+        }
+        drop(selected);
+        Ok(SelectedMutationPermit {
+            guard: g,
+            db: &g.runtime_db,
+            operation,
+        })
+    }
+
+    /// Whether `store_mutex` is this Store's own mutex. A guard of any other
+    /// Store mints no selected permit and admits no selected cleanup.
+    fn owns_store_mutex(&self, store_mutex: *const Mutex<Inner>) -> bool {
+        std::ptr::eq(store_mutex, &self.inner)
+    }
+
+    fn require_selected_bulk_exclusion(&self, g: &StateStoreGuard<'_>) -> Result<()> {
+        if !self.owns_store_mutex(g.store_mutex) {
+            bail!("selected cleanup requires this SAME StateStore guard");
+        }
+        let selected = self
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned; cleanup refused"))?;
+        if selected.has_any() {
+            bail!("selected invocation retains bulk cleanup ownership");
+        }
+        Ok(())
+    }
+
     /// Delete one auxiliary runtime row and keep the process-attachment
     /// projection at the same StateStore linearization point. Runtime rows are
     /// normally removed before target release, but rollback must remain exact
     /// if a future caller reaches this path after an attachment was recorded.
-    fn delete_thread_runtime_locked(&self, g: &Inner, thread_id: &str) -> Result<usize> {
-        let deleted = g.runtime_db.delete_thread_runtime(thread_id)?;
+    fn delete_thread_runtime_locked(
+        &self,
+        g: &StateStoreGuard<'_>,
+        thread_id: &str,
+    ) -> Result<usize> {
+        let permit =
+            self.selected_mutation_permit(g, SelectedMutationOperation::DeleteThread(thread_id))?;
+        let deleted = g.runtime_db.delete_thread_runtime(&permit, thread_id)?;
         if deleted > 0 {
             self.attached_process_registry().remove(thread_id);
         }
@@ -8775,11 +9885,7 @@ impl StateStore {
     /// signed chain members plus any auxiliary rows attributed to the same
     /// chain, so its exact affected thread-id set is owned by RuntimeDb.
     fn refresh_attached_process_registry_locked(&self, g: &Inner) -> Result<()> {
-        let attached = g
-            .runtime_db
-            .list_attached_thread_ids()?
-            .into_iter()
-            .collect();
+        let attached = attached_processes_from_runtime(&g.runtime_db)?;
         *self.attached_process_registry() = attached;
         Ok(())
     }
@@ -8791,7 +9897,7 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
@@ -8812,7 +9918,7 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
@@ -8833,7 +9939,7 @@ impl StateStore {
         if self.read_only && !self.allow_projection_rebuild {
             bail!("state store is open for strict read-only verification");
         }
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
@@ -8943,14 +10049,26 @@ impl StateStore {
         status: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        let updated = g.state_db.projection().connection().execute(
+        let updated = g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "UPDATE threads SET status = ?2 WHERE thread_id = ?1",
             rusqlite::params![thread_id, status],
-        )?;
+        )?))?;
         if updated != 1 {
             bail!("test projection mutation found no exact thread {thread_id}");
         }
         Ok(())
+    }
+
+    /// Run raw SQL on this Store's own live Runtime connection, so recovery
+    /// tests can forge crash-window rows that no public transition produces.
+    /// A second connection to the Runtime file is refused by the native host.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_runtime_sql_for_test<T>(
+        &self,
+        operation: impl for<'connection> FnOnce(&'connection rusqlite::Connection) -> Result<T>,
+    ) -> Result<T> {
+        let g = self.lock()?;
+        g.runtime_db.with_sql_for_test(operation)
     }
 
     /// Remove only projected events while retaining authoritative CAS, used to
@@ -8958,10 +10076,10 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_events_for_test(&self, thread_id: &str) -> Result<usize> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().connection().execute(
+        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "DELETE FROM events WHERE thread_id = ?1",
             rusqlite::params![thread_id],
-        )?)
+        )?))?)
     }
 
     /// Remove the replaceable thread row after its projected events have been
@@ -8970,10 +10088,10 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_row_for_test(&self, thread_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().connection().execute(
+        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
             "DELETE FROM threads WHERE thread_id = ?1",
             rusqlite::params![thread_id],
-        )? == 1)
+        )?))? == 1)
     }
 
     fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
@@ -9351,6 +10469,10 @@ impl StateStore {
                     }
                     Ok(RootCommitReadback::ProvenAbsent) => {}
                 }
+                let _selected_exclusion = self.selected_mutation_permit(
+                    &g,
+                    SelectedMutationOperation::DeleteThread(&thread.thread_id),
+                )?;
                 if let Err(settle_error) = g.runtime_db.fail_launch_planning(&thread.thread_id) {
                     tracing::error!(
                         thread_id = %thread.thread_id,
@@ -9360,7 +10482,7 @@ impl StateStore {
                 }
                 let cleanup = if is_in_process_launch {
                     g.runtime_db
-                        .discard_pending_in_process_handler_birth(&thread.thread_id)
+                        .discard_pending_in_process_handler_birth(&self.selected_mutation_permit(&g, SelectedMutationOperation::DiscardBirth(&thread.thread_id))?, &thread.thread_id)
                         .and_then(|deleted| {
                             if deleted {
                                 Ok(())
@@ -9575,6 +10697,7 @@ impl StateStore {
         )?;
         verify_admitted_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             &authoritative_snapshot,
             runtime.launch_metadata.as_ref(),
         )?;
@@ -10031,7 +11154,7 @@ impl StateStore {
         let capsule = snapshot
             .admitted_launch_capsule_hash
             .as_deref()
-            .map(|hash| load_admitted_launch_capsule(&self.state_authority, hash))
+            .map(|hash| load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, hash))
             .transpose()?;
         let is_external = capsule
             .as_ref()
@@ -10460,6 +11583,7 @@ impl StateStore {
         }
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             permit.cas_guard(),
             &g,
             build_snapshot(&successor_with_upstream),
@@ -10629,6 +11753,10 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
+                let _selected_exclusion = self.selected_mutation_permit(
+                    &g,
+                    SelectedMutationOperation::DeleteThread(&successor.thread_id),
+                )?;
                 if let Err(settle_error) = g.runtime_db.fail_launch_planning(&successor.thread_id) {
                     tracing::error!(
                         thread_id = %successor.thread_id,
@@ -11056,7 +12184,7 @@ impl StateStore {
                 .as_deref()
                 .ok_or_else(|| anyhow!("remote adoption source has no admitted launch capsule"))?;
             let source_capsule =
-                load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+                load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
             source_capsule.validate_durable_handoff_eligibility()?;
             let source_sealed =
                 crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -11334,7 +12462,10 @@ impl StateStore {
                 let cas = self.state_authority.cas_store()?;
                 let target_capsule_hash = &authority.placement.target_launch_capsule_hash;
                 let target_capsule_value = cas
-                    .get_object(target_capsule_hash)?
+                    .get_object_bounded(
+                        target_capsule_hash,
+                        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+                    )?
                     .ok_or_else(|| anyhow!("remote adoption target launch capsule is absent"))?;
                 let target_capsule =
                     ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
@@ -11343,6 +12474,11 @@ impl StateStore {
                 if target_capsule.content_hash()? != *target_capsule_hash {
                     bail!("remote adoption target launch capsule changed content hash");
                 }
+                verify_rooted_bundle_member_source_proof(
+                    &target_capsule,
+                    &self.bundle_admission_trust,
+                )
+                .context("revalidate transferred rooted Bundle member-source signatures")?;
                 target_capsule
                     .verify_retained_execution_realization_with_key(
                         &cas,
@@ -11357,7 +12493,7 @@ impl StateStore {
                         anyhow!("remote adoption source has no admitted launch capsule")
                     })?;
                 let source_capsule =
-                    load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
                 let target_sealed =
                     crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
                         &target_capsule,
@@ -11522,6 +12658,7 @@ impl StateStore {
             } else {
                 attach_continuation_launch_capsule(
                     &self.state_authority,
+                    &self.bundle_admission_trust,
                     permit.cas_guard(),
                     &g,
                     build_continuation_snapshot(
@@ -11951,6 +13088,7 @@ impl StateStore {
         };
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            &self.bundle_admission_trust,
             permit.cas_guard(),
             &g,
             base_successor_snapshot,
@@ -12815,13 +13953,17 @@ impl StateStore {
 
     fn finish_terminal_chain_removal(
         &self,
-        g: &Inner,
+        g: &StateStoreGuard<'_>,
         chain: &ryeos_state::AuthoritativeTerminalChain,
         chain_lock: &ChainLock,
         runtime_paths: &[ThreadRuntimeRemoval],
         head_already_absent: bool,
         result: &mut TerminalChainRetirement,
     ) -> Result<()> {
+        let selected_permit = self.selected_mutation_permit(
+            g,
+            SelectedMutationOperation::DeleteChain(&chain.chain_root_id, &chain.thread_ids),
+        )?;
         if !head_already_absent
             && !g
                 .state_db
@@ -12832,9 +13974,11 @@ impl StateStore {
                 chain.chain_root_id
             );
         }
-        result.deleted_runtime_rows += g
-            .runtime_db
-            .delete_chain_runtime(&chain.chain_root_id, &chain.thread_ids)?;
+        result.deleted_runtime_rows += g.runtime_db.delete_chain_runtime(
+            &selected_permit,
+            &chain.chain_root_id,
+            &chain.thread_ids,
+        )?;
         self.refresh_attached_process_registry_locked(g)?;
         result.deleted_runtime_files += delete_thread_runtime_files(runtime_paths)?;
         result.deleted_projection_rows += g
@@ -12885,6 +14029,9 @@ impl StateStore {
             if !still_pending {
                 continue;
             }
+            // Includes HeadAbsent contradictions: retain SAME Remove and all
+            // cleanup owners rather than cancel/repair/acknowledge through them.
+            self.require_selected_bulk_exclusion(&g)?;
 
             match g.state_db.pending_chain_removal_head_state(
                 &chain_root_id,
@@ -13035,6 +14182,7 @@ impl StateStore {
         loop {
             let candidates = {
                 let g = self.lock()?;
+                self.require_selected_bulk_exclusion(&g)?;
                 g.state_db
                     .list_due_terminal_chains(now, CANDIDATE_BATCH, cursor.as_ref())?
             };
@@ -13056,6 +14204,7 @@ impl StateStore {
                     self.acquire_write_permit()?
                 };
                 let g = self.lock()?;
+                self.require_selected_bulk_exclusion(&g)?;
                 let chain_lock = if dry_run {
                     g.state_db
                         .acquire_existing_chain_lock(&candidate.chain_root_id)?
@@ -13381,7 +14530,7 @@ impl StateStore {
                     bail!("state-anchor execution subject contradicts its authoritative thread");
                 }
                 let capsule =
-                    load_admitted_launch_capsule(&self.state_authority, launch_capsule_hash)?;
+                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, launch_capsule_hash)?;
                 if &capsule.exact_program_hash != exact_program_hash {
                     bail!("state-anchor execution subject contradicts its admitted program");
                 }
@@ -14572,7 +15721,7 @@ impl StateStore {
         else {
             return Ok(None);
         };
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
         Ok(Some((chain_root_id, capsule_hash, capsule)))
     }
 
@@ -14615,7 +15764,7 @@ impl StateStore {
             return Ok(None);
         };
         let (capsule, execution_realization) =
-            load_admitted_launch_capsule_with_realization(&self.state_authority, &capsule_hash)?;
+            load_admitted_launch_capsule_with_realization(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
         capsule.validate()?;
         let request: crate::thread_lifecycle::SealedRootExecutionRequest =
             serde_json::from_value(capsule.sealed_invocation.clone())
@@ -14663,7 +15812,7 @@ impl StateStore {
             .ok_or_else(|| {
                 anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
             })?;
-        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
         if &capsule.artifact_identity != attempted {
             bail!(
                 "thread {thread_id} recovery artifact identity differs from its authoritative \
@@ -14724,6 +15873,96 @@ impl StateStore {
     ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
         compiled.verify_reservation(reservation)?;
         self.reserve_external_allocation_inner(reservation, binding, Some(&compiled))
+    }
+
+    /// First qualification-only reservation consumes the accepted-root token.
+    /// Contacted allocations recover through the ordinary retained journal;
+    /// they never acquire another fresh proof or allocation opportunity.
+    pub(crate) fn reserve_external_qualification_allocation(
+        &self,
+        state: &crate::state::AppState,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            anyhow::ensure!(
+                g.runtime_db
+                    .external_allocation(&reservation.placement_thread_id)?
+                    .is_none(),
+                "qualification first reservation cannot replace retained input lifelines"
+            );
+            let scratch = g
+                .runtime_db
+                .qualification_guest_scratch(&reservation.placement_thread_id)?
+                .context("qualification first reservation has no original guest scratch")?;
+            anyhow::ensure!(
+                scratch.phase
+                    == runtime_db::external_execution::QualificationGuestScratchPhase::Created,
+                "qualification first reservation has no Created guest scratch"
+            );
+            let original = state
+                .qualification_workspace_custody
+                .borrow_guest_scratch(&scratch)?;
+            let pinned = original.pinned_root()?;
+            pinned.require_owner_private_directory()?;
+            pinned.ensure_path_binding()?;
+            let proof = self.verify_external_qualification_owner(
+                state,
+                &g,
+                reservation,
+                binding,
+                &admission,
+            )?;
+            g.runtime_db
+                .reserve_external_qualification_allocation_with_verified_owner(
+                    reservation,
+                    binding,
+                    &proof,
+                )
+        })
+    }
+
+    /// The only Q-path that may cross Reserved to ContactPending. The caller
+    /// must also hold the occurrence contact gate and match the installed
+    /// signed binding; the runtime transaction repeats live occurrence and
+    /// owner-measurement checks before its one-contact CAS.
+    pub(crate) fn claim_external_qualification_allocation_contact(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        request_digest: &str,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationContactClaim> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let record = g
+                .runtime_db
+                .external_allocation(placement)?
+                .context("external qualification allocation was not reserved")?;
+            anyhow::ensure!(
+                record.phase == runtime_db::external_execution::ExternalAllocationPhase::Reserved
+                    && record.reservation.request_digest == request_digest,
+                "qualification first contact changed its reserved request"
+            );
+            let proof = self.verify_external_qualification_owner(
+                state,
+                &g,
+                &record.reservation,
+                binding,
+                &admission,
+            )?;
+            g.runtime_db
+                .claim_external_qualification_allocation_contact_with_verified_owner(
+                    placement,
+                    request_digest,
+                    &proof,
+                )
+        })
     }
 
     fn reserve_external_allocation_inner(
@@ -14798,7 +16037,7 @@ impl StateStore {
             capsule_hash == reservation.admitted_capsule_hash,
             "external direct allocation changed its born capsule"
         );
-        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
         anyhow::ensure!(
             capsule.project_authority == snapshot.project_authority
                 && capsule.executor_ref == snapshot.executor_ref
@@ -14844,6 +16083,172 @@ impl StateStore {
             program_digest: program.digest()?,
             launch_owner: claim.owner,
         }))
+    }
+
+    /// Authenticate the immutable accepted root against the current
+    /// operator-owned restored occurrence before a qualification-only Worker
+    /// allocation may be reserved or first contacted. The allocation journal
+    /// repeats the mutable occurrence/prerequisite checks in its transaction.
+    fn verify_external_qualification_owner(
+        &self,
+        state: &crate::state::AppState,
+        inner: &Inner,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        admission: &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<VerifiedExternalQualificationOwner> {
+        use runtime_db::external_execution::ExternalAllocationOwner;
+        let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+            bail!("external qualification proof requires a qualification candidate owner");
+        };
+        reservation.validate()?;
+        anyhow::ensure!(
+            owner.coordinate == *admission.coordinate()
+                && owner.qualification_operation_id == admission.qualification_operation_id()
+                && owner.operator_principal == admission.owner_principal()
+                && owner.operator_principal == admission.purpose().owner_fingerprint
+                && reservation.admitted_capsule_hash == owner.coordinate.accepted_capsule_hash,
+            "external qualification owner differs from authenticated accepted root"
+        );
+        let operator_fingerprint = owner
+            .operator_principal
+            .strip_prefix("fp:")
+            .context("external qualification operator principal is not canonical")?;
+        anyhow::ensure!(
+            crate::operator_authority::admitted_operator_authority_digest(
+                state,
+                operator_fingerprint,
+            )? == admission.operator_grant_digest(),
+            "external qualification operator grant changed before first contact"
+        );
+        let root = authoritative_snapshot_for_transition(
+            inner,
+            &owner.coordinate.accepted_root_id,
+            &owner.coordinate.accepted_root_id,
+        )?;
+        anyhow::ensure!(
+            root.error.is_none()
+                && root.thread_id == owner.coordinate.accepted_root_id
+                && root.chain_root_id == owner.coordinate.accepted_root_id
+                && root.requested_by.as_deref() == Some(owner.operator_principal.as_str())
+                && root.project_authority == *admission.accepted_project_authority()
+                && root.admitted_launch_capsule_hash.as_deref()
+                    == Some(owner.coordinate.accepted_capsule_hash.as_str()),
+            "external qualification candidate changed its exact accepted root"
+        );
+        match admission.callback_launch_owner() {
+            Some(_) => anyhow::ensure!(
+                root.status == ThreadStatus::Running,
+                "callback qualification candidate requires its exact running accepted root"
+            ),
+            None => anyhow::ensure!(
+                root.status == ThreadStatus::Completed && root.result.is_some(),
+                "operator qualification candidate requires its exact completed accepted root"
+            ),
+        }
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            workspace_outputs: None,
+            environment: ryeos_state::objects::EnvironmentAuthority::None,
+            ..
+        } = admission.accepted_project_authority()
+        else {
+            bail!("external qualification candidate requires an immutable read-only root snapshot");
+        };
+        anyhow::ensure!(
+            snapshot_hash == &reservation.base_snapshot_hash,
+            "external qualification candidate changed the accepted root snapshot"
+        );
+        owner
+            .program
+            .validate_against_purpose(admission.purpose())?;
+        let mut installed = state
+            .node_config
+            .external_execution
+            .iter()
+            .filter(|candidate| candidate.digest() == binding.digest());
+        let current = installed
+            .next()
+            .context("external qualification placement binding is no longer installed")?;
+        anyhow::ensure!(
+            installed.next().is_none(),
+            "external qualification placement binding is installed more than once"
+        );
+        current.check_qualification_program(&owner.program, admission.purpose())?;
+        binding.check_qualification_program(&owner.program, admission.purpose())?;
+        anyhow::ensure!(
+            binding.digest() == reservation.binding_hash
+                && binding.capacity_owner() == reservation.capacity_owner,
+            "external qualification candidate changed its retained signed placement"
+        );
+        let qualified = inner
+            .runtime_db
+            .snapshot_qualification_operation(&owner.qualification_operation_id)?
+            .context("external qualification candidate lost its restored occurrence")?;
+        anyhow::ensure!(
+            qualified.phase
+                == runtime_db::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound
+                && qualified.intent.owner_principal == owner.operator_principal
+                && qualified.occurrence.as_ref() == Some(&owner.qualification_occurrence),
+            "external qualification candidate changed its operator-owned occurrence"
+        );
+        let snapshot = inner
+            .runtime_db
+            .runtime_snapshot_operation(&qualified.intent.snapshot_operation_id)?
+            .context("external qualification candidate lost its measured snapshot source")?;
+        anyhow::ensure!(
+            snapshot.intent.guest_runtime_manifest_hash
+                == binding.backend_contract().guest_runtime_manifest_hash,
+            "external qualification placement changed the measured guest-owner runtime"
+        );
+        inner
+            .runtime_db
+            .observed_consumer_verification_prerequisite(
+                &owner.qualification_operation_id,
+                &owner.operator_principal,
+                &owner.coordinate,
+            )?;
+        let canary_request = admission
+            .purpose()
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get(&owner.coordinate.scenario_id)
+            .context("Q proof lost its signed scenario")?
+            .consumer_worker_request
+            .as_ref()
+            .filter(|request| request.controller_canary.is_some())
+            .cloned();
+        Ok(VerifiedExternalQualificationOwner {
+            reservation: reservation.clone(),
+            callback_launch_owner: admission.callback_launch_owner().map(str::to_owned),
+            canary_request,
+        })
+    }
+
+    fn verify_external_qualification_owner_for_placement(
+        &self,
+        state: &crate::state::AppState,
+        inner: &Inner,
+        placement: &str,
+        admission: &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<VerifiedExternalQualificationOwner> {
+        let record = inner
+            .runtime_db
+            .external_allocation(placement)?
+            .context("Q executable mutation lost its allocation")?;
+        let binding = inner
+            .runtime_db
+            .retained_external_binding(&record.reservation.binding_hash)?
+            .context("Q executable mutation lost its retained signed binding")?;
+        self.verify_external_qualification_owner(
+            state,
+            inner,
+            &record.reservation,
+            &binding,
+            admission,
+        )
     }
 
     pub(crate) fn claim_external_allocation_contact(
@@ -15362,6 +16767,16 @@ impl StateStore {
             .quarantine_snapshot_qualification_attempt(operation_id)
     }
 
+    pub(crate) fn observed_consumer_invocation_prerequisite(
+        &self,
+        owner_principal: &str,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection,
+    ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
+        self.lock()?
+            .runtime_db
+            .observed_consumer_invocation_prerequisite(owner_principal, selection)
+    }
+
     pub(crate) fn restored_verifier_attempt(
         &self,
         operation_id: &str,
@@ -15397,10 +16812,26 @@ impl StateStore {
     pub(crate) fn reserve_consumer_verifier_attempt(
         &self,
         intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
+        input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
         admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
     ) -> Result<runtime_db::restored_verifier_attempt::RestoredVerifierAttemptRecord> {
-        let _permit = self.acquire_write_permit()?;
-        admission.with_live_callback(|| {
+        input.validate_attempt(intent)?;
+        anyhow::ensure!(
+            input.purpose == *admission.purpose()
+                && input.coordinate == *admission.coordinate()
+                && input.selection == *admission.selection(),
+            "consumer input differs from authenticated accepted root"
+        );
+        let bytes = input.canonical_bytes()?;
+        let permit = self.acquire_write_permit()?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(permit.cas_guard(), "consumer-verifier-input")?;
+        let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, &bytes)?;
+        let record = admission.with_live_callback(|| {
             let g = self.lock()?;
             if admission.callback_launch_owner().is_some() {
                 let root = g
@@ -15415,8 +16846,13 @@ impl StateStore {
                 }
             }
             g.runtime_db
-                .reserve_consumer_verifier_attempt(intent, &admission)
-        })
+                .reserve_consumer_verifier_attempt(intent, &hash, &admission)
+        })?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(%error, operation_id = %intent.operation_id,
+                "consumer input retained while temporary roots remain recoverable");
+        }
+        Ok(record)
     }
 
     /// Consumes a separate root authentication; ambiguous claims reconcile
@@ -15544,6 +16980,30 @@ impl StateStore {
             .admit_external_ready_and_author_release(placement, signing_key, live_deadline)
     }
 
+    pub(crate) fn admit_external_qualification_ready_and_author_release(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        live_deadline: lillux::time::MonotonicDeadline,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<Option<ryeos_state::external_execution::AuthenticatedExecutionFrame>> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .admit_external_qualification_ready_and_author_release(
+                    placement,
+                    signing_key,
+                    live_deadline,
+                    &proof,
+                )
+        })
+    }
+
     pub(crate) fn claim_next_external_protocol_output(
         &self,
         placement: &str,
@@ -15585,6 +17045,23 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .external_direct_normal_settlement_output(placement)
+    }
+
+    /// Read exact retained direct owner/program and authenticated raw terminal
+    /// output only after normal occurrence settlement, under one DB transaction.
+    /// Historical data only; no native limit/view or evaluator authority issued.
+    pub(crate) fn external_direct_settled_owner_output(
+        &self,
+        placement: &str,
+    ) -> Result<
+        Option<(
+            runtime_db::external_execution::ExternalAllocationRecord,
+            runtime_db::external_execution::ExternalDirectOutput,
+        )>,
+    > {
+        self.lock()?
+            .runtime_db
+            .external_direct_settled_owner_output(placement)
     }
 
     pub(crate) fn external_connector_capability_generation(
@@ -15643,6 +17120,1206 @@ impl StateStore {
                 record.phase
                     == runtime_db::external_execution::connector::ExternalConnectorPhase::Closed
             }))
+    }
+
+    /// Local qualification Worker rows that a previous daemon generation left
+    /// `Attached`, as (placement, exact process identity). Start recovery
+    /// proves each group dead and then settles exactly that row.
+    pub fn prior_generation_attached_qualification_workers(
+        &self,
+    ) -> Result<Vec<(String, crate::process::ExecutionProcessIdentity)>> {
+        let records = self
+            .lock()?
+            .runtime_db
+            .attached_qualification_worker_processes(runtime_db::daemon_generation_id())?;
+        Ok(records
+            .into_iter()
+            .map(|record| (record.placement_thread_id, record.process_identity))
+            .collect())
+    }
+
+    pub(crate) fn qualification_worker_process(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationWorkerProcessRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_process(placement)
+    }
+
+    pub(crate) fn qualification_local_start(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationLocalStartRecord>> {
+        self.lock()?.runtime_db.qualification_local_start(placement)
+    }
+
+    pub(crate) fn qualification_guest_scratch(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationGuestScratchRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_guest_scratch(placement)
+    }
+
+    pub(crate) fn completed_qualification_guest_scratch_transport(
+        &self,
+        placement: &str,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+        program_digest: &str,
+    ) -> Result<bool> {
+        // A negative readiness probe grants no proof and must remain usable
+        // before allocation and during failure cleanup.
+        if !self
+            .lock()?
+            .runtime_db
+            .completed_qualification_guest_scratch_transport(
+                placement,
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+                program_digest,
+            )?
+        {
+            return Ok(false);
+        }
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.lock()?
+            .runtime_db
+            .completed_qualification_guest_scratch_transport(
+                placement,
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+                program_digest,
+            )
+    }
+
+    /// Read the exact closed Q transport, local cleanup, native settlement,
+    /// provider terminal and structural transcript at one retained DB view.
+    /// The result grants no Worker semantic success or qualification claim.
+    pub(crate) fn qualification_historical_transport_evidence_admitted(
+        &self,
+        guard: &ryeos_state::CasMutationGuard,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        qualification_operation_id: &str,
+        owner_principal: &str,
+    ) -> Result<runtime_db::external_execution::QualificationHistoricalTransportEvidence> {
+        let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+            coordinate, qualification_operation_id,
+        )?;
+        self.verify_retained_external_q_fixture_custody_admitted(guard, &placement)?;
+        self.lock()?
+            .runtime_db
+            .qualification_historical_transport_evidence(
+                coordinate,
+                qualification_operation_id,
+                owner_principal,
+            )
+    }
+
+    /// No child descriptor is adopted on restart. Only the original
+    /// state-owned parent and an absent entry may retire a precreation row.
+    pub(crate) fn retire_absent_reserved_qualification_guest_scratch(
+        &self,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        parent: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        parent.require_owner_private_directory()?;
+        parent.ensure_path_binding()?;
+        let original_parent = self
+            .state_authority
+            .runtime_directory()
+            .open_child_directory(std::ffi::OsStr::new("qualification-guest-inputs"))?
+            .context("Q absent-child recovery lost its original state-owned parent")?;
+        anyhow::ensure!(
+            parent.is_same_directory(&original_parent)?,
+            "Q absent-child recovery changed its original parent"
+        );
+        self.lock()?
+            .runtime_db
+            .retire_absent_reserved_qualification_guest_scratch(expected, parent)
+    }
+
+    /// First Q scratch intent precedes filesystem Create and allocation
+    /// reservation. The nonserializable accepted-root proof is checked before
+    /// the transaction repeats current occurrence and measurement liveness.
+    pub(crate) fn reserve_qualification_guest_scratch(
+        &self,
+        state: &crate::state::AppState,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        qualification_operation_id: &str,
+        parent: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+        parent.require_owner_private_directory()?;
+        parent.ensure_path_binding()?;
+        let original_parent = self
+            .state_authority
+            .runtime_directory()
+            .open_child_directory(std::ffi::OsStr::new("qualification-guest-inputs"))?
+            .context("Q scratch lost its original state-owned parent")?;
+        anyhow::ensure!(
+            parent.is_same_directory(&original_parent)?,
+            "Q scratch parent differs from pinned state authority"
+        );
+        let coordinate = admission.coordinate();
+        program.validate_against_purpose(admission.purpose())?;
+        anyhow::ensure!(
+            admission.qualification_operation_id() == qualification_operation_id
+                && admission.owner_principal() == admission.purpose().owner_fingerprint,
+            "Q scratch changed its authenticated root program"
+        );
+        let operator_fingerprint = admission
+            .owner_principal()
+            .strip_prefix("fp:")
+            .context("Q scratch operator principal is not canonical")?;
+        anyhow::ensure!(
+            crate::operator_authority::admitted_operator_authority_digest(
+                state,
+                operator_fingerprint,
+            )? == admission.operator_grant_digest(),
+            "Q scratch operator grant changed before reservation"
+        );
+        let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+            coordinate,
+            qualification_operation_id,
+        )?;
+        let root = parent.path().join(&placement);
+        let g = self.lock()?;
+        let accepted = authoritative_snapshot_for_transition(
+            &g,
+            &coordinate.accepted_root_id,
+            &coordinate.accepted_root_id,
+        )?;
+        anyhow::ensure!(
+            accepted.error.is_none()
+                && accepted.thread_id == coordinate.accepted_root_id
+                && accepted.chain_root_id == coordinate.accepted_root_id
+                && accepted.requested_by.as_deref() == Some(admission.owner_principal())
+                && accepted.project_authority == *admission.accepted_project_authority()
+                && accepted.admitted_launch_capsule_hash.as_deref()
+                    == Some(coordinate.accepted_capsule_hash.as_str()),
+            "Q scratch changed its exact accepted root"
+        );
+        match admission.callback_launch_owner() {
+            Some(_) => anyhow::ensure!(
+                accepted.status == ThreadStatus::Running,
+                "callback Q scratch requires its exact running accepted root"
+            ),
+            None => anyhow::ensure!(
+                accepted.status == ThreadStatus::Completed && accepted.result.is_some(),
+                "operator Q scratch requires its exact completed accepted root"
+            ),
+        }
+        g.runtime_db.reserve_qualification_guest_scratch(
+            coordinate,
+            qualification_operation_id,
+            admission.owner_principal(),
+            &program.digest()?,
+            &root,
+            admission.callback_launch_owner(),
+        )
+        })
+    }
+
+    /// The original guard was retained before this one-way Created CAS.
+    pub(crate) fn mark_qualification_guest_scratch_created(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody)
+                && custody.pinned_root()?.path() == std::path::Path::new(&expected.scratch_root),
+            "Q scratch creation lost original descriptor custody"
+        );
+        self.lock()?
+            .runtime_db
+            .mark_qualification_guest_scratch_created(expected)
+    }
+
+    pub(crate) fn begin_qualification_guest_scratch_cleanup(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody)
+                && custody.pinned_root()?.path() == std::path::Path::new(&expected.scratch_root),
+            "Q scratch cleanup lost its original descriptor"
+        );
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_guest_scratch_cleanup(expected)
+    }
+
+    pub(crate) fn record_qualification_guest_scratch_removed(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q scratch removal changed original custody"
+        );
+        custody.guard().prove_owned_scratch_removed()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_guest_scratch_removed(expected)
+    }
+
+    pub(crate) fn close_qualification_guest_scratch(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationGuestScratchRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationGuestScratchCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationGuestScratchRecord> {
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_guest_scratch(expected)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q scratch close changed original custody"
+        );
+        custody.guard().prove_owned_scratch_removed()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .close_qualification_guest_scratch(expected)
+    }
+
+    pub(crate) fn reserve_qualification_controller_canary(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        witness: &ryeos_external_execution::guest_inputs::ExternalGuestInputExclusionWitness,
+        admission:crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state,
+                &g,
+                &expected.placement_thread_id,
+                &admission,
+            )?;
+            g.runtime_db.reserve_qualification_controller_canary(
+                expected,
+                witness.identity_digest(),
+                &proof,
+            )
+        })
+    }
+
+    /// Only the original owner module can construct this opaque successful
+    /// captured-adapter invocation. Public deserialized bindings cannot enter.
+    pub(crate) fn bind_qualification_controller_canary(
+        &self,
+        state: &crate::state::AppState,
+        prepared: &crate::external_qualification_local::PreparedQualificationControllerCanary,
+        admission:crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let coordinate=crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(prepared.record())?;
+        let custody = state
+            .qualification_workspace_custody
+            .borrow_exact(&coordinate)?;
+        let (path, observed) = custody.recheck_controller_canary()?;
+        anyhow::ensure!(
+            path == prepared.binding().controller_path
+                && observed == prepared.binding().initial_file,
+            "Q canary adapter result lost original file custody"
+        );
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state,
+                &g,
+                &prepared.record().placement_thread_id,
+                &admission,
+            )?;
+            g.runtime_db.bind_qualification_controller_canary(
+                prepared.record(),
+                prepared.binding(),
+                &proof,
+            )
+        })
+    }
+
+    /// Caller holds the original occurrence cleanup gate through this method.
+    /// Re-read the original private observation here; public JSON supplied by a
+    /// caller is never accepted as terminal file custody.
+    pub(crate) fn retain_qualification_controller_canary_terminal(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        custody: &std::sync::Arc<
+            crate::qualification_workspace_custody::QualificationWorkspaceCustody,
+        >,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let coordinate = crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(expected)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_exact(&coordinate)?;
+        anyhow::ensure!(
+            std::sync::Arc::ptr_eq(&retained, custody),
+            "Q terminal canary changed its original owner"
+        );
+        let _permit = self.acquire_write_permit()?;
+        let binding = expected
+            .controller_canary_binding
+            .as_ref()
+            .context("Q terminal canary has no original binding")?;
+        let (path, terminal_file) = custody.recheck_controller_canary()?;
+        anyhow::ensure!(
+            path == binding.controller_path,
+            "Q terminal canary changed original path"
+        );
+        let evidence = ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence {
+            schema:1,binding:binding.clone(),terminal_file,
+        };
+        evidence.validate()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_controller_canary_terminal(expected, &evidence)
+    }
+
+    /// A read-only check for the original Q directory immediately before an
+    /// owner-gated view borrow and held Worker spawn.
+    pub(crate) fn authorize_qualification_local_spawn(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            anyhow::ensure!(
+                self.process_attachment_admission_open
+                    .load(Ordering::Acquire),
+                "qualification local spawn is fenced during daemon shutdown"
+            );
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .authorize_qualification_local_spawn(placement, &proof)
+        })
+    }
+
+    pub(crate) fn authorize_qualification_worker_release(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            anyhow::ensure!(
+                self.process_attachment_admission_open
+                    .load(Ordering::Acquire),
+                "qualification Worker release is fenced during daemon shutdown"
+            );
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .authorize_qualification_worker_release(placement, &proof)
+        })
+    }
+
+    /// One durable possible-borrow intent before the original private directory
+    /// is cloned for the held Q Worker. No replacement borrow is admitted.
+    pub(crate) fn reserve_qualification_workspace_directory_borrow(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification workspace borrow is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .reserve_qualification_workspace_directory_borrow(placement)
+    }
+
+    /// The cache path comes from the pinned runtime state authority. The
+    /// returned workspace coordinate must be journaled before directory Create.
+    pub(crate) fn reserve_qualification_local_start(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let cache = self
+            .state_authority
+            .runtime_directory()
+            .open_or_create_child(std::ffi::OsStr::new("cache"), 0o700)?;
+        cache.require_owner_private_directory()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification local start is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .reserve_qualification_local_start(placement, cache.path())
+    }
+
+    pub(crate) fn claim_qualification_local_credential_custody(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        profile_id: &str,
+        owner_principal: &str,
+        contract_digest: &str,
+        workload_family: &str,
+        subject_projection_contract: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db.claim_qualification_local_credential_custody(
+                placement,
+                profile_id,
+                owner_principal,
+                contract_digest,
+                workload_family,
+                subject_projection_contract,
+                &proof,
+            )
+        })
+    }
+
+    pub(crate) fn require_live_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        self.lock()?
+            .runtime_db
+            .require_live_qualification_local_credential_custody(placement)
+    }
+
+    pub(crate) fn release_qualification_local_credential_custody(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .release_qualification_local_credential_custody(placement)
+    }
+
+    /// Bind the original privately materialized project. The caller holds its
+    /// pinned custody; this receipt does not permit reopening it after restart.
+    pub(crate) fn complete_qualification_private_workspace(
+        &self,
+        placement: &str,
+        identity: lillux::PinnedDirectoryIdentity,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        anyhow::ensure!(
+            self.process_attachment_admission_open
+                .load(Ordering::Acquire),
+            "qualification private workspace is fenced during daemon shutdown"
+        );
+        g.runtime_db
+            .complete_qualification_private_workspace(placement, identity)
+    }
+
+    pub(crate) fn mark_qualification_local_cleanup_unproved(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_local_cleanup_unproved(placement, reason)
+    }
+
+    fn checked_qualification_cleanup_custody(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        anyhow::ensure!(
+            std::ptr::eq(self, Arc::as_ptr(&state.state_store)),
+            "Q cleanup custody belongs to another StateStore"
+        );
+        let record = self
+            .qualification_local_start(placement)?
+            .context("Q cleanup has no retained local start")?;
+        let coordinate =
+            crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(&record)?;
+        anyhow::ensure!(
+            custody.coordinate() == &coordinate
+                && Arc::ptr_eq(
+                    custody,
+                    &state
+                        .qualification_workspace_custody
+                        .borrow_exact(&coordinate)?,
+                ),
+            "Q cleanup lacks original registered workspace custody"
+        );
+        Ok(record)
+    }
+
+    /// Fence fresh local contact. The original process-local custody is
+    /// mandatory even when a prior failure was already journaled.
+    pub(crate) fn begin_qualification_local_cleanup(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let record = self.checked_qualification_cleanup_custody(state, placement, custody)?;
+        self.lock()?
+            .runtime_db
+            .begin_qualification_local_cleanup(&record)
+    }
+
+    /// Close a fully created pair of original Q roots if custody registration
+    /// failed before private workspace preparation. The facade holds the Q occurrence contact
+    /// gate for this entire call. No descriptor is reconstructed from a path.
+    /// Each physical removal follows a durable no-contact intent and precedes
+    /// its corresponding retained receipt; interruption leaves an explicit
+    /// cleanup phase rather than a reusable Reserved row.
+    pub(crate) fn rollback_unregistered_qualification_roots(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        workspace: &Arc<crate::temp_dir_guard::TempDirGuard>,
+        state_root_parent: &lillux::PinnedDirectory,
+        state_root: &lillux::PinnedDirectory,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        use std::ffi::OsStr;
+
+        anyhow::ensure!(
+            std::ptr::eq(self, Arc::as_ptr(&state.state_store))
+                && expected.phase
+                    == runtime_db::external_execution::QualificationLocalStartPhase::Reserved,
+            "Q unregistered rollback requires its original StateStore reservation"
+        );
+        let current = self
+            .qualification_local_start(&expected.placement_thread_id)?
+            .context("Q unregistered rollback lost its start")?;
+        anyhow::ensure!(
+            current == *expected,
+            "Q unregistered rollback changed its exact Reserved row"
+        );
+        let coordinate =
+            crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+        state
+            .qualification_workspace_custody
+            .ensure_unregistered(&current.placement_thread_id)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_unregistered_rollback(&coordinate)?;
+        anyhow::ensure!(
+            Arc::ptr_eq(retained.workspace(), workspace)
+                && retained
+                    .state_root_parent()
+                    .is_same_directory(state_root_parent)?
+                && retained.state_root().is_same_directory(state_root)?,
+            "Q rollback changed its retained original descriptor custody"
+        );
+        let workspace_root = Path::new(&current.workspace_root);
+        let project = workspace_root.join("project");
+        let state_path = Path::new(&current.state_root);
+        let state_parent_path = state_path.parent().context("Q state root has no parent")?;
+        let expected_state_parent = self
+            .state_authority
+            .runtime_directory()
+            .path()
+            .join("cache")
+            .join("qualification-local");
+        anyhow::ensure!(
+            coordinate.placement() == current.placement_thread_id
+                && workspace.path().as_deref() == Some(workspace_root)
+                && workspace.owns_effective_path(&project)
+                && workspace.owns_workspace_project_path(&project)
+                && workspace.owned_scratch_root()?.path() == workspace_root
+                && state_root.path() == state_path
+                && state_root_parent.path() == state_parent_path
+                && state_parent_path == expected_state_parent,
+            "Q unregistered rollback changed its original pinned roots"
+        );
+        workspace.owned_scratch_root()?.ensure_path_binding()?;
+        state_root_parent.ensure_path_binding()?;
+        state_root.ensure_path_binding()?;
+        let name = OsStr::new(&current.workspace_id);
+        let child = state_root_parent
+            .open_child_directory(name)?
+            .context("Q original state root disappeared before rollback")?;
+        anyhow::ensure!(
+            child.is_same_directory(state_root)?,
+            "Q unregistered state root was replaced before rollback"
+        );
+
+        // Original descriptors and no-Create ownership were checked above.
+        // Release only the proven pre-contact credential fence, then use the
+        // refreshed journal row for cleanup CAS; no credential-home I/O occurs.
+        let released =
+            self.release_qualification_local_credential_custody(&current.placement_thread_id)?;
+        let current = self
+            .qualification_local_start(&current.placement_thread_id)?
+            .context("Q unregistered rollback lost its released credential row")?;
+        anyhow::ensure!(
+            current == released,
+            "Q unregistered rollback changed after credential release"
+        );
+        {
+            let _permit = self.acquire_write_permit()?;
+            self.lock()?
+                .runtime_db
+                .begin_unregistered_qualification_precreate_rollback(&current)?;
+        }
+        self.resume_unregistered_qualification_rollback(state, &current.placement_thread_id)
+    }
+
+    /// Same-daemon continuation of the original no-Create rollback. A cold
+    /// daemon has no retained descriptor pair and cannot infer removal from
+    /// diagnostic paths or a missing current configuration entry.
+    pub(crate) fn resume_unregistered_qualification_rollback(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        use std::ffi::OsStr;
+
+        anyhow::ensure!(
+            std::ptr::eq(self, Arc::as_ptr(&state.state_store)),
+            "Q rollback resume belongs to another StateStore"
+        );
+        let mut current = self
+            .qualification_local_start(placement)?
+            .context("Q rollback resume lost its retained start")?;
+        anyhow::ensure!(
+            matches!(
+                current.phase,
+                runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
+                    | runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved
+                    | runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved
+                    | runtime_db::external_execution::QualificationLocalStartPhase::Closed
+            ) && current.workspace_identity.is_none()
+                && current.worker_incarnation_digest.is_none()
+                && current.directory_borrow_intent.is_none(),
+            "Q rollback resume lacks its exact no-Create cleanup phase"
+        );
+        let coordinate =
+            crate::qualification_workspace_custody::QualificationWorkspaceCustodyCoordinate::from_start(&current)?;
+        state
+            .qualification_workspace_custody
+            .ensure_unregistered(placement)?;
+        let retained = state
+            .qualification_workspace_custody
+            .borrow_unregistered_rollback(&coordinate)?;
+        let workspace = retained.workspace();
+        let parent = retained.state_root_parent();
+        let root = retained.state_root();
+        let workspace_id = current.workspace_id.clone();
+        let name = OsStr::new(&workspace_id);
+        let state_parent_path = Path::new(&current.state_root)
+            .parent()
+            .context("Q rollback state root has no parent")?;
+        anyhow::ensure!(
+            workspace.owned_scratch_root()?.path() == Path::new(&current.workspace_root)
+                && root.path() == Path::new(&current.state_root)
+                && parent.path() == state_parent_path
+                && state_parent_path
+                    == self
+                        .state_authority
+                        .runtime_directory()
+                        .path()
+                        .join("cache")
+                        .join("qualification-local"),
+            "Q rollback resume changed its original pinned root coordinates"
+        );
+        parent.ensure_path_binding()?;
+        // Resume also covers interruptions after cleanup intent. The durable
+        // no-borrow gate remains authoritative without a live callback.
+        let released = self.release_qualification_local_credential_custody(placement)?;
+        current = self
+            .qualification_local_start(placement)?
+            .context("Q rollback resume lost its released credential row")?;
+        anyhow::ensure!(
+            current == released,
+            "Q rollback resume changed after credential release"
+        );
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::CleanupIntent
+        {
+            self.lock()?
+                .runtime_db
+                .authorize_qualification_workspace_removal(&current)?;
+            workspace.remove_uncreated_workspace_now()?;
+            workspace.prove_uncreated_workspace_removed()?;
+            current = {
+                let _permit = self.acquire_write_permit()?;
+                self.lock()?
+                    .runtime_db
+                    .record_qualification_workspace_removed(&current)?
+            };
+        } else {
+            workspace.prove_uncreated_workspace_removed()?;
+        }
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved
+        {
+            match parent.open_child_directory(name)? {
+                Some(child) => {
+                    anyhow::ensure!(
+                        child.is_same_directory(root)?
+                            && parent
+                                .remove_empty_child_if_same(name, root)
+                                .map(|receipt| receipt.is_some())?,
+                        "Q rollback state root changed or remained nonempty"
+                    );
+                }
+                None => {
+                    // The original unlink may have succeeded before its
+                    // durable CAS. The same retained parent proves absence.
+                }
+            }
+            anyhow::ensure!(
+                parent.open_child_directory(name)?.is_none(),
+                "Q rollback state root reappeared before receipt"
+            );
+            current = {
+                let _permit = self.acquire_write_permit()?;
+                self.lock()?
+                    .runtime_db
+                    .record_qualification_state_root_removed(&current)?
+            };
+        } else {
+            anyhow::ensure!(
+                parent.open_child_directory(name)?.is_none(),
+                "Q rollback state root reappeared after removal receipt"
+            );
+        }
+
+        if current.phase
+            == runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved
+        {
+            let _permit = self.acquire_write_permit()?;
+            current = self
+                .lock()?
+                .runtime_db
+                .close_qualification_local_start(&current)?;
+        }
+        Ok(current)
+    }
+
+    /// Remove only the original private root after the exact Worker and
+    /// connector have settled. No backend view or Destroy receipt is involved.
+    pub(crate) fn remove_qualification_workspace_root(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let current = self.checked_qualification_cleanup_custody(
+            state,
+            &expected.placement_thread_id,
+            custody,
+        )?;
+        anyhow::ensure!(
+            current == *expected,
+            "Q workspace removal lost its exact journal row"
+        );
+        self.lock()?
+            .runtime_db
+            .authorize_qualification_workspace_removal(&current)?;
+        custody.workspace().remove_uncreated_workspace_now()?;
+        custody.workspace().prove_uncreated_workspace_removed()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_workspace_removed(expected)
+    }
+
+    pub(crate) fn remove_qualification_state_root(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let current = self.checked_qualification_cleanup_custody(
+            state,
+            &expected.placement_thread_id,
+            custody,
+        )?;
+        anyhow::ensure!(current == *expected
+            && current.phase == runtime_db::external_execution::QualificationLocalStartPhase::WorkspaceRemoved,
+            "Q state root removal lost its exact workspace removal");
+        custody.remove_state_root_now()?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_state_root_removed(expected)
+    }
+
+    pub(crate) fn close_qualification_local_start(
+        &self,
+        state: &crate::state::AppState,
+        expected: &runtime_db::external_execution::QualificationLocalStartRecord,
+        custody: &Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustody>,
+    ) -> Result<runtime_db::external_execution::QualificationLocalStartRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let current = self.checked_qualification_cleanup_custody(
+            state,
+            &expected.placement_thread_id,
+            custody,
+        )?;
+        anyhow::ensure!(
+            current == *expected
+                && current.phase
+                    == runtime_db::external_execution::QualificationLocalStartPhase::StateRemoved,
+            "Q local close lost its exact physical removal receipts"
+        );
+        self.lock()?
+            .runtime_db
+            .close_qualification_local_start(expected)
+    }
+
+    /// Attach the one Q local Worker while Lillux still holds it before
+    /// release. This does not grant an ordinary dedicated session or new
+    /// provider contact.
+    pub(crate) fn attach_qualification_worker_process(
+        &self,
+        placement: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        daemon_generation_id: &str,
+        configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.attach_qualification_worker_process(
+            placement,
+            process_identity,
+            daemon_generation_id,
+            configuration,
+        )
+    }
+
+    /// Proof is captured outside the store lock, then the writer transaction
+    /// rejoins it to the immutable attached identity. A failed proof leaves
+    /// the row attached for process recovery.
+    pub(crate) fn settle_qualification_worker_process(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
+        let record = self
+            .qualification_worker_process(placement)?
+            .context("qualification Worker process is not attached")?;
+        let proof = runtime_db::external_execution::QualificationWorkerDeathProof::capture(record)?;
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .settle_qualification_worker_process(proof)
+    }
+
+    /// Read one exact Q framed request and observed turn. This projection is
+    /// evidence only; it does not authorize a qualification claim.
+    pub(crate) fn qualification_worker_command(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::QualificationWorkerCommandRecord>> {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_command(placement)
+    }
+
+    pub(crate) fn reserve_qualification_worker_command(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+        request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_qualification_worker_command(placement, setup_request_digest, request_digest)
+    }
+
+    /// This is the one-use pre-send boundary. A caller may send one framed
+    /// Request only after this transaction succeeds, and may never resend it.
+    pub(crate) fn mark_qualification_worker_setup_possible_contact(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        setup_request_digest: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .mark_qualification_worker_setup_possible_contact(
+                    placement,
+                    setup_request_digest,
+                    &proof,
+                )
+        })
+    }
+
+    pub(crate) fn mark_qualification_worker_command_possible_contact(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        request_digest: &str,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let proof = self.verify_external_qualification_owner_for_placement(
+                state, &g, placement, &admission,
+            )?;
+            g.runtime_db
+                .mark_qualification_worker_command_possible_contact(
+                    placement,
+                    request_digest,
+                    &proof,
+                )
+        })
+    }
+
+    /// Persist an exact Q turn transition before acknowledging a pushed batch.
+    pub(crate) fn record_qualification_worker_turn_observation(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        observation: &serde_json::Value,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_turn_observation(placement, request_digest, observation)
+    }
+
+    pub(crate) fn record_qualification_worker_progress_delta(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        delta: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_progress_delta(
+                placement,
+                request_digest,
+                delta,
+                max_frame_bytes,
+            )
+    }
+
+    pub(crate) fn record_qualification_worker_setup_final(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+        response: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_setup_final(
+                placement,
+                setup_request_digest,
+                response,
+                max_frame_bytes,
+            )
+    }
+
+    pub(crate) fn mark_qualification_worker_setup_send_settled_success(
+        &self,
+        placement: &str,
+        setup_request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_setup_send_settled_success(placement, setup_request_digest)
+    }
+
+    pub(crate) fn record_qualification_worker_final(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        response: &serde_json::Value,
+        max_frame_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.record_qualification_worker_final(
+            placement,
+            request_digest,
+            response,
+            max_frame_bytes,
+        )
+    }
+
+    pub(crate) fn mark_qualification_worker_send_settled_success(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_send_settled_success(placement, request_digest)
+    }
+
+    pub(crate) fn mark_qualification_worker_command_outcome_unknown(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerCommandRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .mark_qualification_worker_command_outcome_unknown(placement)
+    }
+
+    /// Retain one complete pushed Q Worker batch before returning its
+    /// transport ACK. This local receipt is not a portable signed claim.
+    pub(crate) fn record_qualification_worker_observation_batch(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        batch: &serde_json::Value,
+        signed_wire_max_bytes: u32,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerBatchAck> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_qualification_worker_observation_batch(
+                placement,
+                request_digest,
+                batch,
+                signed_wire_max_bytes,
+            )
+    }
+
+    /// Full local batches for a later semantic verifier; this grants no
+    /// transport or qualification permit.
+    pub(crate) fn qualification_worker_observation_batches(
+        &self,
+        placement: &str,
+    ) -> Result<Vec<runtime_db::external_execution::QualificationWorkerObservationBatchRecord>>
+    {
+        self.lock()?
+            .runtime_db
+            .qualification_worker_observation_batches(placement)
+    }
+
+    /// Freeze the exact death-settled Q Worker command and pushed batches as
+    /// CAS objects, then bind the manifest as an immutable operator root.
+    /// The returned row is structural evidence, never a qualification permit.
+    pub(crate) fn retain_qualification_worker_transcript(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::QualificationWorkerTranscriptRecord> {
+        let permit = self.acquire_write_permit()?;
+        let source = self
+            .lock()?
+            .runtime_db
+            .qualification_worker_transcript_source(placement)?;
+        // Verify the SAME original receiver stage and exact native capture CAS
+        // under this publication guard before creating any transcript roots.
+        self.verify_retained_external_q_fixture_custody_admitted(permit.cas_guard(), placement)?;
+        let prepared =
+            crate::external_qualification_transcript::prepare_qualification_worker_transcript(
+                &source.owner_principal,
+                &source.command,
+                &source.batches,
+                &source.provider_configuration,
+                source.controller_canary.as_ref(),
+                source.fixture_capture.as_ref(),
+                source.fixture_content.as_ref(),
+            )?;
+        let authority = self.pinned_state_authority()?;
+        authority.ensure_guard(permit.cas_guard())?;
+        let cas = authority.cas_store()?;
+        let mut stage = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(
+                permit.cas_guard(),
+                "qualification-worker-transcript",
+            )?;
+        for (chunk, declared) in prepared.chunks.iter().zip(&prepared.manifest.chunks) {
+            let hash = stage.store_blob_admitted(permit.cas_guard(), &cas, chunk)?;
+            anyhow::ensure!(
+                hash == declared.blob_hash,
+                "Q transcript CAS chunk differs from its verified manifest"
+            );
+        }
+        let manifest_hash = stage.store_object_admitted(
+            permit.cas_guard(),
+            &cas,
+            &prepared.manifest.to_value()?,
+        )?;
+        anyhow::ensure!(
+            manifest_hash == prepared.manifest_hash,
+            "Q transcript CAS manifest differs from its canonical source"
+        );
+        stage.protect_object_hash_admitted(permit.cas_guard(), &manifest_hash)?;
+        let record = self
+            .lock()?
+            .runtime_db
+            .bind_qualification_worker_transcript(&source, &prepared.manifest, &manifest_hash)?;
+        if let Err(error) = stage.finish_admitted(permit.cas_guard()) {
+            tracing::warn!(%error, placement, "Q transcript retained while temporary CAS roots remain recoverable");
+        }
+        Ok(record)
     }
 
     pub(crate) fn finish_external_protocol_output(
@@ -15732,6 +18409,169 @@ impl StateStore {
         )
     }
 
+    /// Q-only stop request after exact local Worker and connector settlement.
+    pub(crate) fn ensure_external_qualification_complete(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .ensure_external_qualification_complete(placement, signing_key)
+    }
+
+    /// Apply the signed native scope row as inert evidence. This does not
+    /// settle the provider occurrence or publish a qualification claim.
+    pub(crate) fn apply_external_qualification_scope_settlement(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::RetainedExternalQualificationScopeSettlement>>
+    {
+        use ryeos_state::external_execution::ExecutionChannelPayload;
+        use ryeos_state::recovery::DurableCasPublicationKey;
+
+        let permit = self.acquire_write_permit()?;
+        let Some(plan) = self
+            .lock()?
+            .runtime_db
+            .prepare_external_qualification_scope_settlement(placement)?
+        else {
+            return Ok(None);
+        };
+        let ExecutionChannelPayload::QualificationScopeSettled { observation } =
+            &plan.evidence.settlement.frame().payload
+        else {
+            bail!("Q receiver lost its exact signed settlement");
+        };
+        let verified = match (
+            plan.owner.program.fixture(),
+            observation.fixture_capture.as_ref(),
+            observation.fixture_content.as_ref(),
+        ) {
+            (None, None, None) => None,
+            (Some(fixture), Some(reference), Some(content)) => {
+                let bytes = content.verify_for(
+                    reference,
+                    fixture,
+                    &plan.evidence.binding,
+                    &observation.observation,
+                )?;
+                let key = DurableCasPublicationKey::qualification_fixture_occurrence(
+                    &plan.evidence.binding.digest()?,
+                    plan.evidence.completion.digest(),
+                )?;
+                let recovery = self.state_authority.require_recovery()?;
+                let record = if let Some(record) = &plan.receiver_stage {
+                    record.clone()
+                } else {
+                    // Only empty, expirable staging exists before the DB locator.
+                    // Never store or protect roots until the chosen ID is durable.
+                    let stage = recovery.begin_durable_cas_upload_admitted(
+                        permit.cas_guard(),
+                        &plan.owner.operator_principal,
+                        "qualification-fixture-receiver",
+                        &key,
+                        None,
+                    )?;
+                    let stage_id = stage.staging_id().to_owned();
+                    drop(stage);
+                    self.lock()?
+                        .runtime_db
+                        .bind_receiver_stage(&plan, &stage_id)?
+                };
+                {
+                    // Per-stage locking happens outside the StateStore/DB lock.
+                    let mut stage = recovery.open_durable_cas_upload_admitted(
+                        permit.cas_guard(),
+                        &record.stage_id,
+                        &plan.owner.operator_principal,
+                    )?;
+                    stage.ensure_publication_contract(&key, None)?;
+                    if stage.admitted_target_hash().is_none() {
+                        let cas = self.state_authority.cas_store()?;
+                        anyhow::ensure!(
+                            stage.store_blob(permit.cas_guard(), &cas, &bytes)?
+                                == reference.blob_hash
+                                && stage.store_object(
+                                    permit.cas_guard(),
+                                    &cas,
+                                    &content.metadata.to_value()?,
+                                )? == reference.metadata_hash,
+                            "Q receiver CAS write changed its signed capture"
+                        );
+                        stage.retain_qualification_fixture(permit.cas_guard(), reference)?;
+                    }
+                }
+                Some(
+                    runtime_db::external_execution::verify_qualification_fixture_receiver_custody(
+                        &self.state_authority,
+                        permit.cas_guard(),
+                        &plan,
+                        &record,
+                    )?,
+                )
+            }
+            _ => bail!("Q receiver fixture presence differs from its admitted program"),
+        };
+        let retained = self
+            .lock()?
+            .runtime_db
+            .finish_external_qualification_scope_settlement(&plan, verified.as_ref())?;
+        Ok(Some(retained))
+    }
+
+    /// Cancellation cleanup may proceed without successful capture custody.
+    /// Positive evidence publication/readback uses the unconditional retained
+    /// check below, including after channel revocation.
+    fn verify_external_q_fixture_custody_admitted(
+        &self,
+        guard: &ryeos_state::CasMutationGuard,
+        placement: &str,
+    ) -> Result<()> {
+        self.state_authority.ensure_guard(guard)?;
+        {
+            let state = self.lock()?;
+            if !state
+                .runtime_db
+                .q_fixture_receiver_custody_required(placement)?
+            {
+                return Ok(());
+            }
+        }
+        self.verify_retained_external_q_fixture_custody_admitted(guard, placement)
+    }
+
+    /// Authenticate the original stage and exact CAS bytes for positive
+    /// retained evidence. Revocation cannot replace or waive that custody.
+    /// Null/non-Q selections have no fixture; their callers check their exact
+    /// historical source separately. No provider contact is authorized here.
+    fn verify_retained_external_q_fixture_custody_admitted(
+        &self,
+        guard: &ryeos_state::CasMutationGuard,
+        placement: &str,
+    ) -> Result<()> {
+        self.state_authority.ensure_guard(guard)?;
+        let Some(plan) = self
+            .lock()?
+            .runtime_db
+            .retained_q_fixture_receiver_plan(placement)?
+        else {
+            return Ok(());
+        };
+        let record = plan
+            .receiver_stage
+            .as_ref()
+            .context("Q fixture receiver lost its original durable stage")?;
+        runtime_db::external_execution::verify_qualification_fixture_receiver_custody(
+            &self.state_authority,
+            guard,
+            &plan,
+            record,
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn retained_external_candidate_import(
         &self,
         placement: &str,
@@ -15759,6 +18599,153 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .begin_external_supervisor_activation(placement, intent)
+    }
+
+    pub(crate) fn begin_external_relay_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &runtime_db::external_execution::ExternalSupervisorActivationIntent,
+        relay_bootstrap: &runtime_db::external_execution::ExternalRelayBootstrapCommitment,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .begin_external_relay_supervisor_activation(placement, intent, relay_bootstrap)
+    }
+
+    /// Fresh Q supervisor activation requires the original accepted-root lane.
+    /// Retained activation reconciliation uses the generic journal entry point.
+    pub(crate) fn begin_external_qualification_supervisor_activation(
+        &self,
+        state: &crate::state::AppState,
+        placement: &str,
+        intent: &runtime_db::external_execution::ExternalSupervisorActivationIntent,
+        relay_bootstrap: Option<&runtime_db::external_execution::ExternalRelayBootstrapCommitment>,
+        admission: crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let record = g
+                .runtime_db
+                .external_allocation(placement)?
+                .context("Q supervisor activation lost its allocation")?;
+            let binding = g
+                .runtime_db
+                .retained_external_binding(&record.reservation.binding_hash)?
+                .context("Q supervisor activation lost its retained signed binding")?;
+            let proof = self.verify_external_qualification_owner(
+                state,
+                &g,
+                &record.reservation,
+                &binding,
+                &admission,
+            )?;
+            g.runtime_db
+                .begin_external_qualification_supervisor_activation_with_verified_owner(
+                    placement,
+                    intent,
+                    relay_bootstrap,
+                    &proof,
+                )
+        })
+    }
+
+    pub(crate) fn reserve_external_relay_transfer(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+        outbound: Option<&[u8]>,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .reserve_external_relay_transfer(bootstrap, intent, outbound)
+    }
+
+    pub(crate) fn accepted_external_relay_request(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        self.lock()?
+            .runtime_db
+            .accepted_external_relay_request(intent)
+    }
+
+    pub(crate) fn begin_external_relay_application(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+    ) -> Result<runtime_db::external_execution::RelayApplicationDecision> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .begin_external_relay_application(bootstrap, kind, sequence)
+    }
+
+    pub(crate) fn commit_external_relay_application(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+        response: &ryeos_state::external_execution::transport::ExternalRelayResponseEnvelope,
+    ) -> Result<Vec<u8>> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .commit_external_relay_application(bootstrap, kind, sequence, response)
+    }
+
+    pub(crate) fn retained_external_relay_outbound(
+        &self,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        kind: runtime_db::external_execution::RelayKind,
+        sequence: u32,
+    ) -> Result<Vec<u8>> {
+        self.lock()?
+            .runtime_db
+            .retained_external_relay_outbound(bootstrap, kind, sequence)
+    }
+
+    pub(crate) fn claim_external_relay_read_contact(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::ClaimedRelayFileContact> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_external_relay_read_contact(intent)
+    }
+
+    pub(crate) fn claim_external_relay_upload_contact(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::ClaimedRelayFileContact> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_external_relay_upload_contact(intent)
+    }
+
+    pub(crate) fn accept_external_relay_readback(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+        bytes: &[u8],
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .accept_external_relay_readback(intent, bytes)
+    }
+
+    pub(crate) fn quarantine_external_relay_transfer(
+        &self,
+        intent: &runtime_db::external_execution::RelayTransferIntent,
+    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .quarantine_external_relay_transfer(intent)
     }
 
     /// Author only the original bound occurrence's guest assignment with the
@@ -15857,6 +18844,8 @@ impl StateStore {
         placement: &str,
         intent: &runtime_db::external_execution::ExternalTerminationIntent,
     ) -> Result<bool> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .begin_external_termination(placement, intent)
@@ -15867,9 +18856,42 @@ impl StateStore {
         placement: &str,
         observation: &runtime_db::external_execution::ExternalTerminalObservation,
     ) -> Result<()> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_external_q_fixture_custody_admitted(&guard, placement)?;
         self.lock()?
             .runtime_db
             .settle_external_terminal(placement, observation)
+    }
+
+    pub(crate) fn ensure_external_qualification_normal_terminal(
+        &self,
+        placement: &str,
+    ) -> Result<()> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.lock()?
+            .runtime_db
+            .ensure_external_qualification_normal_terminal(placement)
+    }
+
+    pub(crate) fn has_external_qualification_normal_termination_intent(
+        &self,
+        placement: &str,
+    ) -> Result<bool> {
+        // This is also the pre-revocation cleanup probe. An absent normal
+        // intent must not require a fixture that was never captured.
+        if !self
+            .lock()?
+            .runtime_db
+            .has_external_qualification_normal_termination_intent(placement)?
+        {
+            return Ok(false);
+        }
+        let guard = self.state_authority.acquire_shared_guard()?;
+        self.verify_retained_external_q_fixture_custody_admitted(&guard, placement)?;
+        self.lock()?
+            .runtime_db
+            .has_external_qualification_normal_termination_intent(placement)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -15881,20 +18903,30 @@ impl StateStore {
         self.install_external_placement_test_fixture_with_workspace(
             reservation,
             binding,
-            std::path::Path::new("/external-placement-test"),
-            |_| {
-                Ok(TestWorkspaceBinding {
-                    workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
-                    thread_id: reservation.placement_thread_id.clone(),
-                    launch_owner: None,
-                    backend_id: Some("fixture".into()),
-                    backend_version: Some("fixture".into()),
-                    pinned_root_identities: Some("fixture".into()),
-                    mount_identity: Some("view:external-composed-controller".into()),
-                    workspace_output_partition_identity: None,
-                    base_output_capture_hash: None,
-                })
-            },
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            |_| external_placement_test_workspace_binding(reservation),
+        )
+    }
+
+    /// Install the composed placement as a chain root admitted through the
+    /// exact root launch metadata, so the production placement owner finds
+    /// the same admitted launch capsule an ordinary launch would record.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_admitted_external_placement_test_fixture(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        root_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            reservation,
+            Some(binding),
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            "fp:operator",
+            true,
+            false,
+            Some(root_launch_metadata),
+            |_| external_placement_test_workspace_binding(reservation),
         )
     }
 
@@ -15925,6 +18957,7 @@ impl StateStore {
         binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         project_root: &std::path::Path,
         owner_principal: &str,
+        root_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
     ) -> Result<()> {
         self.install_external_placement_test_fixture_with_workspace_inner(
@@ -15934,7 +18967,7 @@ impl StateStore {
             owner_principal,
             true,
             false,
-            None,
+            Some(root_launch_metadata),
             prepare_workspace,
         )
     }
@@ -16302,7 +19335,7 @@ impl StateStore {
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
         let state = self.lock()?;
         let mut roots = state.runtime_db.external_execution_blob_roots()?;
-        roots.extend(state.runtime_db.restored_verifier_evidence_blob_roots()?);
+        roots.extend(state.runtime_db.restored_verifier_blob_roots()?);
         roots.sort();
         roots.dedup();
         Ok(roots)
@@ -16500,12 +19533,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("workspace contact has no current launch owner"))?;
-        if !self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?
-            .contains(&claim.claimed_by)
-        {
+        if !g.active_launch_owners.contains(&claim.claimed_by) {
             bail!("workspace contact requires its active launch owner");
         }
         Self::authorize_thread_workspace_contact_locked(&g, thread_id)
@@ -16558,10 +19586,7 @@ impl StateStore {
             return Ok(false);
         };
         let owner: runtime_db::LaunchOwner = serde_json::from_str(raw_owner)?;
-        let active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let active = &g.active_launch_owners;
         if owner.thread_id != thread_id || active.contains(raw_owner) {
             return Ok(false);
         }
@@ -16630,10 +19655,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("workspace settlement requires its live launch claim"))?;
-        let active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let active = &g.active_launch_owners;
         if claim.owner != binding.borrower_launch_owner || !active.contains(&claim.claimed_by) {
             bail!("workspace settlement requires the exact active launch owner");
         }
@@ -16684,10 +19706,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(placement_thread_id)?
             .ok_or_else(|| anyhow!("external workspace settlement has no live launch claim"))?;
-        let active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let active = &g.active_launch_owners;
         if claim.owner != binding.borrower_launch_owner || !active.contains(&claim.claimed_by) {
             bail!("external workspace settlement requires its exact active launch owner");
         }
@@ -16771,10 +19790,7 @@ impl StateStore {
     ) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        let active = &g.active_launch_owners;
         let claim = g.runtime_db.get_launch_claim(thread_id)?;
         let binding_owner =
             lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
@@ -17010,8 +20026,14 @@ impl StateStore {
             g.runtime_db
                 .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
         }?;
-        self.attached_process_registry()
-            .insert(thread_id.to_string());
+        self.attached_process_registry().insert(
+            thread_id.to_string(),
+            AttachedProcess {
+                thread_id: thread_id.to_string(),
+                process_identity: Some(process_identity.clone()),
+                cancellation_mode: launch_metadata.cancellation_mode,
+            },
+        );
         Ok(())
     }
 
@@ -17078,6 +20100,11 @@ impl StateStore {
     /// registered first is visible to the drain, and every later registration
     /// observes the closed gate.
     pub fn close_process_attachment_admission(&self) -> Result<()> {
+        // Deny scheduler metadata before any fallible registry/Store lock.
+        // A shutdown refusal cannot reopen this one-use startup boundary.
+        if let Some(original) = &self.live_native_open {
+            original.close_scheduler_admission();
+        }
         let _active = self
             .active_in_process_handlers
             .lock()
@@ -17327,7 +20354,7 @@ impl StateStore {
 
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
         let attached = self.attached_process_registry();
-        Ok(attached.iter().cloned().collect())
+        Ok(attached.keys().cloned().collect())
     }
 
     pub fn in_process_handler_reservations_after(
@@ -17360,8 +20387,11 @@ impl StateStore {
         {
             bail!("refusing to discard in-process birth `{thread_id}` with an authoritative root");
         }
-        g.runtime_db
-            .discard_pending_in_process_handler_birth(thread_id)
+        g.runtime_db.discard_pending_in_process_handler_birth(
+            &self
+                .selected_mutation_permit(&g, SelectedMutationOperation::DiscardBirth(thread_id))?,
+            thread_id,
+        )
     }
 
     /// Complete pending→running reconciliation only after reading the
@@ -17507,8 +20537,13 @@ impl StateStore {
     ) -> Result<Vec<runtime_db::StaleLaunchClaimCleared>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        g.runtime_db
-            .clear_stale_launch_claims(current_daemon_generation_id)
+        g.runtime_db.clear_stale_launch_claims(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::ClearStale(current_daemon_generation_id),
+            )?,
+            current_daemon_generation_id,
+        )
     }
 
     /// Atomically claim the right to launch a thread. The sole authorization for
@@ -17522,8 +20557,15 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        g.runtime_db
-            .claim_thread_launch(thread_id, claim_id, claimed_by)
+        g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by),
+            )?,
+            thread_id,
+            claim_id,
+            claimed_by,
+        )
     }
 
     /// Claim an existing thread and publish its in-process owner before the
@@ -17537,25 +20579,36 @@ impl StateStore {
         daemon_generation_id: &str,
     ) -> Result<Option<runtime_db::LaunchClaim>> {
         let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
+        let mut g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        match g
-            .runtime_db
-            .claim_thread_launch(thread_id, claim_id, daemon_generation_id)?
-        {
+        let outcome = g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id),
+            )?,
+            thread_id,
+            claim_id,
+            daemon_generation_id,
+        )?;
+        match outcome {
             runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
             runtime_db::LaunchClaimOutcome::Claimed => {
                 let claim = g
                     .runtime_db
                     .get_launch_claim(thread_id)?
                     .ok_or_else(|| anyhow!("launch owner disappeared after claim"))?;
-                let mut active = self
-                    .active_launch_owners
-                    .lock()
-                    .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+                let active = &mut g.active_launch_owners;
                 if !active.insert(claim.claimed_by.clone()) {
-                    g.runtime_db
-                        .release_thread_launch_claim(thread_id, claim_id)?;
+                    // No owner mutation happened; the mutable field borrow ends
+                    // before exact rollback beneath the same Store guard.
+                    g.runtime_db.release_thread_launch_claim(
+                        &self.selected_mutation_permit(
+                            &g,
+                            SelectedMutationOperation::Release(thread_id, claim_id),
+                        )?,
+                        thread_id,
+                        claim_id,
+                    )?;
                     bail!("launch owner is already registered in this daemon");
                 }
                 Ok(Some(claim))
@@ -17581,8 +20634,15 @@ impl StateStore {
                 "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
             );
         }
-        g.runtime_db
-            .claim_thread_launch(thread_id, claim_id, claimed_by)
+        g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, claimed_by),
+            )?,
+            thread_id,
+            claim_id,
+            claimed_by,
+        )
     }
 
     /// Fresh-thread counterpart to [`Self::claim_thread_launch_active`]. The
@@ -17595,29 +20655,40 @@ impl StateStore {
         daemon_generation_id: &str,
     ) -> Result<Option<runtime_db::LaunchClaim>> {
         let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
+        let mut g = self.lock()?;
         if g.state_db.get_thread(thread_id)?.is_some() {
             bail!(
                 "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
             );
         }
-        match g
-            .runtime_db
-            .claim_thread_launch(thread_id, claim_id, daemon_generation_id)?
-        {
+        let outcome = g.runtime_db.claim_thread_launch(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Claim(thread_id, claim_id, daemon_generation_id),
+            )?,
+            thread_id,
+            claim_id,
+            daemon_generation_id,
+        )?;
+        match outcome {
             runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
             runtime_db::LaunchClaimOutcome::Claimed => {
                 let claim = g
                     .runtime_db
                     .get_launch_claim(thread_id)?
                     .ok_or_else(|| anyhow!("fresh launch owner disappeared"))?;
-                let mut active = self
-                    .active_launch_owners
-                    .lock()
-                    .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+                let active = &mut g.active_launch_owners;
                 if !active.insert(claim.claimed_by.clone()) {
-                    g.runtime_db
-                        .release_thread_launch_claim(thread_id, claim_id)?;
+                    // No owner mutation happened; the mutable field borrow ends
+                    // before exact rollback beneath the same Store guard.
+                    g.runtime_db.release_thread_launch_claim(
+                        &self.selected_mutation_permit(
+                            &g,
+                            SelectedMutationOperation::Release(thread_id, claim_id),
+                        )?,
+                        thread_id,
+                        claim_id,
+                    )?;
                     bail!("launch owner is already registered in this daemon");
                 }
                 Ok(Some(claim))
@@ -17625,11 +20696,170 @@ impl StateStore {
         }
     }
 
+    /// Register the actual process generation in the shared metadata domain.
+    /// This does not admit a selected invocation or install any native owner.
+    pub fn register_selected_bookkeeping_generation(&self) -> Result<crate::SelectedGeneration> {
+        if self.read_only {
+            bail!("selected bookkeeping is unavailable on a read-only store");
+        }
+        let _store = self.lock()?;
+        let mut selected = self
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("selected bookkeeping admission is closed");
+        }
+        selected
+            .register_generation(runtime_db::daemon_generation_id())
+            .map_err(|error| anyhow!("selected generation registration refused: {error:?}"))
+    }
+
+    /// Metadata return acknowledgment only. No production borrower issuer is
+    /// exposed in this cut, and this is not native/financial settlement evidence.
+    pub fn ack_selected_borrow_return(
+        &self,
+        borrower: &crate::SelectedBorrowTicket,
+    ) -> Result<crate::SelectedBorrowReturn> {
+        self.with_selected_metadata_claim(
+            borrower.invocation(),
+            SelectedMetadataAccess::Return,
+            |selected| selected.ack_selected_borrow_return(borrower),
+        )
+    }
+
+    /// Metadata only; no production pending-ticket issuer exists yet.
+    pub fn confirm_selected_metadata_install(&self, ticket: &crate::SelectedTicket) -> Result<()> {
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| {
+            selected.install(ticket)
+        })
+    }
+
+    /// Names a metadata borrower, not a native loan or contact permission.
+    pub fn begin_selected_metadata_borrow(
+        &self,
+        ticket: &crate::SelectedTicket,
+    ) -> Result<crate::SelectedBorrowTicket> {
+        self.with_selected_metadata_claim(ticket, SelectedMetadataAccess::Start, |selected| {
+            selected.borrow(ticket)
+        })
+    }
+
+    pub fn mark_selected_metadata_restored(
+        &self,
+        borrower: &crate::SelectedBorrowTicket,
+    ) -> Result<()> {
+        self.with_selected_metadata_claim(
+            borrower.invocation(),
+            SelectedMetadataAccess::Return,
+            |selected| selected.restored(borrower),
+        )
+    }
+
+    /// Row-only dependency fixture. No capsule/native/root/loan issuer, and
+    /// absent from production builds. Uses the actual current active claim.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fixture_selected_restored_metadata(
+        &self,
+        thread_id: &str,
+    ) -> Result<crate::SelectedBorrowTicket> {
+        let generation = self.register_selected_bookkeeping_generation()?;
+        let store = self.lock()?;
+        let active = &store.active_launch_owners;
+        let claim = store
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("metadata fixture requires a genuine current claim"))?;
+        if !active.contains(&claim.claimed_by)
+            || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
+        {
+            bail!("metadata fixture claim is not active in this generation");
+        }
+        // Complete the durable check before taking the metadata mutex. The
+        // Store guard keeps claim/owner state stable until the pure fixture
+        // transition has completed.
+        let mut selected = self
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        Ok(selected.fixture_restored_borrow(
+            &generation,
+            thread_id,
+            &claim.claim_id,
+            &claim.claimed_by,
+        ))
+    }
+
+    // Private pure-metadata operation: no public callback or native cleanup
+    // bridge. All callers above invoke only the finite registry transitions.
+    fn with_selected_metadata_claim<T>(
+        &self,
+        ticket: &crate::SelectedTicket,
+        access: SelectedMetadataAccess,
+        operation: impl FnOnce(
+            &mut crate::selected_invocation_bookkeeping::SelectedInvocationBookkeeping,
+        ) -> std::result::Result<
+            T,
+            crate::selected_invocation_bookkeeping::SelectedBookkeepingError,
+        >,
+    ) -> Result<T> {
+        let store = self.lock()?;
+        let active = &store.active_launch_owners;
+        if matches!(access, SelectedMetadataAccess::Start)
+            && (self.read_only
+                || !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire))
+        {
+            bail!("selected metadata admission is closed");
+        }
+        let (thread_id, claim_id, owner) = ticket.claim_identity();
+        let claim = store
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("selected borrower durable claim is absent"))?;
+        if claim.thread_id != thread_id
+            || claim.claim_id != claim_id
+            || claim.claimed_by != owner
+            || !active.contains(owner)
+            || claim.owner.thread_id != thread_id
+            || claim.owner.daemon_generation_id != runtime_db::daemon_generation_id()
+        {
+            bail!("selected borrower claim/active association changed");
+        }
+        // All fallible durable checks precede the metadata lock. The Store
+        // guard keeps the claim and active-owner association stable while the
+        // selected registry is reacquired for this pure transition.
+        let mut selected = self
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected invocation registry poisoned"))?;
+        if matches!(access, SelectedMetadataAccess::Start)
+            && (self.read_only
+                || !self
+                    .process_attachment_admission_open
+                    .load(Ordering::Acquire))
+        {
+            bail!("selected metadata admission is closed");
+        }
+        operation(&mut selected)
+            .map_err(|error| anyhow!("selected metadata transition refused: {error:?}"))
+    }
+
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        g.runtime_db
-            .release_thread_launch_claim(thread_id, claim_id)
+        g.runtime_db.release_thread_launch_claim(
+            &self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Release(thread_id, claim_id),
+            )?,
+            thread_id,
+            claim_id,
+        )
     }
 
     /// Atomically retire the in-process owner and its exact durable claim with
@@ -17641,14 +20871,30 @@ impl StateStore {
         claim_id: &str,
         launch_owner: &str,
     ) -> Result<bool> {
-        let g = self.lock()?;
-        let mut active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
-        active.remove(launch_owner);
-        g.runtime_db
-            .release_thread_launch_claim(thread_id, claim_id)
+        let mut g = self.lock()?;
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Release(thread_id, claim_id),
+        )?;
+        let Some(claim) = g.runtime_db.get_launch_claim(thread_id)? else {
+            return Ok(false);
+        };
+        if claim.thread_id != thread_id
+            || claim.claim_id != claim_id
+            || claim.claimed_by != launch_owner
+        {
+            return Ok(false);
+        }
+        let deleted =
+            g.runtime_db
+                .release_thread_launch_claim(&selected_permit, thread_id, claim_id)?;
+        drop(selected_permit);
+        if deleted {
+            // Same Store guard owns this set: no lock, allocation or fallible
+            // acknowledgment separates durable deletion and exact retirement.
+            g.active_launch_owners.remove(launch_owner);
+        }
+        Ok(deleted)
     }
 
     /// Consume a completed runtime recovery attempt and replace the current
@@ -17662,29 +20908,78 @@ impl StateStore {
         max_attempts: u32,
     ) -> Result<runtime_db::RuntimeRecoveryClaimRotation> {
         let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        let mut active = self
-            .active_launch_owners
-            .lock()
-            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
-        if !active.contains(expected_launch_owner) {
-            return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
-        }
-        let outcome = g
-            .runtime_db
-            .rotate_thread_launch_claim_after_runtime_recovery(
+        let mut g = self.lock()?;
+        // Occupancy refusal precedes every LostOwner/Exhausted shortcut.
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Rotate(
                 thread_id,
                 expected_launch_owner,
                 next_claim_id,
                 daemon_generation_id,
                 max_attempts,
+            ),
+        )?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        if !g.active_launch_owners.contains(expected_launch_owner) {
+            return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        let Some(current) = g.runtime_db.get_launch_claim(thread_id)? else {
+            return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
+        };
+        if current.claimed_by != expected_launch_owner {
+            return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        let next_owner = runtime_db::LaunchOwner {
+            thread_id: thread_id.to_owned(),
+            monotonic_launch_epoch: current
+                .owner
+                .monotonic_launch_epoch
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("launch epoch overflow"))?,
+            unpredictable_nonce: next_claim_id.to_owned(),
+            daemon_generation_id: daemon_generation_id.to_owned(),
+        };
+        let next_active_owner = lillux::canonical_json(&serde_json::to_value(&next_owner)?)?;
+        if g.active_launch_owners.contains(&next_active_owner) {
+            bail!("rotated launch owner collides with an active daemon owner");
+        }
+        // Finish the immutable permit borrow before reserving the Store-owned
+        // set, then revalidate occupancy under this unchanged guard.
+        drop(selected_permit);
+        g.active_launch_owners
+            .try_reserve(1)
+            .map_err(|error| anyhow!("cannot reserve replacement active owner: {error}"))?;
+        let selected_permit = self.selected_mutation_permit(
+            &g,
+            SelectedMutationOperation::Rotate(
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+            ),
+        )?;
+        let outcome = g
+            .runtime_db
+            .rotate_thread_launch_claim_after_runtime_recovery(
+                &selected_permit,
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+                &next_owner,
             )?;
-        if let runtime_db::RuntimeRecoveryClaimRotation::Rotated { claim, .. } = &outcome {
-            active.remove(expected_launch_owner);
-            if !active.insert(claim.claimed_by.clone()) {
-                bail!("rotated launch owner collides with an active daemon owner");
-            }
+        drop(selected_permit);
+        if matches!(
+            &outcome,
+            runtime_db::RuntimeRecoveryClaimRotation::Rotated { .. }
+        ) {
+            // RuntimeDb validates next_owner before commit. Capacity and owned
+            // key are ready; same guard prevents a competing owner insertion.
+            g.active_launch_owners.remove(expected_launch_owner);
+            g.active_launch_owners.insert(next_active_owner);
         }
         Ok(outcome)
     }
@@ -17694,6 +20989,25 @@ impl StateStore {
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
         let g = self.lock()?;
         g.runtime_db.get_launch_claim(thread_id)
+    }
+
+    /// Revalidate the actual original callback owner under its existing window.
+    /// Reuses the finite RuntimeDb connection and StateStore acquisition seam.
+    pub(crate) fn assert_launch_owner_until(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<()> {
+        self.with_runtime_original_deadline(deadline, |db| {
+            let claim = db
+                .get_launch_claim(thread_id)?
+                .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+            if claim.claimed_by != launch_owner {
+                bail!("stale launch owner for thread {thread_id}");
+            }
+            Ok(())
+        })
     }
 
     pub fn assert_launch_owner(&self, thread_id: &str, launch_owner: &str) -> Result<()> {
@@ -17706,6 +21020,44 @@ impl StateStore {
             bail!("stale launch owner for thread {thread_id}");
         }
         Ok(())
+    }
+
+    /// Linearize an already prepared historical response with the enclosing
+    /// callback's current root and launch authority. The value is prepared
+    /// before this gate so disclosure performs no provider or chunk I/O.
+    pub(crate) fn disclose_to_current_consumer_callback<T>(
+        &self,
+        admission: &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        value: T,
+    ) -> Result<T> {
+        let launch_owner = admission
+            .callback_launch_owner()
+            .context("consumer disclosure requires its actual callback admission")?;
+        admission.with_live_callback(|| {
+            let g = self.lock()?;
+            let coordinate = admission.coordinate();
+            let root = authoritative_snapshot_for_transition(
+                &g,
+                &coordinate.accepted_root_id,
+                &coordinate.accepted_root_id,
+            )?;
+            anyhow::ensure!(
+                root.status == ThreadStatus::Running
+                    && root.error.is_none()
+                    && root.thread_id == coordinate.accepted_root_id
+                    && root.chain_root_id == coordinate.accepted_root_id
+                    && root.requested_by.as_deref() == Some(admission.owner_principal())
+                    && root.project_authority == *admission.accepted_project_authority()
+                    && root.admitted_launch_capsule_hash.as_deref()
+                        == Some(coordinate.accepted_capsule_hash.as_str()),
+                "consumer disclosure lost its exact running accepted root"
+            );
+            g.runtime_db.disclose_to_current_consumer_callback(
+                &coordinate.accepted_root_id,
+                launch_owner,
+                value,
+            )
+        })
     }
 
     /// Return the descriptor-stable process identity only when the caller is
@@ -17844,7 +21196,7 @@ impl StateStore {
             || workspace.thread_id.as_deref() != Some(thread_id)
             || workspace.launch_owner.as_deref() != Some(launch_owner)
             || claim.claimed_by != launch_owner
-            || !self.is_launch_owner_active(launch_owner)
+            || !Self::is_launch_owner_active_locked(&g, launch_owner)
         {
             bail!("workspace creator reap check lost its exact constructing owner");
         }
@@ -18012,8 +21364,8 @@ impl StateStore {
         if claim.claimed_by != recovery_launch_owner {
             bail!("stale recovery launch owner for thread {thread_id}");
         }
-        if !self.is_launch_owner_active(recovery_launch_owner)
-            || self.is_launch_owner_active(previous_launch_owner)
+        if !Self::is_launch_owner_active_locked(&g, recovery_launch_owner)
+            || Self::is_launch_owner_active_locked(&g, previous_launch_owner)
         {
             bail!("workspace owner transfer requires an active successor and settled predecessor");
         }
@@ -18078,7 +21430,8 @@ impl StateStore {
         if g.runtime_db
             .get_launch_claim(thread_id)?
             .is_some_and(|claim| {
-                claim.claimed_by == launch_owner && self.is_launch_owner_active(&claim.claimed_by)
+                claim.claimed_by == launch_owner
+                    && Self::is_launch_owner_active_locked(&g, &claim.claimed_by)
             })
         {
             bail!("workspace launch owner is still active in this daemon");
@@ -18135,7 +21488,7 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        if self.is_launch_owner_active(launch_owner) {
+        if Self::is_launch_owner_active_locked(&g, launch_owner) {
             bail!("active launch owner cannot use abandoned freeze recovery");
         }
         if g.runtime_db.get_launch_claim(thread_id)?.is_some() {
@@ -18789,11 +22142,15 @@ impl StateStore {
             )
             .context("verify root action admitted execution realization")?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
-        let expected_capsule_hash = capsule.content_hash()?;
+        let canonical_capsule = capsule.to_canonical_bytes()?;
+        let expected_capsule_hash = lillux::sha256_hex(&canonical_capsule);
         let admitted_launch_capsule_hash = self
             .state_authority
             .cas_store()?
-            .store_object(&capsule.to_value())
+            .store_canonical_object_bytes_bounded(
+                &canonical_capsule,
+                ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+            )
             .context("store detached admitted launch capsule")?;
         if admitted_launch_capsule_hash != expected_capsule_hash {
             bail!(
@@ -19678,28 +23035,7 @@ impl StateStore {
         let events = page
             .rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()?;
         Ok(PersistedEventPage {
             events,
@@ -19730,28 +23066,7 @@ impl StateStore {
         let events = page
             .rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()?;
         Ok(PersistedEventPage {
             events,
@@ -19796,28 +23111,7 @@ impl StateStore {
             queries::latest_node_events(g.state_db.projection(), limit, exclude_types)?;
         event_rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -19830,28 +23124,7 @@ impl StateStore {
         let event_rows = queries::latest_thread_events(g.state_db.projection(), thread_id, limit)?;
         event_rows
             .into_iter()
-            .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
-                    format!(
-                        "malformed JSON payload for event {} (chain_seq {})",
-                        row.event_id, row.chain_seq
-                    )
-                })?;
-                Ok(PersistedEventRecord {
-                    event_id: row.event_id,
-                    event_hash: Some(row.event_hash),
-                    chain_root_id: row.chain_root_id,
-                    chain_seq: row.chain_seq,
-                    thread_id: row.thread_id,
-                    thread_seq: row.thread_seq,
-                    event_type: row.event_type,
-                    storage_class: row.durability,
-                    ts: row.ts,
-                    prev_chain_event_hash: row.prev_chain_event_hash,
-                    prev_thread_event_hash: row.prev_thread_event_hash,
-                    payload,
-                })
-            })
+            .map(persisted_event_from_projection_row)
             .collect::<Result<Vec<_>>>()
     }
 
@@ -20437,9 +23710,351 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_native::TestStateStore;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use std::io::Write as _;
     use tempfile::tempdir;
+
+    fn projected_event_fixture(
+        durability: ryeos_state::objects::EventDurability,
+    ) -> (ryeos_state::objects::ThreadEvent, queries::EventRow) {
+        let event = ryeos_state::objects::ThreadEvent {
+            schema: 1,
+            kind: "thread_event".into(),
+            chain_root_id: "T-projected".into(),
+            chain_seq: 3,
+            thread_id: "T-projected-child".into(),
+            thread_seq: 2,
+            event_type: "test_observation".into(),
+            durability,
+            ts: "2026-10-09T00:00:00Z".into(),
+            prev_chain_event_hash: Some("a".repeat(64)),
+            prev_thread_event_hash: Some("b".repeat(64)),
+            payload: json!({"operation_id": "projection-control", "value": 7}),
+        };
+        let row = queries::EventRow {
+            event_id: 3,
+            event_hash: ryeos_state::objects::thread_event::hash_event(&event).unwrap(),
+            chain_root_id: event.chain_root_id.clone(),
+            chain_seq: 3,
+            thread_id: event.thread_id.clone(),
+            thread_seq: 2,
+            event_type: event.event_type.clone(),
+            durability: event.durability.to_string(),
+            ts: event.ts.clone(),
+            prev_chain_event_hash: event.prev_chain_event_hash.clone(),
+            prev_thread_event_hash: event.prev_thread_event_hash.clone(),
+            payload: serde_json::to_vec(&event.payload).unwrap(),
+        };
+        (event, row)
+    }
+
+    #[test]
+    fn projection_records_match_canonical_events_without_rewriting_evidence() {
+        use ryeos_state::objects::EventDurability::{Durable, Journal};
+        for (durability, storage_class) in [(Durable, "indexed"), (Journal, "journal")] {
+            let (event, row) = projected_event_fixture(durability);
+            let authoritative =
+                persisted_event_from_authoritative(row.event_hash.clone(), event).unwrap();
+            let projected = persisted_event_from_projection_row(row.clone()).unwrap();
+            assert_eq!(projected.storage_class, storage_class);
+            assert_eq!(
+                serde_json::to_value(&projected).unwrap(),
+                serde_json::to_value(&authoritative).unwrap(),
+            );
+
+            // Conversion translates vocabulary only; it must not repair altered
+            // payloads or hashes and thereby conceal a later authentication failure.
+            let mut changed = row;
+            changed.payload = br#"{"value":8}"#.to_vec();
+            let changed = persisted_event_from_projection_row(changed).unwrap();
+            assert_eq!(changed.event_hash, authoritative.event_hash);
+            assert_ne!(changed.payload, authoritative.payload);
+        }
+    }
+
+    #[test]
+    fn projection_conversion_refuses_invalid_persistent_evidence() {
+        use ryeos_state::objects::EventDurability::{Durable, Ephemeral};
+        let (_, row) = projected_event_fixture(Durable);
+        for durability in ["indexed", "ephemeral", "unknown", "", "Durable", "durable "] {
+            let mut changed = row.clone();
+            changed.durability = durability.into();
+            assert!(persisted_event_from_projection_row(changed).is_err());
+        }
+        let (event, ephemeral) = projected_event_fixture(Ephemeral);
+        assert!(persisted_event_from_authoritative(ephemeral.event_hash, event).is_err());
+        let mut malformed = row;
+        malformed.payload = b"invalid JSON".to_vec();
+        assert!(persisted_event_from_projection_row(malformed).is_err());
+    }
+
+    #[test]
+    fn projected_event_read_surfaces_preserve_indexed_class_and_thread_scope() {
+        let store = test_store();
+        let thread = "T-projection-read-surfaces";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let foreign = "T-projection-foreign";
+        store
+            .create_thread_for_test(&thread_record(foreign, foreign))
+            .unwrap();
+        let expected = store
+            .latest_thread_event_by_type(thread, ryeos_state::event_types::THREAD_CREATED)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected.storage_class, "indexed");
+        let scoped = [
+            store.replay_events(thread, Some(thread), None, 10, 1024 * 1024)
+                .unwrap().events,
+            store.replay_events_through(thread, Some(thread), None, expected.chain_seq, 10, 1024 * 1024)
+                .unwrap().events,
+            store.latest_thread_events(thread, 10).unwrap(),
+            vec![store.latest_thread_event_by_type_prefix(thread, "thread_").unwrap().unwrap()],
+        ];
+        for events in scoped {
+            assert_eq!(events.len(), 1);
+            assert_eq!(serde_json::to_value(&events[0]).unwrap(), serde_json::to_value(&expected).unwrap());
+        }
+        let node_events = store.latest_node_events(10, &[]).unwrap();
+        assert_eq!(node_events.len(), 2);
+        assert!(node_events.iter().all(|event| event.storage_class == "indexed"));
+        let owned = node_events.iter().find(|event| event.thread_id == thread).unwrap();
+        assert_eq!(serde_json::to_value(owned).unwrap(), serde_json::to_value(&expected).unwrap());
+    }
+
+    fn rooted_bundle_proof_fixture(
+        key: &lillux::crypto::SigningKey,
+        fingerprint: &str,
+    ) -> ryeos_state::objects::AdmittedLaunchCapsule {
+        use ryeos_state::objects::{
+            AdmittedDirectCommandClosure as Command, AdmittedExecutionClosure as Closure,
+            AdmittedLaunchArtifactIdentity as Artifact, DirectExecutableIdentity as Executable,
+            DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
+            ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
+            ExecutionProjectAuthority, ExecutionRecoveryAuthority, RetainedItemSpaceV1 as Space,
+            RetainedTrustClassV1 as Trust,
+        };
+
+        let triple = "x86_64-unknown-linux-gnu";
+        let item_ref = format!("bin/{triple}/runner");
+        let item_source = json!({
+            "kind": "item_source",
+            "item_ref": item_ref,
+            "content_blob_hash": "f".repeat(64),
+            "integrity": format!("sha256:{}", "f".repeat(64)),
+            "signature_info": null,
+            "mode": 0o755,
+        });
+        let item_source_bytes = lillux::canonical_json(&item_source).unwrap();
+        let item_source_hash = lillux::sha256_hex(item_source_bytes.as_bytes());
+        let manifest = json!({
+            "kind": "source_manifest",
+            "item_source_hashes": { item_ref.clone(): item_source_hash.clone() },
+        });
+        let manifest_hash =
+            lillux::sha256_hex(lillux::canonical_json(&manifest).unwrap().as_bytes());
+        let manifest_ref_body = format!("ryeos:bundle-executor-manifest\n{manifest_hash}\n");
+        let signed_manifest_ref =
+            lillux::signature::sign_content(&manifest_ref_body, key, "#", None);
+        let signed_sidecar = lillux::signature::sign_content(&item_source_bytes, key, "#", None);
+        let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
+            requested_binary_ref: "bin:runner".to_owned(),
+            request_origin: ryeos_state::objects::BundleExecutorRequestOriginV1::WrapperBundle {
+                wrapper_bundle_name: "fixture".to_owned(),
+            },
+            selected_bundle: ryeos_state::objects::SelectedBundleIdentityV1 {
+                name: "fixture".to_owned(),
+                body_digest: "a".repeat(64),
+                signer_fingerprint: fingerprint.to_owned(),
+            },
+            runtime_selection: ryeos_state::objects::RetainedRuntimeBinarySelectionV1 {
+                definition_owner: ryeos_state::objects::RetainedRuntimeDefinitionOwnerV1 {
+                    requested_id: "runtime:fixture".to_owned(),
+                    canonical_ref: "runtime:fixture".to_owned(),
+                    source_space: Space::Bundle,
+                    trust_class: Trust::TrustedBundle,
+                    signer_fingerprint: Some(fingerprint.to_owned()),
+                    content_hash: "b".repeat(64),
+                    raw_content_digest: "c".repeat(64),
+                },
+                definition_owner_chain_index: 1,
+                authored_command: "bin:runner".to_owned(),
+                expanded_command: "bin:runner".to_owned(),
+            },
+            selected_item_ref: item_ref,
+            target_triple: triple.to_owned(),
+            item_source_hash,
+            expected_mode: 0o755,
+            signed_executor_manifest_ref: signed_manifest_ref.into_bytes(),
+            executor_manifest_object: manifest,
+            item_source_object: item_source,
+            signed_item_source_sidecar: signed_sidecar.into_bytes(),
+        };
+        let exact_program = json!({});
+        let exact_program_hash =
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
+        let sealed_invocation = json!({});
+        let plan = json!({});
+        let execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(&plan).unwrap().as_bytes());
+        let protocol_document = String::new();
+        let protocol_hash = lillux::sha256_hex(protocol_document.as_bytes());
+        let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
+            schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            kind: "admitted_launch_capsule".to_owned(),
+            exact_program,
+            exact_program_hash,
+            sealed_invocation,
+            project_authority: ExecutionProjectAuthority::PROJECTLESS,
+            lifecycle_authority: ExecutionLifecycleAuthority {
+                ownership: ExecutionOwnershipAuthority::DaemonOwned,
+                recovery: ExecutionRecoveryAuthority::RestartRecoverable,
+            },
+            launch_driver: ExecutionLaunchDriver::DirectItemExecutor,
+            artifact_identity: Artifact::DirectItemExecutor {
+                executor_ref: "tool:test/executor".to_owned(),
+                root_subject_source_content_digest: "d".repeat(64),
+                root_subject_signer_fingerprint: Some(fingerprint.to_owned()),
+                root_subject_source_identity: DirectRootSourceIdentity::Project,
+                protocol_ref: "protocol:test".to_owned(),
+                protocol_content_hash: protocol_hash,
+                protocol_signer_fingerprint: fingerprint.to_owned(),
+                execution_plan_hash,
+                executable_identity: Executable::BundleExecutor {
+                    content_hash: "f".repeat(64),
+                    executor_manifest_hash: manifest_hash,
+                    executor_manifest_signer_fingerprint: fingerprint.to_owned(),
+                    member_source_proof: proof,
+                },
+                runtime_identity: DirectRuntimeIdentity {
+                    runtime_ref: "runtime:fixture".to_owned(),
+                    runtime_source_space: DirectRuntimeSourceSpace::Bundle,
+                    runtime_content_hash: "e".repeat(64),
+                    runtime_signer_fingerprint: fingerprint.to_owned(),
+                    runtime_bundle_manifest_hash: Some("1".repeat(64)),
+                    runtime_bundle_signer_fingerprint: Some(fingerprint.to_owned()),
+                },
+            },
+            execution_closure: Closure::DirectItemExecutor {
+                execution_plan: plan,
+                protocol_descriptor_document: protocol_document,
+                command: Command::NodePolicy,
+                admitted_project_root: None,
+            },
+            execution_realization_hash: "2".repeat(64),
+            source_binding_hash: None,
+            accounting_scope: None,
+            effective_caps: Vec::new(),
+            parent_delegation_caps: None,
+            runtime_ref: "runtime:fixture".to_owned(),
+            executor_ref: "tool:test/executor".to_owned(),
+        };
+        capsule
+    }
+
+    #[test]
+    fn rooted_bundle_member_proof_rechecks_current_owner_and_signatures() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
+        let trust = bundle_admission_trust_for(&[&key]);
+        let capsule = rooted_bundle_proof_fixture(&key, &fingerprint);
+        verify_rooted_bundle_member_source_proof(&capsule, &trust)
+            .expect("rooted proof verifies with current owner and source signer");
+
+        let mut bad_signature = capsule.clone();
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executable_identity:
+                ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                    member_source_proof,
+                    ..
+                },
+            ..
+        } = &mut bad_signature.artifact_identity
+        else {
+            unreachable!("fixture uses BundleExecutor identity");
+        };
+        let mut sidecar =
+            String::from_utf8(member_source_proof.signed_item_source_sidecar.clone()).unwrap();
+        let header_end = sidecar.find('\n').unwrap();
+        let signer_separator = sidecar[..header_end].rfind(':').unwrap();
+        let signature_separator = sidecar[..signer_separator].rfind(':').unwrap();
+        let signature_start = signature_separator + 1;
+        let replacement = if sidecar.as_bytes()[signature_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        sidecar.replace_range(
+            signature_start..signature_start + 1,
+            &(replacement as char).to_string(),
+        );
+        member_source_proof.signed_item_source_sidecar = sidecar.into_bytes();
+        assert!(verify_rooted_bundle_member_source_proof(&bad_signature, &trust).is_err());
+
+        let mut revoked_owner = capsule;
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executable_identity:
+                ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                    member_source_proof,
+                    ..
+                },
+            ..
+        } = &mut revoked_owner.artifact_identity
+        else {
+            unreachable!("fixture uses BundleExecutor identity");
+        };
+        member_source_proof
+            .runtime_selection
+            .definition_owner
+            .signer_fingerprint = Some("0".repeat(64));
+        assert!(verify_rooted_bundle_member_source_proof(&revoked_owner, &trust).is_err());
+    }
+
+    fn bundle_admission_trust_for(keys: &[&lillux::crypto::SigningKey]) -> BundleAdmissionTrust {
+        BundleAdmissionTrust::bound(ryeos_engine::trust::TrustStore::from_signers(
+            keys.iter()
+                .map(|key| ryeos_engine::trust::TrustedSigner {
+                    fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+                    verifying_key: key.verifying_key(),
+                    label: None,
+                })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn rooted_bundle_member_proof_follows_admitting_trust_not_head_trust() {
+        let bundle_key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let node_key = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+        let bundle_fingerprint = lillux::crypto::fingerprint(&bundle_key.verifying_key());
+        let capsule = rooted_bundle_proof_fixture(&bundle_key, &bundle_fingerprint);
+
+        verify_rooted_bundle_member_source_proof(
+            &capsule,
+            &bundle_admission_trust_for(&[&node_key, &bundle_key]),
+        )
+        .expect("Bundle-signed capsule verifies under the trust that admitted the Bundle");
+
+        let removed = verify_rooted_bundle_member_source_proof(
+            &capsule,
+            &bundle_admission_trust_for(&[&node_key]),
+        )
+        .expect_err("Bundle signer removed from admitting trust must refuse");
+        assert!(
+            removed.to_string().contains("no longer trusted"),
+            "unexpected refusal: {removed:#}"
+        );
+
+        let unbound =
+            verify_rooted_bundle_member_source_proof(&capsule, &BundleAdmissionTrust::unbound())
+                .expect_err("a store without admitting trust must refuse Bundle executors");
+        assert!(
+            unbound.to_string().contains("no Bundle admission trust"),
+            "unexpected refusal: {unbound:#}"
+        );
+    }
 
     #[test]
     fn abandoned_runtime_snapshot_stage_is_removed_under_pinned_state_authority() {
@@ -20549,7 +24164,7 @@ mod tests {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
         let runtime_state_dir = app_root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
@@ -20559,14 +24174,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                app_root.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&app_root, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -20785,26 +24393,987 @@ mod tests {
         );
     }
 
-    fn test_store() -> StateStore {
+    #[test]
+    fn original_state_store_mutex_deadline_refuses_while_actual_guard_remains_held() {
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
+        let original_guard = store.inner.lock().unwrap();
+        let original =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
+        let waiting = Arc::clone(&store);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(waiting.lock_until(original).map(|_| ())).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(original_guard); // always release actual original mutex before joining/assertion
+        worker.join().unwrap();
+        assert!(
+            result
+                .expect("actual StateStore waiter must stop before guard release")
+                .is_err()
+        );
+        assert!(original.has_elapsed());
+        assert!(store.lock().is_ok());
+    }
+
+    #[test]
+    fn original_state_store_expiry_cannot_enter_runtime_sql_operation() {
+        let store = test_store();
+        let entered = AtomicBool::new(false);
+        let result = store.with_runtime_original_deadline(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            |db| {
+                entered.store(true, Ordering::Release);
+                db.process_resource_reservations()
+            },
+        );
+        assert!(result.is_err());
+        assert!(!entered.load(Ordering::Acquire));
+        assert!(store.lock().is_ok());
+    }
+
+    fn test_store() -> TestStateStore {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
-        let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
             *identity.verifying_key(),
         );
-        StateStore::new_with_head_trust(
-            tmp.clone(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer,
-            WriteBarrier::new(),
-            Arc::new(head_trust),
+        TestStateStore::open(&tmp, signer, Arc::new(head_trust)).expect("state store")
+    }
+
+    #[test]
+    fn store_owned_active_access_and_release_share_actual_guard() {
+        let store = test_store();
+        let thread = "T-store-active-release";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", "daemon:test")
+            .unwrap()
+            .unwrap();
+        {
+            let g = store.lock().unwrap();
+            assert!(StateStore::is_launch_owner_active_locked(
+                &g,
+                &claim.claimed_by
+            ));
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claimed_by,
+                claim.claimed_by
+            );
+        }
+        assert!(
+            store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by)
+                .unwrap()
+        );
+        let g = store.lock().unwrap();
+        assert!(g.runtime_db.get_launch_claim(thread).unwrap().is_none());
+        assert!(!StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
+    }
+
+    #[test]
+    fn prepared_rotation_mismatch_rolls_back_epoch_attempt_and_preserves_active_owner() {
+        let store = test_store();
+        let thread = "T-prepared-rotation";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        let g = store.lock().unwrap();
+        let permit = store
+            .selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::Rotate(
+                    thread,
+                    &claim.claimed_by,
+                    "next",
+                    "daemon:test",
+                    3,
+                ),
+            )
+            .unwrap();
+        let wrong = runtime_db::LaunchOwner {
+            thread_id: thread.to_owned(),
+            monotonic_launch_epoch: claim.owner.monotonic_launch_epoch + 2,
+            unpredictable_nonce: "next".to_owned(),
+            daemon_generation_id: "daemon:test".to_owned(),
+        };
+        assert!(
+            g.runtime_db
+                .rotate_thread_launch_claim_after_runtime_recovery(
+                    &permit,
+                    thread,
+                    &claim.claimed_by,
+                    "next",
+                    "daemon:test",
+                    3,
+                    &wrong
+                )
+                .is_err()
+        );
+        assert_eq!(
+            g.runtime_db.fixture_launch_epoch(thread).unwrap(),
+            Some(claim.owner.monotonic_launch_epoch as i64)
+        );
+        assert_eq!(g.runtime_db.get_resume_attempts(thread).unwrap(), 0);
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claimed_by,
+            claim.claimed_by
+        );
+        assert!(StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
+    }
+
+    #[test]
+    fn prepared_rotation_publishes_exact_replacement_under_same_store() {
+        let store = test_store();
+        let thread = "T-prepared-rotation-success";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let first = store
+            .claim_thread_launch_active(thread, "first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        let outcome = store
+            .rotate_active_thread_launch_claim_after_runtime_recovery(
+                thread,
+                &first.claimed_by,
+                "next",
+                "daemon:test",
+                3,
+            )
+            .unwrap();
+        let runtime_db::RuntimeRecoveryClaimRotation::Rotated {
+            claim,
+            next_attempt,
+        } = outcome
+        else {
+            panic!("expected rotation");
+        };
+        let g = store.lock().unwrap();
+        assert_eq!(next_attempt, 1);
+        assert_eq!(
+            claim.owner.monotonic_launch_epoch,
+            first.owner.monotonic_launch_epoch + 1
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claimed_by,
+            claim.claimed_by
+        );
+        assert!(!StateStore::is_launch_owner_active_locked(
+            &g,
+            &first.claimed_by
+        ));
+        assert!(StateStore::is_launch_owner_active_locked(
+            &g,
+            &claim.claimed_by
+        ));
+    }
+
+    // Row-only fixtures; no selected issuer, native contact or settlement proof.
+    fn selected_fence_fixture(
+        phase: crate::selected_invocation_bookkeeping::SelectedFixturePhase,
+        refused: bool,
+    ) -> (TestStateStore, runtime_db::LaunchClaim) {
+        let store = test_store();
+        let thread = "T-selected-fence";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = store.fixture_selected_restored_metadata(thread).unwrap();
+        {
+            let _g = store.lock().unwrap();
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_retained_phase(borrower.invocation(), phase, refused);
+        }
+        (store, claim)
+    }
+
+    #[test]
+    fn selected_fences_all_phases_and_refusal_before_claim_release_rotation_and_sweep() {
+        use crate::selected_invocation_bookkeeping::SelectedFixturePhase::*;
+        for phase in [
+            Pending,
+            Occupied,
+            Borrowed,
+            RestoredAwaitingBorrowAck,
+            Retiring,
+        ] {
+            for refused in [false, true] {
+                let (store, claim) = selected_fence_fixture(phase, refused);
+                assert!(
+                    store
+                        .release_thread_launch_claim(&claim.thread_id, &claim.claim_id)
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_thread_launch_claim(&claim.thread_id, "stale")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_active_thread_launch_claim(&claim.thread_id, "stale", "wrong")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .release_active_thread_launch_claim(
+                            &claim.thread_id,
+                            &claim.claim_id,
+                            &claim.claimed_by
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .claim_thread_launch(&claim.thread_id, "new", "foreign")
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .claim_thread_launch_active(
+                            &claim.thread_id,
+                            "new",
+                            runtime_db::daemon_generation_id()
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .rotate_active_thread_launch_claim_after_runtime_recovery(
+                            &claim.thread_id,
+                            &claim.claimed_by,
+                            "next",
+                            runtime_db::daemon_generation_id(),
+                            3
+                        )
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .clear_stale_launch_claims("foreign-generation")
+                        .is_err()
+                );
+                let retained = store.get_launch_claim(&claim.thread_id).unwrap().unwrap();
+                assert_eq!(retained.claim_id, claim.claim_id);
+                assert_eq!(retained.claimed_by, claim.claimed_by);
+                assert!(
+                    store
+                        .lock()
+                        .unwrap()
+                        .active_launch_owners
+                        .contains(&claim.claimed_by)
+                );
+                let g = store.lock().unwrap();
+                assert_eq!(
+                    g.runtime_db.get_resume_attempts(&claim.thread_id).unwrap(),
+                    0
+                );
+                assert!(
+                    store
+                        .delete_thread_runtime_locked(&g, &claim.thread_id)
+                        .is_err()
+                );
+                assert!(store.require_selected_bulk_exclusion(&g).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn selected_fences_missing_claim_and_unpublished_id_without_new_epoch_or_rollback() {
+        use crate::selected_invocation_bookkeeping::SelectedFixturePhase::Pending;
+        let (store, claim) = selected_fence_fixture(Pending, false);
+        {
+            let g = store.lock().unwrap();
+            g.runtime_db
+                .fixture_release_thread_launch_claim(&claim.thread_id, &claim.claim_id)
+                .unwrap();
+        }
+        let before_epoch = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_launch_epoch(&claim.thread_id)
+            .unwrap();
+        assert!(
+            store
+                .claim_thread_launch(&claim.thread_id, "replacement", "foreign")
+                .is_err()
+        );
+        assert!(store.get_launch_claim(&claim.thread_id).unwrap().is_none());
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .fixture_launch_epoch(&claim.thread_id)
+                .unwrap(),
+            before_epoch
+        );
+        let fresh = "T-selected-unpublished";
+        let fresh_claim = store
+            .reserve_fresh_thread_launch_active(fresh, "fresh", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = store.fixture_selected_restored_metadata(fresh).unwrap();
+        {
+            let g = store.lock().unwrap();
+            g.runtime_db
+                .fixture_release_thread_launch_claim(fresh, &fresh_claim.claim_id)
+                .unwrap();
+        }
+        let fresh_epoch = store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_launch_epoch(fresh)
+            .unwrap();
+        assert!(
+            store
+                .reserve_fresh_thread_launch(fresh, "new", "foreign")
+                .is_err()
+        );
+        assert!(
+            store
+                .reserve_fresh_thread_launch_active(
+                    fresh,
+                    "new",
+                    runtime_db::daemon_generation_id()
+                )
+                .is_err()
+        );
+        assert!(store.get_launch_claim(fresh).unwrap().is_none());
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .runtime_db
+                .fixture_launch_epoch(fresh)
+                .unwrap(),
+            fresh_epoch
+        );
+        assert!(store.mark_selected_metadata_restored(&borrower).is_err());
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .active_launch_owners
+                .contains(&fresh_claim.claimed_by)
+        );
+    }
+
+    #[test]
+    fn selected_live_permit_refuses_wrong_store_db_target_and_operation() {
+        let store = test_store();
+        // One Store is live per process, so the other Store is its identity
+        // alone: an address that is not this Store's mutex. The other Runtime
+        // is a real store opened beside it on the same test host.
+        let other_root = tempdir().unwrap();
+        let other_db = test_native::with_store_host(|host| {
+            runtime_db::test_native::open_live(host, &other_root.path().join("runtime.sqlite3"))
+        });
+        let g = store.lock().unwrap();
+        assert!(store.owns_store_mutex(g.store_mutex));
+        assert!(!store.owns_store_mutex(std::ptr::null()));
+        let permit = store
+            .selected_mutation_permit(&g, SelectedMutationOperation::Release("T", "claim"))
+            .unwrap();
+        assert!(
+            other_db
+                .release_thread_launch_claim(&permit, "T", "claim")
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .release_thread_launch_claim(&permit, "other", "claim")
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .claim_thread_launch(&permit, "T", "claim", "generation")
+                .is_err()
+        );
+        assert!(
+            !g.runtime_db
+                .release_thread_launch_claim(&permit, "T", "claim")
+                .unwrap()
+        );
+        drop(permit);
+        drop(g);
+        test_native::with_store_host(|host| runtime_db::test_native::retire(host, other_db));
+    }
+
+    #[test]
+    fn selected_registry_poison_refuses_without_durable_claim_change() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::selected_registry_poison_refuses_without_durable_claim_change"
+        );
+        // A poisoned registry refuses the store's close, so its native owners
+        // end only with the process: the scenario runs in a child.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "poisoned registry kept the durable claim");
+            return;
+        }
+        let store = test_store();
+        let thread = "T-selected-poison";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Deliberate private poison injection isolates registry refusal;
+            // no ordinary SQL or selected capability is issued by this fixture.
+            let _selected = store.selected_invocations.lock().unwrap();
+            panic!("injected selected registry poison");
+        }));
+        assert!(
+            store
+                .release_thread_launch_claim(thread, &claim.claim_id)
+                .is_err()
+        );
+        {
+            let g = store.lock().unwrap();
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claim_id,
+                claim.claim_id
+            );
+        }
+        let host = crate::state_store::test_native::take_shared_host();
+        lillux_sqlite::test_host::end_isolated_process(
+            (claim, store, host),
+            "poisoned registry kept the durable claim",
         )
-        .expect("state store")
+    }
+
+    #[test]
+    fn selected_pending_birth_veto_retains_reservation_and_runtime_row() {
+        let store = test_store();
+        let thread = "T-selected-pending-birth";
+        let claim = store
+            .reserve_fresh_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        {
+            let g = store.lock().unwrap();
+            g.runtime_db
+                .reserve_in_process_handler_birth(thread, thread, &in_process_launch_metadata())
+                .unwrap();
+        }
+        store.fixture_selected_restored_metadata(thread).unwrap();
+        assert!(
+            store
+                .discard_uncommitted_in_process_handler_birth(thread)
+                .is_err()
+        );
+        let g = store.lock().unwrap();
+        assert!(
+            store
+                .selected_mutation_permit(&g, SelectedMutationOperation::DeleteThread(thread))
+                .is_err()
+        );
+        assert!(
+            g.runtime_db
+                .in_process_handler_reservation(thread)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            claim.claim_id
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            1
+        );
+    }
+
+    #[test]
+    fn selected_first_remove_and_head_absent_replay_preserve_exact_journal_and_claim() {
+        let store = test_store();
+        let thread = "T-selected-terminal";
+        let mut record = thread_record(thread, thread);
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        store.create_thread_for_test(&record).unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        finish_workspace_test_thread(&store, thread);
+        store.fixture_selected_restored_metadata(thread).unwrap();
+        {
+            let g = store.lock().unwrap();
+            let lock = g.state_db.acquire_chain_lock(thread).unwrap();
+            let chain = g
+                .state_db
+                .authoritative_terminal_chain_under_lock(thread, &lock)
+                .unwrap()
+                .unwrap();
+            let mut result = TerminalChainRetirement::default();
+            assert!(
+                store
+                    .finish_terminal_chain_removal(&g, &chain, &lock, &[], false, &mut result)
+                    .is_err()
+            );
+            assert!(
+                g.state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                g.state_db
+                    .authoritative_terminal_chain_under_lock(thread, &lock)
+                    .unwrap()
+                    .is_some()
+            );
+            // Deliberately construct an actual crash-boundary contradiction in
+            // private unit code; no production issuer or cleanup permission.
+            assert!(g.state_db.remove_chain_head_ref(thread, &lock).unwrap());
+        }
+        let before = store
+            .lock()
+            .unwrap()
+            .state_db
+            .pending_chain_transition(thread)
+            .unwrap()
+            .unwrap()
+            .transition_id;
+        assert!(
+            store
+                .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0))
+                .is_err()
+        );
+        let g = store.lock().unwrap();
+        assert_eq!(
+            g.state_db
+                .pending_chain_transition(thread)
+                .unwrap()
+                .unwrap()
+                .transition_id,
+            before
+        );
+        assert_eq!(
+            g.runtime_db
+                .get_launch_claim(thread)
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            claim.claim_id
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            1
+        );
+    }
+
+    #[test]
+    fn selected_expected_and_advanced_replay_keep_actual_signed_heads_and_remove_cursor() {
+        for advanced in [false, true] {
+            let store = test_store();
+            let thread = "T-selected-replay";
+            store
+                .create_thread_for_test(&thread_record(thread, thread))
+                .unwrap();
+            let claim = store
+                .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+                .unwrap()
+                .unwrap();
+            let head_path = store
+                .lock()
+                .unwrap()
+                .state_db
+                .refs_root()
+                .join("generic/chains")
+                .join(thread)
+                .join("head");
+            let expected = std::fs::read(&head_path).unwrap();
+            finish_workspace_test_thread(&store, thread);
+            let newer = std::fs::read(&head_path).unwrap();
+            assert_ne!(expected, newer);
+            store.fixture_selected_restored_metadata(thread).unwrap();
+            let transition = {
+                let g = store.lock().unwrap();
+                let lock = g.state_db.acquire_chain_lock(thread).unwrap();
+                // Private crash fixture restores a genuinely signed earlier
+                // head, then records an actual Remove and a visible signed head.
+                std::fs::write(&head_path, &expected).unwrap();
+                g.state_db.remove_chain_head_ref(thread, &lock).unwrap();
+                std::fs::write(&head_path, if advanced { &newer } else { &expected }).unwrap();
+                let transition = g
+                    .state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .unwrap();
+                let actual = g
+                    .state_db
+                    .pending_chain_removal_head_state(thread, &transition.transition_id, &lock)
+                    .unwrap();
+                if advanced {
+                    assert!(matches!(
+                        actual,
+                        ryeos_state::PendingRemoveHeadState::AdvancedHeadVisible { .. }
+                    ));
+                } else {
+                    assert!(matches!(
+                        actual,
+                        ryeos_state::PendingRemoveHeadState::ExpectedHeadVisible
+                    ));
+                }
+                transition.transition_id
+            };
+            let head_before = std::fs::read(&head_path).unwrap();
+            assert!(
+                store
+                    .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(
+                        0
+                    ))
+                    .is_err()
+            );
+            let g = store.lock().unwrap();
+            assert_eq!(
+                g.state_db
+                    .pending_chain_transition(thread)
+                    .unwrap()
+                    .unwrap()
+                    .transition_id,
+                transition
+            );
+            assert_eq!(std::fs::read(&head_path).unwrap(), head_before);
+            assert_eq!(
+                g.runtime_db
+                    .get_launch_claim(thread)
+                    .unwrap()
+                    .unwrap()
+                    .claim_id,
+                claim.claim_id
+            );
+            assert_eq!(
+                g.runtime_db
+                    .inspect_thread_history_discard()
+                    .unwrap()
+                    .thread_runtime,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn selected_bulk_retirement_veto_preserves_unrelated_due_chain() {
+        use crate::selected_invocation_bookkeeping::SelectedFixturePhase::Occupied;
+        let (store, _) = selected_fence_fixture(Occupied, false);
+        let due = "T-unrelated-due";
+        let mut record = thread_record(due, due);
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        store.create_thread_for_test(&record).unwrap();
+        finish_workspace_test_thread(&store, due);
+        assert!(
+            store
+                .retire_due_terminal_chains("2099-01-01T00:00:00Z", false, |_| Ok(0))
+                .is_err()
+        );
+        let g = store.lock().unwrap();
+        assert!(g.state_db.pending_chain_transition(due).unwrap().is_none());
+        let lock = g.state_db.acquire_chain_lock(due).unwrap();
+        assert!(
+            g.state_db
+                .authoritative_terminal_chain_under_lock(due, &lock)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn empty_selected_domain_preserves_ordinary_head_absent_cleanup() {
+        let store = test_store();
+        let thread = "T-ordinary-replay";
+        let mut record = thread_record(thread, thread);
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        store.create_thread_for_test(&record).unwrap();
+        finish_workspace_test_thread(&store, thread);
+        {
+            let g = store.lock().unwrap();
+            let lock = g.state_db.acquire_chain_lock(thread).unwrap();
+            assert!(g.state_db.remove_chain_head_ref(thread, &lock).unwrap());
+        }
+        store
+            .recover_pending_terminal_chain_removals("2099-01-01T00:00:00Z", false, |_| Ok(0))
+            .unwrap();
+        let g = store.lock().unwrap();
+        assert!(
+            g.state_db
+                .pending_chain_transition(thread)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            g.runtime_db
+                .inspect_thread_history_discard()
+                .unwrap()
+                .thread_runtime,
+            0
+        );
+    }
+
+    #[test]
+    fn selected_metadata_is_shared_and_ack_requires_actual_claim_and_active_owner() {
+        use crate::selected_invocation_bookkeeping::SelectedBorrowReturn;
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
+        let same_store = Arc::clone(&store);
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-ack";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = same_store
+            .selected_invocations
+            .lock()
+            .unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        store
+            .lock()
+            .unwrap()
+            .active_launch_owners
+            .remove(&claim.claimed_by);
+        assert!(same_store.ack_selected_borrow_return(&borrower).is_err());
+        assert!(
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_awaiting_ack(&borrower)
+        );
+        store
+            .lock()
+            .unwrap()
+            .active_launch_owners
+            .insert(claim.claimed_by.clone());
+        assert_eq!(
+            same_store.ack_selected_borrow_return(&borrower).unwrap(),
+            SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            store.ack_selected_borrow_return(&borrower).unwrap(),
+            SelectedBorrowReturn::AlreadyReturned
+        );
+        // One Store is live per process: the first closes before the other
+        // opens, and the borrower is plain data that outlives its Store.
+        drop((store, same_store));
+        store_owner.close().unwrap();
+        let other = test_store();
+        other.register_selected_bookkeeping_generation().unwrap();
+        assert!(other.ack_selected_borrow_return(&borrower).is_err());
+    }
+
+    #[test]
+    fn selected_return_retries_after_close_but_new_metadata_borrow_refuses() {
+        let store = test_store();
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-return-close";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let first = store
+            .selected_invocations
+            .lock()
+            .unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        let ticket = first.invocation().clone();
+        store.mark_selected_metadata_restored(&first).unwrap();
+        store.ack_selected_borrow_return(&first).unwrap();
+        let second = store.begin_selected_metadata_borrow(&ticket).unwrap();
+        assert!(store.mark_selected_metadata_restored(&first).is_err());
+        store.close_process_attachment_admission().unwrap();
+        store.mark_selected_metadata_restored(&second).unwrap();
+        store.mark_selected_metadata_restored(&second).unwrap();
+        assert_eq!(
+            store.ack_selected_borrow_return(&second).unwrap(),
+            crate::SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            store.ack_selected_borrow_return(&second).unwrap(),
+            crate::SelectedBorrowReturn::AlreadyReturned
+        );
+        assert!(store.begin_selected_metadata_borrow(&ticket).is_err());
+        assert!(store.ack_selected_borrow_return(&first).is_err());
+    }
+
+    #[test]
+    fn selected_missing_durable_claim_keeps_restored_metadata_pending() {
+        let store = test_store();
+        let generation = store.register_selected_bookkeeping_generation().unwrap();
+        let thread = "T-selected-missing-claim";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim", runtime_db::daemon_generation_id())
+            .unwrap()
+            .unwrap();
+        let borrower = store
+            .selected_invocations
+            .lock()
+            .unwrap()
+            .fixture_restored_borrow(&generation, thread, &claim.claim_id, &claim.claimed_by);
+        // Deliberate private unit-fixture corruption, not a Store bypass API.
+        store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .fixture_release_thread_launch_claim(thread, &claim.claim_id)
+            .unwrap();
+        assert!(store.ack_selected_borrow_return(&borrower).is_err());
+        assert!(
+            store
+                .selected_invocations
+                .lock()
+                .unwrap()
+                .fixture_awaiting_ack(&borrower)
+        );
+    }
+
+    #[test]
+    fn active_claim_release_refuses_stale_claim_or_wrong_owner_without_mutation() {
+        let store = test_store();
+        let thread = "T-release-order";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread, "claim-current", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, "claim-stale", &claim.claimed_by)
+                .unwrap()
+        );
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+        let retained = store.get_launch_claim(thread).unwrap().unwrap();
+        assert_eq!(retained.claim_id, claim.claim_id);
+        assert_eq!(retained.claimed_by, claim.claimed_by);
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, "wrong-owner")
+                .unwrap()
+        );
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+        assert_eq!(
+            store.get_launch_claim(thread).unwrap().unwrap().claimed_by,
+            claim.claimed_by
+        );
+        // Model an already-absent durable row while the actual active registry
+        // still retains this owner. A missing-row refusal must not erase it.
+        assert!(
+            store
+                .release_thread_launch_claim(thread, &claim.claim_id)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &claim.claim_id, &claim.claimed_by)
+                .unwrap()
+        );
+        assert!(store.is_launch_owner_active(&claim.claimed_by));
+    }
+
+    #[test]
+    fn exact_active_claim_release_acknowledges_both_domains_and_preserves_replacement() {
+        let store = test_store();
+        let thread = "T-release-replaced";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let first = store
+            .claim_thread_launch_active(thread, "claim-first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by)
+                .unwrap()
+        );
+        assert!(store.get_launch_claim(thread).unwrap().is_none());
+        assert!(!store.is_launch_owner_active(&first.claimed_by));
+        let replacement = store
+            .claim_thread_launch_active(thread, "claim-replacement", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store
+                .release_active_thread_launch_claim(thread, &first.claim_id, &first.claimed_by)
+                .unwrap()
+        );
+        assert!(store.is_launch_owner_active(&replacement.claimed_by));
+        let retained = store.get_launch_claim(thread).unwrap().unwrap();
+        assert_eq!(retained.claim_id, replacement.claim_id);
+        assert_eq!(retained.claimed_by, replacement.claimed_by);
     }
 
     // Signed persistence fixture only: no RootAdmission, compiler token, or
@@ -20884,7 +25453,7 @@ mod tests {
                 else {json!({"kind":"local"})},
             "external_endpoint_binding":if external {json!({"binding_id":"storage-direct",
                 "binding_digest":"c".repeat(64)})} else {Value::Null},
-            "resource_authority_ceiling":"node_policy","cache_key":"storage",
+            "subprocess_limits":null, "resource_authority_ceiling":"node_policy","cache_key":"storage",
             "executor_chain":["graph:test/storage-fixture",executor_ref],
             "executor_authorities":[],"runtime_identity":runtime
         }))
@@ -20936,7 +25505,7 @@ mod tests {
         let provisional = metadata.admitted_launch_capsule().unwrap().unwrap();
         let authority = provisional.launch_authority();
         let cas_root = store.cas_root().unwrap();
-        let identity = crate::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &cas_root.ancestors().nth(3).unwrap().join("node-key.pem"),
         )
         .unwrap();
@@ -21331,6 +25900,8 @@ mod tests {
             reservation
         );
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let reserved_store = test_store();
         let reserved = direct_owner_test_reservation(&reserved_store);
         {
@@ -21358,7 +25929,7 @@ mod tests {
         );
     }
 
-    fn workspace_binding_fixture() -> (StateStore, runtime_db::RuntimeWorkspaceBinding) {
+    fn workspace_binding_fixture() -> (TestStateStore, runtime_db::RuntimeWorkspaceBinding) {
         let store = test_store();
         let root = "T-workspace-root";
         store
@@ -21716,6 +26287,8 @@ mod tests {
         assert!(store.has_retained_workspace_quarantine(root).unwrap());
         assert_eq!(store.thread_workspace_binding(root).unwrap(), Some(binding));
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let (settled, binding) = workspace_binding_fixture();
         let identity = attach_workspace_test_process(&settled, &binding);
         assert!(
@@ -22706,7 +27279,7 @@ mod tests {
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
             .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
@@ -22714,14 +27287,7 @@ mod tests {
             identity.fingerprint().to_string(),
             *identity.verifying_key(),
         );
-        let store = StateStore::new_with_head_trust(
-            tmp.path().to_path_buf(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer.clone(),
-            WriteBarrier::new(),
-            Arc::new(head_trust),
-        )
+        let store = TestStateStore::open(tmp.path(), signer.clone(), Arc::new(head_trust))
         .expect("state store");
         let authority = store.pinned_state_authority().expect("state authority");
         let guard = authority.acquire_shared_guard().expect("CAS guard");
@@ -22997,6 +27563,9 @@ mod tests {
             response
         );
 
+        // One Store is live per process: each branch closes its Store before
+        // the next opens.
+        adoption_store.close().unwrap();
         let abort_store = test_store();
         let abort_operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
@@ -23025,6 +27594,7 @@ mod tests {
                 .is_some()
         );
 
+        abort_store.close().unwrap();
         let completion_store = test_store();
         let completion_operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
@@ -23194,7 +27764,8 @@ mod tests {
 
     #[test]
     fn concurrent_target_branch_publishers_cannot_overwrite_each_other() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let operation = handoff_test_operation(
             crate::worker_handoff::WorkerHandoffJobRole::Target,
             "concurrent-branch",
@@ -23478,7 +28049,7 @@ mod tests {
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
@@ -23488,14 +28059,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -23542,7 +28106,7 @@ mod tests {
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
@@ -23552,14 +28116,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -23616,7 +28173,7 @@ mod tests {
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
@@ -23626,14 +28183,7 @@ mod tests {
         );
         let trust = Arc::new(trust);
         let open = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
             .expect("state store")
         };
 
@@ -23830,7 +28380,7 @@ mod tests {
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
@@ -23839,7 +28389,7 @@ mod tests {
             *identity.verifying_key(),
         );
         let trust = Arc::new(trust);
-        let state = StateDb::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+        let state = ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
         let authority = state.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
         let active = ryeos_state::objects::ExternalContentBinding::active(
@@ -23879,27 +28429,18 @@ mod tests {
         drop(authority);
         drop(state);
 
-        let error = StateStore::new_with_head_trust(
-            tmp.path().to_path_buf(),
-            runtime_state_dir.clone(),
-            runtime_state_dir.join("runtime.sqlite3"),
-            signer,
-            WriteBarrier::new(),
-            trust,
-        )
-        .err()
-        .expect("predecessor binding head must refuse startup");
+        let refusal = TestStateStore::open_refusal(tmp.path(), signer, trust);
         assert!(
-            error
-                .to_string()
-                .contains("ryeos node reset external-content-bindings")
+            refusal.contains("ryeos node reset external-content-bindings"),
+            "{refusal}"
         );
     }
 
     #[test]
     fn daemon_bundle_event_append_serializes_concurrent_writers_at_current_head() {
         const WRITERS: usize = 12;
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let start = Arc::new(std::sync::Barrier::new(WRITERS));
         let writers = (0..WRITERS)
             .map(|index| {
@@ -24536,7 +29077,8 @@ mod tests {
 
     #[test]
     fn launch_cancel_and_authoritative_root_bind_have_one_atomic_winner() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let launch_id = store
             .reserve_launch_planning("T-bind-race", "fp:owner")
             .expect("reserve planning");
@@ -24712,7 +29254,8 @@ mod tests {
 
     #[test]
     fn launch_cancel_and_authoritative_continuation_bind_have_one_atomic_winner() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let source_thread_id = "T-continuation-bind-race-source";
         let successor_thread_id = "T-continuation-bind-race-successor";
         let mut source = thread_record(source_thread_id, source_thread_id);
@@ -24804,7 +29347,8 @@ mod tests {
 
     #[test]
     fn direct_attachment_fork_waits_for_state_store_descriptor_scope() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let guard = store.lock().expect("hold state store");
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -25922,20 +30466,21 @@ mod tests {
         let host =
             serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
         let planned = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": host["backend"]["boot_id"],
+                "cgroup_enclosure": host["backend"]["cgroup_enclosure"],
                 "parent": {"containing_device": 1, "inode": 2},
                 "name": format!("resource-{coordinate}")}
         });
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(planned.clone()).unwrap();
         let mut bound = planned;
-        bound["version"] = 4.into();
+        bound["version"] = 5.into();
         bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
         (
@@ -26036,6 +30581,8 @@ mod tests {
             "first possible commit must never be followed by automatic rollback"
         );
 
+        // One Store is live per process: close the first before the second.
+        store.close().unwrap();
         let store = test_store();
         let (original, reservation) =
             scratch_reservation_fixture(&store, "scratch-lost-reserve-ack");
@@ -26183,6 +30730,9 @@ mod tests {
                 .physical_state,
             ProcessCustodyPhysicalState::Retained
         );
+        // One Store is live per process: close the first before the second.
+        drop(original);
+        store.close().unwrap();
 
         // The SAME actual-scratch owner also refuses rollback once the real
         // one-shot stored spawn-intent transition has committed. No subprocess
@@ -26405,21 +30955,14 @@ mod tests {
         use runtime_db::process_resource_custody::ProcessCustodyPhysicalState;
         let root = tempfile::tempdir().unwrap();
         let key = root.path().join("node-key.pem");
-        let identity = crate::identity::NodeIdentity::create(&key).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap();
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let trust = Arc::new(trust);
         let runtime = root.path().join(".ai/state");
         let open = || {
-            StateStore::new_with_head_trust(
-                root.path().to_owned(),
-                runtime.clone(),
-                runtime.join("runtime.sqlite3"),
-                signer.clone(),
-                WriteBarrier::new(),
-                trust.clone(),
-            )
+            TestStateStore::open(root.path(), signer.clone(), trust.clone())
             .unwrap()
         };
         let store = open();
@@ -26493,7 +31036,8 @@ mod tests {
 
     #[test]
     fn shutdown_closure_serializes_resource_reservation_and_scope_binding() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (reservation, _) = process_resource_reservation_fixture("reserve-race");
         let guard = store.lock().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -26521,7 +31065,11 @@ mod tests {
         );
         assert!(store.process_resource_reservations().unwrap().is_empty());
 
-        let store = Arc::new(test_store());
+        // One Store is live per process: close the first before the second.
+        drop(store);
+        store_owner.close().unwrap();
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let (reservation, recovery) = process_resource_reservation_fixture("bind-race");
         store.reserve_process_resource_launch(&reservation).unwrap();
         let guard = store.lock().unwrap();
@@ -27183,6 +31731,8 @@ mod tests {
             terminal_before
         );
 
+        // One Store is live per process: close the first before the second.
+        terminal_store.close().unwrap();
         let attached_store = test_store();
         let attached_id = "T-launch-audit-attached";
         attached_store
@@ -27286,7 +31836,8 @@ mod tests {
 
     #[test]
     fn attached_process_listing_does_not_wait_for_the_global_store_lock() {
-        let store = Arc::new(test_store());
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
         let thread_id = "T-attached-process-registry";
         store
             .create_thread_for_test(&thread_record(thread_id, thread_id))
@@ -27391,7 +31942,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
         let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
-        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
@@ -27401,14 +31952,7 @@ mod tests {
         );
         let head_trust = Arc::new(head_trust);
         let open_store = || {
-            StateStore::new_with_head_trust(
-                tmp.clone(),
-                runtime_state_dir.clone(),
-                runtime_db_path.clone(),
-                Arc::clone(&signer),
-                WriteBarrier::new(),
-                Arc::clone(&head_trust),
-            )
+            TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&head_trust))
             .expect("state store")
         };
 
@@ -27856,4 +32400,92 @@ mod tests {
             ryeos_state::event_types::EDGE_RECORDED
         );
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_requires_same_actual_original_scratch_owner() {
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-funding");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let receipt = store
+            .remove_never_born_scratch_for_funding(&original, &scratch)
+            .unwrap();
+        assert!(
+            store
+                .begin_trusted_process_resource_spawn(&original)
+                .is_err()
+        );
+        receipt
+            .matches_original(&Arc::clone(&store), &original)
+            .unwrap();
+        assert!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_no_birth_funding_receipt_refuses_other_state_and_changed_original() {
+        for foreign_state in [false, true] {
+            let store_owner = test_store();
+            let store = Arc::clone(store_owner.store());
+            let (scratch, original) = scratch_reservation_fixture(&store, "j4-no-birth-foreign");
+            store
+                .reserve_process_resource_launch_with_scratch(&original, &scratch)
+                .unwrap();
+            let receipt = store
+                .remove_never_born_scratch_for_funding(&original, &scratch)
+                .unwrap();
+            let mut changed = original.clone();
+            if !foreign_state {
+                changed.owner_coordinate.push_str("-changed");
+            }
+            // One Store is live per process, so the other Store is its
+            // identity alone: an owner that is not the minting Store.
+            let refused = if foreign_state {
+                receipt.matches_original_of(&std::sync::Weak::new(), &changed)
+            } else {
+                receipt.matches_original(&store, &changed)
+            };
+            assert!(refused.is_err());
+            drop(store);
+            store_owner.close().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn j4_spawn_intent_cannot_mint_no_birth_funding_receipt() {
+        let store_owner = test_store();
+        let store = Arc::clone(store_owner.store());
+        let (scratch, original) = scratch_reservation_fixture(&store, "j4-contacted-no-refund");
+        store
+            .reserve_process_resource_launch_with_scratch(&original, &scratch)
+            .unwrap();
+        let permit = store
+            .begin_trusted_process_resource_spawn(&original)
+            .unwrap();
+        assert!(
+            store
+                .remove_never_born_scratch_for_funding(permit.reservation(), &scratch)
+                .is_err()
+        );
+        assert!(scratch.path().unwrap().exists());
+        assert_eq!(
+            store
+                .process_resource_reservation(&original.owner_kind, &original.owner_coordinate)
+                .unwrap()
+                .as_ref(),
+            Some(permit.reservation())
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "state_store/qualification_transcript_publication_tests.rs"]
+mod qualification_transcript_publication_tests;

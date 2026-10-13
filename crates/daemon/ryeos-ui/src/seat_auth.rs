@@ -30,15 +30,123 @@ impl RetainedProjectAccess {
     pub fn try_clone_directory(&self) -> anyhow::Result<lillux::PinnedDirectory> {
         self.authority.try_clone()
     }
+
+    /// The retained project directory itself. Reads through it traverse from
+    /// the held descriptor; its `path()` is the identity it was bound to and
+    /// is never to be reopened as a pathname.
+    pub fn directory(&self) -> &lillux::PinnedDirectory {
+        self.authority.as_ref()
+    }
+
+    /// The retained directory as project-content authority: every project
+    /// read through it traverses from the held descriptor.
+    pub fn content_authority(
+        &self,
+    ) -> &dyn ryeos_engine::project_content::AuthoritativeProjectContent {
+        self.authority.as_ref()
+    }
+}
+
+/// Resolve `item_ref` over `roots`. When the roots' project space is this
+/// retained access's descriptor path, project candidates are judged by the
+/// retained directory owner: the descriptor pathname is a magic link that
+/// no-follow pathname traversal refuses, and it is never existence authority.
+/// Without retained access, resolution walks the roots' pathnames.
+/// At most `max_bytes` of the item source at `path`, with the source's full
+/// length. A source beneath `access` is read through its retained directory
+/// owner, never by reopening the descriptor pathname; any other source, such
+/// as a bundle item, is read by its own pathname.
+pub(crate) fn read_item_source(
+    path: &std::path::Path,
+    access: Option<&RetainedProjectAccess>,
+    max_bytes: usize,
+) -> Option<(Vec<u8>, u64)> {
+    if let Some(access) = access
+        && let Ok(relative) = path.strip_prefix(&access.descriptor_path)
+    {
+        let file = access
+            .authority
+            .open_pinned_regular_descendant(relative, false)
+            .ok()??;
+        let size = file.size().ok()?;
+        return Some((file.read_prefix(max_bytes).ok()?, size));
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, max_bytes as u64), &mut bytes)
+        .ok()?;
+    Some((bytes, size))
+}
+
+/// The whole UTF-8 item source at `path`, read as [`read_item_source`] reads
+/// it. A source over the engine's item-source bound reads as absent.
+pub(crate) fn read_whole_item_source(
+    path: &std::path::Path,
+    access: Option<&RetainedProjectAccess>,
+) -> Option<String> {
+    let limit = ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES;
+    let (bytes, size) = read_item_source(path, access, limit as usize)?;
+    if size > limit || bytes.len() as u64 != size {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Enumerate `kind`'s refs over `roots`, with project-space candidates listed
+/// by the retained directory owner exactly as [`resolve_item_for_access`]
+/// judges them. An unreadable corpus enumerates nothing, as for
+/// [`ryeos_engine::item_resolution::enumerate_kind_refs`].
+pub(crate) fn enumerate_kind_refs_for_access(
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    kind: &str,
+    access: Option<&RetainedProjectAccess>,
+) -> Vec<ryeos_engine::canonical_ref::CanonicalRef> {
+    match access {
+        Some(access) => ryeos_engine::item_resolution::enumerate_kind_refs_under_project_authority(
+            roots,
+            schema,
+            kind,
+            &access.descriptor_path,
+            access.authority.as_ref(),
+        )
+        .unwrap_or_default(),
+        None => ryeos_engine::item_resolution::enumerate_kind_refs(roots, schema, kind),
+    }
+}
+
+pub(crate) fn resolve_item_for_access(
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    access: Option<&RetainedProjectAccess>,
+) -> Result<ryeos_engine::item_resolution::ResolutionResult, ryeos_engine::error::EngineError> {
+    match access {
+        Some(access) => ryeos_engine::item_resolution::resolve_item_full_under_project_authority(
+            roots,
+            schema,
+            item_ref,
+            &access.descriptor_path,
+            access.authority.as_ref(),
+        ),
+        None => ryeos_engine::item_resolution::resolve_item_full(roots, schema, item_ref),
+    }
 }
 
 fn validate_attachment_project(
     attachment: &AdmittedBindingAttachment,
 ) -> Result<Option<&std::sync::Arc<lillux::PinnedDirectory>>, HandlerError> {
-    match (
-        attachment.project_authority.as_ref(),
-        attachment.project_query_identity.as_deref(),
-    ) {
+    // The attachment's query identity is a copy derived from the compiled
+    // binding at admission; the compiled binding's own project root stays
+    // the identity the directory authority must answer to.
+    let compiled_root = attachment.compiled_binding.binding.project_root.as_deref();
+    if attachment.project_query_identity.as_deref() != compiled_root {
+        return Err(HandlerError::Forbidden(
+            "project authority contradicts the compiled project identity".into(),
+        ));
+    }
+    match (attachment.project_authority.as_ref(), compiled_root) {
         (None, None) => Ok(None),
         (Some(authority), Some(project_root)) => {
             authority
@@ -101,7 +209,7 @@ pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachme
 
 pub enum SeatCaller {
     Attachment(std::sync::Arc<AdmittedBindingAttachment>),
-    Operator { fingerprint: String },
+    Operator { principal_id: String },
 }
 
 impl SeatCaller {
@@ -111,7 +219,7 @@ impl SeatCaller {
     pub fn principal_id(&self) -> &str {
         match self {
             Self::Attachment(attachment) => &attachment.compiled_binding.binding.principal_id,
-            Self::Operator { fingerprint } => fingerprint,
+            Self::Operator { principal_id } => principal_id,
         }
     }
 
@@ -158,7 +266,11 @@ pub fn require_seat_caller(
     }
     let fingerprint = ryeos_app::operator_authority::require_admitted_operator(state, ctx)
         .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
-    Ok(SeatCaller::Operator { fingerprint })
+    // Admission answers with the bare key fingerprint; durable owners, thread
+    // subjects and compiled bindings all name principals in `fp:` form.
+    Ok(SeatCaller::Operator {
+        principal_id: format!("fp:{fingerprint}"),
+    })
 }
 
 #[cfg(test)]

@@ -33,8 +33,14 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let spec = state
-        .scheduler_db
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let _read_guard = scheduler
+        .acquire_read()
+        .await
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let db = scheduler.scheduler_db();
+    let spec = db
         .get_spec(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
@@ -42,8 +48,7 @@ pub async fn handle(
     ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let limit = req.limit.clamp(1, 500);
-    let (fires, total) = state
-        .scheduler_db
+    let (fires, total) = db
         .list_fires(&req.schedule_id, req.status.as_deref(), limit)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 

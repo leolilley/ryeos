@@ -47,7 +47,18 @@ fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let fixtures = root.join(".ai/test-fixtures");
     fs::create_dir_all(&fixtures).unwrap();
-    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    // A disabled (non-enforcing) policy in the current schema, narrowed to
+    // the verified code and project roots these tests exercise.
+    let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+    policy.filesystem.readable = vec!["{verified_code}".to_string()];
+    policy.filesystem.writable = vec!["{project}".to_string()];
+    policy.network.mode = ryeos_engine::isolation::IsolationNetworkMode::Isolated;
+    policy.limits.open_files = Some(128);
+    fs::write(
+        fixtures.join("isolation-policy.yaml"),
+        serde_yaml::to_string(&policy).unwrap(),
+    )
+    .unwrap();
     root
 }
 
@@ -287,6 +298,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine

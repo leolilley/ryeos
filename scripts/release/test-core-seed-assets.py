@@ -22,7 +22,7 @@ BUILD = ASSET / "tools/ryeos/bundle-release/lib/core-seed-build.py"
 
 def release_input(name="core"):
     return {
-        "schema": "ryeos.bundle_release_input_plan.v1",
+        "schema": "ryeos.bundle_release_input_plan.v2",
         "project_path": "/source",
         "bundle_name": name,
         "authored_manifest": {"name": name, "version": "1.0.0",
@@ -33,7 +33,7 @@ def release_input(name="core"):
         "build_profile": "release",
         "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
         "payload_ownership_content_hash": "b" * 64,
-        "payloads": [], "cargo_packages": [], "build_classes": [],
+        "payloads": [], "cargo_packages": [], "cargo_feature_selections": [], "build_classes": [],
         "requires_binary_build": True,
         "clean_output_required": True,
         "ambient_target_reuse_allowed": False,

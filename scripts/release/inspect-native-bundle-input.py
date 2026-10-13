@@ -67,6 +67,18 @@ def main():
         fail("a data-only bundle requires the portable target")
     packages = sorted({record["cargo_package"] for record in records})
     build_classes = sorted({record["build_class"] for record in records})
+    features_by_package = {}
+    for record in records:
+        selected = features_by_package.setdefault(record["cargo_package"], set())
+        selected.update(record["required_features"])
+    cargo_feature_selections = []
+    for package, selected in sorted(features_by_package.items()):
+        # Larger handler compositions include their smaller targets.
+        if selected & {"graph-handlers", "directive-handlers"}:
+            selected -= {"core-handlers", "basic-parsers", "extends-composer"}
+        elif "core-handlers" in selected:
+            selected.discard("basic-parsers")
+        cargo_feature_selections.append({"cargo_package": package, "features": sorted(selected)})
     target = {"kind": "portable"} if args.target == "portable" else {
         "kind": "triple", "triple": args.target
     }
@@ -83,7 +95,7 @@ def main():
         if entry.is_dir() and (entry / f"{entry.name}.kind-schema.yaml").is_file()
     ) if kinds.is_dir() else []
     output = {
-        "schema": "ryeos.bundle_release_input_plan.v1",
+        "schema": "ryeos.bundle_release_input_plan.v2",
         "project_path": str(root),
         "bundle_name": args.bundle,
         "authored_manifest": authored_manifest,
@@ -95,6 +107,7 @@ def main():
         "payload_ownership_content_hash": ownership_identity,
         "payloads": records,
         "cargo_packages": packages,
+        "cargo_feature_selections": cargo_feature_selections,
         "build_classes": build_classes,
         "requires_binary_build": bool(records),
         "clean_output_required": True,

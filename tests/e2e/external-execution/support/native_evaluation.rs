@@ -3,6 +3,8 @@
 //! Host artifacts are explicitly supplied pinned files; guest execution uses
 //! only the four captured members, never a discovered host interpreter/library.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::{ffi::OsStr, path::Path};
 
 use anyhow::{Context as _, Result, ensure};
@@ -156,7 +158,7 @@ fn stage_runtime(project: &Path, inputs: RuntimeInputs<'_>) -> Result<()> {
         (&libraries, "libgcc_s.so.1", &libgcc),
     ] {
         directory
-            .atomic_create_pinned_regular(OsStr::new(name), bytes, 0o755)?
+            .atomic_create_pinned_regular(OsStr::new(name), bytes, 0o755, TEST_PURPOSE)?
             .context("native runtime refuses member replacement")?;
     }
     Ok(())
@@ -222,7 +224,7 @@ fn write_json_source(
         "signed source exceeds evaluator bound"
     );
     directory
-        .atomic_create_pinned_regular(OsStr::new(name), signed.as_bytes(), 0o644)?
+        .atomic_create_pinned_regular(OsStr::new(name), signed.as_bytes(), 0o644, TEST_PURPOSE)?
         .context("native fixture refuses signed source replacement")?;
     Ok(())
 }
@@ -361,7 +363,7 @@ mod tests {
         bytes[5] = 1;
         bytes[18] = 62;
         let file = source_root
-            .atomic_create_pinned_regular(OsStr::new("input"), &bytes, 0o755)
+            .atomic_create_pinned_regular(OsStr::new("input"), &bytes, 0o755, TEST_PURPOSE)
             .unwrap()
             .unwrap();
         let inputs = || RuntimeInputs {

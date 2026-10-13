@@ -5,7 +5,7 @@
 //! never loosen that receipt's settlement or reopen a node cache as a host root.
 
 use super::*;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord,
 };
 

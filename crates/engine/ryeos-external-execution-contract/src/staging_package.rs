@@ -21,6 +21,8 @@ use crate::{
 
 pub const GUEST_STAGING_PACKAGE_SCHEMA: u32 = 1;
 pub const GUEST_IMPORT_TICKET_SCHEMA: u32 = 1;
+/// Structural ceiling for any admitted framed guest package.
+pub const MAX_GUEST_STAGING_FRAMED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 // The base CAS transfer alone admits up to 400,010 filesystem entries. Other
 // inputs share this package and must be accounted for by backend admission.
 pub const MAX_GUEST_STAGING_ENTRIES: usize = 500_000;
@@ -122,7 +124,7 @@ impl GuestImportTicket {
                 && self.regular_bytes <= self.maximum_regular_bytes
                 && self.framed_bytes >= self.regular_bytes.saturating_add(20)
                 && self.framed_bytes <= self.maximum_framed_bytes
-                && self.maximum_framed_bytes <= 4 * 1024 * 1024 * 1024,
+                && self.maximum_framed_bytes <= MAX_GUEST_STAGING_FRAMED_BYTES,
             "guest import ticket package exceeds its bounds"
         );
         Ok(())
@@ -793,6 +795,7 @@ mod tests {
 
     fn fixture() -> (ExternalGuestInputProjection, GuestStagingPackageManifest) {
         let inputs = ExternalGuestInputProjection {
+            workspace_view: crate::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,

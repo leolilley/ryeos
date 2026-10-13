@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use lillux::{
     ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive,
-    retain_fork_sensitive_descriptors, spawn, spawn_awaiting_attachment,
+    try_retain_fork_sensitive_descriptors, spawn, spawn_awaiting_attachment,
     supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
 };
 
@@ -367,7 +367,7 @@ fn concurrent_attachment_boundaries_release_only_their_own_targets() {
 
 #[test]
 fn direct_fork_waits_for_fork_sensitive_descriptor_scopes() {
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let pending = spawn_awaiting_attachment(shell("exit 0".to_string()))
@@ -390,7 +390,7 @@ fn direct_fork_waits_for_fork_sensitive_descriptor_scopes() {
 
 #[test]
 fn direct_fork_fails_loudly_for_same_thread_descriptor_scope() {
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors().unwrap();
     let error = match spawn_awaiting_attachment(shell("exit 0".to_string())) {
         Ok(pending) => {
             pending.abort_and_reap().expect("abort unexpected process");

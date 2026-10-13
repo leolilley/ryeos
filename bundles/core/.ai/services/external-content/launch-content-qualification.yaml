@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-30T01:47:55Z:3ff1175da0714bf23ad6ca49a2dd68fdd5b255205f057539bde902276a06f181:pdUJJeAGtuEiGbX53SOtHT2VvKGKBezQIf/psv8djQ6L2kl0yQpJoZPin6NI21POplLNZQ8ldOzXTO9e3JDoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.launch-content-qualification
 required_caps: ["ryeos.execute.service.external-content/launch-content-qualification"]

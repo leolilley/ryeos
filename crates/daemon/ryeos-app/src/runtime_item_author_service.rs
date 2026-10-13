@@ -24,7 +24,7 @@ use serde_json::json;
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
 use crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY;
-use crate::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 
 const PROVENANCE_MARKER: &str = "ryeos:authored:";
 

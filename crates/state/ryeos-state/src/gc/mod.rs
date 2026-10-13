@@ -657,6 +657,21 @@ fn sweep_sharded_directory(
                         shard2.path().join(&file_name).display()
                     ),
                 };
+                let incomplete_batch_temp = match lillux::classify_secure_temp_name(
+                    &file_name,
+                    lillux::cas::CAS_TEMP_PURPOSE,
+                ) {
+                    lillux::SecureTempOwnership::NotTemp => false,
+                    lillux::SecureTempOwnership::Own => true,
+                    // Another owner's interrupted publication is its owner's
+                    // to settle; collection neither removes nor refuses it.
+                    lillux::SecureTempOwnership::Foreign => continue,
+                    lillux::SecureTempOwnership::Malformed => anyhow::bail!(
+                        "CAS shard holds a secure temporary without an exact owner token: {}; \
+                         stop the node, remove that entry, then rerun GC",
+                        shard2.path().join(&file_name).display()
+                    ),
+                };
                 let filename = file_name.to_str().ok_or_else(|| {
                     anyhow::anyhow!("non-UTF8 CAS filename under {}", shard2.path().display())
                 })?;
@@ -669,7 +684,7 @@ fn sweep_sharded_directory(
                         shard2.path().join(&file_name).display()
                     );
                 }
-                if is_incomplete_batch_temp(filename) || atomic_staging_hash.is_some() {
+                if incomplete_batch_temp || atomic_staging_hash.is_some() {
                     let file_size = file.metadata()?.len();
                     if dry_run {
                         let staging_path = shard2.path().join(&file_name);
@@ -732,11 +747,15 @@ fn sweep_sharded_directory(
                 }
             }
             if !dry_run {
-                shard1.remove_empty_child_if_same(&shard2_name, &shard2)?;
+                shard1
+                    .remove_empty_child_if_same(&shard2_name, &shard2)
+                    .map(|receipt| receipt.is_some())?;
             }
         }
         if !dry_run {
-            namespace_dir.remove_empty_child_if_same(&shard1_name, &shard1)?;
+            namespace_dir
+                .remove_empty_child_if_same(&shard1_name, &shard1)
+                .map(|receipt| receipt.is_some())?;
         }
     }
 
@@ -769,20 +788,6 @@ fn canonical_cas_hash_at_shard(hash: &str, shard1: &str, shard2: &str) -> bool {
         && &hash[2..4] == shard2
 }
 
-fn is_incomplete_batch_temp(filename: &str) -> bool {
-    let Some(rest) = filename.strip_prefix(".secure.tmp.") else {
-        return false;
-    };
-    let Some((pid, sequence)) = rest.split_once('.') else {
-        return false;
-    };
-    !pid.is_empty()
-        && !sequence.is_empty()
-        && !sequence.contains('.')
-        && pid.bytes().all(|byte| byte.is_ascii_digit())
-        && sequence.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 fn validate_cas_shard_component(component: &str, parent: &Path) -> Result<()> {
     if component.len() != 2
         || !component
@@ -808,7 +813,9 @@ fn remove_directory_contents(
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run {
-                    let removed = directory.remove_empty_child_if_same(&name, &child)?;
+                    let removed = directory
+                        .remove_empty_child_if_same(&name, &child)
+                        .map(|receipt| receipt.is_some())?;
                     if !removed {
                         anyhow::bail!(
                             "runtime directory changed while being purged: {}",
@@ -864,7 +871,11 @@ fn remove_rebuildable_cache_directory(
         match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
-                if !dry_run && !cache_directory.remove_empty_child_if_same(&name, &child)? {
+                if !dry_run
+                    && !cache_directory
+                        .remove_empty_child_if_same(&name, &child)
+                        .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!(
                         "runtime cache directory changed while being purged: {}",
                         child.path().display()
@@ -1329,6 +1340,52 @@ mod tests {
         assert_eq!(result.deleted_cas_staging_files, 2);
         assert!(!object_temp.exists());
         assert!(!blob_temp.exists());
+    }
+
+    #[test]
+    fn sweep_removes_only_cas_owned_secure_temps_and_refuses_unattributed_ones() {
+        use std::collections::HashSet;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("cas");
+        let hash = lillux::sha256_hex(b"batch-entry");
+        let shard = lillux::shard_path(&cas_root, "objects", &hash, ".json")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&shard).unwrap();
+        let own = shard.join(format!(
+            ".secure.tmp.{}.4242.7",
+            lillux::cas::CAS_TEMP_PURPOSE.as_str()
+        ));
+        let foreign = shard.join(".secure.tmp.content.4242.8");
+        fs::write(&own, b"interrupted batch entry").unwrap();
+        fs::write(&foreign, b"another owner's debris").unwrap();
+
+        let mut result = GcResult::default();
+        sweep_sharded_dir(&cas_root, "objects", ".json", &HashSet::new(), false, &mut result)
+            .unwrap();
+        assert_eq!(result.deleted_cas_staging_files, 1);
+        assert!(!own.exists());
+        assert!(foreign.is_file());
+
+        let retired_format = shard.join(".secure.tmp.4242.9");
+        fs::write(&retired_format, b"unattributed").unwrap();
+        let error = sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &HashSet::new(),
+            false,
+            &mut GcResult::default(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("without an exact owner token"), "{message}");
+        assert!(message.contains("rerun GC"), "{message}");
+        assert!(retired_format.is_file());
+        assert!(foreign.is_file());
     }
 
     #[test]

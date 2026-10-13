@@ -53,6 +53,8 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod qualification_fixture;
+pub mod qualification_worker_transcript;
 pub mod retained_lifecycle_artifacts;
 pub mod source_closure;
 pub mod source_manifest;
@@ -65,10 +67,13 @@ pub mod workspace_output_capture;
 
 pub use admitted_launch_capsule::{
     ADMITTED_DIRECT_COMMAND_ROOT, ADMITTED_DIRECT_PROJECT_ROOT,
-    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
+    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, AdmittedAccountingScope, AdmittedDirectCommandClosure,
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
     AdmittedLaunchCapsule, DirectExecutableIdentity, DirectRootSourceIdentity,
-    DirectRuntimeIdentity, DirectRuntimeSourceSpace, admitted_direct_command_execution_path,
+    DirectRuntimeIdentity, DirectRuntimeSourceSpace, BundleExecutorMemberSourceProofV1,
+    BundleExecutorRequestOriginV1, RetainedItemSpaceV1, RetainedRuntimeBinarySelectionV1,
+    RetainedRuntimeDefinitionOwnerV1, RetainedTrustClassV1, SelectedBundleIdentityV1,
+    admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
@@ -149,18 +154,21 @@ pub use guest_runtime_materialization::{
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
-    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
+    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile, ConfigurationAbsence,
     CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
+    MAX_CONFIGURATION_ABSENCE_ANCESTORS, MAX_CONFIGURATION_ABSENCE_ENTRIES,
+    MAX_CONFIGURATION_ABSENCE_INSPECTIONS, MAX_CONFIGURATION_ABSENCE_PATH_BYTES,
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
     MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
     MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
     MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES, MAX_STRUCTURED_SESSION_PROFILE_BYTES,
-    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+    MAX_PERSISTENT_SESSION_CAPSULE_BYTES, PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
     PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
     PreparedSessionProcessEnvironment, RetainedExternalRuntimeContentQualification,
     RetainedExternalRuntimeQualification, SESSION_PROCESS_ENVIRONMENT_ENV,
-    SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT, SessionConfigurationFile,
+    SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT,
+    STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, SessionConfigurationFile,
     SessionProcessEnvironmentPathKind, SessionProcessEnvironmentValue,
     SessionRuntimeConfigurationFile, SessionRuntimeViewDelivery, runtime_view_mount_destination,
     session_runtime_endpoint_destination, validate_session_auxiliary_configs,
@@ -184,6 +192,15 @@ pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
+pub use qualification_worker_transcript::{
+    MAX_QUALIFICATION_WORKER_BATCH_TOTAL_BYTES, MAX_QUALIFICATION_WORKER_FINAL_BYTES,
+    MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
+    QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
+    QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA, QualificationWorkerTranscriptChunk,
+    QualificationWorkerTranscriptChunkResponse, QualificationWorkerTranscriptChunkSelection,
+    QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptReference,
+    QualificationWorkerTranscriptStream,
+};
 pub use retained_lifecycle_artifacts::{
     RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
     RetainedLifecycleArtifacts, RetainedLifecycleExecutable, RetainedLifecycleExecutableRole,

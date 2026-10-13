@@ -29,6 +29,11 @@ where
 }
 
 pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
+
+/// Runtime-state child holding the State recovery roots and the CAS lock.
+pub const RECOVERY_DIRECTORY_NAME: &str = "recovery";
+/// The CAS mutation lock inside [`RECOVERY_DIRECTORY_NAME`].
+pub const CAS_MUTATION_LOCK_FILENAME: &str = "cas-mutation.lock";
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
@@ -188,6 +193,303 @@ pub struct RecoveryStore {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 
+/// A scoped in-process borrow of actual recovery roots, not an authority
+/// reconstructed from marker bytes. The real exclusive CAS guard remains required.
+pub(crate) struct RecoveryAcknowledgementCustody {
+    runtime_directory: std::sync::Arc<lillux::PinnedDirectory>,
+    directory: std::sync::Arc<lillux::PinnedDirectory>,
+}
+impl RecoveryAcknowledgementCustody {
+    /// Rewrite this exact operation's Active marker to Acknowledged in one
+    /// same-coordinate rename, so the marker is never absent between the two
+    /// phases. A retry over the same Acknowledged operation only syncs.
+    pub(crate) fn finish(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
+    ) -> Result<()> {
+        let mut work = AcknowledgementWork::default();
+        self.finish_counted(cas_mutation_guard, operation, &mut work)
+    }
+
+    /// `finish` with every bounded read, allocation and filesystem step
+    /// tallied into `work`, so the caller's prepaid quote can be checked
+    /// against the work actually performed.
+    fn finish_counted(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
+        work: &mut AcknowledgementWork,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cas_mutation_guard.is_exclusive(),
+            "thread-history discard requires the exclusive CAS guard"
+        );
+        cas_mutation_guard.ensure_protects_pinned_runtime(&self.runtime_directory)?;
+        operation.validate()?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, work)? else {
+            return Err(ThreadHistoryDiscardAcknowledgementRefused::Absent.into());
+        };
+        if &marker.operation != operation {
+            return Err(ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
+                acknowledged: marker.phase == ThreadHistoryDiscardPhase::Acknowledged,
+                operation_id: marker.operation.operation_id,
+            }
+            .into());
+        }
+        match marker.phase {
+            ThreadHistoryDiscardPhase::Acknowledged => {
+                work.steps += 1;
+                self.directory
+                    .sync()
+                    .context("sync acknowledged thread-history discard")
+            }
+            ThreadHistoryDiscardPhase::Active => {
+                let acknowledged = ThreadHistoryDiscardMarker::for_operation(
+                    operation,
+                    ThreadHistoryDiscardPhase::Acknowledged,
+                )?;
+                work.memory_bytes += (std::mem::size_of::<ThreadHistoryDiscardMarker>()
+                    + acknowledged.kind.capacity()
+                    + acknowledged.operation.operation_id.capacity()
+                    + acknowledged.operation.sha256.capacity()) as u64;
+                let acknowledged = acknowledged.canonical_bytes()?;
+                // The conditional write joins the directory path with the
+                // marker name for its identity check, and encodes the name.
+                let path = self.directory.path().as_os_str().len() as u64;
+                anyhow::ensure!(
+                    path <= ACK_DIRECTORY_PATH_MAX_BYTES,
+                    "thread-history discard directory path exceeds the acknowledgement quote"
+                );
+                work.memory_bytes += acknowledged.capacity() as u64
+                    + ACK_TEMP_NAME_SCRATCH_BYTES
+                    + path
+                    + ACK_MARKER_PATH_SCRATCH_BYTES;
+                work.steps += ACK_ATOMIC_WRITE_STEPS;
+                self.directory
+                    .atomic_write_if_same(
+                        name,
+                        Some(&pin),
+                        &acknowledged,
+                        0o600,
+                        crate::STATE_TEMP_PURPOSE,
+                    )
+                    .context("acknowledge completed thread-history discard")?;
+                work.steps += 1;
+                self.directory
+                    .sync()
+                    .context("sync completed thread-history discard acknowledgement")
+            }
+        }
+    }
+}
+
+/// Bounded read, memory and filesystem steps of one ACK attempt.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcknowledgementWork {
+    pub(crate) read_bytes: u64,
+    pub(crate) memory_bytes: u64,
+    pub(crate) steps: u64,
+}
+
+/// Upper bound on a secure temporary's NUL-terminated name: the 12-byte
+/// `.secure.tmp.` prefix, a purpose token of at most 16 bytes, a separator, a
+/// decimal u32 pid (10), a separator, a decimal u64 sequence (20) and the NUL.
+const ACK_TEMP_NAME_SCRATCH_BYTES: u64 = 12 + 16 + 1 + 10 + 1 + 20 + 1;
+
+/// Largest recovery-directory path an ACK admits, the platform `PATH_MAX`.
+/// The conditional write builds one joined path from it.
+const ACK_DIRECTORY_PATH_MAX_BYTES: u64 = lillux::PATH_MAX_BYTES;
+
+/// Path scratch of the conditional write beyond the directory path: the
+/// separator and the marker name of the joined path, and the marker name
+/// encoded once more with its NUL.
+const ACK_MARKER_PATH_SCRATCH_BYTES: u64 =
+    1 + THREAD_HISTORY_DISCARD_MARKER.len() as u64 + THREAD_HISTORY_DISCARD_MARKER.len() as u64 + 1;
+
+/// Filesystem steps inside one conditional atomic write: temporary create,
+/// mode set, write, fsync, interruption hook check, incumbent identity check,
+/// rename and directory sync.
+const ACK_ATOMIC_WRITE_STEPS: u64 = 8;
+
+/// Filesystem steps of pinned marker intake: pin, presence probe, guarded
+/// open and bounded read, pinned identity, and current-entry identity.
+const MARKER_PINNED_INTAKE_STEPS: u64 = 5;
+
+/// The prepaid bound of one ACK attempt that rewrites an Active marker to
+/// Acknowledged. Reads: every admitted marker byte plus the one growth probe.
+/// Memory: the read buffer, the decoded marker with its three strings, the
+/// canonical re-encoding it is compared against, the Acknowledged marker
+/// with its three strings, its encoded bytes, the temporary-name scratch and
+/// the joined-path scratch of the conditional write. Steps: pinned intake,
+/// the conditional atomic write and the final directory sync. A retry over an
+/// Acknowledged marker does strictly less.
+pub(crate) const fn thread_history_discard_acknowledgement_quote() -> AcknowledgementWork {
+    let max = THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64;
+    let marker = std::mem::size_of::<ThreadHistoryDiscardMarker>() as u64 + max;
+    AcknowledgementWork {
+        read_bytes: max + 1,
+        memory_bytes: (max + 1)
+            + marker
+            + max
+            + marker
+            + max
+            + ACK_TEMP_NAME_SCRATCH_BYTES
+            + ACK_DIRECTORY_PATH_MAX_BYTES
+            + ACK_MARKER_PATH_SCRATCH_BYTES,
+        steps: MARKER_PINNED_INTAKE_STEPS + ACK_ATOMIC_WRITE_STEPS + 1,
+    }
+}
+
+/// Pin the marker inode, read it through the guarded reader and prove the
+/// read named the pinned inode. Absent markers return `None`.
+fn pin_thread_history_discard_marker(
+    directory: &lillux::PinnedDirectory,
+    work: &mut AcknowledgementWork,
+) -> Result<Option<(std::fs::File, ThreadHistoryDiscardMarker)>> {
+    let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+    work.steps += 1;
+    let Some(pin) = directory.open_mount_entry(name)? else {
+        return Ok(None);
+    };
+    let marker = read_thread_history_discard_marker_in(None, directory, work)?
+        .context("thread-history discard marker disappeared during pinned intake")?;
+    work.steps += 2;
+    let pinned = lillux::observe_open_file_identity(&pin)?;
+    let current = directory
+        .entry_no_follow(name)?
+        .context("thread-history discard marker disappeared during pinned intake")?;
+    anyhow::ensure!(
+        current.entry_type == lillux::PinnedEntryType::Regular
+            && current.containing_device == pinned.device()
+            && current.inode == pinned.inode(),
+        "thread-history discard marker changed during pinned intake"
+    );
+    Ok(Some((pin, marker)))
+}
+
+/// Thread-projection children that hold State's durable recovery records.
+const THREAD_PROJECTION_RECORD_DIRECTORIES: [&str; 3] =
+    ["pending", "staged-cas-roots", "durable-cas-uploads"];
+
+/// Remove interrupted State-owned secure publications from State's recovery
+/// directory, its thread-projection directory and that directory's record
+/// children. The caller holds the exclusive runtime-state namespace lock, so
+/// no State writer can still own one of these temporaries. Debris carrying
+/// another owner's token is left in place; a prefixed name without an exact
+/// owner token cannot be attributed and refuses startup.
+pub(crate) fn sweep_interrupted_state_publications(
+    recovery_parent: &lillux::PinnedDirectory,
+    thread_projection: &lillux::PinnedDirectory,
+) -> Result<usize> {
+    let mut removed = sweep_state_temporaries_in(recovery_parent)?;
+    removed += sweep_state_temporaries_in(thread_projection)?;
+    for child in THREAD_PROJECTION_RECORD_DIRECTORIES {
+        let directory = thread_projection.open_child_directory(std::ffi::OsStr::new(child))?;
+        if let Some(directory) = directory {
+            removed += sweep_state_temporaries_in(&directory)?;
+        }
+    }
+    Ok(removed)
+}
+
+fn sweep_state_temporaries_in(directory: &lillux::PinnedDirectory) -> Result<usize> {
+    let mut removed = 0;
+    for name in directory.entry_names()? {
+        let path = directory.path().join(&name);
+        match lillux::classify_secure_temp_name(&name, crate::STATE_TEMP_PURPOSE) {
+            lillux::SecureTempOwnership::NotTemp | lillux::SecureTempOwnership::Foreign => {}
+            lillux::SecureTempOwnership::Own => {
+                let file = directory.open_regular(&name, false)?.with_context(|| {
+                    format!("interrupted State publication disappeared: {}", path.display())
+                })?;
+                directory.remove_if_same(&name, &file).with_context(|| {
+                    format!("remove interrupted State publication {}", path.display())
+                })?;
+                removed += 1;
+            }
+            lillux::SecureTempOwnership::Malformed => anyhow::bail!(
+                "State recovery directory holds a secure temporary without an exact owner token: {}; \
+                 stop the node, remove that entry, then start it again",
+                path.display()
+            ),
+        }
+    }
+    Ok(removed)
+}
+
+/// Guarded evidence read. With the owning native factory the read runs in
+/// that factory's scope, so its own held projection leases answer for their
+/// owner; without one the read refuses whenever any lease is listed.
+pub(crate) fn guarded_evidence_read(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    maximum_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    match factory {
+        Some(factory) => factory.read_regular_without_sqlite_alias(directory, name, maximum_bytes),
+        None => lillux_sqlite::read_regular_without_sqlite_alias(directory, name, maximum_bytes),
+    }
+}
+
+fn read_thread_history_discard_operation(
+    directory: &lillux::PinnedDirectory,
+) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+    read_thread_history_discard_operation_in(None, directory)
+}
+
+/// The in-progress operation: only an Active marker names one. An
+/// Acknowledged marker is the completed record of the last discard.
+fn read_thread_history_discard_operation_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    directory: &lillux::PinnedDirectory,
+) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+    let mut work = AcknowledgementWork::default();
+    Ok(
+        read_thread_history_discard_marker_in(factory, directory, &mut work)?
+            .filter(|marker| marker.phase == ThreadHistoryDiscardPhase::Active)
+            .map(|marker| marker.operation),
+    )
+}
+
+fn read_thread_history_discard_marker_in(
+    factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    directory: &lillux::PinnedDirectory,
+    work: &mut AcknowledgementWork,
+) -> Result<Option<ThreadHistoryDiscardMarker>> {
+    let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+    work.steps += 1;
+    if directory.entry_no_follow(name)?.is_none() {
+        return Ok(None);
+    }
+    work.steps += 1;
+    let bytes = guarded_evidence_read(
+        factory,
+        directory,
+        name,
+        THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
+    )?
+    .context("thread-history discard marker disappeared during intake")?;
+    work.read_bytes += bytes.len() as u64 + 1;
+    work.memory_bytes += bytes.capacity() as u64;
+    ThreadHistoryDiscardMarker::refuse_retired_schema(&bytes)?;
+    let marker: ThreadHistoryDiscardMarker =
+        serde_json::from_slice(&bytes).context("decode strict thread-history discard marker")?;
+    work.memory_bytes += (std::mem::size_of::<ThreadHistoryDiscardMarker>()
+        + marker.kind.capacity()
+        + marker.operation.operation_id.capacity()
+        + marker.operation.sha256.capacity()) as u64;
+    let canonical = marker.canonical_bytes()?;
+    work.memory_bytes += canonical.capacity() as u64;
+    anyhow::ensure!(
+        canonical == bytes,
+        "thread-history discard marker is not canonical"
+    );
+    Ok(Some(marker))
+}
+
 fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 32]> {
     let bytes = file.read_bounded(33)?;
     if bytes.len() != 32 {
@@ -202,8 +504,186 @@ fn read_workspace_journal_key(file: &lillux::PinnedRegularFile) -> Result<[u8; 3
 }
 
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
-const THREAD_HISTORY_DISCARD_MARKER_BYTES: &[u8] =
-    br#"{"kind":"thread_history_discard","schema":1}"#;
+const THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES: usize = 512;
+const THREAD_HISTORY_DISCARD_MARKER_KIND: &str = "thread_history_discard";
+const THREAD_HISTORY_DISCARD_MARKER_SCHEMA: u32 = 3;
+/// The marker schema before the Active/Acknowledged phase existed. It is
+/// refused, never upgraded.
+const RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA: u32 = 2;
+
+/// The explicit repair that clears execution-history reset scratch and a
+/// retired thread-history discard marker.
+pub const EXECUTION_HISTORY_SCRATCH_REPAIR: &str =
+    "ryeos node reset execution-history-scratch --confirm";
+
+/// A thread-history discard marker written under a retired schema. Startup
+/// and reset refuse it; only the explicit scratch repair clears it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredThreadHistoryDiscardMarker {
+    pub schema: u32,
+}
+
+impl std::fmt::Display for RetiredThreadHistoryDiscardMarker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "thread-history discard marker uses retired schema {}; stop the node and run `{}` to clear it",
+            self.schema, EXECUTION_HISTORY_SCRATCH_REPAIR
+        )
+    }
+}
+
+impl std::error::Error for RetiredThreadHistoryDiscardMarker {}
+
+/// A thread-history discard acknowledgement that no retry can complete: the
+/// marker it would acknowledge is gone, or names another operation. Retrying
+/// the same acknowledgement only repeats the refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadHistoryDiscardAcknowledgementRefused {
+    /// No discard marker exists to acknowledge.
+    Absent,
+    /// The marker belongs to another operation.
+    OtherOperation {
+        /// Whether that marker is the acknowledged record of a completed
+        /// discard rather than an active one.
+        acknowledged: bool,
+        operation_id: String,
+    },
+}
+
+impl std::fmt::Display for ThreadHistoryDiscardAcknowledgementRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => formatter
+                .write_str("thread-history discard acknowledgement found no marker to acknowledge"),
+            Self::OtherOperation { acknowledged, operation_id } => write!(
+                formatter,
+                "thread-history discard acknowledgement differs from its marker's operation (the {} marker names {operation_id})",
+                if *acknowledged { "acknowledged" } else { "active" }
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ThreadHistoryDiscardAcknowledgementRefused {}
+
+/// Opaque activation reference. Shape validation is not operation authority:
+/// App must authenticate the staged signed bytes, options and original owners.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadHistoryDiscardOperationRef {
+    pub operation_id: String,
+    pub sha256: String,
+}
+
+impl ThreadHistoryDiscardOperationRef {
+    pub fn validate(&self) -> Result<()> {
+        for (label, value, length) in [
+            ("operation id", self.operation_id.as_str(), 32),
+            ("signed operation digest", self.sha256.as_str(), 64),
+        ] {
+            anyhow::ensure!(
+                value.len() == length
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "invalid thread-history discard {label}"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether a discard is still in progress or is the acknowledged record of
+/// the last completed discard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThreadHistoryDiscardPhase {
+    Active,
+    Acknowledged,
+}
+
+impl ThreadHistoryDiscardPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadHistoryDiscardMarker {
+    kind: String,
+    schema: u32,
+    phase: ThreadHistoryDiscardPhase,
+    operation: ThreadHistoryDiscardOperationRef,
+}
+
+/// Only the schema number of a marker of any generation.
+#[derive(Deserialize)]
+struct ThreadHistoryDiscardMarkerSchemaProbe {
+    schema: u32,
+}
+
+impl ThreadHistoryDiscardMarker {
+    fn for_operation(
+        operation: &ThreadHistoryDiscardOperationRef,
+        phase: ThreadHistoryDiscardPhase,
+    ) -> Result<Self> {
+        operation.validate()?;
+        Ok(Self {
+            kind: THREAD_HISTORY_DISCARD_MARKER_KIND.to_owned(),
+            schema: THREAD_HISTORY_DISCARD_MARKER_SCHEMA,
+            phase,
+            operation: operation.clone(),
+        })
+    }
+
+    /// Refuse a retired-schema marker with its typed error before strict
+    /// decoding reports it as merely malformed.
+    fn refuse_retired_schema(bytes: &[u8]) -> Result<()> {
+        if let Ok(probe) = serde_json::from_slice::<ThreadHistoryDiscardMarkerSchemaProbe>(bytes)
+            && probe.schema == RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA
+        {
+            return Err(RetiredThreadHistoryDiscardMarker {
+                schema: probe.schema,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            self.kind == THREAD_HISTORY_DISCARD_MARKER_KIND
+                && self.schema == THREAD_HISTORY_DISCARD_MARKER_SCHEMA,
+            "unsupported thread-history discard marker"
+        );
+        self.operation.validate()?;
+        // This validated schema has only a fixed ASCII kind, schema and phase
+        // and two exact hexadecimal strings. Write its canonical sorted-key
+        // JSON directly into one bounded buffer, without intermediate maps.
+        let mut bytes = Vec::with_capacity(THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES);
+        bytes.extend_from_slice(b"{\"kind\":\"");
+        bytes.extend_from_slice(THREAD_HISTORY_DISCARD_MARKER_KIND.as_bytes());
+        bytes.extend_from_slice(b"\",\"operation\":{\"operation_id\":\"");
+        bytes.extend_from_slice(self.operation.operation_id.as_bytes());
+        bytes.extend_from_slice(b"\",\"sha256\":\"");
+        bytes.extend_from_slice(self.operation.sha256.as_bytes());
+        bytes.extend_from_slice(b"\"},\"phase\":\"");
+        bytes.extend_from_slice(self.phase.as_str().as_bytes());
+        bytes.extend_from_slice(b"\",\"schema\":");
+        bytes.extend_from_slice(THREAD_HISTORY_DISCARD_MARKER_SCHEMA.to_string().as_bytes());
+        bytes.push(b'}');
+        anyhow::ensure!(
+            bytes.len() <= THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES,
+            "thread-history discard marker exceeds its byte bound"
+        );
+        Ok(bytes)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -234,6 +714,11 @@ pub enum DurableCasPublicationKey {
     ExternalCandidateOccurrence {
         binding_digest: String,
         occurrence_digest: String,
+    },
+    /// Finite Q evidence retention, never a candidate snapshot/export receipt.
+    QFixtureOccurrence {
+        binding_digest: String,
+        completion_frame_digest: String,
     },
     /// Exact controller-local source preparation. This is neither an
     /// execution capture nor an external-content import; the coordinate must
@@ -289,6 +774,18 @@ impl DurableCasPublicationKey {
         let key = Self::ExternalCandidateOccurrence {
             binding_digest: binding_digest.to_owned(),
             occurrence_digest: occurrence_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    pub fn qualification_fixture_occurrence(
+        binding_digest: &str,
+        completion_frame_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::QFixtureOccurrence {
+            binding_digest: binding_digest.into(),
+            completion_frame_digest: completion_frame_digest.into(),
         };
         key.validate()?;
         Ok(key)
@@ -354,6 +851,13 @@ impl DurableCasPublicationKey {
             } => {
                 validate_hash("external-candidate binding digest", binding_digest)?;
                 validate_hash("external-candidate occurrence digest", occurrence_digest)
+            }
+            Self::QFixtureOccurrence {
+                binding_digest,
+                completion_frame_digest,
+            } => {
+                validate_hash("Q fixture binding", binding_digest)?;
+                validate_hash("Q fixture completion", completion_frame_digest)
             }
             Self::GuestRuntimeMaterialization {
                 binding_digest,
@@ -481,6 +985,16 @@ impl DurableExternalCandidateReceipt {
     pub fn large_object_hashes(&self) -> &BTreeSet<String> {
         &self.large_object_hashes
     }
+}
+
+/// Exact non-expiring two-root Q receipt. It conveys no ordinary publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableQFixtureReceipt {
+    pub staging_id: String,
+    pub owner_principal: String,
+    pub publication_key: DurableCasPublicationKey,
+    pub metadata_hash: String,
+    pub blob_hash: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -801,6 +1315,12 @@ impl DurableCasUploadStage {
     ) -> Result<()> {
         self.ensure_active()?;
         self.recovery.ensure_guard(cas_mutation_guard)?;
+        if matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) {
+            anyhow::bail!("Q fixture evidence requires retained two-root custody");
+        }
         validate_hash("admitted durable upload target", admitted_target_hash)?;
         if !self.record.object_hashes.contains(admitted_target_hash) {
             anyhow::bail!("admitted publication target was not protected by the upload stage");
@@ -826,6 +1346,66 @@ impl DurableCasUploadStage {
         }
         drop(self.lock_file.take());
         Ok(())
+    }
+
+    /// Preserve exactly the Q metadata object and blob as non-expiring roots.
+    /// This must precede committing a guest settlement row or signed frame.
+    pub fn retain_qualification_fixture(
+        &mut self,
+        guard: &CasMutationGuard,
+        reference: &crate::objects::qualification_fixture::QFixtureCaptureReference,
+    ) -> Result<DurableQFixtureReceipt> {
+        self.ensure_active()?;
+        self.recovery.ensure_guard(guard)?;
+        reference.validate()?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) || self.record.object_hashes != BTreeSet::from([reference.metadata_hash.clone()])
+            || self.record.blob_hashes != BTreeSet::from([reference.blob_hash.clone()])
+            || !self.record.large_object_hashes.is_empty()
+            || self.record.expected_previous_hash.is_some()
+        {
+            anyhow::bail!("Q fixture retention changed its exact two-root contract");
+        }
+        let now = lillux::time::iso8601_now();
+        let mut candidate = self.record.clone();
+        candidate.admitted_target_hash = Some(reference.metadata_hash.clone());
+        candidate.admitted_at = Some(now.clone());
+        candidate.retained_at = Some(now);
+        self.persist_record(&candidate)?;
+        self.record = candidate;
+        let receipt = self.qualification_fixture_receipt()?;
+        drop(self.lock_file.take());
+        Ok(receipt)
+    }
+
+    pub fn qualification_fixture_receipt(&self) -> Result<DurableQFixtureReceipt> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        validate_durable_upload_record(&self.record)?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::QFixtureOccurrence { .. }
+        ) || self.record.retained_at.is_none()
+        {
+            anyhow::bail!("upload is not retained Q fixture evidence");
+        }
+        Ok(DurableQFixtureReceipt {
+            staging_id: self.record.staging_id.clone(),
+            owner_principal: self.record.owner_principal.clone(),
+            publication_key: self.record.publication_key.clone(),
+            metadata_hash: self
+                .record
+                .admitted_target_hash
+                .clone()
+                .context("Q fixture metadata is absent")?,
+            blob_hash: self
+                .record
+                .blob_hashes
+                .first()
+                .context("Q fixture blob is absent")?
+                .clone(),
+        })
     }
 
     /// Convert an external-candidate staging capability into an immutable,
@@ -1040,6 +1620,29 @@ impl StagedCasRootLease {
         let expected = lillux::sha256_hex(canonical.as_bytes());
         self.protect_object_hash_admitted(cas_mutation_guard, &expected)?;
         let stored = cas.store_object(value)?;
+        if stored != expected {
+            anyhow::bail!("staged CAS object hash mismatch: expected {expected}, got {stored}");
+        }
+        Ok(stored)
+    }
+
+    /// Stage exact bounded canonical object bytes. The exact bytes whose hash
+    /// is protected are the bytes persisted by CAS.
+    pub fn store_object_bytes_admitted(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        cas: &lillux::cas::CasStore,
+        canonical_bytes: &[u8],
+        maximum_bytes: usize,
+    ) -> Result<String> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        if canonical_bytes.len() > maximum_bytes {
+            anyhow::bail!("staged canonical CAS object exceeds {maximum_bytes} bytes");
+        }
+        let expected = lillux::sha256_hex(canonical_bytes);
+        self.protect_object_hash_admitted(cas_mutation_guard, &expected)?;
+        let stored = cas.store_canonical_object_bytes_bounded(canonical_bytes, maximum_bytes)?;
         if stored != expected {
             anyhow::bail!("staged CAS object hash mismatch: expected {expected}, got {stored}");
         }
@@ -1298,7 +1901,7 @@ impl CasMutationGuard {
         let recovery = runtime.create_child(recovery_name, 0o700)?;
         let result = (|| -> Result<()> {
             let lock = recovery.open_regular_create(
-                std::ffi::OsStr::new("cas-mutation.lock"),
+                std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME),
                 true,
                 true,
                 0o600,
@@ -1313,7 +1916,9 @@ impl CasMutationGuard {
         })();
         if result.is_err() {
             let _ = recovery.remove_contents_recursive();
-            let _ = runtime.remove_empty_child_if_same(recovery_name, &recovery);
+            let _ = runtime
+                .remove_empty_child_if_same(recovery_name, &recovery)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -1322,7 +1927,7 @@ impl CasMutationGuard {
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
@@ -1352,7 +1957,7 @@ impl CasMutationGuard {
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         let file = recovery
-            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         #[cfg(unix)]
         {
@@ -1379,6 +1984,86 @@ impl CasMutationGuard {
         })
     }
 
+    /// The existing pinned shared authority, bounded by one original caller
+    /// deadline. No path-based anchor, lock-content mutation or Send guard.
+    #[track_caller]
+    pub(crate) fn acquire_existing_shared_in_pinned_runtime_until(
+        runtime: &lillux::PinnedDirectory,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
+        let check_deadline = || -> Result<()> {
+            if deadline.has_elapsed() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "pinned CAS shared guard deadline elapsed",
+                )
+                .into());
+            }
+            Ok(())
+        };
+        check_deadline()?;
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("retain pinned CAS guard descriptors before deadline")?;
+        check_deadline()?;
+        let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
+        if exclusive_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            check_deadline()?;
+            EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
+            let guard = Self {
+                _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
+                exclusive: false,
+                depth: GuardDepth::Exclusive,
+                _not_send: std::marker::PhantomData,
+            };
+            check_deadline()?;
+            return Ok(guard);
+        }
+        let shared_depth = SHARED_CAS_GUARD_DEPTH.with(Cell::get);
+        if shared_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            check_deadline()?;
+            SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
+            let guard = Self {
+                _file: file,
+                _fork_sensitive_descriptors: fork_sensitive_descriptors,
+                exclusive: false,
+                depth: GuardDepth::Shared,
+                _not_send: std::marker::PhantomData,
+            };
+            check_deadline()?;
+            return Ok(guard);
+        }
+
+        let recovery = runtime
+            .open_child_directory(std::ffi::OsStr::new("recovery"))?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
+        check_deadline()?;
+        let file = recovery
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
+        check_deadline()?;
+        let file = lillux::locks::acquire_existing_shared_file_until(file, deadline)
+            .context("acquire pinned CAS mutation/sweep lock before deadline")?;
+        check_deadline()?;
+        let file = Rc::new(file);
+        CAS_GUARD_FILE.with(|current| {
+            let previous = current.borrow_mut().replace(Rc::clone(&file));
+            debug_assert!(previous.is_none());
+        });
+        SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
+        let guard = Self {
+            _file: file,
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            exclusive: false,
+            depth: GuardDepth::Shared,
+            _not_send: std::marker::PhantomData,
+        };
+        check_deadline()?;
+        Ok(guard)
+    }
+
     #[track_caller]
     pub(crate) fn acquire_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
@@ -1398,7 +2083,7 @@ impl CasMutationGuard {
         runtime: &lillux::PinnedDirectory,
         create: bool,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
@@ -1412,7 +2097,7 @@ impl CasMutationGuard {
                 .open_child_directory(recovery_name)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?
         };
-        let lock_name = std::ffi::OsStr::new("cas-mutation.lock");
+        let lock_name = std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME);
         let file = if create {
             let file = recovery.open_regular_create(lock_name, true, false, 0o600)?;
             recovery.sync()?;
@@ -1519,7 +2204,7 @@ impl CasMutationGuard {
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         let expected = recovery
-            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), false)?
+            .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), false)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         let expected = expected.metadata()?;
         let held = self._file.metadata()?;
@@ -1539,7 +2224,7 @@ impl CasMutationGuard {
     }
 
     fn ensure_protects_runtime_state_dir(&self, runtime_state_dir: &Path) -> Result<()> {
-        let expected_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+        let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
         let expected = secure_open_regular(&expected_path, false)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
         let expected = expected
@@ -1566,7 +2251,7 @@ impl CasMutationGuard {
 
     #[track_caller]
     fn acquire(runtime_state_dir: &Path, exclusive: bool, create_if_missing: bool) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if exclusive {
             let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
             if exclusive_depth != 0 {
@@ -1613,7 +2298,7 @@ impl CasMutationGuard {
             }
         }
 
-        let lock_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+        let lock_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
         let parent_path = lock_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock has no parent"))?;
@@ -1625,14 +2310,14 @@ impl CasMutationGuard {
         };
         let file = if create_if_missing {
             parent.open_regular_create(
-                std::ffi::OsStr::new("cas-mutation.lock"),
+                std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME),
                 true,
                 false,
                 0o600,
             )?
         } else {
             parent
-                .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+                .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?
         };
         #[cfg(unix)]
@@ -1699,7 +2384,7 @@ fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
             .cloned()
             .expect("reentrant CAS guard depth without lock file")
     });
-    let expected_path = runtime_state_dir.join("recovery/cas-mutation.lock");
+    let expected_path = runtime_state_dir.join(RECOVERY_DIRECTORY_NAME).join(CAS_MUTATION_LOCK_FILENAME);
     let expected = secure_open_regular(&expected_path, false)?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
     let expected = expected
@@ -1734,7 +2419,7 @@ fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> R
         .open_child_directory(std::ffi::OsStr::new("recovery"))?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
     let expected = recovery
-        .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), false)?
+        .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), false)?
         .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
     let expected = expected
         .metadata()
@@ -1756,6 +2441,22 @@ fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> R
 }
 
 impl RecoveryStore {
+    /// Borrow the SAME pinned directory allocations while preserving the
+    /// typed semantic recovery owner. This cannot acknowledge recovery or
+    /// authorize descriptor retirement. Caller funds counted alias work first.
+    pub(crate) fn borrow_original_directory_custody(&self)
+        -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
+        [std::sync::Arc::clone(&self.runtime_directory), std::sync::Arc::clone(&self.directory)]
+    }
+
+    /// Move the real pinned owners after the original controller has completed
+    /// semantic recovery. No reopen, duplicate, close or retirement receipt.
+    pub(crate) fn into_original_directory_custody(
+        self,
+    ) -> [std::sync::Arc<lillux::PinnedDirectory>; 2] {
+        [self.runtime_directory, self.directory]
+    }
+
     pub fn from_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
         let runtime = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
             .context("pin recovery runtime-state directory")?;
@@ -1830,7 +2531,7 @@ impl RecoveryStore {
         rand::rngs::OsRng.fill_bytes(&mut generated);
         if self
             .directory
-            .atomic_create_pinned_regular(name, &generated, 0o600)?
+            .atomic_create_pinned_regular(name, &generated, 0o600, crate::STATE_TEMP_PURPOSE)?
             .is_some()
         {
             return Ok(generated);
@@ -1858,68 +2559,183 @@ impl RecoveryStore {
         self.root.join("generation.json")
     }
 
-    /// Whether an explicitly requested offline thread-history discard has not
-    /// yet completed. Ordinary startup must refuse while this marker exists;
-    /// rerunning the offline command resumes the idempotent cleanup.
-    pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
-        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let Some(mut file) = self.directory.open_regular(name, false)? else {
-            return Ok(false);
-        };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .context("read thread-history discard marker")?;
-        if bytes != THREAD_HISTORY_DISCARD_MARKER_BYTES {
-            anyhow::bail!(
-                "invalid thread-history discard marker: {}",
-                self.directory.path().join(name).display()
-            );
-        }
-        Ok(true)
+    /// Read the strict active operation locator, without opening an observer
+    /// data descriptor that could close a live SQLite alias. This reference
+    /// locates evidence; it does not authenticate App policy or signatures.
+    pub fn thread_history_discard_operation(
+        &self,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        read_thread_history_discard_operation(&self.directory)
     }
 
-    /// Publish the durable intent for an explicit offline discard before its
-    /// first destructive step. Repeating this after interruption is harmless.
+    /// The same locator read inside the owning native factory's scope, for
+    /// callers that may hold projection leases.
+    pub fn thread_history_discard_operation_scoped(
+        &self,
+        factory: &lillux_sqlite::OriginalNativeFactory,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        self.thread_history_discard_operation_in(Some(factory))
+    }
+
+    pub(crate) fn thread_history_discard_operation_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        read_thread_history_discard_operation_in(factory, &self.directory)
+    }
+
+    /// Ordinary startup refuses an Active marker and any malformed,
+    /// unsupported or retired-schema evidence. An Acknowledged marker is the
+    /// record of a completed discard and does not block startup. Re-entry must
+    /// verify the exact staged operation before a projection preview can
+    /// manufacture new accounting.
+    pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
+        Ok(self.thread_history_discard_operation()?.is_some())
+    }
+
+    /// The operation of the last completed discard, when the marker records
+    /// one as Acknowledged. An Active marker returns `None`.
+    pub fn last_acknowledged_thread_history_discard(
+        &self,
+    ) -> Result<Option<ThreadHistoryDiscardOperationRef>> {
+        let mut work = AcknowledgementWork::default();
+        Ok(
+            read_thread_history_discard_marker_in(None, &self.directory, &mut work)?
+                .filter(|marker| marker.phase == ThreadHistoryDiscardPhase::Acknowledged)
+                .map(|marker| marker.operation),
+        )
+    }
+
+    /// Remove a thread-history discard marker written under the retired
+    /// schema, which every reader refuses. Returns that schema when such a
+    /// marker is present; a current or absent marker is left alone and
+    /// returns `None`. With `dry_run` nothing is removed.
+    pub fn clear_retired_thread_history_discard_marker(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        dry_run: bool,
+    ) -> Result<Option<u32>> {
+        self.ensure_guard(cas_mutation_guard)?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some(pin) = self.directory.open_mount_entry(name)? else {
+            return Ok(None);
+        };
+        let Some(bytes) =
+            guarded_evidence_read(None, &self.directory, name, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES)?
+        else {
+            return Ok(None);
+        };
+        let retired = serde_json::from_slice::<ThreadHistoryDiscardMarkerSchemaProbe>(&bytes)
+            .is_ok_and(|probe| probe.schema == RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA);
+        if !retired {
+            return Ok(None);
+        }
+        if !dry_run {
+            anyhow::ensure!(
+                cas_mutation_guard.is_exclusive(),
+                "clearing a retired thread-history discard marker requires the exclusive CAS guard"
+            );
+            self.directory
+                .unlink_regular_if_same(name, &pin)
+                .context("remove retired thread-history discard marker")?;
+        }
+        Ok(Some(RETIRED_THREAD_HISTORY_DISCARD_MARKER_SCHEMA))
+    }
+
+    /// Activate the already-staged immutable operation after actual CAS
+    /// admission. An uncertain acknowledgement retries this same reference.
+    /// The Acknowledged record of an earlier discard is replaced in one
+    /// same-coordinate rename; a different Active operation is refused.
     pub(crate) fn begin_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
     ) -> Result<()> {
-        if !cas_mutation_guard.is_exclusive() {
-            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
-        }
+        anyhow::ensure!(
+            cas_mutation_guard.is_exclusive(),
+            "thread-history discard requires the exclusive CAS guard"
+        );
         self.ensure_guard(cas_mutation_guard)?;
+        let bytes = ThreadHistoryDiscardMarker::for_operation(
+            operation,
+            ThreadHistoryDiscardPhase::Active,
+        )?
+        .canonical_bytes()?;
         let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        if self.thread_history_discard_in_progress()? {
-            return Ok(());
+        let mut work = AcknowledgementWork::default();
+        if let Some((pin, marker)) = pin_thread_history_discard_marker(&self.directory, &mut work)? {
+            match marker.phase {
+                ThreadHistoryDiscardPhase::Active => {
+                    anyhow::ensure!(
+                        &marker.operation == operation,
+                        "thread-history discard marker activates a different operation"
+                    );
+                    return self
+                        .directory
+                        .sync()
+                        .context("sync retained thread-history discard activation");
+                }
+                ThreadHistoryDiscardPhase::Acknowledged => {
+                    // An acknowledged operation is finished and never revived.
+                    anyhow::ensure!(
+                        &marker.operation != operation,
+                        "thread-history discard operation was already acknowledged"
+                    );
+                    self.directory
+                        .atomic_write_if_same(
+                            name,
+                            Some(&pin),
+                            &bytes,
+                            0o600,
+                            crate::STATE_TEMP_PURPOSE,
+                        )
+                        .context("replace acknowledged thread-history discard with activation")?;
+                    return self
+                        .directory
+                        .sync()
+                        .context("sync thread-history discard activation");
+                }
+            }
+        }
+        // The no-replace publisher never overwrites another operation. A
+        // publication collision is accepted only after exact guarded intake.
+        if self
+            .directory
+            .atomic_create_regular(name, &bytes, 0o600, crate::STATE_TEMP_PURPOSE)?
+            .is_none()
+        {
+            anyhow::ensure!(
+                self.thread_history_discard_operation()?.as_ref() == Some(operation),
+                "thread-history discard marker appeared with different evidence"
+            );
         }
         self.directory
-            .atomic_create_regular(name, THREAD_HISTORY_DISCARD_MARKER_BYTES, 0o600)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("thread-history discard marker appeared concurrently")
-            })?;
-        Ok(())
+            .sync()
+            .context("sync thread-history discard activation")
     }
 
-    /// Remove the durable intent only after every participating store has
-    /// reached its empty-current state.
+    /// Acknowledge only this exact operation after every participating owner
+    /// is terminal. Keep the staged operation until the Acknowledged marker
+    /// is durable. Its marker read is unscoped, so no projection lease may be
+    /// held; outside tests the reset acknowledges through a closed State's
+    /// final acknowledgement custody instead.
+    #[cfg(test)]
     pub(crate) fn finish_thread_history_discard(
         &self,
         cas_mutation_guard: &CasMutationGuard,
+        operation: &ThreadHistoryDiscardOperationRef,
     ) -> Result<()> {
-        if !cas_mutation_guard.is_exclusive() {
-            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        self.final_ack_custody()
+            .finish(cas_mutation_guard, operation)
+    }
+
+    /// Retain only the SAME real recovery/runtime directory owners for the
+    /// bounded ACK effect. No File duplication or diagnostic path allocation.
+    pub(crate) fn final_ack_custody(&self) -> RecoveryAcknowledgementCustody {
+        RecoveryAcknowledgementCustody {
+            runtime_directory: self.runtime_directory.clone(),
+            directory: self.directory.clone(),
         }
-        self.ensure_guard(cas_mutation_guard)?;
-        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
-        let Some(file) = self.directory.open_regular(name, false)? else {
-            return Ok(());
-        };
-        if !self.thread_history_discard_in_progress()? {
-            anyhow::bail!("thread-history discard marker disappeared during validation");
-        }
-        self.directory
-            .remove_if_same(name, &file)
-            .context("remove completed thread-history discard marker")
     }
 
     /// Drop every chain-head recovery record as one part of an explicitly
@@ -2199,7 +3015,10 @@ impl RecoveryStore {
             return Ok(());
         };
         parts.remove_contents_recursive()?;
-        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(staging_id), &parts)? {
+        if !parts_root
+            .remove_empty_child_if_same(std::ffi::OsStr::new(staging_id), &parts)
+            .map(|receipt| receipt.is_some())?
+        {
             anyhow::bail!("durable blob-parts directory changed during retirement");
         }
         Ok(())
@@ -2213,7 +3032,10 @@ impl RecoveryStore {
             return Ok(());
         };
         parts.remove_contents_recursive()?;
-        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(lease_id), &parts)? {
+        if !parts_root
+            .remove_empty_child_if_same(std::ffi::OsStr::new(lease_id), &parts)
+            .map(|receipt| receipt.is_some())?
+        {
             anyhow::bail!("staged blob-parts directory changed during retirement");
         }
         Ok(())
@@ -2354,16 +3176,37 @@ impl RecoveryStore {
         })
     }
 
+    /// Unscoped read, for processes that hold no projection lease. Any
+    /// listed lease refuses it; lease holders use `read_generation_scoped`.
     pub fn read_generation(&self) -> Result<Option<ProjectionRecoveryGeneration>> {
-        let Some(mut file) = self
-            .directory
-            .open_regular(std::ffi::OsStr::new("generation.json"), false)?
+        self.read_generation_in(None)
+    }
+
+    /// The generation read inside the owning native factory's scope, for
+    /// callers that may hold that factory's projection leases.
+    pub fn read_generation_scoped(
+        &self,
+        factory: &lillux_sqlite::OriginalNativeFactory,
+    ) -> Result<Option<ProjectionRecoveryGeneration>> {
+        self.read_generation_in(Some(factory))
+    }
+
+    pub(crate) fn read_generation_in(
+        &self,
+        factory: Option<&lillux_sqlite::OriginalNativeFactory>,
+    ) -> Result<Option<ProjectionRecoveryGeneration>> {
+        // Intake remains bounded and the native alias gate spans every data
+        // open/read/close. Metadata observations alone cannot safely read JSON.
+        let Some(bytes) = guarded_evidence_read(
+            factory,
+            &self.directory,
+            std::ffi::OsStr::new("generation.json"),
+            65_536,
+        )
+        .context("read bounded recovery generation without SQLite alias")?
         else {
             return Ok(None);
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .context("read recovery generation")?;
         let generation: ProjectionRecoveryGeneration =
             serde_json::from_slice(&bytes).context("decode recovery generation")?;
         generation.validate()?;
@@ -2375,9 +3218,22 @@ impl RecoveryStore {
         let value = serde_json::to_value(generation)?;
         let bytes = lillux::canonical_json(&value).context("canonicalize recovery generation")?;
         let name = std::ffi::OsStr::new("generation.json");
-        let expected = self.directory.open_regular(name, false)?;
+        let expected = self.directory.open_mount_entry(name)?;
+        if let Some(file) = &expected {
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "recovery generation target is not regular"
+            );
+            self.directory.ensure_open_regular_same_mount(file)?;
+        }
         self.directory
-            .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
+            .atomic_write_if_same(
+                name,
+                expected.as_ref(),
+                bytes.as_bytes(),
+                0o600,
+                crate::STATE_TEMP_PURPOSE,
+            )
             .context("durably write recovery generation")
     }
 
@@ -2699,6 +3555,7 @@ impl RecoveryStore {
                 expected,
                 bytes.as_bytes(),
                 0o600,
+                crate::STATE_TEMP_PURPOSE,
             )
             .with_context(|| {
                 format!(
@@ -2812,7 +3669,13 @@ fn publish_staging_record(
     let name = std::ffi::OsStr::new(&name);
     let expected = directory.open_regular(name, false)?;
     directory
-        .atomic_write_if_same(name, expected.as_ref(), bytes.as_bytes(), 0o600)
+        .atomic_write_if_same(
+            name,
+            expected.as_ref(),
+            bytes.as_bytes(),
+            0o600,
+            crate::STATE_TEMP_PURPOSE,
+        )
         .context("durably write staging roots")?;
     #[cfg(test)]
     if FAIL_AFTER_STAGING_PUBLICATION.with(|fail| fail.replace(false)) {
@@ -2931,6 +3794,12 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     ) {
         (None, None, None) => {}
         (Some(hash), Some(admitted_at), None) => {
+            if matches!(
+                record.publication_key,
+                DurableCasPublicationKey::QFixtureOccurrence { .. }
+            ) {
+                anyhow::bail!("Q fixture receipt cannot discard its retained roots");
+            }
             validate_hash("durable upload admitted target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
                 .context("durable upload admitted_at is not canonical")?;
@@ -2942,22 +3811,31 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
             }
         }
         (Some(hash), Some(admitted_at), Some(retained_at)) => {
-            validate_hash("retained external-candidate snapshot", hash)?;
+            validate_hash("retained occurrence target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
-                .context("retained external-candidate admitted_at is not canonical")?;
+                .context("retained occurrence admitted_at is not canonical")?;
             crate::objects::parse_canonical_timestamp(retained_at)
-                .context("retained external-candidate retained_at is not canonical")?;
+                .context("retained occurrence retained_at is not canonical")?;
             if admitted_at != retained_at {
-                anyhow::bail!("retained external-candidate timestamps do not match");
+                anyhow::bail!("retained occurrence timestamps do not match");
             }
-            if !matches!(
-                record.publication_key,
-                DurableCasPublicationKey::ExternalCandidateOccurrence { .. }
-            ) {
-                anyhow::bail!("only an external-candidate occurrence may retain CAS roots");
+            match record.publication_key {
+                DurableCasPublicationKey::ExternalCandidateOccurrence { .. } => {}
+                DurableCasPublicationKey::QFixtureOccurrence { .. } => {
+                    if record.object_hashes.len() != 1
+                        || record.blob_hashes.len() != 1
+                        || !record.large_object_hashes.is_empty()
+                        || record.expected_previous_hash.is_some()
+                    {
+                        anyhow::bail!(
+                            "retained Q fixture must have exactly its metadata and blob roots"
+                        );
+                    }
+                }
+                _ => anyhow::bail!("only candidate or Q fixture occurrences may retain CAS roots"),
             }
             if !record.object_hashes.contains(hash) {
-                anyhow::bail!("retained external-candidate snapshot is not a protected root");
+                anyhow::bail!("retained occurrence target is not a protected root");
             }
         }
         _ => anyhow::bail!("durable upload admission receipt is incomplete"),
@@ -3131,6 +4009,140 @@ mod tests {
             "blob_hashes": [],
             "large_object_hashes": [],
         })
+    }
+
+    #[test]
+    fn q_fixture_receipt_retains_exact_roots_across_retirement_and_reopen() {
+        use crate::objects::qualification_fixture::QFixtureCaptureReference;
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let key =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("b"))
+                .unwrap();
+        let reference = QFixtureCaptureReference {
+            metadata_hash: hash("d"),
+            blob_hash: hash("e"),
+            size_bytes: 5,
+        };
+        let owner = hash("c");
+        let receipt;
+        {
+            let guard = CasMutationGuard::acquire_shared(temp.path()).unwrap();
+            let mut stage = store
+                .begin_durable_cas_upload_admitted(&guard, &owner, "q-fixture", &key, None)
+                .unwrap();
+            assert!(
+                stage
+                    .retain_qualification_fixture(&guard, &reference)
+                    .is_err()
+            );
+            stage
+                .protect_cas_closure(
+                    &guard,
+                    [reference.metadata_hash.as_str()],
+                    [reference.blob_hash.as_str()],
+                )
+                .unwrap();
+            assert!(
+                stage
+                    .finish_admitted(&guard, &reference.metadata_hash)
+                    .is_err()
+            );
+            receipt = stage
+                .retain_qualification_fixture(&guard, &reference)
+                .unwrap();
+            assert!(stage.external_candidate_receipt().is_err());
+            assert!(
+                stage
+                    .protect_cas_closure(&guard, [hash("f").as_str()], [])
+                    .is_err()
+            );
+        }
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard)
+                .unwrap(),
+            0
+        );
+        let roots = store.active_staged_cas_root_hashes().unwrap();
+        assert!(roots.object_hashes.contains(&reference.metadata_hash));
+        assert!(roots.blob_hashes.contains(&reference.blob_hash));
+        let stage = store
+            .open_durable_cas_upload_admitted(&guard, &receipt.staging_id, &owner)
+            .unwrap();
+        assert_eq!(stage.qualification_fixture_receipt().unwrap(), receipt);
+        let other =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("f"))
+                .unwrap();
+        assert!(stage.ensure_publication_contract(&other, None).is_err());
+        let mut malformed = stage.record.clone();
+        malformed.retained_at = None;
+        malformed.object_hashes.clear();
+        malformed.blob_hashes.clear();
+        assert!(validate_durable_upload_record(&malformed).is_err());
+        malformed = stage.record.clone();
+        malformed.blob_hashes.insert(hash("f"));
+        assert!(validate_durable_upload_record(&malformed).is_err());
+        malformed = stage.record.clone();
+        malformed.publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        assert!(validate_durable_upload_record(&malformed).is_err());
+    }
+
+    #[test]
+    fn q_fixture_unretained_stage_expiry_never_reopens_a_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let key =
+            DurableCasPublicationKey::qualification_fixture_occurrence(&hash("a"), &hash("b"))
+                .unwrap();
+        let owner = hash("c");
+        let original_id = {
+            let guard = CasMutationGuard::acquire_shared(temp.path()).unwrap();
+            let stage = store
+                .begin_durable_cas_upload_admitted(
+                    &guard,
+                    &owner,
+                    "qualification-fixture-receiver",
+                    &key,
+                    None,
+                )
+                .unwrap();
+            stage.staging_id().to_owned()
+        };
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard,)
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
+        // Even a fresh capability with the same publication key does not
+        // restore an immutable receiver row's selected stage identity.
+        let replacement = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "qualification-fixture-receiver",
+                &key,
+                None,
+            )
+            .unwrap();
+        assert_ne!(replacement.staging_id(), original_id);
+        assert!(replacement.qualification_fixture_receipt().is_err());
+        assert!(
+            store
+                .open_durable_cas_upload_admitted(&guard, &original_id, &owner,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3547,20 +4559,434 @@ mod tests {
     }
 
     #[test]
+    fn startup_sweep_removes_only_state_owned_secure_temporaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery_path = temp.path().join("recovery");
+        let projection_path = recovery_path.join("thread-projection");
+        fs::create_dir_all(projection_path.join("pending")).unwrap();
+        let own = |pid: u32| format!(".secure.tmp.{}.{pid}.1", crate::STATE_TEMP_PURPOSE.as_str());
+        let owned = [
+            recovery_path.join(own(11)),
+            projection_path.join(own(12)),
+            projection_path.join("pending").join(own(13)),
+        ];
+        let retained = [
+            recovery_path.join(".secure.tmp.reset.14.1"),
+            projection_path.join(".secure.tmp.scheduler.15.1"),
+            projection_path.join("generation.json"),
+        ];
+        for path in owned.iter().chain(&retained) {
+            fs::write(path, b"bytes").unwrap();
+        }
+        let parent = lillux::PinnedDirectory::open(&recovery_path).unwrap().unwrap();
+        let projection = lillux::PinnedDirectory::open(&projection_path).unwrap().unwrap();
+
+        assert_eq!(sweep_interrupted_state_publications(&parent, &projection).unwrap(), 3);
+        for path in &owned {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &retained {
+            assert!(path.is_file(), "{}", path.display());
+        }
+
+        let retired_format = projection_path.join(".secure.tmp.16.1");
+        fs::write(&retired_format, b"unattributed").unwrap();
+        let error = sweep_interrupted_state_publications(&parent, &projection).unwrap_err();
+        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        assert!(retired_format.is_file());
+    }
+
+    #[test]
     fn thread_history_discard_marker_is_durable_and_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
         CasMutationGuard::ensure_anchor(temp.path()).unwrap();
         let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
 
+        let operation = ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        };
         assert!(!store.thread_history_discard_in_progress().unwrap());
-        store.begin_thread_history_discard(&guard).unwrap();
-        store.begin_thread_history_discard(&guard).unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
         assert!(store.thread_history_discard_in_progress().unwrap());
 
-        store.finish_thread_history_discard(&guard).unwrap();
-        store.finish_thread_history_discard(&guard).unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
         assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation)
+        );
+    }
+
+    fn discard_operation(id: char, digest: char) -> ThreadHistoryDiscardOperationRef {
+        ThreadHistoryDiscardOperationRef {
+            operation_id: id.to_string().repeat(32),
+            sha256: digest.to_string().repeat(64),
+        }
+    }
+
+    fn marker_bytes(
+        operation: &ThreadHistoryDiscardOperationRef,
+        phase: ThreadHistoryDiscardPhase,
+    ) -> Vec<u8> {
+        ThreadHistoryDiscardMarker::for_operation(operation, phase)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap()
+    }
+
+    fn recovery_entry_names(store: &RecoveryStore) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn discard_marker_schema_three_bytes_are_canonical_sorted_json() {
+        let operation = discard_operation('a', 'b');
+        let expected = format!(
+            "{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{}\",\"sha256\":\"{}\"}},\"phase\":\"acknowledged\",\"schema\":3}}",
+            operation.operation_id, operation.sha256
+        );
+        let marker = ThreadHistoryDiscardMarker::for_operation(
+            &operation,
+            ThreadHistoryDiscardPhase::Acknowledged,
+        )
+        .unwrap();
+        assert_eq!(marker.canonical_bytes().unwrap(), expected.as_bytes());
+        let value = serde_json::to_value(&marker).unwrap();
+        assert_eq!(
+            lillux::canonical_json(&value).unwrap().into_bytes(),
+            expected.into_bytes()
+        );
+    }
+
+    #[test]
+    fn acknowledgement_rewrites_the_marker_in_place_and_retries_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            marker_bytes(&operation, ThreadHistoryDiscardPhase::Active)
+        );
+        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let acknowledged = marker_bytes(&operation, ThreadHistoryDiscardPhase::Acknowledged);
+        assert_eq!(std::fs::read(&marker).unwrap(), acknowledged);
+        let marker_inode = || {
+            store
+                .directory
+                .entry_no_follow(std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER))
+                .unwrap()
+                .unwrap()
+                .inode
+        };
+        let inode = marker_inode();
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+        assert!(!store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation.clone())
+        );
+
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), acknowledged);
+        assert_eq!(marker_inode(), inode);
+        assert_eq!(
+            recovery_entry_names(&store),
+            vec![THREAD_HISTORY_DISCARD_MARKER.to_owned()]
+        );
+    }
+
+    #[test]
+    fn acknowledgement_refuses_a_different_acknowledged_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        let before = std::fs::read(&marker).unwrap();
+        for other in [discard_operation('c', 'b'), discard_operation('a', 'd')] {
+            let error = store
+                .finish_thread_history_discard(&guard, &other)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("differs from its marker's operation"),
+                "{error:#}"
+            );
+            assert_eq!(
+                error.downcast_ref::<ThreadHistoryDiscardAcknowledgementRefused>(),
+                Some(&ThreadHistoryDiscardAcknowledgementRefused::OtherOperation {
+                    acknowledged: true,
+                    operation_id: operation.operation_id.clone(),
+                }),
+                "a permanent refusal must be typed: {error:#}"
+            );
+            assert_eq!(std::fs::read(&marker).unwrap(), before);
+        }
+        assert_eq!(
+            store.last_acknowledged_thread_history_discard().unwrap(),
+            Some(operation)
+        );
+    }
+
+    #[test]
+    fn acknowledgement_refuses_an_absent_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let error = store
+            .finish_thread_history_discard(&guard, &discard_operation('a', 'b'))
+            .unwrap_err();
+        assert!(error.to_string().contains("found no marker"), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<ThreadHistoryDiscardAcknowledgementRefused>(),
+            Some(&ThreadHistoryDiscardAcknowledgementRefused::Absent)
+        );
+        assert!(recovery_entry_names(&store).is_empty());
+    }
+
+    #[test]
+    fn activation_replaces_an_acknowledged_marker_and_refuses_a_different_active_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let first = discard_operation('a', 'b');
+        let second = discard_operation('c', 'd');
+        store.begin_thread_history_discard(&guard, &first).unwrap();
+        store.finish_thread_history_discard(&guard, &first).unwrap();
+
+        store.begin_thread_history_discard(&guard, &second).unwrap();
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        let active = marker_bytes(&second, ThreadHistoryDiscardPhase::Active);
+        assert_eq!(std::fs::read(&marker).unwrap(), active);
+        assert!(store.thread_history_discard_in_progress().unwrap());
+        assert_eq!(
+            store.thread_history_discard_operation().unwrap(),
+            Some(second.clone())
+        );
+        assert_eq!(store.last_acknowledged_thread_history_discard().unwrap(), None);
+
+        let error = store
+            .begin_thread_history_discard(&guard, &first)
+            .unwrap_err();
+        assert!(error.to_string().contains("different operation"), "{error:#}");
+        assert!(store.finish_thread_history_discard(&guard, &first).is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), active);
+        assert_eq!(
+            recovery_entry_names(&store),
+            vec![THREAD_HISTORY_DISCARD_MARKER.to_owned()]
+        );
+    }
+
+    #[test]
+    fn retired_schema_two_marker_is_refused_naming_the_scratch_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        let retired = format!(
+            "{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{}\",\"sha256\":\"{}\"}},\"schema\":2}}",
+            operation.operation_id, operation.sha256
+        );
+        let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        std::fs::write(&marker, retired.as_bytes()).unwrap();
+        let refusals = [
+            store.thread_history_discard_operation().map(drop),
+            store.thread_history_discard_in_progress().map(drop),
+            store.last_acknowledged_thread_history_discard().map(drop),
+            store.begin_thread_history_discard(&guard, &operation),
+            store.finish_thread_history_discard(&guard, &operation),
+        ];
+        for refusal in refusals {
+            let error = refusal.unwrap_err();
+            let retired = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<RetiredThreadHistoryDiscardMarker>())
+                .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+            assert_eq!(retired.schema, 2);
+            assert!(
+                format!("{error:#}").contains(EXECUTION_HISTORY_SCRATCH_REPAIR),
+                "{error:#}"
+            );
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(), retired.into_bytes());
+        assert_eq!(
+            EXECUTION_HISTORY_SCRATCH_REPAIR,
+            "ryeos node reset execution-history-scratch --confirm"
+        );
+    }
+
+    #[test]
+    fn acknowledgement_work_stays_within_its_prepaid_quote() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = discard_operation('a', 'b');
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let quote = thread_history_discard_acknowledgement_quote();
+        let custody = store.final_ack_custody();
+        let within = |work: AcknowledgementWork| {
+            work.read_bytes <= quote.read_bytes
+                && work.memory_bytes <= quote.memory_bytes
+                && work.steps <= quote.steps
+        };
+
+        let mut rewrite = AcknowledgementWork::default();
+        custody
+            .finish_counted(&guard, &operation, &mut rewrite)
+            .unwrap();
+        assert!(within(rewrite), "{rewrite:?} exceeds {quote:?}");
+        // The rewrite is the most expensive attempt: it takes every step.
+        assert_eq!(rewrite.steps, quote.steps);
+        assert_eq!(
+            rewrite.read_bytes,
+            marker_bytes(&operation, ThreadHistoryDiscardPhase::Active).len() as u64 + 1
+        );
+
+        let mut retry = AcknowledgementWork::default();
+        custody.finish_counted(&guard, &operation, &mut retry).unwrap();
+        assert!(within(retry), "{retry:?} exceeds {quote:?}");
+        assert!(retry.steps < rewrite.steps);
+
+        // The temporary-name scratch bounds the longest name a State writer
+        // can generate: maximal pid and sequence digits.
+        let longest = format!(
+            ".secure.tmp.{}.{}.{}",
+            "x".repeat(16),
+            u32::MAX,
+            u64::MAX
+        );
+        assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
+        // The joined-path term is the directory's own path plus the name.
+        let joined = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+        assert!(
+            joined.as_os_str().len() as u64
+                <= store.root().as_os_str().len() as u64 + ACK_MARKER_PATH_SCRATCH_BYTES
+        );
+        assert!(store.root().as_os_str().len() as u64 <= ACK_DIRECTORY_PATH_MAX_BYTES);
+        assert_eq!(quote.read_bytes, THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES as u64 + 1);
+    }
+
+    #[test]
+    fn discard_activation_rejects_different_operation_without_replacing_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let operation = ThreadHistoryDiscardOperationRef {
+            operation_id: "a".repeat(32),
+            sha256: "b".repeat(64),
+        };
+        store
+            .begin_thread_history_discard(&guard, &operation)
+            .unwrap();
+        let before = std::fs::read(store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap();
+        let other = ThreadHistoryDiscardOperationRef {
+            operation_id: operation.operation_id.clone(),
+            sha256: "c".repeat(64),
+        };
+        assert!(store.begin_thread_history_discard(&guard, &other).is_err());
+        assert!(store.finish_thread_history_discard(&guard, &other).is_err());
+        assert_eq!(
+            store.thread_history_discard_operation().unwrap(),
+            Some(operation.clone())
+        );
+        assert_eq!(
+            std::fs::read(store.root().join(THREAD_HISTORY_DISCARD_MARKER)).unwrap(),
+            before
+        );
+        store
+            .finish_thread_history_discard(&guard, &operation)
+            .unwrap();
+        assert_eq!(store.thread_history_discard_operation().unwrap(), None);
+    }
+
+    #[test]
+    fn discard_activation_refuses_unbound_malformed_and_noncanonical_markers() {
+        let valid = ThreadHistoryDiscardMarker::for_operation(
+            &ThreadHistoryDiscardOperationRef {
+                operation_id: "a".repeat(32),
+                sha256: "b".repeat(64),
+            },
+            ThreadHistoryDiscardPhase::Active,
+        )
+        .unwrap();
+        let value = serde_json::to_value(&valid).unwrap();
+        let mut cases = vec![
+            br#"{"kind":"thread_history_discard","schema":1}"#.to_vec(),
+            vec![b'x'; THREAD_HISTORY_DISCARD_MARKER_MAX_BYTES + 1],
+        ];
+        for key in ["kind", "schema", "phase", "operation"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            cases.push(lillux::canonical_json(&missing).unwrap().into_bytes());
+        }
+        for key in ["operation_id", "sha256"] {
+            let mut missing = value.clone();
+            missing["operation"].as_object_mut().unwrap().remove(key);
+            cases.push(lillux::canonical_json(&missing).unwrap().into_bytes());
+        }
+        let mut extra = value.clone();
+        extra["operation"]["authority"] = serde_json::json!(true);
+        cases.push(lillux::canonical_json(&extra).unwrap().into_bytes());
+        let mut unknown_phase = value.clone();
+        unknown_phase["phase"] = serde_json::json!("retired");
+        cases.push(lillux::canonical_json(&unknown_phase).unwrap().into_bytes());
+        let mut wrong_id = value.clone();
+        wrong_id["operation"]["operation_id"] = serde_json::json!("A".repeat(32));
+        cases.push(lillux::canonical_json(&wrong_id).unwrap().into_bytes());
+        let mut whitespace = valid.canonical_bytes().unwrap();
+        whitespace.push(10);
+        cases.push(whitespace);
+        for bytes in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+            let marker = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
+            std::fs::write(&marker, &bytes).unwrap();
+            assert!(store.thread_history_discard_operation().is_err());
+            assert!(store.thread_history_discard_in_progress().is_err());
+            assert_eq!(std::fs::read(marker).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -3825,6 +5251,128 @@ mod tests {
         drop(nested_shared);
         drop(nested_exclusive);
         drop(exclusive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_preserves_nested_original_file() {
+        let temp = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1));
+        let outer =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        let nested =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        assert!(Rc::ptr_eq(&outer._file, &nested._file));
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 2);
+        drop(outer);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        nested.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(nested);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
+
+        let exclusive =
+            CasMutationGuard::acquire_existing_exclusive_in_pinned_runtime(&runtime).unwrap();
+        let nested =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .unwrap();
+        assert!(Rc::ptr_eq(&exclusive._file, &nested._file));
+        assert_eq!(EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get), 2);
+        assert!(!nested.is_exclusive());
+        drop(exclusive);
+        nested.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(nested);
+        assert_eq!(EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_refuses_expired_reentry_without_depth_change() {
+        let temp = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let original =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(&runtime).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(
+            &runtime,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+        ) {
+            Ok(_) => panic!("expired nested CAS guard unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        assert!(
+            CAS_GUARD_FILE
+                .with(|file| Rc::ptr_eq(file.borrow().as_ref().unwrap(), &original._file))
+        );
+        original.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(original);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_refuses_foreign_runtime_without_depth_change() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(first.path()).unwrap();
+        CasMutationGuard::ensure_anchor(second.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(first.path())
+            .unwrap()
+            .unwrap();
+        let foreign = lillux::PinnedDirectory::open(second.path())
+            .unwrap()
+            .unwrap();
+        let original =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(&runtime).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(
+            &foreign,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1)),
+        ) {
+            Ok(_) => panic!("foreign nested CAS guard unexpectedly acquired"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}")
+                .contains("held CAS mutation guard does not protect pinned runtime")
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 1);
+        original.ensure_protects_pinned_runtime(&runtime).unwrap();
+        drop(original);
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pinned_shared_guard_does_not_create_missing_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1));
+        assert!(
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .is_err()
+        );
+        assert!(!temp.path().join("recovery").exists());
+        fs::create_dir(temp.path().join("recovery")).unwrap();
+        assert!(
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime_until(&runtime, deadline)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_dir(temp.path().join("recovery")).unwrap().count(),
+            0
+        );
+        assert_eq!(SHARED_CAS_GUARD_DEPTH.with(Cell::get), 0);
+        assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
     }
 
     #[test]

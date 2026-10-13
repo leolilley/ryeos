@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn verified_operator_passes_projects_read_gate() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let operator_ctx = local_operator_context(&state, vec!["*".into()]);
 
     let listed = ryeos_ui::handlers::ui_projects::handle_projects_list(
@@ -29,7 +29,7 @@ async fn verified_operator_passes_projects_read_gate() {
 
 #[tokio::test]
 async fn request_project_path_does_not_create_project_authority() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let requested = tempfile::TempDir::new().expect("request project");
     let operator_ctx = local_operator_context(&state, vec!["*".into()]);
 
@@ -50,7 +50,7 @@ async fn request_project_path_does_not_create_project_authority() {
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn opening_another_project_admits_an_independent_attachment() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let first = tempfile::TempDir::new().expect("first project");
     let second = tempfile::TempDir::new().expect("second project");
     let operator_ctx = local_operator_context(&state, vec!["*".into()]);

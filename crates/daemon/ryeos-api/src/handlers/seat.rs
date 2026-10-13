@@ -93,13 +93,15 @@ pub async fn handle_open(
         state
             .node_history_policy()
             .map_err(|error| HandlerError::Internal(error.to_string()))?,
-        &surface_ref,
         &project_path,
-        &caller,
-        ctx.scopes.clone(),
-        &site_id,
-        &origin_site_id,
-        SEAT_KIND.to_string(),
+        ryeos_app::thread_lifecycle::NonExecutionRootRequest {
+            item_ref: &surface_ref,
+            requested_by: &caller,
+            caller_scopes: ctx.scopes.clone(),
+            current_site_id: &site_id,
+            origin_site_id: &origin_site_id,
+            thread_profile: SEAT_KIND.to_string(),
+        },
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
 

@@ -1,8 +1,31 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const EXECUTOR_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("executor");
+
 pub mod augmentations;
 pub mod dispatch;
 pub mod dispatch_error;
 pub mod dispatch_role;
 pub mod execution;
+pub use execution::{
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, SelectedDedicatedInvocationLoan,
+    abandoned_selected_compositions,
+};
+/// Immutable daemon publication. Attachment presence never admits a worker.
+pub struct SelectedApplicationPublication {
+    pub(crate) app: std::sync::Arc<ryeos_app::state::AppState>,
+    pub(crate) attachment: SelectedInvocationAttachment,
+}
+
+impl SelectedApplicationPublication {
+    pub fn app(&self) -> &std::sync::Arc<ryeos_app::state::AppState> { &self.app }
+    pub fn attachment(&self) -> &SelectedInvocationAttachment { &self.attachment }
+}
+
+/// Positive closure means no retained selected slot or ambiguous storage lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedRootClose { Closed, Unresolved }
+
 pub mod executor;
 pub(crate) mod resolved_config_cache;
 pub mod structured_error;
@@ -172,7 +195,7 @@ pub mod test_support {
 
         ryeos_app::external_placement::test_support::install_test_placement_vault(state);
         let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
         let scopes = vec!["*".to_owned()];
         let site = state.threads.site_id().to_owned();
         let context = crate::executor::ExecutionContext {
@@ -401,7 +424,7 @@ pub mod test_support {
             .context("fixture selected products omit the admitted external runtime")?
             .manifest_hash
             .clone();
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,
@@ -495,8 +518,8 @@ pub mod test_support {
                 subject,
             )?;
         let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+            ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use ryeos_app::callback_token::{
     AdmittedWorkloadClientGrant, CallbackCapability, CallbackRuntimeMethodSurface,
 };
-use ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
+use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 use ryeos_app::runtime_db::{WorkerProcessState, daemon_generation_id};
 use ryeos_app::state::AppState;
 use ryeos_executor::execution::persistent_session::ExclusivePersistentSessionIdentity;
@@ -884,7 +884,7 @@ mod tests {
 
     use super::*;
     use ryeos_app::runtime_db::{
-        DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession, RuntimeDb,
+        DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
     };
 
     fn test_execution(
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn workload_client_requires_the_real_pending_session_reservation() {
         let temp = tempfile::tempdir().unwrap();
-        let db = RuntimeDb::open(&temp.path().join("runtime.sqlite3")).unwrap();
+        let db = ryeos_app::test_support::TestRuntime::open(&temp.path().join("runtime.sqlite3"));
         db.create_credential_profile(NewCredentialProfile {
             profile_id: "P-test",
             owner_principal: "fp:operator",

@@ -153,13 +153,17 @@ fn plant_project_mutating_tool(project_dir: &Path, signer: &SigningKey) -> anyho
 #   category: mutate
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 
 import json
 import pathlib
 import sys
 
-params = json.loads(sys.stdin.read())
-pathlib.Path(params["project_path"]).joinpath("follow-generation-moved.txt").write_text(
+# The python script runtime binds the project root as `--project-path` on
+# argv; stdin carries only the item parameters.
+json.loads(sys.stdin.read())
+project_path = sys.argv[sys.argv.index("--project-path") + 1]
+pathlib.Path(project_path).joinpath("follow-generation-moved.txt").write_text(
     "moved before follow\n", encoding="utf-8"
 )
 print(json.dumps({"mutated": True}))
@@ -225,48 +229,13 @@ config:
     Ok(())
 }
 
-/// Every persisted event across ALL threads: `(thread_id, event_type, payload)`.
-/// The test owns the whole daemon, so an unfiltered read is exactly the parent +
-/// child + successor threads.
-fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut stmt = match conn
-        .prepare("SELECT thread_id, event_type, payload FROM events ORDER BY chain_seq ASC")
-    {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map([], |row| {
-        let thread_id: String = row.get(0)?;
-        let event_type: String = row.get(1)?;
-        let payload_blob: Vec<u8> = row.get(2)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((thread_id, event_type, payload))
-    })
-    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-    .unwrap_or_default()
-}
 
-fn all_threads(state_path: &Path) -> Vec<ryeos_state::queries::ThreadRow> {
-    let projection_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let projection = match ryeos_state::projection::ProjectionDb::open(&projection_path) {
-        Ok(projection) => projection,
-        Err(_) => return Vec::new(),
-    };
-    ryeos_state::queries::list_threads(&projection, 200).unwrap_or_default()
+/// Threads visible to the test principal through `service:threads/list`.
+/// The test principal requests the parent and every child, successor and
+/// service thread these graphs start, so the principal filter hides none of
+/// them.
+async fn all_threads(h: &DaemonHarness) -> Vec<common::ListedThread> {
+    h.list_threads(200).await.unwrap_or_default()
 }
 
 /// True iff `thread_id` has an event of `event_type` whose payload `node` == `node`.
@@ -335,7 +304,10 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out after 30s.\n--- daemon stderr ---\n{stderr}");
@@ -365,7 +337,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
     //    successor thread ran the post-follow `mark` node to completion.
     let deadline = Instant::now() + Duration::from_secs(60);
     let events = loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
 
         // Child: a thread that ran `work` and reached terminal.
         let child_done = threads_that_ran(&events, "work")
@@ -511,7 +483,7 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
     plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
     plant_parent_follow_graph(project.path(), &fixture.publisher).expect("plant parent graph");
 
-    let (status, body) = h
+    let result = h
         .post_json(
             "/execute",
             serde_json::json!({
@@ -524,8 +496,14 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
                 ),
             }),
         )
-        .await
-        .expect("execute pinned parent");
+        .await;
+    let (status, body) = match result {
+        Ok(pair) => pair,
+        Err(e) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("execute pinned parent: {e:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
         body.pointer("/result/status").and_then(Value::as_str),
@@ -538,11 +516,20 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
         .expect("parent thread id")
         .to_string();
 
+    // Needs a read surface: the parent's workspace ownership is only
+    // observable while it is suspended at the follow handoff, so this cannot
+    // move behind a stopped-node read, and no service exposes it. Until one
+    // exists this is a read-only open of the live Runtime store, which the
+    // native store refuses.
     let runtime_db = h
         .state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let runtime = rusqlite::Connection::open(runtime_db).expect("open runtime database");
+    let runtime = rusqlite::Connection::open_with_flags(
+        runtime_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open runtime database read-only");
     let owned_workspaces: i64 = runtime
         .query_row(
             "SELECT COUNT(*) FROM execution_workspace \
@@ -558,7 +545,7 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
         let child_done = threads_that_ran(&events, "work")
             .into_iter()
             .any(|thread| thread_has_event(&events, &thread, "thread_completed"));
@@ -628,7 +615,7 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
 
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
         let child_done = threads_that_ran(&events, "work")
             .into_iter()
             .any(|thread| thread_has_event(&events, &thread, "thread_completed"));
@@ -636,7 +623,7 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
             thread != parent_thread_id && thread_has_event(&events, &thread, "thread_completed")
         });
         if child_done && successor_done {
-            let threads = all_threads(&h.state_path);
+            let threads = all_threads(&h).await;
             let parent = threads
                 .iter()
                 .find(|thread| thread.thread_id == parent_thread_id)
@@ -648,13 +635,27 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
                         && thread.chain_root_id == parent.chain_root_id
                 })
                 .expect("follow-resume successor");
-            assert_eq!(
-                successor.base_project_snapshot_hash, parent.result_project_snapshot_hash,
-                "the successor must resume from the exact generation frozen at follow"
-            );
             assert!(
                 successor.admitted_launch_capsule_hash.is_some(),
                 "the resumed segment must retain an admitted capsule"
+            );
+            let successor_id = successor.thread_id.clone();
+            // The retained snapshot coordinates are not part of the thread
+            // RPC. The test is finished with the daemon, so stop it and read
+            // them from its Store.
+            h.kill_daemon().await.expect("stop daemon");
+            let store = common::open_stopped_node_store(&h.state_path)
+                .expect("open stopped node store");
+            let (parent_row, successor_row) = store
+                .with_state_db(|db| {
+                    Ok((db.get_thread(&parent_thread_id)?, db.get_thread(&successor_id)?))
+                })
+                .expect("read thread rows");
+            let parent_row = parent_row.expect("parent row");
+            let successor_row = successor_row.expect("successor row");
+            assert_eq!(
+                successor_row.base_project_snapshot_hash, parent_row.result_project_snapshot_hash,
+                "the successor must resume from the exact generation frozen at follow"
             );
             break;
         }
@@ -773,7 +774,10 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -796,7 +800,7 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let events = loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
         let child_terminal = threads_that_ran(&events, "boom").into_iter().any(|tid| {
             thread_has_event(&events, &tid, "thread_failed")
                 || thread_has_event(&events, &tid, "thread_completed")
@@ -970,7 +974,10 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -996,7 +1003,7 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
     // parent + first successor are `continued`, never `graph_completed`.
     let deadline = Instant::now() + Duration::from_secs(90);
     let events = loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
         let completed = events
             .iter()
             .filter(|(_, et, _)| et == "graph_completed")
@@ -1221,7 +1228,10 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(45), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e}\n--- daemon stderr ---\n{stderr}");
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
@@ -1246,7 +1256,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     // graph_completed. Wait for it, then read its persisted result.
     let deadline = Instant::now() + Duration::from_secs(90);
     let successor_tid = loop {
-        let events = all_events(&h.state_path);
+        let events = h.principal_events().await;
         let successor = events
             .iter()
             .find(|(tid, et, _)| et == "graph_completed" && *tid != parent_tid)
@@ -1258,7 +1268,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
             let stderr = h.drain_stderr_nonblocking().await;
             panic!(
                 "resumed parent never completed.\nevents={:#?}\n--- daemon stderr ---\n{stderr}",
-                all_events(&h.state_path)
+                h.principal_events().await
             );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1370,10 +1380,16 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         .to_str()
         .expect("utf-8 operator input project path");
 
-    let (status, body) = h
+    let (status, body) = match h
         .post_execute("graph:parent_cost", project_path, serde_json::json!({}))
         .await
-        .expect("launch graph-follow parent");
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("launch graph-follow parent: {e:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
         body.pointer("/result/status").and_then(Value::as_str),
@@ -1388,7 +1404,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (parent, child) = loop {
-        let threads = all_threads(&h.state_path);
+        let threads = all_threads(&h).await;
         let parent = threads.iter().find(|thread| thread.thread_id == parent_id);
         let child = threads
             .iter()
@@ -1465,8 +1481,8 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
     let input_text = "incorporate this public ARC observation";
     let completion_deadline = Instant::now() + Duration::from_secs(90);
     let (successor_id, terminal_events) = loop {
-        let events = all_events(&h.state_path);
-        let projected_threads = all_threads(&h.state_path);
+        let events = h.principal_events().await;
+        let projected_threads = all_threads(&h).await;
         let child_completed = thread_has_event(&events, &child.thread_id, "thread_completed");
         let successor = events
             .iter()
@@ -1531,7 +1547,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         "the submitted operator input must be folded exactly once"
     );
 
-    let threads = all_threads(&h.state_path);
+    let threads = all_threads(&h).await;
     let service = threads
         .iter()
         .find(|thread| thread.thread_id == service_id)
@@ -1555,7 +1571,14 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         service.project_root, parent.project_root,
         "service audit authority and target execution authority must remain distinct"
     );
-    assert!(service.base_project_snapshot_hash.is_none());
+    assert!(
+        service
+            .project_authority
+            .as_ref()
+            .and_then(|authority| authority.operational_snapshot_projection())
+            .is_none(),
+        "the service audit root must not pin a base project snapshot"
+    );
 
     let matching_children = threads
         .iter()

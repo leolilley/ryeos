@@ -152,7 +152,7 @@ fn advanced_terminal_preserves_original_admitted_build_identity() {
 fn accepted_result_closure_retains_product_bytes_not_historical_capture() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = crate::StateDb::open(temp.path(), publication::tests::trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let _guard = authority.acquire_shared_guard().unwrap();
     let cas = authority.cas_store().unwrap();

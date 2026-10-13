@@ -1,8 +1,7 @@
-# ryeos:signed:2026-09-08T15:36:50Z:bbef8053fc461d359f0105ebc930a9e3b2c48368d6af027d04417e7f5f61c01e:xpe9/9gbAhXqx0/KpB3KGG5M+TMcPtv7zma/pz3dPucgGLIvgY+ArCneu16WFnkRHJw6sUcy/ESOwGUTJO+HCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 version: "1.0.0"
 description: Finite exact inputs for the GNU CPython 3.14 distribution producer
-schema: ryeos.gnu_python_production_inputs.v2
+schema: ryeos.gnu_python_production_inputs.v3
 source_date_epoch: 1786060800
 runtime:
   version: "3.14.7"
@@ -15,6 +14,10 @@ runtime:
   libpython_link_mode: shared
   crt_features: [glibc-dynamic, "glibc-max-symbol-version:2.17)"]
   runtime_root: /ryeos/realizations/python-gnu/python
+private_profile:
+  id: private_origin_v1
+  runtime_root: /ryeos/realizations/python-gnu-private/python
+  runpath_policy: member-relative-origin-v1
 archives:
   manifest:
     digest: ec7d4a2a749b0b709dabca0a7919c3a897a9b671be56332b67a659b6bd82cac6

@@ -1,0 +1,13 @@
+# ryeos:signed:2026-10-10T04:34:03Z:e4c57454d6ba3558af902f7719a4c161332a19fe62158d4168877c70bdcb51ff:Puj7JQXoqMDarUW5QgZ2mz+ONE3kM0xEzxs3U/KA6t4JeUAf9Ic8B9a58jbeeCNFMsg8XkuuL8Y5CrlRiulDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, run-product-qualification-worker]
+description: Run one accepted qualification Worker against its exact restored occurrence
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content run-product-qualification-worker '{\"qualification_operation_id\":\"<exact-restored-operation>\",\"coordinate\":<retained-consumer-verification-coordinate>}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/run-product-qualification-worker

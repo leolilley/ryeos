@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-28T23:35:24Z:7189124e584d13edd4770f869cc50f4b556cfab78a1eaf2c0ded8e20796d4978:6nd/O5QfwDidFido6hJNNdLBo17e0iARn5e6S9QFzdXEp1tfQTe88zoEYzuXkyPFGGaqVwzh4/HdF/BJ/g8BDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T03:29:27Z:8b465749c7818ef6fee31e33e2396d062243ec81491c22d4bda25fd37ccce932:gUXtNg47yReSVwy7H30emAL/NYWdamkMXKpU4eZf2mgO0WVQHRtUnM+LDpPX+JjJXTjaQrsWzvcn/dL18vpBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.9.0"
+version: "1.10.0"
 ```
 
 # RyeOS Release Process
@@ -56,10 +56,10 @@ the external compiler bootstrap for every future bundle change. The intended
 normal path reuses qualified environment products, publishes the changed bundle
 closure to the source node, and activates an admitted selection on consumers.
 
-The remaining native implementation sequence is section 0 of
-`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`:
-finish qualified build inputs, calibrate/apply publication authority, bootstrap
-the catalog, then demonstrate data-only and binary-bearing successor updates.
+Continue the native sequence with qualified build inputs, current-policy
+calibration and publication authority, catalog bootstrap, then data-only and
+binary-bearing successor updates. Retained operational evidence supplies the
+exact live coordinates; these durable gates define the required acceptance.
 Calibration is reused while its measured identities and policy remain valid;
 invalidating changes require recalibration. Portable production itself needs
 only its qualified Python runtime, while native compilation needs the selected
@@ -68,6 +68,40 @@ reproduction and self-hosted CI cutover are separate campaigns. Do not report
 prerequisite qualification as completion of bundle publication or activation.
 
 ## Critical rules
+
+### Protected release qualification
+
+Release qualifier services use `external-content.launch-product-qualification`
+through its existing owner. Their signed capability declarations and calling
+Graphs explicitly include that capability in addition to their Tool and Config
+requirements. The selected checker and parameters still come from the current
+signed qualification policy; the release stage may only assert the expected
+checker and complete composed inputs.
+
+The stage captures and verifies the signed source/recipe overlay, binds its
+complete subject and qualified Python inputs, then launches the protected
+read-only verifier. Ordinary build/capture Graphs keep writable COW authority.
+Publication consumes the exact retained successful verifier terminal and its
+owner-bound qualification purpose. A direct checker result cannot bypass that
+purpose or the current-policy checks.
+
+Qualification launch IDs are stable for an exact recorded release operation
+and its source tree, capture policy, recipe and selected products. Recapturing
+identical source changes the snapshot creation timestamp but does not authorize
+another launch. The chosen exact snapshot hash remains bound by the protected
+launch. An uncertain acknowledgement reports the exact launch ID: query that
+owner-bound `launch/status` coordinate before proceeding. Repeating it cannot
+start a second verifier. A deliberate new recorded service invocation supplies
+a fresh operation root for a new attempt or changed-policy requalification.
+Internal callers without a recorded root retain one deterministic coordinate
+for the exact stage; mutable policy changes alone do not remint that attempt.
+
+After merging a checker, policy or admission change, assess exact artifact and
+definition identities and requalify affected retained products. Recalibrate
+dependent release authority when its measured inputs change. Preserve existing
+evidence for the artifacts and contracts it actually tested. Source tests do
+not establish installation, live qualification or cross-node activation; record
+those stages and their exact retained evidence during operational integration.
 
 - Release publication does not run repository, runtime, model, or image tests.
   Those belong to independent CI/qualification workflows and may report
@@ -190,7 +224,7 @@ crates/tools/external-candidate-supervisor/Cargo.toml
 crates/tools/external-guest-occurrence-owner/Cargo.toml
 crates/tools/external-guest-restoration-verifier/Cargo.toml
 crates/tools/external-guest-runtime-producer/Cargo.toml
-crates/tools/independent-runtime-verifier/Cargo.toml
+crates/tools/codex-runtime-verifier/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
@@ -218,7 +252,7 @@ files=(
   crates/tools/external-guest-occurrence-owner/Cargo.toml
   crates/tools/external-guest-restoration-verifier/Cargo.toml
   crates/tools/external-guest-runtime-producer/Cargo.toml
-  crates/tools/independent-runtime-verifier/Cargo.toml
+  crates/tools/codex-runtime-verifier/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -675,7 +709,7 @@ Before tagging:
   - [ ] `crates/engine/ryeos-runtime/Cargo.toml`
   - [ ] `crates/tools/core-tools/Cargo.toml`
   - [ ] `crates/tools/session-exec/Cargo.toml`
-  - [ ] All `crates/tools/{codex-*,external-*,independent-runtime-verifier}/Cargo.toml` release-version manifests
+  - [ ] All `crates/tools/{codex-*,external-*}/Cargo.toml` release-version manifests
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

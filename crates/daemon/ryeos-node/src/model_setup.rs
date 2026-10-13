@@ -96,7 +96,13 @@ pub fn persist_default_model_route(
     );
     let signed = lillux::signature::sign_content(&body, &signing_key, "#", None);
     parent
-        .atomic_write_if_same(name, existing.as_ref(), signed.as_bytes(), 0o600)
+        .atomic_write_if_same(
+            name,
+            existing.as_ref(),
+            signed.as_bytes(),
+            0o600,
+            crate::NODE_TEMP_PURPOSE,
+        )
         .with_context(|| format!("write model routing {}", path.display()))?;
     Ok(PersistModelRouteReport {
         path,

@@ -192,6 +192,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "validated launch contract rejected at dispatch boundary: {error:#}"
             ))
         })?
+        .with_application_publication(ctx.publication.clone())
         .retain_captured_generation(project_ctx.take_captured_generation());
 
         let route_id: String = ctx.route_id.to_string();

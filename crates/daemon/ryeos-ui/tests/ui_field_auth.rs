@@ -72,7 +72,7 @@ fn append_fixture_event(
 
 #[tokio::test]
 async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let state = Arc::new(state);
     let unauthenticated = HandlerContext::new("anonymous:test".to_string(), Vec::new(), false);
     let malformed = serde_json::json!({"not": "a valid request for any field handler"});
@@ -96,7 +96,7 @@ async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request()
 
 #[tokio::test]
 async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-selected", &operator.fingerprint);
     create_running_thread(&state, "T-foreign", &operator.fingerprint);
@@ -145,7 +145,7 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
 
 #[tokio::test]
 async fn execution_handler_applies_expansion_to_a_valid_braid_cut() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-cut", &operator.fingerprint);
     let event = append_fixture_event(&state, "T-cut");

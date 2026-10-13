@@ -31,7 +31,7 @@ fn authenticated_target_node(
 ) -> Result<String, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
-            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+            != Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
         || ctx.authenticated_origin_site_id.as_deref() != Some(target_site_id)
     {
         return Err(HandlerError::Forbidden(
@@ -787,7 +787,7 @@ mod authority_tests {
             "fp:target-node".into(),
             Vec::new(),
             true,
-            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode),
             Some("site:target".into()),
         );
         assert_eq!(
@@ -796,8 +796,8 @@ mod authority_tests {
         );
 
         for class in [
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
         ] {
             let rejected = HandlerContext::new_with_authority(
                 "fp:operator".into(),

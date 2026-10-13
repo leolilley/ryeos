@@ -472,6 +472,7 @@ fn plant_native_resume_tool(project_path: &Path, signer: &SigningKey) -> anyhow:
 executor_id: "@subprocess"
 category: "resume_tool"
 description: "test runtime with native_resume"
+execution_protocol: "protocol:ryeos/core/opaque"
 native_resume: true
 config:
   command: "/usr/bin/sleep"
@@ -488,6 +489,7 @@ config:
 executor_id: "tool:resume_tool/runtime"
 category: "resume"
 description: "native_resume test tool"
+execution_protocol: "protocol:ryeos/core/opaque"
 "#;
     let signed = lillux::signature::sign_content(tool_body, signer, "#", None);
     std::fs::write(tool_dir.join("resume_test.yaml"), signed)?;
@@ -590,6 +592,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // ── Phase 1: Execute the tool (detached) ────────────────────
     let body = serde_json::json!({
         "item_ref": "tool:resume/resume_test",
+        "launch_id": "L-0123456789abcdef0123456789abcdef",
         "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
@@ -601,22 +604,22 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     let user_key = h.user_key.as_ref().expect("fast fixture user key");
     let node_key = h.node_key.as_ref().expect("fast fixture node key");
     let signed_headers =
-        common::build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
+        common::build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute/launch", &body_bytes);
     let mut req = reqwest::Client::new()
-        .post(format!("http://{}/execute", h.bind))
+        .post(format!("http://{}/execute/launch", h.bind))
         .header("content-type", "application/json")
         .body(body_bytes)
         .timeout(Duration::from_secs(30));
     for (k, v) in signed_headers {
         req = req.header(k, v);
     }
-    let resp = req.send().await.expect("/execute send failed");
+    let resp = req.send().await.expect("/execute/launch send failed");
     let status = resp.status();
     let resp_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     assert_eq!(
         status,
         reqwest::StatusCode::ACCEPTED,
-        "/execute should accept daemon-owned tool execution; got status={status} body={resp_body:#}"
+        "/execute/launch should accept daemon-owned tool execution; got status={status} body={resp_body:#}"
     );
 
     let thread_id = resp_body["thread_id"]

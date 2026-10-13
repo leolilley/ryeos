@@ -134,7 +134,7 @@ fn poll_and_persist(state: &AppState, thread_id: &str) -> bool {
 
 #[tokio::test]
 async fn live_input_persists_into_running_thread_then_finalize_closes_the_queue() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     // The composition root wires this in production; do it here so finalize can
     // close the thread's queue.
     state.threads.set_live_input_queue(state.live_input.clone());
@@ -193,7 +193,7 @@ async fn poll_before_terminal_persists_but_after_terminal_discards() {
     // The enqueue/finalize race, resolved deterministically: an input still
     // queued when the thread finalizes is dropped (queue closed), and the
     // running-guard means it could never have been appended post-terminal anyway.
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     state.threads.set_live_input_queue(state.live_input.clone());
 
     let tid = "T-live-2";

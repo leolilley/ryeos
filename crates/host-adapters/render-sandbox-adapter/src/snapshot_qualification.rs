@@ -398,7 +398,7 @@ pub(crate) fn terminate_restored_sandbox(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
     }
     let network = crate::network_context_from_captured_inputs()?;
@@ -521,7 +521,7 @@ fn preflight_verifier_upload_and_routes(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
         ensure!(
             url == crate::proxy_route::connect_token_url(
@@ -618,7 +618,7 @@ pub(crate) fn parse_consumer_verifier_stream(
     let bytes = parse_verifier_stdout(
         body,
         MAX_CONSUMER_RUN_STREAM_BYTES,
-        1024 * 1024,
+        MAX_CONSUMER_RUN_STREAM_BYTES,
         16 * 1024,
         maximum,
         Some((cancellation, deadline)),
@@ -663,7 +663,7 @@ fn parse_verifier_stdout(
         "restored verifier stream exceeds its bound"
     );
     let limits = SseLimits {
-        line_bytes: maximum_event.min(64 * 1024),
+        line_bytes: maximum_event,
         event_bytes: maximum_event,
         total_bytes: maximum_wire as u64,
         events: maximum_events,
@@ -1272,6 +1272,25 @@ mod tests {
         assert_eq!(parsed.evidence_sha256, lillux::sha256_hex(&canonical));
         assert_eq!(parsed.evidence_bytes, canonical.len() as u64);
         assert_eq!(parsed.response_sha256, lillux::sha256_hex(&consumer_stream));
+        // Render may place the entire bounded stdout write in one SSE event.
+        // A small line ceiling would reject valid evidence before its 5 MiB
+        // canonical-content bound is checked.
+        let single_output = serde_json::json!({
+            "stream": "stdout",
+            "data": format!("{}\n", std::str::from_utf8(&canonical).unwrap()),
+        });
+        let single_stream = format!(
+            "event: output\ndata: {single_output}\n\nevent: exit\ndata: {{\"exit_code\":0}}\n\n"
+        );
+        let single = parse_consumer_verifier_stream(
+            single_stream.as_bytes(),
+            &challenge,
+            deadline,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(single.evidence_sha256, parsed.evidence_sha256);
+        assert_eq!(single.evidence_bytes, parsed.evidence_bytes);
         for output in ["{}", "{}\n\n", " {}\n", "[]\n", "{\"x\":1,\"x\":2}\n"] {
             assert!(
                 parse_consumer_verifier_stream(

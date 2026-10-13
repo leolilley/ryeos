@@ -5,8 +5,8 @@
 use anyhow::{Context as _, bail};
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, ProductWitnessLookup, VerifiedProductWitness,

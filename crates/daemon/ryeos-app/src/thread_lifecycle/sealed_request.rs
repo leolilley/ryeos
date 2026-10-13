@@ -122,25 +122,9 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-/// v11 additionally seals the optional ingress-authenticated handler context.
-/// Its absence is meaningful: node-internal execution must not manufacture a
-/// verified transport principal during recovery or callback dispatch.
-/// v12 carries flat exact node-history policy provenance instead of the
-/// predecessor tagged config wrapper. v13 binds remotely adopted execution
-/// to the exact target-node operator grant generation. v14 seals the optional
-/// daemon-authored scheduled-fire coordinate. v15 seals the narrow
-/// independently-evaluated-candidate purpose and its exact base/candidate
-/// authority.
-/// v16 combines candidate/scheduler authority with the current exact
-/// filesystem/network and realization-root execution contract.
-/// v17 seals fixed-parent live confinement and explicit namespace symlink
-/// semantics. Old path-mask claims cannot be decoded as this authority.
-/// v19 retains the exact invocation product selector map. Predecessor sealed
-/// requests cannot prove whether a selected witness was omitted during
-/// persistence, so they are classified before nested decoding.
-/// v20 requires the exact local-or-received product witness source proof.
-/// v21 seals the daemon-derived product-qualification launch purpose. Absent
-/// remains meaningful for ordinary execution; it cannot be inferred on replay.
+/// Exact sealed root execution request contract. Absent optional fields are
+/// meaningful and are never inferred on recovery; a stored request of any
+/// other version is refused before nested decoding.
 pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -330,6 +314,7 @@ impl SealedResolvedItem {
                     source_name,
                     &source_bytes,
                     0o600,
+                    crate::APP_TEMP_PURPOSE,
                 )? {
                     Some(created) => created,
                     None => pinned_capsule_root
@@ -937,24 +922,11 @@ impl SealedRootExecutionRequest {
             content.verify_verifier_realizations(&realizations, &purpose.subject_declaration_id)?;
             return Ok(());
         }
-        let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
-        let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
-            matches!(
-                selected.target,
-                ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-            ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                && selected.selection.witness_hash == product_witness_hash
-                && &selected.selection.witness_source == witness_source
-                && selected.selection.qualification_hash.is_none()
-        };
-        match (pinned_lane, self.product_selections.as_slice()) {
-            (true, [selected]) if is_exact_root_subject(selected) => {}
-            // Preserve the legacy projectless fixed-pin lane (with its
-            // optional pre-existing selected-root admission form).
-            (false, []) => {}
-            (false, [selected]) if is_exact_root_subject(selected) => {}
-            _ => bail!("sealed qualification subject selection differs from launch purpose"),
-        }
+        super::validate_qualification_root_selections(
+            purpose,
+            &self.product_selections,
+            pinned_lane,
+        )?;
         Ok(())
     }
 
@@ -1006,6 +978,12 @@ impl SealedRootExecutionRequest {
 
     pub fn item_ref(&self) -> &str {
         &self.item_ref
+    }
+
+    /// The admitted thread profile name, distinct from the source item kind.
+    /// Runtime terminal snapshots retain this profile (for example graph_run).
+    pub fn thread_profile(&self) -> &str {
+        &self.kind
     }
 
     /// Exact caller-authored reference bindings sealed at admission. Recovery
@@ -2415,6 +2393,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_worker"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2492,6 +2471,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_worker"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2650,7 +2630,7 @@ mod authority_tests {
     }
 
     #[test]
-    fn pinned_qualification_requires_exact_snapshot_and_one_root_subject_selection() {
+    fn pinned_qualification_requires_exact_snapshot_and_subject_among_root_inputs() {
         use ryeos_state::objects::{
             EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
         };
@@ -2714,6 +2694,7 @@ mod authority_tests {
                 "relationship_name": "runtime_to_qualified_runtime"
             },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2749,6 +2730,27 @@ mod authority_tests {
         ];
 
         sealed.validate_qualification_purpose().unwrap();
+
+        let mut with_auxiliary = sealed.clone();
+        let mut auxiliary = with_auxiliary.product_selections[0].clone();
+        auxiliary.selection.declaration_id = "verifier-platform".into();
+        auxiliary.selection.witness_hash = "7".repeat(64);
+        auxiliary.selection.qualification_hash = Some("8".repeat(64));
+        with_auxiliary.product_selections.push(auxiliary);
+        with_auxiliary.validate_qualification_purpose().unwrap();
+
+        let mut replaced_subject = with_auxiliary.clone();
+        replaced_subject.product_selections[0]
+            .selection
+            .witness_hash = "9".repeat(64);
+        assert!(replaced_subject.validate_qualification_purpose().is_err());
+
+        let mut non_root_auxiliary = with_auxiliary.clone();
+        non_root_auxiliary.product_selections[1].target =
+            ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
+                binding: "environment".into(),
+            };
+        assert!(non_root_auxiliary.validate_qualification_purpose().is_err());
 
         let mut empty = sealed.clone();
         empty.product_selections.clear();
@@ -2978,7 +2980,7 @@ mod authority_tests {
             "session:test".to_string(),
             Vec::new(),
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3063,7 +3065,7 @@ mod authority_tests {
             "session:operator".to_string(),
             vec!["threads.execute".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
             None,
         );
 
@@ -3248,7 +3250,7 @@ mod authority_tests {
             owner.clone(),
             vec!["*".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3320,7 +3322,7 @@ mod authority_tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },
@@ -3419,7 +3421,7 @@ mod authority_tests {
             capsule_target
                 .handler_context()
                 .and_then(|context| context.authorized_key_class),
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
         );
         assert_eq!(capsule_target.parameters, capsule_resume.parameters);
     }

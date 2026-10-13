@@ -151,6 +151,41 @@ pub struct RuntimeSnapshotQualificationRequest {
     qualification_operation_id: String,
 }
 
+/// Select an existing accepted Q root and restored occurrence only. The
+/// current signed Worker, backend, limits and guest inputs are reconstructed
+/// by the daemon; the caller cannot supply a command or a verdict.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunProductQualificationWorkerRequest {
+    qualification_operation_id: String,
+    coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+}
+
+pub async fn run_product_qualification_worker(
+    req: RunProductQualificationWorkerRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let placement = ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+        &req.coordinate,
+        &req.qualification_operation_id,
+    )?;
+    tokio::task::spawn_blocking(move || {
+        ryeos_executor::execution::external_qualification_start::run_consumer_runtime_verification_transport(
+            &state,
+            &ctx,
+            &req.coordinate,
+            &req.qualification_operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("qualification Worker transport join failed: {error}"))??;
+    Ok(serde_json::json!({
+        "placement_thread_id": placement,
+        "status": "transport_completed"
+    }))
+}
+
 pub async fn create_runtime_snapshot_qualification(
     req: CreateRuntimeSnapshotQualificationRequest,
     ctx: HandlerContext,
@@ -607,6 +642,23 @@ pub const VERIFY_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = 
     handler: |params, ctx, state| {
         Box::pin(async move {
             verify_runtime_snapshot_qualification(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
+        })
+    },
+};
+
+pub const RUN_PRODUCT_QUALIFICATION_WORKER_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/run-product-qualification-worker",
+    endpoint: "external-content.run-product-qualification-worker",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/run-product-qualification-worker"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            run_product_qualification_worker(
                 crate::handler_error::parse_request(params)?,
                 ctx,
                 state,

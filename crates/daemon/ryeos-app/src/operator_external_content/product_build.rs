@@ -21,7 +21,7 @@ use ryeos_state::objects::AdmittedLaunchCapsule;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 use crate::thread_lifecycle::SealedRootExecutionRequest;
 
@@ -197,7 +197,7 @@ pub fn verify_current(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let policy = state.node_policy.require::<crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
+    let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
     let node_bounds = ryeos_state::LargeContentCaptureBounds {
         max_entries: policy.limits.max_entries,
         max_depth: policy.limits.max_depth,
@@ -316,10 +316,9 @@ pub(super) fn verified_root_producer(
             .as_deref()
             .context("product producer placement has no admitted capsule")?;
         let capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
                 &cas,
                 hash,
-                limits.max_object_bytes,
             )?,
         )?;
         capsule.verify_retained_execution_realization(

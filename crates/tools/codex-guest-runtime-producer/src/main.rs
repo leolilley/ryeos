@@ -3,6 +3,9 @@
 //! The output is an ordinary private-workspace product. This executable does
 //! not qualify the product, choose a provider, or publish a candidate.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const PRODUCER_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("producer");
+
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -64,7 +67,13 @@ fn produce(
     let runtime = products.create_child(OsStr::new("codex-guest-runtime"), 0o755)?;
     let bin = runtime.create_child(OsStr::new("bin"), 0o755)?;
     let (output, copied) = bin
-        .atomic_create_regular_from_reader(OsStr::new("codex"), &mut source, maximum_bytes, 0o755)?
+        .atomic_create_regular_from_reader(
+            OsStr::new("codex"),
+            &mut source,
+            maximum_bytes,
+            0o755,
+            crate::PRODUCER_TEMP_PURPOSE,
+        )?
         .context("Codex guest runtime output already exists")?;
     ensure!(
         copied == observed.size(),

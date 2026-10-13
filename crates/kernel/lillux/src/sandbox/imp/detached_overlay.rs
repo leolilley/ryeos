@@ -6,6 +6,7 @@
 
 use super::*;
 
+const PROBE_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("sandbox");
 const FSOPEN_CLOEXEC: libc::c_uint = 1;
 const FSMOUNT_CLOEXEC: libc::c_uint = 1;
 const FSCONFIG_SET_FLAG: libc::c_uint = 0;
@@ -18,10 +19,11 @@ pub(crate) fn take_overlay_template(fd: u32) -> Result<LinuxOverlayTemplate, Str
         return Err("overlay template descriptor overlaps stdio".to_string());
     }
     let descriptor = raw_fd(fd)?;
-    let lease = crate::retain_fork_sensitive_descriptors();
     // SAFETY: the outer public adoption contract transfers unique inherited
-    // ownership. Registration/type refusal retains or closes it on every path.
+    // ownership. Registration/type refusal retains or closes it on every path,
+    // so adoption precedes the lease: a refused lease closes the owner too.
     let file = unsafe { File::from_raw_fd(descriptor) };
+    let lease = crate::try_retain_fork_sensitive_descriptors()?;
     LinuxOverlayTemplate::from_transferred_authority(
         crate::InheritedDescriptorAuthority::from_owned_file(file, &lease)?,
     )
@@ -37,7 +39,7 @@ pub(crate) fn create_overlay_template(
     // Cover every temporary pin/duplicate until the returned template has
     // joined the existing registered inheritance owner. Registering only the
     // final mount cannot retroactively protect earlier descriptor creation.
-    let _creation_lease = crate::retain_fork_sensitive_descriptors();
+    let _creation_lease = crate::try_retain_fork_sensitive_descriptors()?;
     // Hold the original objects throughout the namespace transition and
     // identity comparison. A path is only a locator for those exact objects.
     let original_lower = inherited_directory(project_fd, "overlay template lower")?;
@@ -81,7 +83,7 @@ fn create_from_layers(
     // Registration must cover creation, not just eventual transport. The
     // existing inheritance owner prevents unrelated held children retaining
     // this mount after its legitimate workspace owner drops the last handle.
-    let lease = crate::retain_fork_sensitive_descriptors();
+    let lease = crate::try_retain_fork_sensitive_descriptors()?;
     let context_fd =
         unsafe { libc::syscall(libc::SYS_fsopen, c"overlay".as_ptr(), FSOPEN_CLOEXEC) } as RawFd;
     if context_fd < 0 {
@@ -208,7 +210,7 @@ pub(super) fn probe() -> Result<(), String> {
             .create_child(OsStr::new("work"), 0o700)
             .map_err(|error| error.to_string())?;
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600, PROBE_TEMP_PURPOSE)
             .map_err(|error| error.to_string())?;
         let lower = lower
             .inherited_descriptor_authority()
@@ -258,6 +260,8 @@ pub(super) fn probe() -> Result<(), String> {
             (LinuxSandboxProcess {
                 pid: creator,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -337,6 +341,8 @@ fn bounded_probe_child(operation: impl FnOnce() -> Result<(), String>) -> Result
         (LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
+            native_terminal_observation: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
@@ -424,7 +430,13 @@ mod tests {
         state.create_child(OsStr::new("upper"), 0o700).unwrap();
         state.create_child(OsStr::new("work"), 0o700).unwrap();
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(
+                OsStr::new("seed"),
+                None,
+                b"lower",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
         let lower = lower.inherited_descriptor_authority().unwrap();
         let state = state.inherited_descriptor_authority().unwrap();
@@ -590,7 +602,13 @@ mod tests {
         state.create_child(OsStr::new("upper"), 0o700).unwrap();
         state.create_child(OsStr::new("work"), 0o700).unwrap();
         lower
-            .atomic_write_if_same(OsStr::new("seed"), None, b"lower", 0o600)
+            .atomic_write_if_same(
+                OsStr::new("seed"),
+                None,
+                b"lower",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
         let lower_fd = lower.try_clone_descriptor().unwrap();
         let state_fd = state.try_clone_descriptor().unwrap();

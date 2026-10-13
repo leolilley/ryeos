@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use anyhow::Context;
-use ryeos_app::node_config::loader::BootstrapLoader;
+use ryeos_app::node_config::loader::NodeConfigLoader;
+use ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority;
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
+use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
+use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(Debug, Clone)]
@@ -37,14 +38,14 @@ pub fn load_verified_snapshot_with_trust(
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> anyhow::Result<NodeConfigSnapshot> {
     let policy = load_verified_policy_snapshot_with_trust(app_root, trust_store)?;
-    let loader = BootstrapLoader {
+    let bootstrap = BundleBootstrapLoader {
         app_root,
         trust_store,
     };
-    let bundles = loader
+    let bundles = bootstrap
         .load_bundle_section()
         .context("load verified node bundle registrations")?;
-    loader
+    NodeConfigLoader { app_root, trust_store }
         .load_full(
             &NodeConfigTable::new(),
             &bundles,
@@ -67,7 +68,7 @@ pub fn load_verified_policy_snapshot_with_trust(
     app_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> anyhow::Result<NodePolicySnapshot> {
-    ryeos_app::node_policy::load_snapshot(app_root, trust_store, &NodePolicyTable::new())
+    ryeos_node_runtime::node_policy::load_snapshot(app_root, trust_store, &NodePolicyTable::new())
         .context("load verified node policy generation")
 }
 
@@ -128,6 +129,8 @@ mod tests {
         let snapshot = NodeConfigSnapshot {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {

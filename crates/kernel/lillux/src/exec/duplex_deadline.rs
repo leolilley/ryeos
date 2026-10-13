@@ -139,6 +139,48 @@ impl<'a> DeadlinePipeStream<'a> {
             ))
         }
     }
+
+    /// Write one atomic-size pipe record with the stream's original deadline.
+    /// EINTR and EAGAIN retry the same complete input; a successful syscall's
+    /// actual count is returned immediately without a post-write check.
+    /// An EPIPE drain interrupted through expiry returns an error and restores
+    /// the prior signal mask; pending SIGPIPE delivery then remains uncertain.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn write_atomic_record(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() || buffer.len() > libc::PIPE_BUF as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "atomic pipe record must contain 1..=PIPE_BUF bytes",
+            ));
+        }
+        let signal = crate::invocation::linux::BlockedSigpipe::new()?;
+        loop {
+            wait_ready(self.descriptor.as_raw_fd(), libc::POLLOUT, self.deadline)?;
+            // SAFETY: the borrowed nonblocking pipe and input bytes remain live.
+            let count = unsafe {
+                libc::write(
+                    self.descriptor.as_raw_fd(),
+                    buffer.as_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if count >= 0 {
+                return Ok(count as usize);
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EPIPE) {
+                signal.consume_new_sigpipe_until(self.deadline)?;
+                return Err(error);
+            }
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                continue;
+            }
+            return Err(error);
+        }
+    }
 }
 
 impl Read for DeadlinePipeStream<'_> {

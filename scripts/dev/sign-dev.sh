@@ -14,7 +14,7 @@
 # Env:   RYEOS_DEV_KEY  override the key path (default: .dev-keys/PUBLISHER_DEV.pem)
 #
 # Envelope is chosen by extension: `# ryeos:signed:...` for
-# .yaml/.yml/.toml/.py, the same comment after a `.sh` shebang, and
+# .yaml/.yml/.toml, the same comment after a `.sh` or `.py` shebang, and
 # `<!-- ryeos:signed:... -->` for .md.
 set -euo pipefail
 
@@ -36,8 +36,8 @@ sign_file() {
   [[ -f "$file" ]] || { echo "sign-dev: missing file: $file" >&2; return 1; }
   case "$file" in
     *.md)            prefix='<!-- '; suffix=' -->'; strip_re='^<!-- ryeos:signed:'; after_shebang=false ;;
-    *.sh)            prefix='# '; suffix=''; strip_re='^# ryeos:signed:'; after_shebang=true ;;
-    *.yaml|*.yml|*.toml|*.py) prefix='# '; suffix=''; strip_re='^# ryeos:signed:'; after_shebang=false ;;
+    *.sh|*.py)       prefix='# '; suffix=''; strip_re='^# ryeos:signed:'; after_shebang=true ;;
+    *.yaml|*.yml|*.toml) prefix='# '; suffix=''; strip_re='^# ryeos:signed:'; after_shebang=false ;;
     *)               echo "sign-dev: unknown envelope for $file (expected .yaml/.yml/.toml/.py/.sh/.md)" >&2; return 1 ;;
   esac
 

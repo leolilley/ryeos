@@ -76,6 +76,13 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
                 grant_id: grant_id.clone(),
                 name_authority: name_authority(name_policy),
             },
+            // The node's provider declaration is sealed only by node
+            // admission, which this local resolver does not perform.
+            ExecutionEnvironmentPolicy::ProviderEnvironment { .. } => {
+                anyhow::bail!(
+                    "provider environment authority is resolved only by node execution admission"
+                );
+            }
         };
         let child_policy = match child_policy {
             ChildProjectPolicy::Inherit => {

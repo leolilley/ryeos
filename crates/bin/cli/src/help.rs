@@ -916,6 +916,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
             "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
+        #[cfg(feature = "model-provider-setup")]
         "setup" => (
             "ryeos setup",
             "Configure a verified model provider and default model",
@@ -940,6 +941,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos node reset execution-history",
             "Retire the local execution-history epoch",
             "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--json] [--app-root <DIR>]",
+        ),
+        "node reset execution-history-scratch" => (
+            "ryeos node reset execution-history-scratch",
+            "Clear execution-history reset scratch the next reset cannot settle",
+            "ryeos node reset execution-history-scratch [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
         "node reset authorization" => (
             "ryeos node reset authorization",
@@ -1024,6 +1030,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             ("--app-root <DIR>", "Application root"),
         ],
+        #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
         "node host setup" => &[
             (
@@ -1076,6 +1083,20 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_setup_help_matches_selection_and_core_help_survives() {
+        let setup = build_lifecycle_command_help(&["setup".to_owned()]);
+        let expected = if cfg!(feature = "model-provider-setup") {
+            "ryeos setup"
+        } else {
+            "no local help available for 'setup'"
+        };
+        assert_eq!(setup.title.as_deref(), Some(expected));
+        let init = build_lifecycle_command_help(&["init".to_owned()]);
+        assert_eq!(init.title.as_deref(), Some("ryeos init"));
+    }
+
     use ryeos_app::node_config::NodeConfigSnapshot;
     use std::path::PathBuf;
 
@@ -1084,6 +1105,8 @@ mod tests {
         let snapshot = NodeConfigSnapshot {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {

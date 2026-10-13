@@ -1,4 +1,7 @@
 //! Installed OCI lifecycle hook for the hard-contained workflow product.
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const OCI_HOOK_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("oci-hook");
+
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Read as _;
@@ -24,6 +27,10 @@ const SETUP_TRANSACTION_NAME: &str = "setup-transaction.json";
 const MAX_RECORD_BYTES: u64 = 131_072;
 const CONTROLLER_UID: u32 = 10001;
 const CONTROLLER_GID: u32 = 10001;
+const CONTAINED_NODE_RESOURCES: lillux::ProcessScopeResourceLimits = lillux::ProcessScopeResourceLimits {
+    maximum_memory_bytes: 1_073_741_824,
+    maximum_processes: 256,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +41,7 @@ struct LifecycleRecord {
     phase: LifecyclePhase,
     intent: lillux::OciLifecycleIntent,
     lifecycle: Option<lillux::OciLifecycleGeneration>,
+    preparation: Option<lillux::OciPreparationProgress>,
     binding_digest: Option<String>,
 }
 
@@ -80,7 +88,20 @@ fn reconcile_records(first: LifecycleRecord, second: LifecycleRecord) -> Result<
     {
         bail!("container index and app-root lease disagree on immutable authority");
     }
-    Ok(if phase_rank(first.phase) >= phase_rank(second.phase) {
+    if let Some((a, b)) = first.preparation.as_ref().zip(second.preparation.as_ref()) {
+        if !a.supersedes(b) && !b.supersedes(a) {
+            bail!("lifecycle indexes disagree on original preparation evidence");
+        }
+    }
+    let choose_first = if phase_rank(first.phase) == phase_rank(second.phase) {
+        match (&first.preparation, &second.preparation) {
+            (Some(a), Some(b)) => a.supersedes(b),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            _ => true,
+        }
+    } else { phase_rank(first.phase) > phase_rank(second.phase) };
+    Ok(if choose_first {
         first
     } else {
         second
@@ -89,7 +110,7 @@ fn reconcile_records(first: LifecycleRecord, second: LifecycleRecord) -> Result<
 
 impl LifecycleRecord {
     fn validate(&self, expected_name: Option<&str>) -> Result<()> {
-        if self.schema != 1
+        if self.schema != 2
             || self.container_id.is_empty()
             || self.container_id.len() > 128
             || !self
@@ -123,6 +144,9 @@ impl LifecycleRecord {
             _ => bail!("contained OCI lifecycle phase fields disagree"),
         }
         self.intent.validate().map_err(anyhow::Error::msg)?;
+        if let Some(progress) = &self.preparation {
+            progress.require_intent(&self.intent).map_err(anyhow::Error::msg)?;
+        }
         self.intent
             .require_container_id(&self.container_id)
             .map_err(anyhow::Error::msg)?;
@@ -261,7 +285,13 @@ fn write_record(
         existing.require_owner(0)?;
     }
     let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?.into_bytes();
-    directory.atomic_write_pinned_if_same(name.as_ref(), existing.as_ref(), &bytes, 0o600)?;
+    directory.atomic_write_pinned_if_same(
+        name.as_ref(),
+        existing.as_ref(),
+        &bytes,
+        0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
+    )?;
     Ok(())
 }
 
@@ -273,10 +303,10 @@ fn read_setup_transaction(directory: &lillux::PinnedDirectory) -> Result<Option<
     let observation = file.observation()?;
     let transaction: SetupTransaction =
         serde_json::from_slice(&file.read_stable_bounded(&observation, MAX_RECORD_BYTES)?)?;
-    if transaction.schema != 1
+    if transaction.schema != 2
         || !matches!(
             transaction.record.phase,
-            LifecyclePhase::Intent | LifecyclePhase::Released
+            LifecyclePhase::Intent | LifecyclePhase::Prepared | LifecyclePhase::Released
         )
     {
         bail!("contained OCI setup transaction is not canonical");
@@ -299,6 +329,7 @@ fn write_setup_transaction(
         existing.as_ref(),
         &bytes,
         0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
     )?;
     Ok(())
 }
@@ -338,19 +369,20 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         bail!("contained OCI identity has an unreleased preceding lifetime");
     }
     let mut record = LifecycleRecord {
-        schema: 1,
+        schema: 2,
         container_id: state.id.clone(),
         lease_name: lease_name.clone(),
         phase: LifecyclePhase::Intent,
         intent,
         lifecycle: None,
+        preparation: None,
         binding_digest: None,
     };
     // Publish one fixed transaction journal before either secondary index.
     // Thus a crash between index writes blocks every new setup until exact
     // recovery converges the intended volume and container records.
     let mut setup = SetupTransaction {
-        schema: 1,
+        schema: 2,
         open: true,
         record: LifecycleRecord {
             schema: record.schema,
@@ -359,26 +391,44 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
             phase: record.phase,
             intent: record.intent.clone(),
             lifecycle: None,
+            preparation: None,
             binding_digest: None,
         },
     };
     write_setup_transaction(&host_state, &setup)?;
     write_record(&host_state, &container_name, &record)?;
     write_record(&host_state, &lease_name, &record)?;
-    setup.open = false;
-    write_setup_transaction(&host_state, &setup)?;
+    let original_intent = record.intent.clone();
     let account = lillux::ControllerAccount::unix(CONTROLLER_UID, CONTROLLER_GID);
     let (process_scopes, lifecycle) = lillux::ProcessScopeConfiguration::prepare_oci_hook(
         &state,
         &account,
-        &record.intent,
+        &original_intent,
         &process_root,
+        CONTAINED_NODE_RESOURCES,
+        |progress| {
+            progress.require_intent(&original_intent)?;
+            if record.preparation.as_ref().is_some_and(|before| !progress.supersedes(before)) {
+                return Err("OCI preparation observer regressed original evidence".to_owned());
+            }
+            record.preparation = Some(progress.clone());
+            setup.record = record.clone();
+            write_setup_transaction(&host_state, &setup).map_err(|error| error.to_string())?;
+            write_record(&host_state, &container_name, &record).map_err(|error| error.to_string())?;
+            write_record(&host_state, &lease_name, &record).map_err(|error| error.to_string())
+        },
     )
     .map_err(anyhow::Error::msg)?;
     record.phase = LifecyclePhase::Prepared;
     record.lifecycle = Some(lifecycle.clone());
+    // The authoritative journal advances before either secondary index. A
+    // crash at either index write retains the complete original generation.
+    setup.record = record.clone();
+    write_setup_transaction(&host_state, &setup)?;
     write_record(&host_state, &lease_name, &record)?;
     write_record(&host_state, &container_name, &record)?;
+    setup.open = false;
+    write_setup_transaction(&host_state, &setup)?;
     lillux::ProcessScopeConfiguration::enter_oci_mount_namespace(
         &state,
         &record.intent,
@@ -392,6 +442,8 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         &app_root,
         PathBuf::from(APP_ROOT),
         account,
+        // Effective observed limits preserve a stricter OCI runtime ceiling.
+        lifecycle.node_resources(),
         process_scopes,
         lifecycle,
     )?;
@@ -406,6 +458,7 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         existing.as_ref(),
         &bytes,
         0o600,
+        crate::OCI_HOOK_TEMP_PURPOSE,
     )?;
     process_root
         .require_retained_lifetime()
@@ -449,27 +502,36 @@ fn release(container_id: &str) -> Result<()> {
         let volume_index = read_record(&host_state, &transaction.record.lease_name)?;
         for index in [container_index.as_ref(), volume_index.as_ref()] {
             if let Some(index) = index {
-                let allowed = match transaction.record.phase {
-                    LifecyclePhase::Intent => {
-                        index.phase == LifecyclePhase::Released || index == &transaction.record
-                    }
-                    LifecyclePhase::Released => index.intent == transaction.record.intent,
-                    _ => false,
+                // An older Released index belongs to the preceding lifetime;
+                // it may remain only while the new Intent/Prepared journal is
+                // still publishing its indexes. It cannot grant this release.
+                let preceding_released = index.phase == LifecyclePhase::Released
+                    && index.intent != transaction.record.intent
+                    && matches!(transaction.record.phase, LifecyclePhase::Intent | LifecyclePhase::Prepared);
+                let allowed = preceding_released || {
+                    let joined = reconcile_records(transaction.record.clone(), index.clone())?;
+                    joined == transaction.record
                 };
                 if !allowed {
                     bail!("interrupted lifecycle index differs from its authoritative journal");
                 }
             }
         }
-        if transaction.record.phase == LifecyclePhase::Intent {
-            transaction
-                .record
-                .intent
-                .prove_ended_and_retire()
-                .map_err(anyhow::Error::msg)?;
+        if transaction.record.phase != LifecyclePhase::Released {
+            if let Some(lifecycle) = &transaction.record.lifecycle {
+                lifecycle.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
+            } else if let Some(progress) = &transaction.record.preparation {
+                progress.prove_ended_and_retire(&transaction.record.intent).map_err(anyhow::Error::msg)?;
+            } else {
+                transaction.record.intent.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
+            }
         }
         let mut released = transaction.record.clone();
         released.phase = LifecyclePhase::Released;
+        // Persist successful physical retirement before converging indexes;
+        // retry never needs to reconstruct vanished descriptors.
+        transaction.record = released.clone();
+        write_setup_transaction(&host_state, transaction)?;
         write_record(&host_state, &released.lease_name, &released)?;
         write_record(&host_state, &container_name, &released)?;
         transaction.open = false;
@@ -480,7 +542,7 @@ fn release(container_id: &str) -> Result<()> {
         Some(record) => record,
         None => bail!("poststop has no retained lifecycle record"),
     };
-    if container_record.schema != 1 || container_record.container_id != container_id {
+    if container_record.schema != 2 || container_record.container_id != container_id {
         bail!("contained OCI lifecycle record is not active");
     }
     let lease = read_record(&host_state, &container_record.lease_name)?;
@@ -498,15 +560,14 @@ fn release(container_id: &str) -> Result<()> {
         lifecycle
             .prove_ended_and_retire()
             .map_err(anyhow::Error::msg)?;
+    } else if let Some(progress) = &record.preparation {
+        progress.prove_ended_and_retire(&record.intent).map_err(anyhow::Error::msg)?;
     } else {
-        record
-            .intent
-            .prove_ended_and_retire()
-            .map_err(anyhow::Error::msg)?;
+        record.intent.prove_ended_and_retire().map_err(anyhow::Error::msg)?;
     }
     record.phase = LifecyclePhase::Released;
     let mut release_transaction = SetupTransaction {
-        schema: 1,
+        schema: 2,
         open: true,
         record: record.clone(),
     };

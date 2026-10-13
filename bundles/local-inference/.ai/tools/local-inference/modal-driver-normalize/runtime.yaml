@@ -1,0 +1,61 @@
+category: local-inference/modal-driver-normalize
+name: runtime
+version: "1.0.0"
+description: Run the admitted Modal driver normalizer under pinned musl Python
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory, namespace_root, namespace_lib]
+  materialization: read_only
+env_config:
+  env:
+    PATH: ""
+  env_paths:
+    PATH:
+      prepend: []
+      append: []
+config:
+  command: realization:producer-python/lib/ld-musl-x86_64.so.1
+  args:
+    - --library-path
+    - /ryeos/realizations/producer-python/lib
+    - /ryeos/realizations/producer-python/python/bin/python3.14
+    - -P
+    - -S
+    - -B
+    - -X
+    - utf8
+    - -u
+    - -c
+    - literal: |
+        import hashlib, json, os, sys
+        from pathlib import Path
+        if Path(sys.prefix) != Path("/ryeos/realizations/producer-python/python"):
+            raise SystemExit("producer Python prefix escaped its admitted realization")
+        sealed = sys.argv[1]
+        handoff = json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP", "null"))
+        if not isinstance(handoff, dict) or handoff.get("version") != 1:
+            raise SystemExit("missing sealed normalizer source map")
+        entry = handoff.get("entries", {}).get(sealed)
+        if not isinstance(entry, dict) or set(entry) != {"content_hash", "logical_path"}:
+            raise SystemExit("missing sealed normalizer source entry")
+        source = Path(sealed).read_bytes()
+        if hashlib.sha256(source).hexdigest() != entry["content_hash"]:
+            raise SystemExit("normalizer source digest mismatch")
+        logical = Path(entry["logical_path"])
+        sys.argv = [str(logical)]
+        exec(compile(source, str(logical), "exec"), dict(
+            __name__="__main__", __file__=str(logical), __package__=None,
+            __cached__=None, __spec__=None))
+    - "${tool_path}"
+  env:
+    PYTHONHASHSEED: "0"
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONNOUSERSITE: "1"
+    PYTHONSAFEPATH: "1"
+  input_data: "${params_json}"
+  timeout_secs: 300

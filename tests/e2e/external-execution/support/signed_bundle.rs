@@ -135,12 +135,13 @@ external_lifecycle_adapters:
       - exact_terminal_observation
 external_providers:
   - id: codex-hosted
-    protocol: ryeos.external-execution.provider-configuration.v1
+    protocol: ryeos.external-execution.provider-declaration.v2
     targets: [{target}]
     connector: ryeos-synthetic-external-candidate-connector
     connector_process_group: {connector_process_group}
     configuration_adapter: ryeos-synthetic-codex-external-configuration
     configuration_destination: environments.toml
+    qualification_request_binding_protocol: null
 "#,
         "9".repeat(64),
         connector_process_group = if connector_new_group {

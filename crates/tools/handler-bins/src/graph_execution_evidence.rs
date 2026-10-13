@@ -155,10 +155,10 @@ fn project_inner(
     if request.terminal.status != "completed" || !request.terminal.error.is_null() {
         bail!("Graph execution evidence requires one successful terminal");
     }
-    let graph: ryeos_graph_definition::GraphResult =
+    let graph: ryeos_runtime::graph_result::GraphResult =
         serde_json::from_value(request.terminal.result).context("decode Graph terminal result")?;
     if !graph.success
-        || graph.status != ryeos_graph_definition::GraphRunStatus::Completed
+        || graph.status != ryeos_runtime::graph_result::GraphRunStatus::Completed
         || graph.definition_ref != request.effective_program.canonical_ref
         || graph.effective_definition_digest
             != request.effective_program.effective_definition_digest
@@ -719,13 +719,13 @@ mod tests {
             event(9, ryeos_state::event_types::GRAPH_STEP_COMPLETED, json!({})),
             event(10, ryeos_state::event_types::GRAPH_COMPLETED, json!({})),
         ];
-        let graph = ryeos_graph_definition::GraphResult {
+        let graph = ryeos_runtime::graph_result::GraphResult {
             success: true,
             graph_id: "test/verify-dynamic-products".into(),
             definition_ref: effective_program.canonical_ref.clone(),
             effective_definition_digest: effective_program.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.into(),
-            status: ryeos_graph_definition::GraphRunStatus::Completed,
+            status: ryeos_runtime::graph_result::GraphRunStatus::Completed,
             steps: 2,
             state: json!({"qualification_result": result}),
             result: Some(result),
@@ -868,13 +868,13 @@ mod tests {
 
     #[test]
     fn project_refuses_a_terminal_without_exact_history() {
-        let graph = ryeos_graph_definition::GraphResult {
+        let graph = ryeos_runtime::graph_result::GraphResult {
             success: true,
             graph_id: "test/verify-dynamic-products".into(),
             definition_ref: "graph:test/verify-dynamic-products".into(),
             effective_definition_digest: "d".repeat(64),
             graph_run_id: "run".into(),
-            status: ryeos_graph_definition::GraphRunStatus::Completed,
+            status: ryeos_runtime::graph_result::GraphRunStatus::Completed,
             steps: 2,
             state: json!({}),
             result: Some(json!({"accepted":true})),

@@ -41,7 +41,7 @@ async fn live_execute_service_node_status_over_tcp() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_run_service_node_status() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:node/status", None)
+    let (out, _node) = run_service_standalone_fresh("service:node/status", None)
         .await
         .expect("run-service");
     assert!(
@@ -90,12 +90,16 @@ async fn cli_initialized_but_stopped_suggests_start() {
     // fails before lifecycle preflight can report the stopped node.
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Standard,
+    )
+    .expect("populate Standard-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core");
-    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
-        .expect("register standard");
+    common::fast_fixture::register_standard_composition(&state_path, &fixture)
+        .expect("register Standard composition");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
     let ryeos = ryeos_binary();
@@ -141,7 +145,7 @@ async fn stopped_node_service_errors_when_daemon_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_only_service_errors_via_run_service() {
-    let (out, _sd, _us) = run_service_standalone_fresh(
+    let (out, _node) = run_service_standalone_fresh(
         "service:commands/submit",
         Some(r#"{"thread_id":"T-test","command_type":"noop","params":{}}"#),
     )
@@ -442,14 +446,18 @@ async fn uds_namespace_rejects_service_methods() {
 async fn state_lock_prevents_concurrent_daemons() {
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Core,
+    )
+    .expect("populate Core-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core bundle");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&state_path),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&state_path),
     )
     .expect("hold first daemon state lock");
 
@@ -606,7 +614,7 @@ response:
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
-                err_msg.contains("legacy structural field 'section'"),
+                err_msg.contains("declares path-owned structural field 'section'"),
                 "error should mention legacy section rejection, got: {err_msg}"
             );
         }

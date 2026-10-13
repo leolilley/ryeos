@@ -25,17 +25,22 @@ use crate::thread_lifecycle::ResolvedExecutionRequest;
 /// was checked against that testimony; this helper does not resolve products
 /// or current qualification heads again. Root admission remains the verified
 /// pre-augmentation D0/request authority.
+///
+/// Plan preparation resolves the executor chain and protocol through the
+/// Engine and may start handler processes, so it runs with no CAS guard. Only
+/// the final identity projection, which reads the exact realization-member
+/// manifest from CAS and consults the static kind registry, runs in its own
+/// short guarded segment.
 pub(super) fn reconstruct_current_direct_artifact_identity(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     context: &HandlerContext,
     request_engine: &Arc<ryeos_engine::engine::Engine>,
     resolved: &ResolvedExecutionRequest,
     finalized_program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
     logical_project_root: Option<&std::path::Path>,
 ) -> anyhow::Result<AdmittedLaunchArtifactIdentity> {
-    authority.ensure_guard(guard)?;
+    super::require_unguarded_resolution("current direct verifier artifact reconstruction")?;
     // The verifier runs on this node, but its owner can be an authenticated
     // remote operator. Use the same admitted-owner boundary as qualification
     // publication; transport locality must not replace principal/site proof.
@@ -120,17 +125,19 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
         // again or require this consumer to have its execution capabilities.
         // The consuming projection returns identity only; actual execution
         // keeps its enforced-isolation binding and descriptor admission.
-        let artifact = prepared.into_current_artifact_identity_guarded(
-            authority,
-            guard,
-            request_engine,
-            finalized_resolution,
-            &state.node_config.external_execution,
-            state.isolation.verified_command_file_bytes(),
-            logical_project_root,
-            resolved,
-            protocol,
-        )?;
+        let artifact = super::with_state_guard(authority, |guard| {
+            prepared.into_current_artifact_identity_guarded(
+                authority,
+                guard,
+                request_engine,
+                finalized_resolution,
+                &state.node_config.external_execution,
+                state.isolation.verified_command_file_bytes(),
+                logical_project_root,
+                resolved,
+                protocol,
+            )
+        })?;
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executable_identity,
             ..
@@ -143,7 +150,6 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
                 "independent product qualification requires exact verifier executable provenance"
             );
         }
-        authority.ensure_guard(guard)?;
         Ok(artifact)
     })
 }

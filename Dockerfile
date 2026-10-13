@@ -75,6 +75,7 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 # Bundles with rebuilt CAS, baked into /opt (read-only template).
 COPY --from=builder /build/bundles/.ai       /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 COPY --from=builder /build/bundles/web       /opt/ryeos/web

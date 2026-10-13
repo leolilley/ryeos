@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-22T11:55:38Z:6678284ca0e4ceab8bf5332c1aca9a000821747fd4884a7428fa9a9abefffcd2:BcfxoXVMsn3YCLCeveFeSMqeZOfyEQZPyYMnRRZm2x2u6BSSvoC2TXTDWHzHgLqK+eBRaw78DXCFv3uDCbRWDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T07:01:53Z:934def0065c52d6cfd58c753fb8534ff37678f87aa775d157a28229feb97592e:iDiRITyIBGFnggCXvhrFvJIW4V6yG5urkBYbbsCzzfFGf2K15WfStyEZOMuvGkn6T0AUONLTToPflkB4sy7jAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained exact Codex guest executable product
@@ -28,6 +28,28 @@ build_products:
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
+    # Qualification roots must be able to inspect an unqualified subject.
+    # Keep this distinct from the ordinary Worker's evidence-gated edge.
+    - name: runtime_to_qualification_verifier
+      producer:
+        canonical_ref: graph:codex/guest-runtime-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: tool:codex/qualification/consumer-runtime-verifier
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 3
+          maximum_depth: 3
+          maximum_file_bytes: 268435456
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
     - name: runtime_to_external_authoring_worker
       producer:
         canonical_ref: graph:codex/guest-runtime-production

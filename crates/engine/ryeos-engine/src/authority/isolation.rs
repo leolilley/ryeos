@@ -40,9 +40,9 @@ pub use authority::{
     IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
     IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
     IsolationTargetChannelAuthority, IsolationVerifiedCode,
-    IsolationWritableRuntimeViewMountAuthority,
+    IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
-pub use backend::ResolvedIsolationBackend;
+pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
 pub use inspection::{
     IsolationBackendInspection, IsolationBackendStatus, IsolationInspection,
     ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
@@ -90,6 +90,119 @@ struct CompiledIsolationLaunch {
     expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
     expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
     loopback_transfer: Option<CompiledLoopbackTransfer>,
+    original_command_binding: Option<CompiledOriginalCommandBinding>,
+}
+
+/// Custody produced only by the actual original held target compiler.
+/// No selected GPU role, funding, applied observation or release authority.
+pub(crate) struct CompiledOriginalCommandBinding {
+    command: IsolationAdmittedCommand,
+    realization_tree: Option<lillux::InheritedDescriptorAuthority>,
+    target: lillux::LinuxSandboxAppliedLaunchCommitments,
+    mounts: lillux::LinuxSandboxMountPreparationCommitments,
+    backend: Arc<VerifiedIsolationBackendCapture>,
+    original_deadline: lillux::time::MonotonicDeadline,
+}
+
+impl CompiledOriginalCommandBinding {
+    pub(crate) fn require_same_compilation(
+        &self,
+        target: &lillux::LinuxSandboxAppliedLaunchCommitments,
+        mounts: &lillux::LinuxSandboxMountPreparationCommitments,
+        backend: &Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if self.target != *target || self.mounts != *mounts || !Arc::ptr_eq(&self.backend, backend) {
+            return Err(refused(
+                "original command custody differs from its compiler return".into(),
+            ));
+        }
+        if self.original_deadline.has_elapsed() {
+            return Err(refused(
+                "original command custody expired before process contact".into(),
+            ));
+        }
+        let command = match &self.command {
+            IsolationAdmittedCommand::DescriptorBound(command) => {
+                if self.realization_tree.is_some() {
+                    return Err(refused("standalone command custody carries a foreign tree".into()));
+                }
+                command
+            }
+            IsolationAdmittedCommand::RealizationMember(command) => {
+                let tree = self.realization_tree.as_ref().ok_or_else(|| {
+                    refused("original member command custody lost its actual tree".into())
+                })?;
+                if tree.directory_identity().map_err(|error| {
+                    refused(format!("identify retained original command tree: {error}"))
+                })? != command.realization_root() {
+                    return Err(refused("original member command custody changed tree".into()));
+                }
+                command.command()
+            }
+        };
+        validate_descriptor_bound_command(command)
+    }
+}
+
+// Called downstream of target preparation with the exact selected mount
+// handle. A source identity or public descriptor-bound DTO alone is insufficient.
+fn retain_original_prepared_command(
+    authority: Option<IsolationCommandAuthorityRef<'_>>,
+    prepared_target: &lillux::InheritedDescriptorAuthority,
+) -> Result<IsolationAdmittedCommand, EngineError> {
+    let (retained, command) = match authority {
+        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
+            (
+                IsolationAdmittedCommand::DescriptorBound(command.clone()),
+                command,
+            )
+        }
+        Some(IsolationCommandAuthorityRef::RealizationMember(member)) => {
+            (
+                IsolationAdmittedCommand::RealizationMember(member.clone()),
+                member.command(),
+            )
+        }
+        _ => {
+            return Err(refused(
+                "original held compiler requires an admitted descriptor-backed command".into(),
+            ));
+        }
+    };
+    validate_descriptor_bound_command(command)?;
+    if !command
+        .executable()
+        .same_file_identity(prepared_target)
+        .map_err(|error| refused(format!("compare original prepared executable: {error}")))?
+        || descriptor_file_identity(prepared_target)? != command.file_identity()
+    {
+        return Err(refused(
+            "original command descriptor differs from prepared target".into(),
+        ));
+    }
+    Ok(retained)
+}
+
+fn retain_original_prepared_tree(
+    command: &IsolationAdmittedCommand,
+    mounts: &[IsolationReadOnlyMountAuthority],
+) -> Result<Option<lillux::InheritedDescriptorAuthority>, EngineError> {
+    let IsolationAdmittedCommand::RealizationMember(member) = command else {
+        return Ok(None);
+    };
+    let mount = mounts.iter().find(|mount| {
+        matches!(
+            mount.scope(),
+            IsolationReadOnlyMountScope::ProjectRealization
+                | IsolationReadOnlyMountScope::ExecutionRuntimeRealization
+        ) && mount.destination() == member.realization_destination()
+    }).ok_or_else(|| refused("original command custody lost its prepared tree mount".into()))?;
+    if mount.source().directory_identity().map_err(|error| {
+        refused(format!("identify original prepared command tree: {error}"))
+    })? != member.realization_root() {
+        return Err(refused("original prepared command tree binding changed".into()));
+    }
+    Ok(Some(mount.source().clone()))
 }
 
 struct CompiledLoopbackTransfer {
@@ -231,6 +344,7 @@ pub struct IsolationRuntime {
     /// Exact daemon-lifetime backend capture used by enforced execution.
     /// Disabled snapshots always carry `None`.
     backend_capture: Option<Arc<ResolvedIsolationBackend>>,
+    verified_backend_capture: Option<Arc<VerifiedIsolationBackendCapture>>,
     network_runtime_files: Vec<network_inputs::CapturedNetworkFile>,
     process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
     /// Optional higher-level generation guard retained by standalone
@@ -557,7 +671,7 @@ impl VerifiedArtifactStore {
             }
             None => match self
                 .root
-                .atomic_create_regular(name.as_ref(), content, 0o500)
+                .atomic_create_regular(name.as_ref(), content, 0o500, crate::ENGINE_TEMP_PURPOSE)
                 .map_err(|error| {
                     refused(format!(
                         "verified artifact {} cannot be written: {error}",
@@ -1762,18 +1876,21 @@ impl IsolationRuntime {
     /// Node-owned control budget, distinct from a workload request deadline.
     pub fn process_scope_control_timeout(&self) -> Result<lillux::time::Duration, EngineError> {
         self.ensure_registered_generation_current()?;
-        for capability in [
-            lillux::ProcessScopeCapability::Quiescence,
-            lillux::ProcessScopeCapability::Termination,
-            lillux::ProcessScopeCapability::Recovery,
-        ] {
+        for entry in &self.inspection.requires_capabilities {
+            let lillux::process_control::CapabilityRequirement::Name(name) = entry else {
+                continue;
+            };
+            let Some(capability) = lillux::ProcessScopeCapability::from_capability_name(name)
+            else {
+                continue;
+            };
             if !self
                 .inspection
                 .process_scope_capabilities
                 .contains(&capability)
             {
                 return Err(refused(format!(
-                    "node has not qualified required process-scope capability {capability:?}"
+                    "node policy requires {name}, but the process-scope provider has not qualified it"
                 )));
             }
         }
@@ -1838,6 +1955,31 @@ impl IsolationRuntime {
         let provenance = self.launch_provenance(None);
         self.ensure_registered_generation_current()?;
         Ok(provenance)
+    }
+
+    /// Retain same-backend actual executable capture facts exactly once.
+    /// This is not node admission, a generation witness or native evidence.
+    pub fn retain_verified_backend_capture(
+        mut self,
+        capture: Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<Self, EngineError> {
+        if self.verified_backend_capture.is_some() {
+            return Err(refused(
+                "verified backend captures cannot be replaced".into(),
+            ));
+        }
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("verified backend capture requires this runtime's retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        self.verified_backend_capture = Some(capture);
+        Ok(self)
+    }
+
+    /// Borrow retained capture facts only. Protected consumers must separately
+    /// bind actual node trust/generation and their original selected launch.
+    pub fn verified_backend_capture(&self) -> Option<&Arc<VerifiedIsolationBackendCapture>> {
+        self.verified_backend_capture.as_ref()
     }
 
     pub fn retain_registered_generation(
@@ -2318,6 +2460,7 @@ impl IsolationRuntime {
             None,
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunch {
@@ -2376,6 +2519,7 @@ impl IsolationRuntime {
             scope.as_ref().map(|scope| scope.recovery()),
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
@@ -2383,6 +2527,7 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
         })
     }
 
@@ -2416,6 +2561,7 @@ impl IsolationRuntime {
             scope.as_ref().map(|scope| scope.recovery()),
             Some(devices),
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
@@ -2423,6 +2569,78 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
+        })
+    }
+
+    /// Compile the same held unscoped request with the original owner-supplied
+    /// sealed local window and existing node-selected device descriptors.
+    /// This generic compiler grants no financial/node/device/Runtime release
+    /// authority. The caller must consume its SAME retained original funded
+    /// owner; missing qualified admission remains refusal, never null fallback.
+    pub fn apply_awaiting_attachment_with_original_namespace_occupancy(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        let original_deadline = original_window.original_deadline();
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before compilation".into(),
+            ));
+        }
+        self.ensure_registered_generation_current()?;
+        let capture = self.verified_backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks actual retained backend captures".into())
+        })?;
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks its same retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before selected translation".into(),
+            ));
+        }
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            None,
+            Some(devices),
+            None,
+            Some(original_window),
+        )?;
+        self.ensure_registered_generation_current()?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired during compilation".into(),
+            ));
+        }
+        let binding = applied.original_command_binding.as_ref().ok_or_else(|| {
+            refused("original compiler omitted prepared command custody".into())
+        })?;
+        binding.require_same_compilation(
+            applied.expected_applied_launch.as_ref().ok_or_else(|| {
+                refused("original compiler omitted target commitments".into())
+            })?,
+            applied.expected_mount_preparation.as_ref().ok_or_else(|| {
+                refused("original compiler omitted mount commitments".into())
+            })?,
+            capture,
+        )?;
+        Ok(AppliedIsolationLaunchAwaitingAttachment {
+            request: IsolationRequestAwaitingAttachment::new_with_original_backend_capture(
+                applied.request,
+                Arc::clone(capture),
+            ),
+            provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: applied.original_command_binding,
         })
     }
 
@@ -2458,6 +2676,7 @@ impl IsolationRuntime {
             Some(scope.recovery()),
             None,
             Some(ingress),
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchWithLoopbackIngress {
@@ -2483,12 +2702,29 @@ impl IsolationRuntime {
         process_scope: Option<&lillux::ProcessScopeRecovery>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
         loopback_ingress: Option<&IsolationLoopbackIngress>,
+        original_occupancy: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
         // carriers. Namespace, mount, descriptor, process, and host-path
         // mechanics belong to Lillux; never add a backend-specific branch or
         // an ambient-path fallback here.
+        if context.filesystem_authority_ceiling
+            == IsolationFilesystemAuthorityCeiling::CapturedInputs
+        {
+            return Err(refused(
+                "captured inputs workspace view is not supported by this local isolation compiler"
+                    .into(),
+            ));
+        }
+        if original_occupancy.is_some()
+            && (self.state == IsolationRuntimeState::Disabled
+                || lifecycle != RequestedLaunchLifecycle::AwaitAttachment
+                || process_scope.is_some()
+                || loopback_ingress.is_some())
+        {
+            return Err(refused("original occupancy cannot downgrade held enforced launch, acquire local scope or use an unrelated loopback transfer".into()));
+        }
         validate_workspace_view_context(
             self.state,
             context.project_authority,
@@ -2507,6 +2743,17 @@ impl IsolationRuntime {
         let verified_command_authority = context
             .verified_command
             .map(|authority| authority.authority());
+        if original_occupancy.is_some()
+            && !matches!(
+                verified_command_authority,
+                Some(IsolationCommandAuthorityRef::DescriptorBound(_))
+                    | Some(IsolationCommandAuthorityRef::RealizationMember(_))
+            )
+        {
+            return Err(refused(
+                "original held compiler cannot use a data-only command fallback".into(),
+            ));
+        }
         if request.argv0.is_some() {
             return Err(refused(
                 "caller-supplied subprocess argv[0] is not admitted by isolation policy"
@@ -2799,6 +3046,7 @@ impl IsolationRuntime {
                         rewrite_descriptor_bound_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &destination,
                         )?;
@@ -2806,6 +3054,7 @@ impl IsolationRuntime {
                         rewrite_verified_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &canonical_source,
                             &destination,
@@ -2868,6 +3117,7 @@ impl IsolationRuntime {
                 expected_applied_launch: None,
                 expected_mount_preparation: None,
                 loopback_transfer: None,
+                original_command_binding: None,
             });
         }
         if !request.inherited_fds.is_empty() {
@@ -3485,6 +3735,7 @@ impl IsolationRuntime {
                 rewrite_descriptor_bound_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.artifact.destination,
                 )?;
@@ -3492,6 +3743,7 @@ impl IsolationRuntime {
                 rewrite_verified_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.canonical_source,
                     &prepared.artifact.destination,
@@ -3764,11 +4016,25 @@ impl IsolationRuntime {
         // pinned-workspace mode, leaving live or absent bytes where identity
         // claims the realization.
         let mut external_destinations = Vec::with_capacity(context.external_read_only_mounts.len());
+        IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(
+            context.external_read_only_mounts,
+        )
+        .map_err(|error| refused(error.to_string()))?;
         for external in context.external_read_only_mounts {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
             match external.scope() {
-                IsolationReadOnlyMountScope::RuntimeConfiguration => {
+                IsolationReadOnlyMountScope::RuntimeConfiguration
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_) => {
+                    if let IsolationReadOnlyMountScope::OriginalProductManifest(role) =
+                        external.scope()
+                    {
+                        if destination != role.destination() {
+                            return Err(refused(
+                                "original product manifest has a non-role destination".into(),
+                            ));
+                        }
+                    }
                     ryeos_state::objects::validate_session_runtime_configuration_destination(
                         destination.to_str().ok_or_else(|| {
                             refused("runtime configuration destination is not UTF-8".into())
@@ -4145,7 +4411,17 @@ impl IsolationRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let (supervised_status, status_writer, status_fd, adapter_lifecycle) = match lifecycle {
+        // Borrow the existing original handoff before moving its exact roles.
+        let original_occupancy_deadline = original_occupancy
+            .as_ref()
+            .map(lillux::time::OriginalNamespaceOccupancyHandoff::original_deadline);
+        let (
+            supervised_status,
+            status_writer,
+            status_fd,
+            adapter_lifecycle,
+            native_terminal_writer,
+        ) = match lifecycle {
             RequestedLaunchLifecycle::Run => {
                 let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
                     refused(format!(
@@ -4160,10 +4436,11 @@ impl IsolationRuntime {
                     status.writer,
                     status_fd,
                     AdapterLaunchLifecycle::Run,
+                    None,
                 )
             }
             RequestedLaunchLifecycle::AwaitAttachment => {
-                let status = lillux::supervised_launcher_attachment_status_pipe().map_err(
+                let mut status = lillux::supervised_launcher_attachment_status_pipe().map_err(
                     |reason| {
                         refused(format!(
                             "supervised launcher attachment boundary cannot be initialized: {reason}"
@@ -4173,6 +4450,32 @@ impl IsolationRuntime {
                 let status_fd = status.writer_descriptor().map_err(|reason| {
                     refused(format!("invalid supervised status descriptor: {reason}"))
                 })?;
+                let native_terminal_writer =
+                    if let Some(original) = original_occupancy_deadline {
+                        status
+                            .reader
+                            .require_applied_launch_receipt(
+                                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+                            )
+                            .map_err(|reason| {
+                                refused(format!("require original applied launch: {reason}"))
+                            })?;
+                        status
+                            .reader
+                            .require_mount_preparation_receipt()
+                            .map_err(|reason| {
+                                refused(format!("require original held mount: {reason}"))
+                            })?;
+                        Some(status.prepare_native_settlement_channel(original).map_err(
+                            |reason| {
+                                refused(format!(
+                                    "prepare original native terminal channel: {reason}"
+                                ))
+                            },
+                        )?)
+                    } else {
+                        None
+                    };
                 let release_reader = status.attachment_release_reader;
                 let release_fd = inherited_fd(&release_reader)?;
                 inherited_fds.push(release_reader);
@@ -4187,6 +4490,7 @@ impl IsolationRuntime {
                         release_fd,
                         release_keepalive_fd,
                     },
+                    native_terminal_writer,
                 )
             }
         };
@@ -4594,7 +4898,26 @@ impl IsolationRuntime {
             }
         }
         let argv0 = command_argv0.unwrap_or_else(|| command_path.to_string_lossy().into_owned());
+        let target_limits = limits
+            .filter(|limits| {
+                limits.max_open_files.is_some()
+                    || limits.max_address_space_bytes.is_some()
+                    || limits.max_cpu_seconds.is_some()
+                    || limits.max_processes.is_some()
+                    || limits.deny_process_creation
+            })
+            .map(|limits| ryeos_isolation_protocol::IsolationTargetLimits {
+                max_open_files: match (self.inspection.limits.open_files, limits.max_open_files) {
+                    (Some(policy), Some(requested)) => Some(policy.min(requested)),
+                    (_, requested) => requested,
+                },
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            });
         let plan = IsolationPlan {
+            target_limits,
             target: IsolationTarget {
                 executable: target_authority,
                 argv0,
@@ -4650,16 +4973,11 @@ impl IsolationRuntime {
         let required_capabilities = plan
             .validate(&authorities)
             .map_err(|error| refused(format!("invalid compiled isolation plan: {error}")))?;
-        if !required_capabilities.is_subset(&backend.effective_capabilities) {
-            let missing = required_capabilities
-                .difference(&backend.effective_capabilities)
-                .map(|capability| format!("{capability:?}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(refused(format!(
-                "selected isolation adapter is missing required capabilities: {missing}"
-            )));
-        }
+        require_compiled_launch_capabilities(
+            required_capabilities,
+            backend,
+            original_occupancy.is_some(),
+        )?;
         let plan_digest = redacted_plan_digest(&plan)?;
         let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
         let expected_mount_preparation =
@@ -4676,6 +4994,18 @@ impl IsolationRuntime {
         } else {
             (None, None)
         };
+        let original_occupancy_handles = original_occupancy.map(|window| window.into_authorities());
+        let original_namespace_occupancy = original_occupancy_handles
+            .as_ref()
+            .map(|(window, clock)| {
+                Ok::<_, EngineError>(
+                    ryeos_isolation_protocol::OriginalNamespaceOccupancyDescriptorRoles {
+                        window_fd: inherited_fd(window)?,
+                        clock_namespace_fd: inherited_fd(clock)?,
+                    },
+                )
+            })
+            .transpose()?;
         let launch_request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan,
@@ -4688,11 +5018,60 @@ impl IsolationRuntime {
                 .map(|child| child.inherited_descriptor())
                 .transpose()
                 .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
+            original_namespace_occupancy,
+            native_terminal_fd: native_terminal_writer
+                .as_ref()
+                .map(inherited_fd)
+                .transpose()?,
             lifecycle: adapter_lifecycle,
         };
         launch_request
             .validate()
             .map_err(|error| refused(format!("invalid isolation launch request: {error}")))?;
+        // Only now have descriptor/member preparation, target mount selection,
+        // exact commitments and the complete request validation succeeded.
+        let original_command_binding = if let Some(original_deadline) = original_occupancy_deadline {
+            let target_role = launch_request
+                .authorities
+                .iter()
+                .find(|authority| authority.id == launch_request.plan.target.executable)
+                .ok_or_else(|| refused("original compiled target authority missing".into()))?;
+            if target_role.purpose != IsolationAuthorityPurpose::Executable {
+                return Err(refused(
+                    "original compiled target is not executable authority".into(),
+                ));
+            }
+            let prepared_target = authority_handles
+                .iter()
+                .find(|handle| handle.inherited_descriptor().ok() == Some(target_role.inherited_fd))
+                .ok_or_else(|| {
+                    refused("original compiled target descriptor owner missing".into())
+                })?;
+            let command =
+                retain_original_prepared_command(verified_command_authority, prepared_target)?;
+            let realization_tree =
+                retain_original_prepared_tree(&command, context.external_read_only_mounts)?;
+            let backend_capture = self
+                .verified_backend_capture
+                .as_ref()
+                .ok_or_else(|| refused("original compiled command lacks captured backend".into()))?;
+            let binding = CompiledOriginalCommandBinding {
+                command,
+                realization_tree,
+                target: expected_applied_launch.clone(),
+                mounts: expected_mount_preparation.clone(),
+                backend: Arc::clone(backend_capture),
+                original_deadline,
+            };
+            binding.require_same_compilation(
+                &expected_applied_launch,
+                &expected_mount_preparation,
+                backend_capture,
+            )?;
+            Some(binding)
+        } else {
+            None
+        };
         let request_bytes = serde_json::to_vec(&launch_request)
             .map_err(|error| refused(format!("serialize isolation request: {error}")))?;
         if request_bytes.len() > ryeos_isolation_protocol::MAX_REQUEST_BYTES {
@@ -4707,6 +5086,10 @@ impl IsolationRuntime {
         if let Some(child) = transfer_child.as_ref() {
             child.retain_for_child(&mut inherited_fds);
         }
+        if let Some((window, clock)) = original_occupancy_handles {
+            inherited_fds.push(window);
+            inherited_fds.push(clock);
+        }
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
         // The exact signed adapter is both the initial executable and the
@@ -4715,6 +5098,19 @@ impl IsolationRuntime {
         // range, and closes this original at the launcher exec boundary.
         inherited_fds.push(backend.adapter_handle.clone());
         inherited_fds.push(request_handle);
+        if let Some(writer) = native_terminal_writer {
+            let original = original_occupancy_deadline
+                .ok_or_else(|| refused("native terminal writer lost original handoff".into()))?;
+            // ALL actual inherited handles, including the newly sealed request.
+            // Adapter checks its actual stdio independently before role closure.
+            let companions = inherited_fds.iter().collect::<Vec<_>>();
+            writer
+                .require_distinct_nonblocking_pipe_writer(&companions, original)
+                .map_err(|reason| {
+                    refused(format!("validate original terminal writer: {reason}"))
+                })?;
+            inherited_fds.push(writer);
+        }
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
         let effective_open_files = match (self.inspection.limits.open_files, requested_open_files) {
@@ -4744,9 +5140,9 @@ impl IsolationRuntime {
                 .and_then(|limits| limits.max_address_space_bytes),
             max_cpu_seconds: limits.as_ref().and_then(|limits| limits.max_cpu_seconds),
             max_processes: limits.as_ref().and_then(|limits| limits.max_processes),
-            deny_process_creation: limits
-                .as_ref()
-                .is_some_and(|limits| limits.deny_process_creation),
+            // The sealed target carrier has already passed capability admission.
+            // Trusted adapter setup still needs to fork the final target.
+            deny_process_creation: false,
         });
 
         Ok(CompiledIsolationLaunch {
@@ -4772,6 +5168,7 @@ impl IsolationRuntime {
                 receiver,
                 request: launch_request,
             }),
+            original_command_binding,
         })
     }
 
@@ -4938,6 +5335,7 @@ impl IsolationRuntime {
             };
         let process_scope_readiness = ProcessScopeReadiness::classify(
             policy.process_scopes.clone(),
+            policy.required_process_scope_capabilities(),
             policy.trusted_process_group_sessions,
             process_scope_authority_digest,
             process_scope_capabilities.clone(),
@@ -4949,6 +5347,8 @@ impl IsolationRuntime {
                 mode: policy.mode,
                 digest,
                 process_scopes: policy.process_scopes,
+                requires_capabilities: policy.requires_capabilities,
+                enclosure_inits: policy.enclosure_inits,
                 process_scope_capabilities,
                 process_scope_readiness,
                 backend: IsolationBackendInspection {
@@ -4979,6 +5379,7 @@ impl IsolationRuntime {
             daemon_socket,
             verified_artifacts,
             backend_capture: captured_backend,
+            verified_backend_capture: None,
             network_runtime_files,
             process_scope_provider,
             _generation_lifeline: None,
@@ -5133,6 +5534,7 @@ impl IsolationRuntime {
             IsolationReadOnlyMountScope::StateOverlay
                 | IsolationReadOnlyMountScope::RuntimeConfiguration
                 | IsolationReadOnlyMountScope::RuntimeEndpoint
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_)
         ) {
             return Err(refused(format!(
                 "verified code {} is covered by an ineligible configuration mount",
@@ -5512,6 +5914,29 @@ fn descriptor_file_identity(
     })
 }
 
+// The compiler admits the plan before forming AdapterLaunchRequest. Original
+// reporter admission must therefore happen here as well as request.validate.
+fn require_compiled_launch_capabilities(
+    mut required: BTreeSet<IsolationCapability>,
+    backend: &ResolvedIsolationBackend,
+    original_occupancy: bool,
+) -> Result<(), EngineError> {
+    if original_occupancy {
+        required.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
+    }
+    if !required.is_subset(&backend.effective_capabilities) {
+        let missing = required
+            .difference(&backend.effective_capabilities)
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(refused(format!(
+            "selected isolation adapter is missing required capabilities: {missing}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_descriptor_bound_command(
     command: &IsolationDescriptorBoundCommand,
 ) -> Result<(), EngineError> {
@@ -5572,8 +5997,107 @@ fn validate_descriptor_bound_command(
     }
 }
 
+/// The floor is canonical data: well-formed names, each named once across
+/// the whole floor. An `any_of` set lists at least two names in sorted
+/// order, and the entries are sorted by their first name. A set never names
+/// a per-scope capability, whose requirement decides how scopes are
+/// configured and so must be unconditional. A weaker residency basis, which
+/// a stronger basis does not meet, is named only in a set beside
+/// `accounting`. A per-scope name needs a
+/// configured scope provider, and a configured provider's scopes cannot run
+/// without termination and recovery, so the floor must name both whenever
+/// scopes are required. Trusted enclosure inits are sorted, unique
+/// executable file names.
+fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError> {
+    use lillux::process_control::CapabilityRequirement;
+    let entries = &policy.requires_capabilities;
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        let names = entry.names();
+        if let CapabilityRequirement::AnyOf(_) = entry {
+            if names.len() < 2 || names.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities entry {} must list at least two names, \
+                     sorted and unique",
+                    entry.label()
+                )));
+            }
+        }
+        if let Some(reason) = lillux::process_control::floor_entry_refusal(entry) {
+            return Err(refused(format!("isolation requires_capabilities {reason}")));
+        }
+        for name in names {
+            let well_formed = !name.is_empty()
+                && name.len() <= 128
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-' | b':' | b'.')
+                });
+            if !well_formed {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names an invalid capability {name:?}"
+                )));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names {name} more than once"
+                )));
+            }
+        }
+    }
+    if entries.windows(2).any(|pair| pair[0].names()[0] >= pair[1].names()[0]) {
+        return Err(refused(
+            "isolation requires_capabilities must be sorted and unique".to_owned(),
+        ));
+    }
+    let inits = &policy.enclosure_inits;
+    if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(refused("isolation enclosure_inits must be sorted and unique".to_owned()));
+    }
+    for init in inits {
+        let file_name = !init.is_empty()
+            && init.len() <= 255
+            && init != "."
+            && init != ".."
+            && init.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/');
+        if !file_name {
+            return Err(refused(format!(
+                "isolation enclosure_inits names {init:?}, which is not an executable file name"
+            )));
+        }
+    }
+    let scoped = policy.required_process_scope_capabilities();
+    match &policy.process_scopes {
+        IsolationProcessScopePolicy::Unconfigured {} if !scoped.is_empty() => Err(refused(format!(
+            "isolation requires per-scope capabilities {} but process scopes are unconfigured",
+            scoped
+                .iter()
+                .map(|capability| capability.capability_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        IsolationProcessScopePolicy::Required { .. } => {
+            for capability in [
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ] {
+                if !scoped.contains(&capability) {
+                    return Err(refused(format!(
+                        "required process scopes need {} in isolation requires_capabilities",
+                        capability.capability_name()
+                    )));
+                }
+            }
+            Ok(())
+        }
+        IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
+    }
+}
+
 fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError> {
     network_inputs::validate(&policy.network)?;
+    validate_capability_floor(policy)?;
     policy
         .filesystem
         .live_project
@@ -5739,6 +6263,7 @@ fn push_verified_code_handoff(
 fn rewrite_descriptor_bound_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     destination: &Path,
 ) -> Result<(), EngineError> {
@@ -5754,25 +6279,56 @@ fn rewrite_descriptor_bound_code_references(
             destination.display()
         ))
     })?;
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         }
         if value.contains(source) {
             return Err(refused(format!(
-                "descriptor-bound code reference cannot be rewritten safely: {value:?}"
+                "descriptor-bound code reference in {site} cannot be rewritten safely"
             )));
         }
     }
     Ok(())
 }
 
+/// One rewritable argument or environment value, labelled by position or name
+/// only. Refusals never echo the value itself.
+enum RewriteSite<'a> {
+    Argument(usize),
+    Environment(&'a str),
+}
+
+impl std::fmt::Display for RewriteSite<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Argument(index) => write!(formatter, "argument {index}"),
+            Self::Environment(name) => write!(formatter, "environment variable {name}"),
+        }
+    }
+}
+
+/// Arguments plus environment values that are subject to code-path rewriting.
+/// Verbatim names are delivered exactly as admitted and are never inspected.
+fn rewrite_sites<'a>(
+    args: &'a mut [String],
+    envs: &'a mut [(String, String)],
+    verbatim_env_names: &'a [String],
+) -> impl Iterator<Item = (RewriteSite<'a>, &'a mut String)> {
+    args.iter_mut()
+        .enumerate()
+        .map(|(index, value)| (RewriteSite::Argument(index), value))
+        .chain(
+            envs.iter_mut()
+                .filter(move |(name, _)| !verbatim_env_names.contains(name))
+                .map(|(name, value)| (RewriteSite::Environment(name.as_str()), value)),
+        )
+}
+
 fn rewrite_verified_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     canonical_source: &Path,
     destination: &Path,
@@ -5793,10 +6349,7 @@ fn rewrite_verified_code_references(
         && canonical_source
             .to_str()
             .is_some_and(|canonical| canonical == destination);
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         } else {
@@ -5841,7 +6394,7 @@ fn rewrite_verified_code_references(
             || contains_canonical_path_reference(value, canonical_source)
         {
             return Err(refused(format!(
-                "verified code reference in argument or environment value cannot be rewritten safely: {value:?}"
+                "verified code reference in {site} cannot be rewritten safely"
             )));
         }
     }
@@ -6975,6 +7528,23 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn compiled_original_launch_requires_reporter_before_request_validation() {
+        let mut backend = resolved_backend();
+        let required = BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]);
+        require_compiled_launch_capabilities(required.clone(), &backend, false).unwrap();
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        let reporter = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        backend.declaration.capabilities.insert(reporter);
+        // A signed declaration without inspected effective support is insufficient.
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        backend.effective_capabilities.insert(reporter);
+        require_compiled_launch_capabilities(required, &backend, true).unwrap();
+        // Metadata admission only; these sealed empty fixture handles are not
+        // a qualified native publisher or a protected App acceptance fixture.
+    }
+
     fn write_policy(app_root: &Path, policy: &IsolationPolicy) {
         let policy_path = app_root
             .join(crate::AI_DIR)
@@ -7295,6 +7865,133 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn original_prepared_command_refuses_missing_and_data_only_owners() {
+        let target = lillux::sealed_memfd(c"unselected-target", b"data").unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: "/admitted/owner".into(),
+            content_hash: lillux::sha256_hex(b"data"),
+        };
+        assert!(retain_original_prepared_command(None, &target).is_err());
+        assert!(retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::Revalidate(&identity)),
+            &target,
+        ).is_err());
+        assert!(target.file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn original_retention_control_command() -> IsolationDescriptorBoundCommand {
+        let bytes = b"original command retention component control";
+        let executable = lillux::sealed_executable_memfd(c"original-command-control", bytes).unwrap();
+        let file_identity = descriptor_file_identity(&executable).unwrap();
+        IsolationDescriptorBoundCommand::new(
+            IsolationVerifiedCode {
+                source_path: "/admitted/owner".into(),
+                content_hash: lillux::sha256_hex(bytes),
+            },
+            executable,
+            file_identity,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_refuses_different_inode_with_identical_bytes() {
+        let command = original_retention_control_command();
+        let replacement = original_retention_control_command();
+        assert_eq!(command.identity(), replacement.identity());
+        assert!(retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+            replacement.executable(),
+        ).is_err());
+        assert!(command.executable().file_identity().is_ok());
+        assert!(replacement.executable().file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_retains_exact_owner_after_source_drop() {
+        let command = original_retention_control_command();
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+            command.executable(),
+        ).unwrap();
+        assert!(retained.same_binding_as(&command.clone().into()).unwrap());
+        let before = command.file_identity();
+        drop(command);
+        let IsolationAdmittedCommand::DescriptorBound(command) = retained else {
+            panic!("retention changed command variant");
+        };
+        assert_eq!(descriptor_file_identity(command.executable()).unwrap(), before);
+        validate_descriptor_bound_command(&command).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_member_retains_root_and_destination_distinctions() {
+        let command = original_retention_control_command();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let root_a = lillux::PinnedDirectory::open(root_a.path()).unwrap().unwrap();
+        let root_b = lillux::PinnedDirectory::open(root_b.path()).unwrap().unwrap();
+        let member = IsolationRealizationMemberCommand::new(
+            command.clone(), root_a.identity().unwrap(), "/runtime/selected".into(),
+        );
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::RealizationMember(&member)),
+            command.executable(),
+        ).unwrap();
+        assert!(retained.same_binding_as(&member.clone().into()).unwrap());
+        let other_root = IsolationRealizationMemberCommand::new(
+            command.clone(), root_b.identity().unwrap(), "/runtime/selected".into(),
+        );
+        let other_destination = IsolationRealizationMemberCommand::new(
+            command, root_a.identity().unwrap(), "/runtime/substituted".into(),
+        );
+        assert!(!retained.same_binding_as(&other_root.into()).unwrap());
+        assert!(!retained.same_binding_as(&other_destination.into()).unwrap());
+        drop(member);
+        let IsolationAdmittedCommand::RealizationMember(member) = retained else {
+            panic!("retention discarded member tree placement");
+        };
+        validate_descriptor_bound_command(member.command()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_tree_refuses_substitution_and_retains_live_root() {
+        let source = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(source.path()).unwrap().unwrap();
+        let other = lillux::PinnedDirectory::open(foreign.path()).unwrap().unwrap();
+        let member: IsolationAdmittedCommand = IsolationRealizationMemberCommand::new(
+            original_retention_control_command(),
+            root.identity().unwrap(),
+            "/runtime/selected".into(),
+        ).into();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(), "/runtime/selected".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        let replacement = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            foreign.path().into(), "/runtime/selected".into(),
+            other.inherited_descriptor_authority().unwrap(),
+        );
+        let wrong_destination = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(), "/runtime/other".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        assert!(retain_original_prepared_tree(&member, &[]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[replacement]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[wrong_destination]).is_err());
+        let identity = root.identity().unwrap();
+        let retained = retain_original_prepared_tree(&member, &[mount]).unwrap().unwrap();
+        drop(root);
+        assert_eq!(retained.directory_identity().unwrap(), identity);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn admitted_nonexecutable_cas_blob_becomes_a_hash_checked_sealed_command() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -7427,6 +8124,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7513,6 +8211,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7581,6 +8280,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7711,6 +8411,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -8123,6 +8824,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
+                    verbatim_env_names: &[],
                 };
                 let applied = narrowed.apply_with_provenance(request(), context);
                 if !readable_project && !writable_project {
@@ -8263,6 +8965,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
+                verbatim_env_names: &[],
             };
             // These host fixture paths are below /tmp, which is refused by
             // configuration admission before the planner can consider overlap.
@@ -8510,6 +9213,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -8631,6 +9335,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("disabled isolation accepted a descriptor mount"),
@@ -8695,6 +9400,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -8791,6 +9497,7 @@ mod tests {
             target_channels: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
+            verbatim_env_names: &[],
         };
         let applied = runtime.apply_with_provenance(request(), context).unwrap();
         let (request_bytes, _) = applied
@@ -8845,6 +9552,7 @@ mod tests {
                 std::ffi::OsStr::new("config.toml"),
                 b"model = 'fixture'\n",
                 0o600,
+                crate::ENGINE_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -9049,6 +9757,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9127,6 +9836,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9185,6 +9895,7 @@ mod tests {
                 target_channels: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("captured execution accepted ambient node filesystem policy"),
@@ -9241,6 +9952,7 @@ mod tests {
                 target_channels: std::slice::from_ref(&channel),
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("typed target channel accepted competing stdin"),
@@ -9348,6 +10060,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9397,6 +10110,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let request = lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
@@ -9457,6 +10171,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let error = runtime
             .apply_awaiting_attachment(request, context)
@@ -9508,6 +10223,7 @@ mod tests {
             target_channels: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
+            verbatim_env_names: &[],
         };
         runtime
             .apply_with_provenance(request(), context(Some(&unconfined)))
@@ -9587,6 +10303,7 @@ mod tests {
                     target_channels: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9623,9 +10340,15 @@ mod tests {
                     validate_workspace_view_context(state, project, None).is_err(),
                     requires_view
                 );
+                let accepts_view = state == IsolationRuntimeState::Enforced
+                    && matches!(
+                        project,
+                        IsolationProjectAuthority::RuntimeWorkspace
+                            | IsolationProjectAuthority::EphemeralScratch
+                    );
                 assert_eq!(
                     validate_workspace_view_context(state, project, Some(&view)).is_ok(),
-                    requires_view
+                    accepts_view
                 );
             }
         }
@@ -9684,6 +10407,7 @@ mod tests {
     #[test]
     fn launch_plan_digest_redacts_arguments_and_environment_values() {
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".to_string(),
@@ -9726,6 +10450,15 @@ mod tests {
         assert_ne!(target.argv_sha256, changed.argv_sha256);
         assert_ne!(target.environment_sha256, changed.environment_sha256);
 
+        plan.target_limits = Some(ryeos_isolation_protocol::IsolationTargetLimits {
+            max_open_files: None,
+            max_address_space_bytes: None,
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        });
+        assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+        plan.target_limits = None;
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
     }
@@ -9743,6 +10476,7 @@ mod tests {
             purpose: IsolationAuthorityPurpose::Executable,
         };
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: id.clone(),
                 argv0: "tool".into(),
@@ -9792,6 +10526,7 @@ mod tests {
     #[test]
     fn loopback_receipt_requires_exact_held_request_and_one_descriptor() {
         let plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".into(),
@@ -9825,6 +10560,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 11,
             loopback_transfer_fd: Some(12),
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 13,
                 release_keepalive_fd: 14,
@@ -9925,6 +10662,7 @@ mod tests {
             "nested_sandbox": false,
         }))
         .unwrap();
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
         let source = app_root.path().join("isolation.yaml");
         let digest = format!("sha256:{}", "a".repeat(64));
         let prospective = IsolationRuntime::resolve_compiled_policy_for_definition_validation(
@@ -10001,7 +10739,62 @@ mod tests {
             control_timeout_ms: 1_000,
             nested_sandbox: false,
         };
+        // Required scopes cannot run without termination and recovery, so
+        // the declared floor must name both; quiescence stays optional.
+        let error = IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap_err();
+        assert!(error.to_string().contains("need termination:scope"), "{error}");
+        scoped_without_sandbox.requires_capabilities =
+            vec!["recovery:scope".into(), "termination:scope".into()];
         IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
+        let mut unsorted = scoped_without_sandbox.clone();
+        unsorted.requires_capabilities.reverse();
+        assert!(IsolationRuntime::validate_policy(&unsorted).is_err());
+        let mut unconfigured_scope_floor = policy.clone();
+        unconfigured_scope_floor.requires_capabilities = vec!["termination:scope".into()];
+        assert!(IsolationRuntime::validate_policy(&unconfigured_scope_floor).is_err());
+        // A set of alternatives accepts a weaker grade only by naming it.
+        let any_of = |names: &[&str]| {
+            lillux::process_control::CapabilityRequirement::AnyOf(
+                lillux::process_control::AnyOfCapabilities {
+                    any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+                },
+            )
+        };
+        let mut alternatives = policy.clone();
+        alternatives.requires_capabilities =
+            vec![any_of(&["accounting", "residency:swap_absent"]), "time".into()];
+        IsolationRuntime::validate_policy(&alternatives).unwrap();
+        let value = serde_json::to_value(&alternatives).unwrap();
+        assert_eq!(
+            value["requires_capabilities"],
+            serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
+        );
+        assert_eq!(serde_json::from_value::<IsolationPolicy>(value).unwrap(), alternatives);
+        for (floor, refusal) in [
+            (vec![any_of(&["accounting"]), "time".into()], "at least two names"),
+            (vec![any_of(&["residency:swap_absent", "accounting"])], "at least two names"),
+            (vec![any_of(&["accounting", "termination:scope"])], "per-scope capability"),
+            (vec![any_of(&["accounting", "limits:scope"])], "per-scope capability"),
+            (vec!["residency:swap_absent".into()], "stronger residency basis does not meet"),
+            (
+                vec![any_of(&["residency:locked", "residency:swap_absent"])],
+                "stronger residency basis does not meet",
+            ),
+            (vec!["accounting".into(), any_of(&["accounting", "residency:swap_absent"])], "more than once"),
+            (vec!["time".into(), any_of(&["accounting", "residency:swap_absent"])], "sorted and unique"),
+        ] {
+            let mut invalid = policy.clone();
+            invalid.requires_capabilities = floor;
+            let error = IsolationRuntime::validate_policy(&invalid).unwrap_err().to_string();
+            assert!(error.contains(refusal), "{refusal}: {error}");
+        }
+        let mut inits = scoped_without_sandbox.clone();
+        inits.enclosure_inits = vec!["catatonit".to_owned(), "dumb-init".to_owned(), "tini".to_owned()];
+        IsolationRuntime::validate_policy(&inits).unwrap();
+        inits.enclosure_inits.reverse();
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
+        inits.enclosure_inits = vec!["/usr/bin/tini".to_owned()];
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
         assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
         assert!(matches!(
             scoped_without_sandbox.process_scopes,
@@ -10037,6 +10830,7 @@ mod tests {
             "nested authority must be explicit, not defaulted"
         );
         value["process_scopes"]["nested_sandbox"] = true.into();
+        value["requires_capabilities"] = serde_json::json!(["recovery:scope", "termination:scope"]);
         value["process_scopes"]["configuration"] = serde_json::json!({
             "version": 3,
             "backend": {
@@ -10176,6 +10970,7 @@ mod tests {
         rewrite_verified_code_references(
             &mut namespace_preserving,
             &mut namespace_environment,
+            &[],
             logical,
             logical,
             logical,
@@ -10192,6 +10987,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut embedded_noop,
                 &mut no_environment,
+                &[],
                 logical,
                 logical,
                 logical,
@@ -10211,6 +11007,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut arguments,
                 &mut environment,
+                &[],
                 &source,
                 &canonical_source,
                 Path::new("/run/verified/entry.py"),
@@ -10219,6 +11016,62 @@ mod tests {
             .to_string()
             .contains("cannot be rewritten safely")
         );
+    }
+
+    #[test]
+    fn verbatim_secret_values_are_neither_rewritten_nor_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("entry.py");
+        std::fs::write(&source, b"verified\n").unwrap();
+        let canonical_source = std::fs::canonicalize(&source).unwrap();
+        let destination = Path::new("/run/verified/entry.py");
+        let secret = format!("synthetic-secret-{}.backup", source.display());
+        let verbatim = vec!["API_TOKEN".to_string()];
+
+        let mut arguments = Vec::new();
+        let mut environment = vec![("API_TOKEN".to_string(), secret.clone())];
+        rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap();
+        rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            destination,
+        )
+        .unwrap();
+        assert_eq!(environment[0].1, secret);
+
+        let refusal = rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
+        let refusal = rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
     }
 
     #[test]

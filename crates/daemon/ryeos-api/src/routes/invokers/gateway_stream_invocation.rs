@@ -290,8 +290,8 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             })?;
 
         // Capability check: derive the required cap from the item_ref
-        // (e.g. "directive:apps/tv-tracker/ai_chat" →
-        //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+        // (e.g. "directive:apps/example-app/ai_chat" →
+        //  "ryeos.execute.directive.apps/example-app/ai_chat") and check
         // via the unified Authorizer. Supports fine-grained scopes and
         // wildcards.
         {
@@ -581,6 +581,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.launch_mode = req.launch_mode;
         options.target_site_id = req.target_site_id;
         options.validate_only = req.validate_only;
+        options = options.with_application_publication(ctx.publication.clone());
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
@@ -1061,6 +1062,26 @@ mod tests {
         assert!(
             msg.contains("bogus_field"),
             "error should mention the unknown field: {msg}"
+        );
+    }
+
+    #[test]
+    fn source_observation_cannot_enter_streaming_launch() {
+        let body = serde_json::json!({
+            "item_ref": "worker:example/author",
+            "ref_bindings": {},
+            "parameters": {},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            "validate_only": true,
+            "validation_scope": "source_observation"
+        });
+        assert!(
+            ryeos_handler_protocol::from_json_slice_strict::<LaunchRequest>(
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .is_err()
         );
     }
 

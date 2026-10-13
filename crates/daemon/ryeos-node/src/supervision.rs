@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedDirectoryLock};
+use lillux::{PinnedDirectory, PinnedDirectoryLock};
 use serde::{Deserialize, Serialize};
 
 use crate::NodeConfig;
@@ -35,26 +35,6 @@ pub struct HostServiceBinding {
     pub schema_version: u32,
     pub runtime: crate::host_runtime::HostRuntimeBinding,
     pub daemon_executable: PathBuf,
-}
-
-/// Exact predecessor accepted only by the administrator-confirmed host setup
-/// cutover. Runtime discovery never decodes this shape as current authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PredecessorHostServiceBindingV2 {
-    schema_version: u32,
-    app_root: PathBuf,
-    app_root_identity: PinnedDirectoryIdentity,
-    node_fingerprint: String,
-    account: lillux::ControllerAccount,
-    daemon_executable: PathBuf,
-    process_scopes: lillux::ProcessScopeConfiguration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExistingBindingDisposition {
-    Current,
-    ReplacePredecessor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,12 +204,12 @@ pub(crate) fn configure_host_endpoints_while_locked(
     lifecycle: &crate::LifecycleStartLock,
 ) -> Result<NodeConfig> {
     lifecycle.ensure_protects_app_root(app_root)?;
-    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
-        &ryeos_app::state_lock::default_lock_path(app_root),
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
         lillux::time::Duration::from_secs(30),
     )
     .context("endpoint configuration requires a stopped node")?;
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(app_root.to_path_buf()),
         bind,
         uds_path,
@@ -237,7 +217,7 @@ pub(crate) fn configure_host_endpoints_while_locked(
         ..Default::default()
     })
     .context("resolve replacement node endpoints")?;
-    ryeos_app::config::replace_bootstrap_config(&config, &state_lock)?;
+    ryeos_node_runtime::config::replace_bootstrap_config(&config, &state_lock)?;
     Ok(NodeConfig::from_app_config(&config))
 }
 
@@ -248,8 +228,10 @@ pub(crate) fn configure_host_endpoints_while_locked(
 pub fn provision_host_service(
     app_root: &Path,
     account: lillux::ControllerAccount,
+    node_resources: lillux::ProcessScopeResourceLimits,
 ) -> Result<DesiredState> {
     lillux::require_administrator()?;
+    node_resources.validate().map_err(anyhow::Error::msg)?;
     // The administrator boundary receives only the explicit app root. Retain
     // the same two locks as ordinary lifecycle/config mutation so a concurrent
     // start cannot select direct mode immediately before this association is
@@ -263,8 +245,8 @@ pub fn provision_host_service(
     // controller before returning, otherwise this root-only setup would leave
     // the node unable to perform its normal unprivileged lifecycle.
     lifecycle.grant_controller(&account)?;
-    let state_lock = ryeos_app::state_lock::StateLock::acquire_with_timeout(
-        &ryeos_app::state_lock::default_lock_path(app_root),
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
         lillux::time::Duration::from_secs(5),
     )
     .context("host setup requires the selected node to be stopped")?;
@@ -278,7 +260,7 @@ pub fn provision_host_service(
         .open_pinned_regular_descendant(&identity_path, false)?
         .context("host setup requires an initialized node public identity")?;
     let observation = identity_file.observation()?;
-    let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+    let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
         &identity_file.read_stable_bounded(&observation, MAX_HOST_DOCUMENT_BYTES)?,
     )?;
     let node_fingerprint = identity.verified_fingerprint()?;
@@ -311,6 +293,7 @@ pub fn provision_host_service(
             &app_root,
             node_fingerprint,
             account,
+            node_resources,
             process_scopes,
         )?,
         daemon_executable: daemon.path().to_path_buf(),
@@ -330,26 +313,18 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
     directory.require_owner(0)?;
     let expected = lillux::canonical_json(&serde_json::to_value(binding)?)?.into_bytes();
     let existing_description = directory.open_pinned_regular(OsStr::new(DESCRIPTION), false)?;
-    let disposition = match &existing_description {
+    let description_is_current = match &existing_description {
         Some(existing) => {
             existing.require_owner(0)?;
             let current =
                 existing.read_stable_bounded(&existing.observation()?, MAX_HOST_DOCUMENT_BYTES)?;
-            Some(classify_existing_binding(&current, binding)?)
+            require_current_binding(&current, binding, &directory.path().join(DESCRIPTION))?;
+            true
         }
-        None => None,
+        None => false,
     };
 
-    // Validate and preserve predecessor lifecycle intent before replacing its
-    // binding. A malformed/missing control record must not be hidden by a
-    // successful description cutover.
-    let existing_control = directory.open_child_directory(OsStr::new(CONTROL))?;
-    if disposition == Some(ExistingBindingDisposition::ReplacePredecessor)
-        && existing_control.is_none()
-    {
-        bail!("predecessor host association has no lifecycle control state");
-    }
-    let control = match existing_control {
+    let control = match directory.open_child_directory(OsStr::new(CONTROL))? {
         Some(control) => {
             binding.runtime.account.require_directory_owner(&control)?;
             control
@@ -360,13 +335,7 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
             control
         }
     };
-    let existing_desired = control.open_pinned_regular(OsStr::new(DESIRED), false)?;
-    if disposition == Some(ExistingBindingDisposition::ReplacePredecessor)
-        && existing_desired.is_none()
-    {
-        bail!("predecessor host association has no desired-state testimony");
-    }
-    match existing_desired {
+    match control.open_pinned_regular(OsStr::new(DESIRED), false)? {
         Some(existing) => {
             binding.runtime.account.grant_private_file(&existing)?;
             let _: DesiredState = serde_json::from_slice(
@@ -380,6 +349,7 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
                 None,
                 &serde_json::to_vec(&DesiredState::Down)?,
                 0o600,
+                crate::NODE_TEMP_PURPOSE,
             )?;
             let desired = control
                 .open_pinned_regular(OsStr::new(DESIRED), false)?
@@ -388,47 +358,36 @@ fn publish_service_state(directory: &PinnedDirectory, binding: &HostServiceBindi
         }
     }
 
-    match disposition {
-        Some(ExistingBindingDisposition::Current) => {}
-        Some(ExistingBindingDisposition::ReplacePredecessor) => {
-            directory.atomic_write_pinned_if_same(
-                OsStr::new(DESCRIPTION),
-                existing_description.as_ref(),
-                &expected,
-                0o644,
-            )?;
-        }
-        None => directory.atomic_write_pinned_if_same(
+    if !description_is_current {
+        directory.atomic_write_pinned_if_same(
             OsStr::new(DESCRIPTION),
             None,
             &expected,
             0o644,
-        )?,
+            crate::NODE_TEMP_PURPOSE,
+        )?;
     }
     Ok(())
 }
 
-fn classify_existing_binding(
+/// An existing host association is accepted only when it is byte-equal to the
+/// canonical binding this setup would publish. Any other description, of any
+/// schema, is refused and never rewritten.
+fn require_current_binding(
     bytes: &[u8],
     expected: &HostServiceBinding,
-) -> Result<ExistingBindingDisposition> {
+    description_path: &Path,
+) -> Result<()> {
     let canonical_expected = lillux::canonical_json(&serde_json::to_value(expected)?)?;
-    if bytes == canonical_expected.as_bytes() {
-        return Ok(ExistingBindingDisposition::Current);
+    if bytes != canonical_expected.as_bytes() {
+        bail!(
+            "existing host association {} is not the current binding for this node; \
+             remove that host association state directory and re-run \
+             `ryeos node host setup --confirm`",
+            description_path.display()
+        );
     }
-    let predecessor: PredecessorHostServiceBindingV2 = serde_json::from_slice(bytes)
-        .context("existing host association is neither current nor the exact predecessor")?;
-    if predecessor.schema_version != 2
-        || predecessor.app_root != expected.runtime.app_root
-        || predecessor.app_root_identity != expected.runtime.app_root_identity
-        || predecessor.node_fingerprint != expected.runtime.node_fingerprint
-        || predecessor.account != expected.runtime.account
-        || predecessor.daemon_executable != expected.daemon_executable
-        || predecessor.process_scopes != expected.runtime.process_scopes
-    {
-        bail!("predecessor host association does not belong to this exact node binding");
-    }
-    Ok(ExistingBindingDisposition::ReplacePredecessor)
+    Ok(())
 }
 
 fn expected_native_launch(binding: &HostServiceBinding) -> lillux::HostServiceLaunch {
@@ -497,6 +456,7 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
             .process_scopes
             .exec_controller(
                 &service.binding.runtime.account,
+                service.binding.runtime.node_resources,
                 &executable,
                 &["--app-root".to_owned(), root.to_owned()],
                 &service.app_root,
@@ -571,6 +531,7 @@ impl InstalledService {
             existing.as_ref(),
             &serde_json::to_vec(&failure)?,
             0o644,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 
@@ -645,7 +606,7 @@ impl InstalledService {
     /// existing StateLock still protects this exact app root.
     pub fn verify_loaded_node_identity(
         &self,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<()> {
         self.binding.runtime.account.require_current_process()?;
         self.check_binding()?;
@@ -759,6 +720,7 @@ impl InstalledService {
             Some(&current),
             &serde_json::to_vec(&state)?,
             0o600,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 
@@ -794,6 +756,7 @@ impl InstalledService {
             existing.as_ref(),
             &serde_json::to_vec(intent)?,
             0o644,
+            crate::NODE_TEMP_PURPOSE,
         )
     }
 
@@ -1083,6 +1046,17 @@ impl InstalledService {
         self.set_desired(DesiredState::Down)?;
         self.supervisor.request_down()
     }
+
+    /// Self-inhibition by the placed controller as it exits: record the
+    /// service as wanted down and keep the supervisor from restarting it,
+    /// without signalling the exiting controller.
+    pub fn inhibit_restart(&self) -> Result<()> {
+        let _gate = self.gate()?;
+        self.check_binding()?;
+        self.supervisor.check_available()?;
+        self.set_desired(DesiredState::Down)?;
+        self.supervisor.inhibit_restart()
+    }
 }
 
 /// The service entry must check this under the same gate before scope
@@ -1136,17 +1110,17 @@ mod tests {
         let app_root = tmp.path().join("node");
         std::fs::create_dir_all(app_root.join(".ai/node")).unwrap();
         std::fs::create_dir_all(app_root.join(".ai/state")).unwrap();
-        let lock = ryeos_app::state_lock::StateLock::acquire(
-            &ryeos_app::state_lock::default_lock_path(&app_root),
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
         )
         .unwrap();
-        let initial = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        let initial = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
             app_root: Some(app_root.clone()),
             uds_path: Some(tmp.path().join("first.sock")),
             ..Default::default()
         })
         .unwrap();
-        ryeos_app::config::seed_bootstrap_config(&initial, &lock).unwrap();
+        ryeos_node_runtime::config::seed_bootstrap_config(&initial, &lock).unwrap();
         drop(lock);
 
         let lifecycle = crate::LifecycleStartLock::try_acquire(&app_root)
@@ -1242,8 +1216,8 @@ mod tests {
     }
 
     #[test]
-    fn predecessor_flat_host_binding_is_not_reinterpreted() {
-        let predecessor = serde_json::json!({
+    fn flat_schema_two_host_binding_is_refused() {
+        let flat = serde_json::json!({
             "schema_version": 2,
             "app_root": "/node",
             "app_root_identity": {"containing_device": 1, "inode": 2},
@@ -1255,7 +1229,7 @@ mod tests {
                 "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
             }
         });
-        assert!(serde_json::from_value::<HostServiceBinding>(predecessor).is_err());
+        assert!(serde_json::from_value::<HostServiceBinding>(flat).is_err());
     }
 
     fn current_host_binding() -> HostServiceBinding {
@@ -1267,6 +1241,7 @@ mod tests {
                 "app_root_identity": {"containing_device": 1, "inode": 2},
                 "node_fingerprint": "a".repeat(64),
                 "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+                "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
                 "process_scopes": {
                     "version": 3,
                     "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
@@ -1277,65 +1252,19 @@ mod tests {
         .unwrap()
     }
 
-    fn predecessor_binding_value() -> serde_json::Value {
-        serde_json::json!({
-            "schema_version": 2,
-            "app_root": "/node",
-            "app_root_identity": {"containing_device": 1, "inode": 2},
-            "node_fingerprint": "a".repeat(64),
-            "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
-            "daemon_executable": "/usr/bin/ryeosd",
-            "process_scopes": {
-                "version": 3,
-                "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
-            }
-        })
-    }
-
     #[test]
-    fn confirmed_host_setup_classifies_only_exact_predecessor_and_is_idempotent() {
+    fn confirmed_host_setup_accepts_only_the_exact_current_binding() {
         let current = current_host_binding();
+        let path = Path::new("/state/host.json");
         let current_bytes =
             lillux::canonical_json(&serde_json::to_value(&current).unwrap()).unwrap();
-        assert_eq!(
-            classify_existing_binding(current_bytes.as_bytes(), &current).unwrap(),
-            ExistingBindingDisposition::Current
-        );
+        require_current_binding(current_bytes.as_bytes(), &current, path).unwrap();
 
-        let predecessor = lillux::canonical_json(&predecessor_binding_value()).unwrap();
-        assert_eq!(
-            classify_existing_binding(predecessor.as_bytes(), &current).unwrap(),
-            ExistingBindingDisposition::ReplacePredecessor
-        );
-    }
-
-    #[test]
-    fn confirmed_host_setup_refuses_forged_or_unknown_predecessor() {
-        let current = current_host_binding();
-        for (field, value) in [
-            ("app_root", serde_json::json!("/other")),
-            ("node_fingerprint", serde_json::json!("b".repeat(64))),
-            (
-                "account",
-                serde_json::json!({"implementation": "unix", "uid": 1001, "gid": 1000}),
-            ),
-            ("daemon_executable", serde_json::json!("/usr/bin/other")),
-        ] {
-            let mut forged = predecessor_binding_value();
-            forged[field] = value;
-            let bytes = lillux::canonical_json(&forged).unwrap();
-            assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
-        }
-
-        let mut unknown = predecessor_binding_value();
-        unknown["replacement_hint"] = serde_json::json!(true);
-        let bytes = lillux::canonical_json(&unknown).unwrap();
-        assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
-
-        let mut wrong_epoch = predecessor_binding_value();
-        wrong_epoch["schema_version"] = serde_json::json!(1);
-        let bytes = lillux::canonical_json(&wrong_epoch).unwrap();
-        assert!(classify_existing_binding(bytes.as_bytes(), &current).is_err());
+        let mut other = serde_json::to_value(&current).unwrap();
+        other["daemon_executable"] = serde_json::json!("/usr/bin/other");
+        let bytes = lillux::canonical_json(&other).unwrap();
+        let error = require_current_binding(bytes.as_bytes(), &current, path).unwrap_err();
+        assert!(error.to_string().contains("ryeos node host setup --confirm"));
     }
 
     #[test]

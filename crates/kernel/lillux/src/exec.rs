@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::process::{self, Stdio};
@@ -18,6 +18,8 @@ pub use duplex_deadline::{DeadlineDuplexStream, DeadlinePipeStream, DuplexReadin
 
 #[cfg(target_os = "linux")]
 mod descriptor_transfer;
+#[cfg(target_os = "linux")]
+pub(crate) mod registered_pair;
 #[cfg(target_os = "linux")]
 pub use descriptor_transfer::{
     DescriptorTransferBounds, InheritedDescriptorTransferChildAuthority,
@@ -154,6 +156,107 @@ pub struct SupervisedProcessStatus {
     state: SupervisedProcessStatusState,
     applied_receipt_schema: Option<String>,
     mount_preparation_required: bool,
+    native_settlement: Option<NativeSettlementChannel>,
+}
+
+/// Protected adapter testimony channel retained by the same supervision owner.
+/// It is not worker I/O or decoded namespace/driver retirement evidence.
+struct NativeSettlementChannel {
+    reader: InheritedDescriptorAuthority,
+    original_deadline: crate::time::MonotonicDeadline,
+    /// Captured from the held target pin before release/death. A later native
+    /// record cannot supply its own expected incarnation or reopen procfs.
+    held_target_identity: Option<crate::ExactProcessIdentity>,
+    // Bounded raw testimony and irreversible observations stay in this owner.
+    frame: Vec<u8>,
+    exact_eof: bool,
+    testimony: Option<crate::sandbox::native_terminal_wire::NativeTerminalTestimony>,
+    failure: Option<String>,
+    pin_observation: NativeTerminalPinObservation,
+    pin_timely: bool,
+    selected_wait_phase: SelectedNativeTerminalWaitPhase,
+    // Drainer joins are irreversible too. Preserve exact bounded bytes/flags
+    // when natural wait returns this owner after a late terminal failure.
+    retained_drains: Option<(BoundedCapture, BoundedCapture)>,
+    retained_terminal_result: Option<SubprocessResult>,
+}
+
+/// Raw result of the one nonblocking observation of the exact retained target pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeTerminalPinObservation {
+    NotAttempted,
+    Interrupted,
+    Error(String),
+    NotExited,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTerminalWaitPhase {
+    Pending,
+    Collected,
+    Failed,
+}
+
+type SelectedNativeTerminalWaitPhase = NativeTerminalWaitPhase;
+
+/// Same-owner result of a selected native terminal wait. `Incomplete` is a
+/// per-call observation and may be resumed with the same owner and deadline.
+pub enum SelectedNativeTerminalWaitOutcome {
+    Collected(RunningProcess),
+    Incomplete(RunningProcess),
+    Failed(RunningProcess),
+}
+
+enum NaturalWaitCoreOutcome {
+    Completed(RunningProcess, Option<SubprocessResult>),
+    Incomplete(RunningProcess),
+    Failed(RunningProcess),
+}
+
+/// Borrowed raw collection state. These bytes and observations are diagnostics,
+/// not native-generation, driver-retirement, or financial proof.
+pub struct NativeTerminalRawView<'a> {
+    pub frame: &'a [u8],
+    pub exact_eof: bool,
+    pub applied_receipt: Option<&'a Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+    pub pin_observation: &'a NativeTerminalPinObservation,
+    pub pin_timely: bool,
+    pub failure: Option<&'a str>,
+    pub wait_phase: NativeTerminalWaitPhase,
+    pub retained_drains: Option<(&'a [u8], bool, &'a [u8], bool)>,
+    pub terminal_result: Option<&'a SubprocessResult>,
+}
+
+#[cfg(target_os = "linux")]
+fn native_terminal_pin_has_exited(pin: &OwnedFd) -> NativeTerminalPinObservation {
+    let mut readiness = libc::pollfd {
+        fd: pin.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut readiness, 1, 0) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return NativeTerminalPinObservation::Interrupted;
+        }
+        return NativeTerminalPinObservation::Error(format!(
+            "observe native terminal target pin: {error}"
+        ));
+    }
+    if readiness.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        return NativeTerminalPinObservation::Error(
+            "native terminal target pin observation failed".into(),
+        );
+    }
+    // Linux reports HUP after the exact child has been reaped. Neither case
+    // reopens procfs or transfers ownership from another process wrapper.
+    if ready > 0 && readiness.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+        NativeTerminalPinObservation::Exited
+    } else {
+        NativeTerminalPinObservation::NotExited
+    }
 }
 
 impl SupervisedProcessStatus {
@@ -171,6 +274,36 @@ impl SupervisedProcessStatus {
         }
         self.mount_preparation_required = true;
         Ok(())
+    }
+
+    /// Borrow the already-selected native channel's original requirements.
+    /// False means ordinary channel absence only; a selected mismatch/expiry
+    /// refuses instead of enabling a fallback or mutating a one-use setter.
+    /// This is configuration validation, not admitted/native evidence.
+    pub fn validate_existing_native_settlement_requirements(
+        &self,
+        applied_schema: &str,
+    ) -> Result<bool, String> {
+        let Some(channel) = self.native_settlement.as_ref() else {
+            return Ok(false);
+        };
+        if channel.original_deadline.remaining().is_zero() {
+            return Err("native settlement original requirement window expired".into());
+        }
+        if !matches!(
+            &self.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        ) || !self.mount_preparation_required
+            || self.applied_receipt_schema.as_deref() != Some(applied_schema)
+        {
+            return Err("native settlement existing launch requirements differ".into());
+        }
+        if channel.original_deadline.remaining().is_zero() {
+            return Err(
+                "native settlement original requirement window expired during validation".into(),
+            );
+        }
+        Ok(true)
     }
 
     /// Require a second exact trusted-launcher status document after the
@@ -258,6 +391,134 @@ impl SupervisedLauncherAttachmentStatusPipe {
     pub fn writer_descriptor(&self) -> Result<u32, String> {
         self.writer.inherited_descriptor()
     }
+
+    /// Prepare an optional protected adapter-only terminal testimony pipe.
+    /// Configure the existing mount and applied-launch requirements first.
+    /// The reader and caller's SAME original deadline stay with supervision;
+    /// inherit the returned writer only in the authenticated adapter, never
+    /// target mappings, target environment or worker cleanup channels.
+    /// This allocates custody only; no bytes, EOF or generic target exit from
+    /// this channel currently produce native/driver retirement evidence.
+    #[cfg(target_os = "linux")]
+    pub fn prepare_native_settlement_channel(
+        &mut self,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<InheritedDescriptorAuthority, String> {
+        if !matches!(
+            &self.reader.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        ) || !self.reader.mount_preparation_required
+            || self.reader.applied_receipt_schema.is_none()
+        {
+            return Err(
+                "native settlement channel requires held mount and applied-launch supervision"
+                    .into(),
+            );
+        }
+        if self.reader.native_settlement.is_some() {
+            return Err("native settlement channel was already prepared".into());
+        }
+        if original_deadline.remaining().is_zero() {
+            return Err("native settlement original deadline expired before preparation".into());
+        }
+        let lease =
+            retain_fork_sensitive_descriptors_until(original_deadline).map_err(|error| {
+                format!("retain native settlement descriptors within original window: {error}")
+            })?;
+        let mut descriptors = [-1; 2];
+        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0
+        {
+            return Err(format!(
+                "create protected native settlement pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: successful pipe2 returned two uniquely owned descriptors.
+        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+        let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        let reader = InheritedDescriptorAuthority::from_owned_file(reader, &lease)?;
+        let writer = InheritedDescriptorAuthority::from_owned_file(writer, &lease)?;
+        if original_deadline.remaining().is_zero() {
+            return Err("native settlement original deadline expired during preparation".into());
+        }
+        self.reader.native_settlement = Some(NativeSettlementChannel {
+            reader,
+            original_deadline,
+            held_target_identity: None,
+            frame: Vec::new(),
+            exact_eof: false,
+            testimony: None,
+            failure: None,
+            pin_observation: NativeTerminalPinObservation::NotAttempted,
+            pin_timely: false,
+            selected_wait_phase: SelectedNativeTerminalWaitPhase::Pending,
+            retained_drains: None,
+            retained_terminal_result: None,
+        });
+        Ok(writer)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn prepare_native_settlement_channel(
+        &mut self,
+        _original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<InheritedDescriptorAuthority, String> {
+        Err("native settlement supervision is unavailable on this platform".into())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_settlement_custody_tests {
+    use super::*;
+
+    fn held_with_launch_requirements() -> SupervisedLauncherAttachmentStatusPipe {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied-launch/v1")
+            .unwrap();
+        held
+    }
+
+    #[test]
+    fn protected_channel_requires_launch_context_and_original_live_window() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        assert!(held.reader.native_settlement.is_none());
+        held.reader.require_mount_preparation_receipt().unwrap();
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        assert!(held.reader.native_settlement.is_none());
+        held.reader
+            .require_applied_launch_receipt("test.applied-launch/v1")
+            .unwrap();
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(held.prepare_native_settlement_channel(expired).is_err());
+        assert!(held.reader.native_settlement.is_none());
+    }
+
+    #[test]
+    fn protected_channel_is_one_use_cloexec_and_retains_same_expiry() {
+        let mut held = held_with_launch_requirements();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        let original_remaining = deadline.remaining();
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let retained = held.reader.native_settlement.as_ref().unwrap();
+        let reader_fd = retained.reader.file().as_raw_fd();
+        let retained_remaining = retained.original_deadline.remaining();
+        assert!(retained_remaining <= original_remaining);
+        assert!(!retained.original_deadline.has_elapsed());
+        for descriptor in [reader_fd, writer.file().as_raw_fd()] {
+            let descriptor_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+            let status_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+            assert!(descriptor_flags >= 0 && descriptor_flags & libc::FD_CLOEXEC != 0);
+            assert!(status_flags >= 0 && status_flags & libc::O_NONBLOCK != 0);
+        }
+        assert!(held.prepare_native_settlement_channel(deadline).is_err());
+        let same = held.reader.native_settlement.as_ref().unwrap();
+        assert_eq!(same.reader.file().as_raw_fd(), reader_fd);
+        assert!(same.original_deadline.remaining() <= retained_remaining);
+    }
 }
 
 /// Create an atomically-CLOEXEC status pipe for trusted-launcher supervision.
@@ -269,7 +530,7 @@ impl SupervisedLauncherAttachmentStatusPipe {
 pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut fds = [-1; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!(
@@ -288,6 +549,7 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
             },
             applied_receipt_schema: None,
             mount_preparation_required: false,
+            native_settlement: None,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(writer, &lease)?,
     })
@@ -310,7 +572,7 @@ pub fn supervised_launcher_attachment_status_pipe()
 -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut status_fds = [-1; 2];
     if unsafe { libc::pipe2(status_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!(
@@ -352,6 +614,7 @@ pub fn supervised_launcher_attachment_status_pipe()
             },
             applied_receipt_schema: None,
             mount_preparation_required: false,
+            native_settlement: None,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(status_writer, &lease)?,
         attachment_release_reader: InheritedDescriptorAuthority::from_owned_file(
@@ -385,6 +648,35 @@ pub fn sealed_memfd(
         libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
         Some(0o600),
     )
+}
+
+/// Capture sealed non-executable data with an exact portable input mode.
+/// Protocol data should continue to use `sealed_memfd` and its private default.
+/// Only owner-private or normalized read-only guest data modes are admitted.
+#[cfg(target_os = "linux")]
+pub fn sealed_normalized_data_memfd(
+    name: &std::ffi::CStr,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<InheritedDescriptorAuthority, String> {
+    if !matches!(mode, 0o600 | 0o644) {
+        return Err("sealed data mode must be 0600 or 0644".to_owned());
+    }
+    sealed_memfd_with_flags(
+        name,
+        bytes,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        Some(mode as libc::mode_t),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sealed_normalized_data_memfd(
+    _name: &std::ffi::CStr,
+    _bytes: &[u8],
+    _mode: u32,
+) -> Result<InheritedDescriptorAuthority, String> {
+    Err("sealed data memfd is supported only on Linux".to_owned())
 }
 
 /// Create a sealed anonymous file that the supported Linux kernel may execute.
@@ -484,7 +776,7 @@ fn sealed_memfd_with_flags_and_write(
     use std::io::Seek as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
     if fd < 0 {
         return Err(format!(
@@ -595,7 +887,7 @@ pub struct SubprocessResult {
     pub stderr_truncated: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum InitialLauncherStatus {
     Target(u32, Option<crate::LinuxSandboxMountPreparationReceipt>),
     Refused(String),
@@ -776,23 +1068,31 @@ impl InheritedReadonlyDocument {
         }
         #[cfg(unix)]
         {
-            use std::os::fd::FromRawFd as _;
-            let lease = retain_fork_sensitive_descriptors();
-            // Duplicate before constructing an owned File. An inherited raw
-            // coordinate can be repeated in hostile process environment; the
-            // successful duplicate gives this call unique ownership and
-            // closing the transport coordinate makes any repeated adoption
-            // fail without creating aliased File owners.
-            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } < 0 {
+                return Err(format!(
+                    "adopt inherited document descriptor: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: the coordinate was consumed from launch transport above
+            // and is open. Adopt it before any fallible step, so that a
+            // refused lease closes it instead of leaving it unowned. Dropping
+            // this transport owner closes the coordinate on every path, which
+            // makes any repeated adoption of the same number fail.
+            let transport = unsafe { std::fs::File::from_raw_fd(descriptor) };
+            let lease = try_retain_fork_sensitive_descriptors()?;
+            // Duplicate under the lease. The registered duplicate gives this
+            // call unique ownership of a coordinate no other owner can name.
+            let duplicate =
+                unsafe { libc::fcntl(transport.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
             if duplicate < 0 {
                 return Err(format!(
                     "adopt inherited document descriptor: {}",
                     std::io::Error::last_os_error()
                 ));
             }
-            unsafe {
-                libc::close(descriptor);
-            }
+            drop(transport);
             // SAFETY: F_DUPFD_CLOEXEC returned this uniquely owned descriptor.
             let file = unsafe { std::fs::File::from_raw_fd(duplicate) };
             let authority = InheritedDescriptorAuthority::from_owned_file(file, &lease)?;
@@ -979,7 +1279,7 @@ impl InheritedDescriptorAuthority {
             use std::os::fd::{AsRawFd as _, FromRawFd as _};
             let minimum = i32::try_from(minimum_fd.max(3))
                 .map_err(|_| "minimum inherited descriptor exceeds RawFd".to_owned())?;
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors()?;
             let duplicate =
                 unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
             if duplicate < 0 {
@@ -1064,6 +1364,60 @@ impl InheritedDescriptorAuthority {
                 .map_err(|error| error.to_string())?;
             self.bind_to_subprocess_request(request, target_fd)?;
             request.cmd = format!("/proc/self/fd/{target_fd}");
+            Ok(())
+        }
+    }
+
+    /// Prove that `request` makes this exact executable, and only it, the
+    /// subprocess image at child descriptor `target_fd`. The proof is made
+    /// against the parent's own source descriptor and the recorded child
+    /// mapping; the parent's descriptor table at `target_fd` is irrelevant
+    /// because the coordinate exists only in the child after the pre-exec
+    /// mapping is installed.
+    pub fn require_bound_as_subprocess_executable(
+        &self,
+        request: &SubprocessRequest,
+        target_fd: u32,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (request, target_fd);
+            return Err("descriptor-bound subprocess executables require Linux".to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if target_fd <= libc::STDERR_FILENO as u32 {
+                return Err("subprocess executable descriptor overlaps standard I/O".to_owned());
+            }
+            self.require_owned_executable()
+                .map_err(|error| error.to_string())?;
+            let source = self.inherited_descriptor()?;
+            let mut targeted = 0usize;
+            for mapping in &request.inherited_fd_mappings {
+                let mapped_source = mapping.source_descriptor()?;
+                if mapping.target_fd == target_fd {
+                    targeted += 1;
+                    if mapped_source != source {
+                        return Err(format!(
+                            "subprocess executable descriptor {target_fd} maps a different source"
+                        ));
+                    }
+                } else if mapped_source == source {
+                    return Err(format!(
+                        "subprocess executable source {source} is mapped to another descriptor"
+                    ));
+                }
+            }
+            if targeted != 1 {
+                return Err(format!(
+                    "subprocess executable descriptor {target_fd} is not mapped exactly once"
+                ));
+            }
+            if request.cmd != format!("/proc/self/fd/{target_fd}") {
+                return Err(format!(
+                    "subprocess image is not the executable mapped at descriptor {target_fd}"
+                ));
+            }
             Ok(())
         }
     }
@@ -1211,9 +1565,165 @@ impl InheritedDescriptorAuthority {
         crate::secure_fs::same_open_file_identity(self.file(), other.file())
     }
 
+    /// Require this descriptor to be a nonblocking FIFO writer distinct from
+    /// every supplied open descriptor. This is a bounded point observation;
+    /// callers retain the original deadline and must separately prove peer
+    /// lifetime and any protocol or process authority.
+    #[cfg(unix)]
+    pub fn require_distinct_nonblocking_pipe_writer(
+        &self,
+        companions: &[&InheritedDescriptorAuthority],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        fn require_time(deadline: crate::time::MonotonicDeadline) -> Result<(), String> {
+            if deadline.remaining().is_zero() {
+                Err("pipe writer inspection exceeded its original deadline".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+
+        require_time(original_deadline)?;
+        let lease = retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("acquire pipe writer inspection lease: {error}"))?;
+        let result = (|| {
+            require_time(original_deadline)?;
+            let identity = self
+                .file_identity()
+                .map_err(|error| format!("inspect pipe writer identity: {error}"))?;
+            require_time(original_deadline)?;
+            if identity.file_type() != libc::S_IFIFO as u32 {
+                return Err("pipe writer descriptor is not a FIFO".to_owned());
+            }
+
+            use std::os::fd::AsRawFd as _;
+            let flags = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GETFL) };
+            if flags < 0 {
+                return Err(format!(
+                    "inspect pipe writer status flags: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if flags & libc::O_ACCMODE != libc::O_WRONLY {
+                return Err("pipe writer descriptor is not write-only".to_owned());
+            }
+            if flags & libc::O_NONBLOCK == 0 {
+                return Err("pipe writer descriptor is not nonblocking".to_owned());
+            }
+            let required_flags = flags & (libc::O_ACCMODE | libc::O_NONBLOCK);
+            require_time(original_deadline)?;
+
+            for companion in companions {
+                require_time(original_deadline)?;
+                let same = self
+                    .same_file_identity(companion)
+                    .map_err(|error| format!("compare pipe writer descriptor identity: {error}"))?;
+                require_time(original_deadline)?;
+                if same {
+                    return Err("pipe writer aliases a companion descriptor".to_owned());
+                }
+            }
+            require_time(original_deadline)?;
+            let final_flags = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GETFL) };
+            if final_flags < 0 {
+                return Err(format!(
+                    "recheck pipe writer status flags: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if final_flags & (libc::O_ACCMODE | libc::O_NONBLOCK) != required_flags {
+                return Err("pipe writer mode changed during inspection".to_owned());
+            }
+            require_time(original_deadline)
+        })();
+        drop(lease);
+        require_time(original_deadline)?;
+        result
+    }
+
+    /// Inspect live inherited role coordinates without adopting or duplicating
+    /// their ownership. Stdio coordinates are permitted here: a writer above
+    /// fd 2 may still share their pipe object. Caller retains every peer alive
+    /// throughout this point observation; this does not authenticate roles.
+    #[cfg(unix)]
+    pub fn require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+        &self,
+        companion_fds: &[u32],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let require_time = || {
+            if original_deadline.remaining().is_zero() {
+                Err("inherited pipe peer inspection exceeded its original deadline".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        // Reuse the existing owned-writer object/mode checks. No peer File,
+        // descriptor lease owner, dup or reconstructed authority is created.
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)?;
+        require_time()?;
+        let identity = self.file_identity().map_err(|error| error.to_string())?;
+        require_time()?;
+        for descriptor in companion_fds {
+            require_time()?;
+            let raw = i32::try_from(*descriptor)
+                .map_err(|_| "inherited pipe peer exceeds descriptor range".to_string())?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            loop {
+                require_time()?;
+                // SAFETY: fstat only borrows raw, including stdio. It writes
+                // initialized stat on success and never takes descriptor ownership.
+                if unsafe { libc::fstat(raw, stat.as_mut_ptr()) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(format!("inspect inherited pipe peer {descriptor}: {error}"));
+                }
+            }
+            require_time()?;
+            // SAFETY: the successful fstat above initialized the complete stat.
+            let stat = unsafe { stat.assume_init() };
+            if identity.device() == stat.st_dev as u64 && identity.inode() == stat.st_ino as u64 {
+                return Err("pipe writer aliases an inherited role or stdio endpoint".into());
+            }
+            require_time()?;
+        }
+        // Recheck actual writer flags and original expiry after every peer.
+        // This remains a point observation, not a concurrency/lifetime proof.
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)?;
+        require_time()
+    }
+
+    /// Borrow this actual nonblocking FIFO writer for one bounded record.
+    /// Returns the actual write count immediately; callers must retain that
+    /// count before any later expiry check and must never replay sent bytes.
+    /// This observes bytes only, not native or settlement evidence.
+    /// If EPIPE's SIGPIPE drain is interrupted through expiry, the method
+    /// returns an error and restores the prior signal mask; a pending SIGPIPE
+    /// may then be delivered and terminate the caller. Invocation-stack
+    /// custody after such termination is not guaranteed.
+    #[cfg(target_os = "linux")]
+    pub fn write_atomic_pipe_record_until(
+        &self,
+        record: &[u8],
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> std::io::Result<usize> {
+        if record.is_empty() || record.len() > libc::PIPE_BUF as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic pipe record must contain 1..=PIPE_BUF bytes",
+            ));
+        }
+        self.require_distinct_nonblocking_pipe_writer(&[], original_deadline)
+            .map_err(std::io::Error::other)?;
+        let mut stream = DeadlinePipeStream::new(self.file().as_fd(), original_deadline)?;
+        stream.write_atomic_record(record)
+    }
+
     #[cfg(unix)]
     pub fn directory_identity(&self) -> anyhow::Result<crate::secure_fs::PinnedDirectoryIdentity> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_open_directory(
             self.path.clone(),
             self.file().try_clone()?,
@@ -1231,7 +1741,7 @@ impl InheritedDescriptorAuthority {
         &self,
         diagnostic_path: std::path::PathBuf,
     ) -> anyhow::Result<crate::secure_fs::PinnedDirectory> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_inherited_directory_descriptor(
             diagnostic_path,
             self.file().try_clone()?,
@@ -1247,7 +1757,7 @@ impl InheritedDescriptorAuthority {
         &self,
         relative: &std::path::Path,
     ) -> anyhow::Result<Option<Self>> {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let root = crate::secure_fs::PinnedDirectory::from_open_directory(
             self.path.clone(),
             self.file().try_clone()?,
@@ -1292,7 +1802,7 @@ impl InheritedDescriptorAuthority {
         {
             anyhow::bail!("private directory descendant must be bounded canonical relative components");
         }
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         // A workspace view may be held with O_PATH. Reopen only its exact
         // inode, not its diagnostic pathname, for mkdirat/fsync traversal.
         let fd = unsafe {
@@ -1352,7 +1862,7 @@ impl InheritedDescriptorAuthority {
         {
             anyhow::bail!("directory descendant must have bounded canonical relative components");
         }
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let mut directory = self.try_clone_pinned_directory(self.path.clone())?;
         for component in relative.components() {
             let Component::Normal(name) = component else {
@@ -1376,6 +1886,48 @@ impl InheritedDescriptorAuthority {
     #[cfg(unix)]
     pub fn require_owned_executable(&self) -> anyhow::Result<crate::secure_fs::OpenFileIdentity> {
         crate::secure_fs::require_effective_user_owned_executable(self.file())
+    }
+
+    /// Require an owned executable whose contents cannot change after exact
+    /// measurement. This checks the retained file, never a diagnostic path.
+    pub fn require_write_sealed_executable(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            self.require_owned_executable()?;
+            let required =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            let observed = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GET_SEALS) };
+            anyhow::ensure!(
+                observed >= 0 && observed & required == required,
+                "measured executable is not sealed against content mutation"
+            );
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("sealed executable measurement requires Linux")
+    }
+
+    /// Inspect this retained data descriptor without exporting a numeric FD
+    /// or reopening its diagnostic path. This grants no executable authority.
+    pub fn require_write_sealed_regular(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            self.require_owned_regular()?;
+            let required =
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+            // SAFETY: the registered owner keeps this descriptor live; this
+            // query neither mutates the file nor transfers ownership.
+            let observed = unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_GET_SEALS) };
+            anyhow::ensure!(
+                observed >= 0 && observed & required == required,
+                "retained regular file is not sealed against content mutation"
+            );
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("sealed regular-file inspection requires Linux")
     }
 
     #[cfg(unix)]
@@ -1447,6 +1999,17 @@ impl InheritedDescriptorAuthority {
     }
 }
 
+#[cfg(not(unix))]
+impl InheritedDescriptorAuthority {
+    pub fn require_distinct_nonblocking_pipe_writer(
+        &self,
+        _companions: &[&InheritedDescriptorAuthority],
+        _original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        Err("inherited pipe inspection is unavailable on this platform".to_owned())
+    }
+}
+
 /// Adopt one exact descriptor deliberately mapped into this process by a
 /// trusted Lillux parent. This is not ambient descriptor discovery.
 ///
@@ -1469,13 +2032,12 @@ pub unsafe fn take_inherited_descriptor_authority(
             std::io::Error::last_os_error()
         ));
     }
-    let lease = retain_fork_sensitive_descriptors();
-    // SAFETY: upheld by the caller; ownership is immediately transferred into
-    // the registered Lillux authority.
-    InheritedDescriptorAuthority::from_owned_file(
-        unsafe { std::fs::File::from_raw_fd(raw) },
-        &lease,
-    )
+    // SAFETY: upheld by the caller. Adopt before any fallible step, so that a
+    // refused lease closes the descriptor instead of leaving it unowned. This
+    // is adoption of an already-open coordinate, not an open or duplicate.
+    let file = unsafe { std::fs::File::from_raw_fd(raw) };
+    let lease = try_retain_fork_sensitive_descriptors()?;
+    InheritedDescriptorAuthority::from_owned_file(file, &lease)
 }
 
 #[cfg(not(unix))]
@@ -1559,6 +2121,192 @@ pub fn inherited_executable_path(descriptor: u32) -> Result<std::path::PathBuf, 
 }
 
 #[cfg(all(test, unix))]
+mod pinned_duplex_forwarding_tests {
+    use super::*;
+    use crate::subordinate_process::PinnedSubordinateProcessRequest;
+
+    fn request(fixture: &tempfile::TempDir) -> PinnedSubordinateProcessRequest {
+        std::fs::write(fixture.path().join("target"), b"fixture; never executed").unwrap();
+        let cwd = crate::PinnedDirectory::open(fixture.path())
+            .unwrap()
+            .unwrap();
+        let executable = cwd
+            .open_pinned_regular_descendant(std::path::Path::new("target"), false)
+            .unwrap()
+            .unwrap();
+        PinnedSubordinateProcessRequest {
+            executable,
+            cwd,
+            argv0: Some("selected-target".to_owned()),
+            args: vec!["fixed-argument".to_owned()],
+            envs: vec![("FIXTURE".to_owned(), "preserved".to_owned())],
+            limits: None,
+            inherited_fds: Vec::new(),
+        }
+    }
+
+    fn inventory(request: &PinnedSubordinateProcessRequest) -> (Vec<(String, String)>, Vec<u32>) {
+        (
+            request.envs.clone(),
+            request
+                .inherited_fds
+                .iter()
+                .map(|authority| authority.inherited_descriptor().unwrap())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn forwarding_binds_registered_cloexec_duplicate_and_preserves_original() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, peer) = inherited_duplex_channel_pair().unwrap();
+        let original = channel.stream.inherited_descriptor().unwrap();
+        channel
+            .forward_to_pinned_subordinate(&mut request, "SESSION_ROLE")
+            .unwrap();
+        let forwarded = &request.inherited_fds[0];
+        let coordinate = forwarded.inherited_descriptor().unwrap();
+        assert!(coordinate >= 3);
+        assert_ne!(coordinate, original);
+        assert!(forwarded.same_file_identity(&channel.stream).unwrap());
+        assert_eq!(
+            request.envs.last(),
+            Some(&("SESSION_ROLE".to_owned(), coordinate.to_string()))
+        );
+        let flags = unsafe { libc::fcntl(coordinate as i32, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        assert_eq!(channel.stream.inherited_descriptor().unwrap(), original);
+        assert_eq!(request.argv0.as_deref(), Some("selected-target"));
+        assert_eq!(request.args, ["fixed-argument"]);
+        // Exercise the actual connected endpoint, not just copied coordinates.
+        let mut peer_file = peer.channel.file();
+        peer_file.write_all(b"same").unwrap();
+        let mut forwarded_file = forwarded.file();
+        let mut bytes = [0; 4];
+        forwarded_file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"same");
+        drop(request);
+        peer_file.write_all(b"live").unwrap();
+        let mut original_file = channel.stream.file();
+        original_file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"live");
+    }
+
+    #[test]
+    fn invalid_roles_and_existing_role_collision_leave_request_unchanged() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        let oversized_role = "R".repeat(257);
+        for role in [
+            "",
+            "1ROLE",
+            "BAD=ROLE",
+            "BAD\0ROLE",
+            "HAS SPACE",
+            "éROLE",
+            &oversized_role,
+        ] {
+            let before = inventory(&request);
+            assert!(
+                channel
+                    .forward_to_pinned_subordinate(&mut request, role)
+                    .is_err()
+            );
+            assert_eq!(inventory(&request), before);
+        }
+        let before = inventory(&request);
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "FIXTURE")
+                .is_err()
+        );
+        assert_eq!(inventory(&request), before);
+        assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
+    }
+
+    #[test]
+    fn repeat_and_distinct_descriptor_alias_forwarding_refuse_atomically() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        channel
+            .forward_to_pinned_subordinate(&mut request, "FIRST_ROLE")
+            .unwrap();
+        let before = inventory(&request);
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "SECOND_ROLE")
+                .is_err()
+        );
+        assert_eq!(inventory(&request), before);
+        let alias = InheritedDuplexChannel {
+            stream: channel.stream.duplicate_at_or_above(59).unwrap(),
+        };
+        assert_ne!(
+            alias.stream.inherited_descriptor().unwrap(),
+            channel.stream.inherited_descriptor().unwrap()
+        );
+        assert!(
+            alias
+                .forward_to_pinned_subordinate(&mut request, "ALIAS_ROLE")
+                .is_err()
+        );
+        assert_eq!(inventory(&request), before);
+    }
+
+    #[test]
+    fn preexisting_descriptor_collision_refuses_without_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (channel, _peer) = inherited_duplex_channel_pair().unwrap();
+        let (unrelated, _unrelated_peer) = inherited_duplex_channel_pair().unwrap();
+        request
+            .inherited_fds
+            .extend([unrelated.stream.clone(), unrelated.stream.clone()]);
+        let before = inventory(&request);
+        assert!(
+            channel
+                .forward_to_pinned_subordinate(&mut request, "NEW_ROLE")
+                .is_err()
+        );
+        assert_eq!(inventory(&request), before);
+        assert!(channel.stream.inherited_descriptor().unwrap() >= 3);
+    }
+
+    #[test]
+    fn distinct_channels_keep_distinct_role_and_authority_bindings() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut request = request(&fixture);
+        let (session, _session_peer) = inherited_duplex_channel_pair().unwrap();
+        let (cleanup, _cleanup_peer) = inherited_duplex_channel_pair().unwrap();
+        session
+            .forward_to_pinned_subordinate(&mut request, "SESSION_ROLE")
+            .unwrap();
+        cleanup
+            .forward_to_pinned_subordinate(&mut request, "CLEANUP_ROLE")
+            .unwrap();
+        let (envs, coordinates) = inventory(&request);
+        assert_eq!(coordinates.len(), 2);
+        assert_ne!(coordinates[0], coordinates[1]);
+        assert!(
+            request.inherited_fds[0]
+                .same_file_identity(&session.stream)
+                .unwrap()
+        );
+        assert!(
+            request.inherited_fds[1]
+                .same_file_identity(&cleanup.stream)
+                .unwrap()
+        );
+        assert!(envs.contains(&("SESSION_ROLE".to_owned(), coordinates[0].to_string())));
+        assert!(envs.contains(&("CLEANUP_ROLE".to_owned(), coordinates[1].to_string())));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod inherited_directory_traversal_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
@@ -1577,7 +2325,7 @@ mod inherited_directory_traversal_tests {
     fn registered_authority_duplication_avoids_fixed_target_coordinates() {
         let fixture = tempfile::tempdir().unwrap();
         let authority = {
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors().unwrap();
             let file = std::fs::File::open(fixture.path()).unwrap();
             InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
         };
@@ -1602,7 +2350,7 @@ mod inherited_directory_traversal_tests {
         let original = parent.path().join("source");
         std::fs::create_dir(&original).unwrap();
         let root = {
-            let lease = retain_fork_sensitive_descriptors();
+            let lease = try_retain_fork_sensitive_descriptors().unwrap();
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -1739,6 +2487,112 @@ mod inherited_directory_traversal_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod inherited_pipe_writer_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fn fifo(path: &std::path::Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    fn authority(open: impl FnOnce() -> std::fs::File) -> InheritedDescriptorAuthority {
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let file = open();
+        InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
+    }
+
+    fn deadline() -> crate::time::MonotonicDeadline {
+        crate::time::MonotonicDeadline::after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn nonblocking_fifo_writer_requires_unique_inode_from_every_companion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("writer");
+        fifo(&path);
+        let reader = authority(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let writer = authority(|| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let regular = authority(|| std::fs::File::open(directory.path()).unwrap());
+
+        writer
+            .require_distinct_nonblocking_pipe_writer(&[&regular], deadline())
+            .unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer(&[&reader], deadline())
+                .is_err()
+        );
+        let duplicate = writer.duplicate_at_or_above(32).unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer(&[&duplicate], deadline())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pipe_writer_inspection_rejects_non_fifo_read_only_blocking_and_expired() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("writer");
+        fifo(&path);
+        let reader = authority(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let blocking_writer = authority(|| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(&path)
+                .unwrap()
+        });
+        let regular = authority(|| std::fs::File::open(directory.path()).unwrap());
+
+        assert!(
+            reader
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
+        assert!(
+            blocking_writer
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
+        assert!(
+            regular
+                .require_distinct_nonblocking_pipe_writer(&[], deadline())
+                .is_err()
+        );
+        assert!(
+            blocking_writer
+                .require_distinct_nonblocking_pipe_writer(
+                    &[],
+                    crate::time::MonotonicDeadline::after(Duration::ZERO),
+                )
+                .is_err()
+        );
+    }
+}
+
 // Keep the opaque inspection interface callable at the existing platform
 // refusal boundary; unsupported hosts never construct synthetic descriptors,
 // metadata, mount identities, or fallback authority.
@@ -1838,6 +2692,79 @@ impl InheritedDescriptorAuthority {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod write_sealed_regular_tests {
+    use super::*;
+    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    #[test]
+    fn opaque_sealed_data_query_preserves_owner_cursor_and_nonexecutable_role() {
+        let authority = sealed_memfd(c"sealed-data-query", b"original bytes").unwrap();
+        let original = authority.clone();
+        let mut cursor = authority.file().try_clone().unwrap();
+        cursor.seek(SeekFrom::Start(3)).unwrap();
+        authority.require_write_sealed_regular().unwrap();
+        assert_eq!(cursor.stream_position().unwrap(), 3);
+        assert!(authority.same_file_identity(&original).unwrap());
+        assert!(authority.require_owned_executable().is_err());
+        drop(authority);
+        original.require_write_sealed_regular().unwrap();
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_mutable_regular_and_retains_original() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"mutable bytes").unwrap();
+        let authority = inherited_descriptor_path(file).unwrap();
+        let original = authority.clone();
+        assert!(authority.require_write_sealed_regular().is_err());
+        assert!(authority.same_file_identity(&original).unwrap());
+        let (bytes, _) = original.read_regular_file_stable_bounded(64).unwrap();
+        assert_eq!(bytes, b"mutable bytes");
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_partial_seals() {
+        // Native setup is confined to Lillux. Each missing seal must refuse.
+        let all = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        for missing in [
+            libc::F_SEAL_SEAL,
+            libc::F_SEAL_SHRINK,
+            libc::F_SEAL_GROW,
+            libc::F_SEAL_WRITE,
+        ] {
+            let fd = unsafe {
+                libc::memfd_create(
+                    c"partial-data-seals".as_ptr(),
+                    libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+                )
+            };
+            assert!(fd >= 0);
+            // SAFETY: successful memfd_create returned this unique owner.
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            assert_eq!(unsafe { libc::fchmod(file.as_raw_fd(), 0o600) }, 0);
+            file.write_all(b"partial immutable bytes").unwrap();
+            assert_eq!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, all & !missing) },
+                0
+            );
+            let authority = inherited_descriptor_path(file).unwrap();
+            assert!(authority.require_write_sealed_regular().is_err());
+            assert!(authority.require_owned_regular().is_ok());
+        }
+    }
+
+    #[test]
+    fn opaque_sealed_data_query_refuses_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let authority =
+            inherited_descriptor_path(std::fs::File::open(directory.path()).unwrap()).unwrap();
+        assert!(authority.require_write_sealed_regular().is_err());
+        assert!(authority.directory_identity().is_ok());
+    }
+}
+
 pub(crate) fn inherited_descriptor_path(
     file: std::fs::File,
 ) -> Result<InheritedDescriptorAuthority, String> {
@@ -1848,7 +2775,7 @@ pub(crate) fn inherited_descriptor_path(
     }
     #[cfg(target_os = "linux")]
     {
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         // The consumed pinned source predates this child-inheritance owner.
         // Create its new registered descriptor under the lease and retire the
         // old source before reopening the fork window. Received mount owners
@@ -2104,7 +3031,7 @@ pub fn inherited_duplex_channel_pair()
 -> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
     use std::os::fd::OwnedFd;
 
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let (parent, child) = std::os::unix::net::UnixStream::pair()
         .map_err(|error| format!("create inherited duplex channel: {error}"))?;
     protect_descriptor_from_exec(&parent)?;
@@ -2132,6 +3059,85 @@ pub fn inherited_duplex_channel_pair()
 }
 
 impl InheritedDuplexChannel {
+    /// Forward this already-owned channel into one pinned subordinate request.
+    ///
+    /// The registered duplicate remains CLOEXEC in the parent and is bound to
+    /// its exact child environment role together with launch custody. No raw
+    /// descriptor or new protocol authority is returned. All validation and
+    /// duplication precede request mutation; errors preserve the request and
+    /// original channel. Pinned subordinate stdio remains separately piped.
+    ///
+    /// The caller retains the original through spawn failure and cleanup. After
+    /// successful launch it must deliberately close any originals/other copies
+    /// it no longer needs so they cannot keep peer EOF alive. This method does
+    /// not assert launch, peer retirement or process/resource settlement.
+    pub fn forward_to_pinned_subordinate(
+        &self,
+        request: &mut crate::subordinate_process::PinnedSubordinateProcessRequest,
+        environment_role: &str,
+    ) -> Result<(), String> {
+        #[cfg(not(unix))]
+        {
+            let _ = (request, environment_role);
+            Err("inherited duplex forwarding is unavailable on this platform".to_owned())
+        }
+        #[cfg(unix)]
+        {
+            let mut name = environment_role.bytes();
+            let valid_first = name
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+            if environment_role.len() > 256
+                || !valid_first
+                || !name.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return Err("inherited duplex environment role is invalid".to_owned());
+            }
+            if request
+                .envs
+                .iter()
+                .any(|(role, _)| role == environment_role)
+            {
+                return Err("pinned subordinate already contains this environment role".to_owned());
+            }
+            let source = self.stream.inherited_descriptor()?;
+            let mut coordinates = BTreeSet::new();
+            for authority in &request.inherited_fds {
+                let coordinate = authority.inherited_descriptor()?;
+                if !coordinates.insert(coordinate) {
+                    return Err(
+                        "pinned subordinate contains duplicate descriptor coordinates".to_owned(),
+                    );
+                }
+                if coordinate == source
+                    || authority
+                        .same_file_identity(&self.stream)
+                        .map_err(|error| error.to_string())?
+                {
+                    return Err(
+                        "pinned subordinate already retains this channel or an alias".to_owned(),
+                    );
+                }
+            }
+            // The existing authority API duplicates under the fork-sensitive
+            // lease, registers the owned handle and preserves parent CLOEXEC.
+            let duplicate = self.stream.duplicate_at_or_above(3)?;
+            let coordinate = duplicate.inherited_descriptor()?;
+            if coordinate < 3 || coordinates.contains(&coordinate) {
+                return Err("forwarded duplex descriptor collides with child inventory".to_owned());
+            }
+            // Build both replacements before publishing either part of the
+            // role/authority binding. A refused duplicate is dropped locally.
+            let mut envs = request.envs.clone();
+            envs.push((environment_role.to_owned(), coordinate.to_string()));
+            let mut inherited_fds = request.inherited_fds.clone();
+            inherited_fds.push(duplicate);
+            request.envs = envs;
+            request.inherited_fds = inherited_fds;
+            Ok(())
+        }
+    }
+
     /// Prove that the connected peer has not closed and has not sent bytes
     /// outside the caller's finished handshake. This is a point observation,
     /// not a process-lifetime or identity proof; the launch owner supplies
@@ -2436,9 +3442,10 @@ unsafe fn take_inherited_duplex_channel(
         ));
     }
     // SAFETY: the caller guarantees unique ownership of this live descriptor.
-    // Adopt it before any fallible inspection so every error path closes it.
-    let lease = retain_fork_sensitive_descriptors();
+    // Adopt it before any fallible step, the lease included, so every error
+    // path closes it.
     let owned = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let descriptor = owned.as_raw_fd();
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
     if flags < 0 {
@@ -2898,14 +3905,38 @@ const ATTACHMENT_READY_PHASE: u32 = 2;
 const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 
 #[cfg(target_os = "linux")]
-struct OccupancyWatchdog {
+#[path = "namespace_occupancy.rs"]
+mod namespace_occupancy;
+#[cfg(target_os = "linux")]
+pub(crate) use namespace_occupancy::PendingNamespaceWatchdog;
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct OccupancyWatchdog {
     pid: libc::pid_t,
     cancel: Option<std::fs::File>,
 }
 
 #[cfg(target_os = "linux")]
 impl OccupancyWatchdog {
-    fn cancel_and_reap(&mut self) -> Result<(), String> {
+    /// Cancel a watchdog that never acknowledged readiness, and reap it
+    /// within `bound`, killing it on overrun rather than waiting on it. The
+    /// PID is relinquished either way: an unexited child passes to a reaper.
+    fn cancel_and_reap_bounded(&mut self, bound: Duration, context: &str) -> Result<(), String> {
+        if let Some(mut cancel) = self.cancel.take() {
+            let _ = cancel.write_all(&[1]);
+        }
+        let pid = std::mem::replace(&mut self.pid, -1);
+        if pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
+        reap_fork_holder_until(pid, Instant::now() + bound, context).map(|_| ())
+    }
+
+    pub(crate) fn cancel_and_reap(&mut self) -> Result<(), String> {
+        if self.pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
         if let Some(mut cancel) = self.cancel.take() {
             let _ = cancel.write_all(&[1]);
             drop(cancel);
@@ -2914,6 +3945,9 @@ impl OccupancyWatchdog {
         loop {
             let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };
             if result == self.pid {
+                if !libc::WIFEXITED(status) && !libc::WIFSIGNALED(status) {
+                    return Err("original watchdog lacks a supported terminal status".into());
+                }
                 self.pid = -1;
                 return Ok(());
             }
@@ -2922,12 +3956,85 @@ impl OccupancyWatchdog {
                 if error.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
-                if error.raw_os_error() == Some(libc::ECHILD) {
+                // Missing wait ownership is uncertainty, never child death.
+                // Retain the same identity so callers cannot release inherited
+                // descriptor exclusion from an ECHILD observation.
+                return Err(format!("reap occupancy watchdog: {error}"));
+            }
+        }
+    }
+
+    /// Cancel only after the native caller has observed exact owned namespace
+    /// reap, then reap this SAME helper within that caller's original window.
+    /// An expired window or observation failure retains the helper owner and
+    /// cannot testify to namespace/driver retirement or refund authority.
+    pub(crate) fn cancel_and_reap_until(
+        &mut self,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.pid <= 0 {
+            return Err("original watchdog has no retained exclusive reap authority".into());
+        }
+        if original_deadline.has_elapsed() {
+            return Err("original watchdog reap deadline already expired".into());
+        }
+        if let Some(cancel) = self.cancel.as_mut() {
+            let descriptor = cancel.as_raw_fd();
+            let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err(format!(
+                    "bound original watchdog cancellation write: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            loop {
+                if original_deadline.has_elapsed() {
+                    return Err("original watchdog cancellation deadline elapsed".into());
+                }
+                match cancel.write(&[1]) {
+                    Ok(1) => break,
+                    Ok(_) => {
+                        return Err("original watchdog cancellation write was incomplete".into());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // A closed helper may still be exclusively reaped below;
+                    // pipe loss by itself supplies no terminal evidence.
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+                    Err(error) => {
+                        return Err(format!("request original watchdog cancellation: {error}"));
+                    }
+                }
+            }
+            // A successful request is not repeated after a late helper reap.
+            // Retain the same PID owner until its exclusive waitpid succeeds.
+            self.cancel.take();
+        }
+        loop {
+            if original_deadline.has_elapsed() {
+                return Err("original watchdog reap remains unproved at deadline".into());
+            }
+            let mut status = 0;
+            let result = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+            if result == self.pid {
+                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                    // Only supported terminal wait status proves owned reap.
+                    // Retrying later cannot wait on this numeric PID again.
                     self.pid = -1;
                     return Ok(());
                 }
-                return Err(format!("reap occupancy watchdog: {error}"));
+                return Err("original watchdog lacks a supported terminal status".into());
             }
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                // ECHILD is uncertainty here, not exclusive reap testimony.
+                return Err(format!("observe original watchdog owned reap: {error}"));
+            }
+            crate::time::sleep(Duration::from_millis(1).min(original_deadline.remaining()));
         }
     }
 }
@@ -2965,6 +4072,121 @@ fn arm_occupancy_watchdog(
     limit: &crate::time::OccupancyLimit,
     cleanup_allowance: Duration,
 ) -> Result<OccupancyWatchdog, String> {
+    arm_occupancy_watchdog_inner(target_pidfd, scope_kill, false, limit, cleanup_allowance)
+}
+
+/// Only the SAME native sandbox owner can supply this private PID-1 lifetime.
+/// No ordinary target, group, public mount DTO or missing scope is a fallback.
+#[cfg(target_os = "linux")]
+pub(crate) fn arm_namespace_occupancy_watchdog(
+    authority: crate::sandbox::NativeNamespaceOccupancyAuthority,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: Duration,
+) -> Result<OccupancyWatchdog, String> {
+    // Native preparation changed pid_for_children. Forking the controller in
+    // that namespace would let the workload share its enforcement boundary.
+    // The actual outside-owner handoff must exist; no same-namespace fallback.
+    require_original_watchdog_fork_boundary()?;
+    let lifetime = authority.into_pidfd();
+    let kill = std::fs::File::from(
+        lifetime
+            .try_clone()
+            .map_err(|error| format!("retain exact namespace occupancy lifetime: {error}"))?,
+    );
+    arm_occupancy_watchdog_inner(lifetime.as_fd(), kill, true, limit, cleanup_allowance)
+}
+
+#[cfg(target_os = "linux")]
+fn require_original_watchdog_fork_boundary() -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    // Inspect the actual CALLING thread, not the thread-group leader. Keep
+    // both namespace descriptors pinned through their identity comparison.
+    let current = std::fs::File::open("/proc/thread-self/ns/pid").map_err(|error| {
+        format!("watchdog requires original outside namespace fork boundary: {error}")
+    })?;
+    let children =
+        std::fs::File::open("/proc/thread-self/ns/pid_for_children").map_err(|error| {
+            format!("watchdog requires original outside namespace fork boundary: {error}")
+        })?;
+    let current_identity = current
+        .metadata()
+        .map_err(|error| format!("inspect original watchdog PID namespace: {error}"))?;
+    let child_identity = children
+        .metadata()
+        .map_err(|error| format!("inspect original watchdog child PID namespace: {error}"))?;
+    if current_identity.dev() != child_identity.dev()
+        || current_identity.ino() != child_identity.ino()
+    {
+        return Err("watchdog requires original outside namespace fork boundary; target namespace fork refused".into());
+    }
+    Ok(())
+}
+
+/// Return one fixed cutoff in the original BOOTTIME domain. The optional
+/// original directive is actual owned authority, never a renewed duration.
+#[cfg(target_os = "linux")]
+fn occupancy_service_cutoff_tick(
+    limit: &crate::time::OccupancyLimit,
+    cleanup: Duration,
+    original_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<u64, String> {
+    limit.validate()?;
+    // BOOTTIME BEFORE remaining Instant duration: delay/suspend can only
+    // narrow the mapping. A later BOOTTIME plus earlier duration could extend.
+    let before = crate::time::occupancy_now()?;
+    if !matches!(
+        limit.window_at(&before, cleanup)?,
+        crate::time::OccupancyWindowState::Service { .. }
+    ) {
+        return Err("occupancy service window elapsed before watchdog preparation".into());
+    }
+    let cleanup_ns = u64::try_from(cleanup.as_nanos()).map_err(|_| "occupancy cleanup overflow")?;
+    let resource_tick = limit
+        .start
+        .tick_ns
+        .checked_add(
+            limit
+                .maximum_occupancy_ns
+                .checked_sub(cleanup_ns)
+                .ok_or("occupancy cleanup consumes limit")?,
+        )
+        .ok_or("occupancy service deadline overflow")?;
+    let cutoff = match original_deadline {
+        Some(original) => {
+            let service_remaining = original
+                .remaining()
+                .checked_sub(cleanup)
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or("original directive has no remaining service plus cleanup reserve")?;
+            let original_tick = before
+                .tick_ns
+                .checked_add(
+                    u64::try_from(service_remaining.as_nanos())
+                        .map_err(|_| "original directive cutoff overflow")?,
+                )
+                .ok_or("original directive cutoff tick overflow")?;
+            resource_tick.min(original_tick)
+        }
+        // Ordinary/legacy scope enforcement owns only its resource limit.
+        // Do not manufacture an original aggregate clock or claim one here.
+        None => resource_tick,
+    };
+    let after = crate::time::occupancy_now()?;
+    after.elapsed_nanoseconds_since(&before)?;
+    if cutoff <= after.tick_ns {
+        return Err("original occupancy service cutoff elapsed before watchdog fork".into());
+    }
+    Ok(cutoff)
+}
+
+#[cfg(target_os = "linux")]
+fn arm_occupancy_watchdog_inner(
+    target_pidfd: BorrowedFd<'_>,
+    scope_kill: std::fs::File,
+    namespace_init: bool,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: Duration,
+) -> Result<OccupancyWatchdog, String> {
     limit.validate()?;
     if !matches!(
         limit.window(cleanup_allowance)?,
@@ -2972,13 +4194,7 @@ fn arm_occupancy_watchdog(
     ) {
         return Err("occupancy service window elapsed before target release".to_owned());
     }
-    let cleanup_ns = u64::try_from(cleanup_allowance.as_nanos())
-        .map_err(|_| "occupancy cleanup allowance overflows nanoseconds".to_owned())?;
-    let service_tick = limit
-        .start
-        .tick_ns
-        .checked_add(limit.maximum_occupancy_ns - cleanup_ns)
-        .ok_or_else(|| "occupancy service deadline overflow".to_owned())?;
+    let service_tick = occupancy_service_cutoff_tick(limit, cleanup_allowance, None)?;
     let expiry_tick = limit
         .start
         .tick_ns
@@ -3027,6 +4243,29 @@ fn arm_occupancy_watchdog(
     let child_target_pidfd = duplicate_for_child(target_pidfd.as_raw_fd())?;
     let child_cancel_keepalive = duplicate_for_child(cancel_writer.as_raw_fd())?;
     let child_ready_writer = duplicate_for_child(ready_writer.as_raw_fd())?;
+    // Hold the same exclusive fork boundary until the child acknowledges
+    // physical descriptor disposal. Parent-side lease close must not race
+    // this non-exec child's inherited lock descriptions.
+    let before_clock = Instant::now();
+    let now = crate::time::occupancy_now()?;
+    let remaining_ns = service_tick.checked_sub(now.tick_ns)
+        .ok_or("original watchdog service window elapsed before fork")?;
+    let setup_deadline = before_clock.checked_add(
+        Duration::from_nanos(remaining_ns).min(Duration::from_secs(5)))
+        .ok_or("watchdog fork deadline overflow")?;
+    let fork_guard = quiesce_fork_sensitive_descriptors(setup_deadline)?;
+    // The parent write end stays open until the fork has happened or failed.
+    // Any end without the acknowledgement settles through the witness. The
+    // child fixes descriptors 3..=8 before its scrub, so keep the witness
+    // above them: replacing it there would hang it up too early.
+    let witnessed = fork_guard
+        .witness_creation("occupancy watchdog creation")
+        .map_err(|error| format!("create occupancy watchdog creation witness: {error}"))?;
+    // Declared before the write end, so that on any early return the write
+    // end drops first and the custody's own settlement observes the witness.
+    let fork_custody = witnessed.0;
+    let fork_custody_witness = witness_writer_at_or_above(witnessed.1, 9)
+        .map_err(|error| format!("place occupancy watchdog creation witness: {error}"))?;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -3044,9 +4283,11 @@ fn arm_occupancy_watchdog(
                 child_target_pidfd.as_raw_fd(),
                 child_ready_writer.as_raw_fd(),
                 expiry_tick,
+                namespace_init,
             )
         }
     }
+    drop(fork_custody_witness);
     drop(ready_writer);
     drop(child_cancel_reader);
     drop(child_timer);
@@ -3060,7 +4301,8 @@ fn arm_occupancy_watchdog(
         events: libc::POLLIN,
         revents: 0,
     };
-    let polled = unsafe { libc::poll(&mut readiness_poll, 1, 5_000) };
+    let poll_ms = setup_deadline.saturating_duration_since(Instant::now()).as_millis().min(5_000) as i32;
+    let polled = unsafe { libc::poll(&mut readiness_poll, 1, poll_ms) };
     let mut ready = [0_u8; 1];
     let acknowledged = polled == 1
         && readiness_poll.revents & libc::POLLIN != 0
@@ -3069,20 +4311,44 @@ fn arm_occupancy_watchdog(
     if !acknowledged {
         let mut cancel = std::fs::File::from(cancel_writer);
         let _ = cancel.write_all(&[1]);
-        let mut status = 0;
-        while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
-            }
-        }
-        return Err(
-            "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned(),
+        drop(cancel);
+        // Cancellation ends a live watchdog promptly; one that does not end
+        // within the bound is killed rather than waited on.
+        let reaped = reap_fork_holder_until(
+            child,
+            Instant::now() + ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+            "unacknowledged occupancy watchdog",
         );
+        // Without proof of disposal, only the witness may reopen the window,
+        // else it strands with its fact; it never blocks here.
+        let custody = fork_custody.settle();
+        let refusal =
+            "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned();
+        return Err(match (reaped, custody) {
+            (Ok(_), Ok(())) => refusal,
+            (Err(reap), Ok(())) => format!("{refusal}; {reap}"),
+            (Ok(_), Err(fact)) => format!("{refusal}; {fact}"),
+            (Err(reap), Err(fact)) => format!("{refusal}; {reap}; {fact}"),
+        });
     }
-    Ok(OccupancyWatchdog {
+    // Readiness is emitted only after dup2 and close_range consumed all
+    // unrelated inherited descriptors, including registered native leases.
+    fork_custody.release_observed();
+    let watchdog = OccupancyWatchdog {
         pid: child,
         cancel: Some(std::fs::File::from(cancel_writer)),
-    })
+    };
+    // Readiness may have consumed the ORIGINAL service window. Do not renew
+    // it or hand back a release-capable owner after this five-second wait.
+    // Error drops only our cancel authority; the armed child continues until
+    // exact cleanup proves that enforcement may be cancelled.
+    if !matches!(
+        limit.window(cleanup_allowance)?,
+        crate::time::OccupancyWindowState::Service { .. }
+    ) {
+        return Err("original occupancy service window elapsed while watchdog armed".into());
+    }
+    Ok(watchdog)
 }
 
 #[cfg(target_os = "linux")]
@@ -3130,6 +4396,7 @@ unsafe fn occupancy_watchdog_child(
     target_pidfd: i32,
     ready_writer: i32,
     expiry_tick: u64,
+    namespace_init: bool,
 ) -> ! {
     for (source, target) in [
         cancel_reader,
@@ -3177,7 +4444,7 @@ unsafe fn occupancy_watchdog_child(
             if unsafe { *libc::__errno_location() } == libc::EINTR {
                 continue;
             }
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
         if poll_fds[0].revents != 0 {
             unsafe { libc::_exit(0) }
@@ -3185,6 +4452,12 @@ unsafe fn occupancy_watchdog_child(
         if poll_fds[1].revents & libc::POLLIN != 0 {
             break;
         }
+    }
+    // Kill a proved namespace-init at the ORIGINAL service boundary, leaving
+    // the existing cleanup reserve for death observation. This requests exact
+    // descendant termination; it does NOT prove bounded death or GPU release.
+    if namespace_init {
+        unsafe { kill_occupancy_target_and_exit(5, true) }
     }
     // The service-boundary request is fenced by the retained pidfd. A numeric
     // PID or PGID may be recycled after daemon loss and is never safe here.
@@ -3200,7 +4473,7 @@ unsafe fn occupancy_watchdog_child(
     if signal_result != 0 {
         let error = unsafe { *libc::__errno_location() };
         if error != libc::ESRCH {
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
     }
     let seconds = expiry_tick / 1_000_000_000;
@@ -3218,7 +4491,7 @@ unsafe fn occupancy_watchdog_child(
     if unsafe { libc::timerfd_settime(4, libc::TFD_TIMER_ABSTIME, &expiry, std::ptr::null_mut()) }
         != 0
     {
-        unsafe { kill_scope_and_exit(5) }
+        unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
     }
     for poll_fd in &mut poll_fds {
         poll_fd.revents = 0;
@@ -3229,7 +4502,7 @@ unsafe fn occupancy_watchdog_child(
             if unsafe { *libc::__errno_location() } == libc::EINTR {
                 continue;
             }
-            unsafe { kill_scope_and_exit(5) }
+            unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
         }
         if poll_fds[0].revents != 0 {
             unsafe { libc::_exit(0) }
@@ -3238,14 +4511,39 @@ unsafe fn occupancy_watchdog_child(
             break;
         }
     }
-    unsafe { kill_scope_and_exit(5) }
+    unsafe { kill_occupancy_target_and_exit(5, namespace_init) }
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn kill_scope_and_exit(scope_kill_fd: i32) -> ! {
+unsafe fn kill_occupancy_target_and_exit(kill_fd: i32, namespace_init: bool) -> ! {
+    if namespace_init {
+        loop {
+            let signalled = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    kill_fd,
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0_u32,
+                )
+            };
+            if signalled == 0 {
+                // Diagnostic only; namespace death still requires observation.
+                unsafe { libc::_exit(0) }
+            }
+            let error = unsafe { *libc::__errno_location() };
+            if error == libc::EINTR {
+                continue;
+            }
+            if error == libc::ESRCH {
+                unsafe { libc::_exit(0) }
+            }
+            unsafe { libc::_exit(126) }
+        }
+    }
     let byte = b'1';
     loop {
-        let written = unsafe { libc::write(scope_kill_fd, (&byte as *const u8).cast(), 1) };
+        let written = unsafe { libc::write(kill_fd, (&byte as *const u8).cast(), 1) };
         if written == 1 {
             unsafe { libc::_exit(0) }
         }
@@ -3271,6 +4569,10 @@ unsafe fn kill_scope_and_exit(scope_kill_fd: i32) -> ! {
 /// release, or the runtime's lifetime, so independent executions remain
 /// concurrent.
 static DIRECT_ATTACHMENT_FORK_BARRIER: OnceLock<DescriptorForkBarrier> = OnceLock::new();
+// Child installation is copy-on-write process-local and never changes the
+// parent barrier. Installed storage intentionally survives for this process.
+static CHILD_DESCRIPTOR_FORK_BARRIER: std::sync::atomic::AtomicPtr<DescriptorForkBarrier> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct DescriptorLeaseLocation {
@@ -3288,10 +4590,214 @@ struct DescriptorForkBarrierState {
     fork_quiesced: bool,
     pending_fork_control_fds: BTreeSet<i32>,
     fork_child_close_fds: BTreeSet<i32>,
+    owned_registration_generations: BTreeMap<i32, u64>,
+    next_owned_registration_generation: u64,
+    borrowed_child_close: BorrowedChildCloseRegistry,
     // Files, not registered wrappers: release must close+deregister without
     // recursively entering this barrier through another registered Drop.
     // At most one entry per descriptor already registered at quiescence.
     deferred_child_closes: Vec<(i32, std::fs::File)>,
+    // Pending fork-control writers dropped while the window was stranded.
+    // Each stays in `pending_fork_control_fds` until the window reopens.
+    deferred_control_closes: Vec<(i32, std::fs::File)>,
+    // Set only while `fork_quiesced` is held by no live owner: process
+    // creation ended without proof that every created process has disposed
+    // of its pre-exec descriptor table. Acquisition refuses with this fact
+    // instead of waiting; observing the witness closed reopens the window.
+    stranded_fork_custody: Option<StrandedForkCustody>,
+}
+
+struct StrandedForkCustody {
+    fact: String,
+    // Read end of the creation witness, when one existed. `None` means no
+    // later observation can prove disposal and the window stays closed.
+    witness: Option<std::fs::File>,
+    // Whether the creator can no longer fork with the window's close snapshot.
+    // Only then may a registered descriptor close during the strand: a live
+    // creator's later child would scrub a snapshot number which the parent
+    // may meanwhile have reused for one of that creator's own descriptors.
+    creator_settled: bool,
+}
+
+const BORROWED_CHILD_CLOSE_LIMIT: usize = 64;
+
+struct BorrowedChildCloseRegistry {
+    slots: [Option<(Option<i32>, u64)>; BORROWED_CHILD_CLOSE_LIMIT],
+    next_generation: u64,
+}
+
+impl Default for BorrowedChildCloseRegistry {
+    fn default() -> Self {
+        Self {
+            slots: [None; BORROWED_CHILD_CLOSE_LIMIT],
+            next_generation: 0,
+        }
+    }
+}
+
+/// Registration of a descriptor owned by a native backend, not by Rust.
+/// Dropping this token neither closes nor unregisters the descriptor. Failed
+/// owners must retain it until explicit physical disposal under the fork lease.
+#[must_use]
+pub struct BorrowedForkChildCloseRegistration {
+    barrier_identity: usize,
+    slot: usize,
+    generation: u64,
+    parent_pid: u32,
+}
+
+impl BorrowedForkChildCloseRegistration {
+    /// Remove the child-close entry after the native owner consumed its FD.
+    ///
+    /// # Safety
+    /// The supplied lease must have been acquired before physical close and
+    /// remain held through this call. The descriptor must actually be consumed;
+    /// an unconsumed close refusal must retain this registration. Never retry a
+    /// consumed descriptor number or release the guard before deregistration.
+    pub unsafe fn unregister_consumed(
+        self,
+        lease: &ForkSensitiveDescriptorLease,
+    ) -> Result<(), Self> {
+        if self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || self.barrier_identity != lease.barrier_identity
+            || self.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[self.slot]
+                .is_none_or(|(fd, generation)| fd.is_none() || generation != self.generation)
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[self.slot] = None;
+        Ok(())
+    }
+}
+
+/// Reserved inventory capacity with no descriptor effects yet.
+/// Drop is inert: abandoned capacity remains excluded until explicit cancel.
+#[must_use]
+pub struct BorrowedForkChildCloseReservation {
+    registration: BorrowedForkChildCloseRegistration,
+}
+
+impl BorrowedForkChildCloseReservation {
+    /// Bind the actual acquired FD without a post-open capacity allocation.
+    ///
+    /// # Safety
+    /// Acquire and keep this lease before native open through this call. `fd`
+    /// must be uniquely owned by the native backend with no external close or
+    /// registration. On refusal retain both the owner and the lease until the
+    /// FD is physically consumed or correctly enrolled. No unguarded unwind.
+    pub unsafe fn bind(
+        self,
+        lease: &ForkSensitiveDescriptorLease,
+        fd: i32,
+    ) -> Result<BorrowedForkChildCloseRegistration, Self> {
+        let registration = &self.registration;
+        if fd < 0
+            || registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || registration.barrier_identity != lease.barrier_identity
+            || registration.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[registration.slot]
+                != Some((None, registration.generation))
+            || state.fork_child_close_fds.contains(&fd)
+            || state.pending_fork_control_fds.contains(&fd)
+            || state
+                .borrowed_child_close
+                .slots
+                .iter()
+                .flatten()
+                .any(|(registered, _)| *registered == Some(fd))
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[registration.slot] =
+            Some((Some(fd), registration.generation));
+        Ok(self.registration)
+    }
+
+    /// Cancel unused capacity. A reservation has no bound descriptor.
+    pub fn cancel(self, lease: &ForkSensitiveDescriptorLease) -> Result<(), Self> {
+        let registration = &self.registration;
+        if registration.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+            || registration.barrier_identity != lease.barrier_identity
+            || registration.parent_pid != std::process::id()
+            || lease.parent_pid != std::process::id()
+            || !lease.retained
+            || lease.owner != thread::current().id()
+        {
+            return Err(self);
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.fork_quiesced
+            || !state.retained_scope_owners.contains_key(&lease.owner)
+            || state.borrowed_child_close.slots[registration.slot]
+                != Some((None, registration.generation))
+        {
+            return Err(self);
+        }
+        state.borrowed_child_close.slots[registration.slot] = None;
+        Ok(())
+    }
+}
+
+/// Reserve fixed child-close inventory capacity BEFORE native descriptor open.
+/// This has no File ownership and performs no per-registration allocation.
+pub fn reserve_borrowed_fork_child_close_descriptor(
+    lease: &ForkSensitiveDescriptorLease,
+) -> Result<BorrowedForkChildCloseReservation, &'static str> {
+    if lease.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        || lease.parent_pid != std::process::id()
+        || !lease.retained
+        || lease.owner != thread::current().id()
+    {
+        return Err("borrowed descriptor requires its current fork lease");
+    }
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+    if state.fork_quiesced || !state.retained_scope_owners.contains_key(&lease.owner) {
+        return Err("borrowed descriptor reservation during fork");
+    }
+    let slot = state
+        .borrowed_child_close
+        .slots
+        .iter()
+        .position(Option::is_none)
+        .ok_or("borrowed child-close inventory exhausted")?;
+    let generation = state
+        .borrowed_child_close
+        .next_generation
+        .checked_add(1)
+        .ok_or("borrowed child-close generation exhausted")?;
+    state.borrowed_child_close.next_generation = generation;
+    state.borrowed_child_close.slots[slot] = Some((None, generation));
+    Ok(BorrowedForkChildCloseReservation {
+        registration: BorrowedForkChildCloseRegistration {
+            barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+            slot,
+            generation,
+            parent_pid: std::process::id(),
+        },
+    })
 }
 
 struct DescriptorForkBarrier {
@@ -3301,6 +4807,12 @@ struct DescriptorForkBarrier {
 }
 
 fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
+    let child = CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire);
+    if !child.is_null() {
+        // SAFETY: installation leaks the preallocated owner for this process;
+        // no installed pointer is freed or mutated through shared references.
+        return unsafe { &*child };
+    }
     DIRECT_ATTACHMENT_FORK_BARRIER.get_or_init(|| DescriptorForkBarrier {
         state: Mutex::new(DescriptorForkBarrierState::default()),
         changed: Condvar::new(),
@@ -3311,22 +4823,91 @@ fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
 /// Shared proof that the current scope may own descriptor-backed authority
 /// which a pre-exec attachment child must not inherit.
 pub struct ForkSensitiveDescriptorLease {
+    barrier_identity: usize,
+    parent_pid: u32,
     owner: thread::ThreadId,
     location: DescriptorLeaseLocation,
     retained: bool,
     _not_send: PhantomData<Rc<()>>,
 }
 
-/// Retain the process-wide fork-sensitive descriptor lease.
+/// Why a fork-sensitive descriptor lease was not granted. The refusal is the
+/// caller's to propagate; no lease, descriptor or owner was created for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkSensitiveDescriptorLeaseRefused {
+    cause: ForkSensitiveDescriptorLeaseRefusal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForkSensitiveDescriptorLeaseRefusal {
+    /// A failed or abandoned process creation left the fork window closed and
+    /// its creation witness still open. The recorded fact names that window.
+    Stranded(String),
+    /// The caller's operation deadline elapsed before the window opened.
+    DeadlineElapsed,
+}
+
+impl ForkSensitiveDescriptorLeaseRefused {
+    /// The stranded-window fact, when that is the refusal's cause.
+    pub fn stranded_fact(&self) -> Option<&str> {
+        match &self.cause {
+            ForkSensitiveDescriptorLeaseRefusal::Stranded(fact) => Some(fact),
+            ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed => None,
+        }
+    }
+
+    pub fn deadline_elapsed(&self) -> bool {
+        matches!(self.cause, ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed)
+    }
+}
+
+impl std::fmt::Display for ForkSensitiveDescriptorLeaseRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            ForkSensitiveDescriptorLeaseRefusal::Stranded(fact) => {
+                write!(formatter, "fork-sensitive descriptor lease refused: {fact}")
+            }
+            ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed => {
+                formatter.write_str("descriptor lease deadline elapsed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ForkSensitiveDescriptorLeaseRefused {}
+
+impl From<ForkSensitiveDescriptorLeaseRefused> for std::io::Error {
+    fn from(refused: ForkSensitiveDescriptorLeaseRefused) -> Self {
+        let kind = if refused.deadline_elapsed() {
+            std::io::ErrorKind::TimedOut
+        } else {
+            std::io::ErrorKind::Other
+        };
+        std::io::Error::new(kind, refused)
+    }
+}
+
+impl From<ForkSensitiveDescriptorLeaseRefused> for String {
+    fn from(refused: ForkSensitiveDescriptorLeaseRefused) -> Self {
+        refused.to_string()
+    }
+}
+
+/// Retain the process-wide fork-sensitive descriptor lease without a caller
+/// deadline.
 ///
 /// Acquire this before opening or locking descriptor-backed authority and keep
 /// it until those descriptors/locks have been released. Acquisition is
-/// intentionally infallible after poisoning: the barrier protects process
+/// intentionally unaffected by poisoning: the barrier protects process
 /// topology, not data whose consistency could be invalidated by a panic.
+///
+/// Waiting is only for a live process-creation owner, which always reopens
+/// the window or strands it within a bounded time. A stranded window is the
+/// one refusal; it is returned with its fact, never waited on.
 #[track_caller]
-pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
+pub fn try_retain_fork_sensitive_descriptors()
+-> Result<ForkSensitiveDescriptorLease, ForkSensitiveDescriptorLeaseRefused> {
     retain_fork_sensitive_descriptors_inner(None)
-        .expect("undeadlined descriptor lease acquisition cannot expire")
 }
 
 /// The same fork barrier, bounded by the caller's existing operation deadline.
@@ -3343,13 +4924,33 @@ pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
 pub fn retain_fork_sensitive_descriptors_until(
     deadline: crate::time::MonotonicDeadline,
 ) -> std::io::Result<ForkSensitiveDescriptorLease> {
-    retain_fork_sensitive_descriptors_inner(Some(deadline))
+    retain_fork_sensitive_descriptors_inner(Some(deadline)).map_err(std::io::Error::from)
+}
+
+/// Whether the calling thread currently retains any fork-sensitive descriptor
+/// lease.
+///
+/// Such a thread cannot start a process: process creation refuses outright
+/// when the requesting thread is itself a lease holder, and every other
+/// thread's process creation waits until all leases drop. Work that may start
+/// a process can use this to refuse at its own entry, naming its own cause,
+/// instead of failing later at the process-creation barrier. This is an
+/// observation only; it neither acquires nor releases a lease.
+pub fn current_thread_retains_fork_sensitive_descriptors() -> bool {
+    let barrier = direct_attachment_fork_barrier();
+    let owner = thread::current().id();
+    barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retained_scope_owners
+        .contains_key(&owner)
 }
 
 #[track_caller]
 fn retain_fork_sensitive_descriptors_inner(
     deadline: Option<crate::time::MonotonicDeadline>,
-) -> std::io::Result<ForkSensitiveDescriptorLease> {
+) -> Result<ForkSensitiveDescriptorLease, ForkSensitiveDescriptorLeaseRefused> {
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
     let caller = std::panic::Location::caller();
@@ -3362,16 +4963,26 @@ fn retain_fork_sensitive_descriptors_inner(
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    while state.fork_quiesced
-        || (state.waiting_forks != 0 && !state.retained_scope_owners.contains_key(&owner))
-    {
+    loop {
+        if state.stranded_fork_custody.is_some() {
+            settle_stranded_fork_custody_locked(&mut state).map_err(|fact| {
+                ForkSensitiveDescriptorLeaseRefused {
+                    cause: ForkSensitiveDescriptorLeaseRefusal::Stranded(fact),
+                }
+            })?;
+            barrier.changed.notify_all();
+        }
+        if !(state.fork_quiesced
+            || (state.waiting_forks != 0 && !state.retained_scope_owners.contains_key(&owner)))
+        {
+            break;
+        }
         state = if let Some(deadline) = deadline {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "descriptor lease deadline elapsed",
-                ));
+                return Err(ForkSensitiveDescriptorLeaseRefused {
+                    cause: ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed,
+                });
             }
             barrier
                 .changed
@@ -3386,10 +4997,9 @@ fn retain_fork_sensitive_descriptors_inner(
         };
     }
     if deadline.is_some_and(|deadline| deadline.has_elapsed()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "descriptor lease deadline elapsed",
-        ));
+        return Err(ForkSensitiveDescriptorLeaseRefused {
+            cause: ForkSensitiveDescriptorLeaseRefusal::DeadlineElapsed,
+        });
     }
     state.retained_scopes = state
         .retained_scopes
@@ -3409,6 +5019,8 @@ fn retain_fork_sensitive_descriptors_inner(
         .checked_add(1)
         .expect("fork-sensitive descriptor location count overflow");
     Ok(ForkSensitiveDescriptorLease {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
         owner,
         location,
         retained: true,
@@ -3416,9 +5028,39 @@ fn retain_fork_sensitive_descriptors_inner(
     })
 }
 
+/// Fork exclusions this process holds until exit because their owner refused
+/// on a descriptor-registration invariant. Only ever incremented.
+static FORK_EXCLUSIONS_HELD_UNTIL_EXIT: AtomicUsize = AtomicUsize::new(0);
+
+/// Count of fork-sensitive descriptor leases this process holds until exit.
+/// Any nonzero count means every protected process creation in this process
+/// stays refused or waiting until the process exits.
+pub fn fork_exclusions_held_until_exit() -> usize {
+    FORK_EXCLUSIONS_HELD_UNTIL_EXIT.load(Ordering::Acquire)
+}
+
+impl ForkSensitiveDescriptorLease {
+    /// Keep this lease's fork exclusion held until the process exits. For an
+    /// owner whose descriptor registration contradicts its actual descriptor:
+    /// releasing the exclusion would let a protected fork snapshot a stale or
+    /// unregistered number. The barrier keeps counting this scope, so every
+    /// protected process creation stays refused or waiting; the lease value
+    /// carries no other owner and ends here with nothing left to release.
+    pub fn hold_until_process_exit(mut self) {
+        if self.retained && self.parent_pid == std::process::id() {
+            FORK_EXCLUSIONS_HELD_UNTIL_EXIT
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_add(1))
+                .expect("held fork exclusion count overflow");
+        }
+        self.retained = false;
+    }
+}
+
 impl Drop for ForkSensitiveDescriptorLease {
     fn drop(&mut self) {
-        if !self.retained {
+        if !self.retained || self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
             return;
         }
         let barrier = direct_attachment_fork_barrier();
@@ -3466,26 +5108,87 @@ impl Drop for ForkSensitiveDescriptorLease {
 // Kernel-only probes which fork without exec must use this same barrier and
 // child-close inventory. CLOEXEC alone cannot keep them from retaining a
 // daemon lock, release pipe, or transferred authority for their lifetime.
-pub(crate) struct QuiescedForkSensitiveDescriptors;
+pub(crate) struct QuiescedForkSensitiveDescriptors {
+    barrier_identity: usize,
+    parent_pid: u32,
+    // Cleared only when the owner hands the closed window to the barrier's
+    // stranded record; Drop then has nothing left to release.
+    armed: bool,
+}
+
+/// Fresh bookkeeping allocated by the parent before fork, with no FD ownership.
+/// Only explicitly preserved registered descriptors populate the child ledger.
+pub(crate) struct PreparedForkChildDescriptorBarrier {
+    barrier: Box<DescriptorForkBarrier>,
+}
+
+impl PreparedForkChildDescriptorBarrier {
+    /// # Safety
+    /// Call only in the single-threaded child of the protecting fork, after
+    /// physically closing every snapshot FD. Preserved owners remain live;
+    /// closed inherited wrappers must never be used to recover authority.
+    /// No Rust destructor or descriptor-lease acquisition may precede this.
+    pub(crate) unsafe fn install_in_actual_fork_child(self) {
+        // The actual kernel fork==0 branch is the witness. Numeric PID
+        // inequality cannot identify a child across nested PID namespaces.
+        let pointer = Box::into_raw(self.barrier);
+        CHILD_DESCRIPTOR_FORK_BARRIER.store(pointer, Ordering::Release);
+    }
+}
 
 impl QuiescedForkSensitiveDescriptors {
+    pub(crate) fn prepare_child_descriptor_barrier(
+        &self,
+        preserved: &BTreeSet<i32>,
+    ) -> Result<PreparedForkChildDescriptorBarrier, String> {
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return Err("child barrier preparation requires the original parent".into());
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !state.fork_quiesced || !state.pending_fork_control_fds.is_disjoint(preserved)
+            || state.borrowed_child_close.slots.iter().flatten()
+                .any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
+        { return Err("child barrier cannot preserve native/control custody".into()); }
+        let mut child_state = DescriptorForkBarrierState::default();
+        child_state.fork_child_close_fds = state.fork_child_close_fds
+            .intersection(preserved).copied().collect();
+        child_state.next_owned_registration_generation = state.next_owned_registration_generation;
+        child_state.owned_registration_generations = state.owned_registration_generations.iter()
+            .filter(|(fd, _)| preserved.contains(fd)).map(|(fd, generation)| (*fd, *generation)).collect();
+        Ok(PreparedForkChildDescriptorBarrier {
+            barrier: Box::new(DescriptorForkBarrier {
+                state: Mutex::new(child_state), changed: Condvar::new(),
+                waiting_descriptor_closers: AtomicUsize::new(0),
+            }),
+        })
+    }
+
     pub(crate) fn fork_child_close_fds(
         &self,
         preserved: &BTreeSet<i32>,
     ) -> Result<Vec<i32>, String> {
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        { return Err("fork snapshot requires its original bookkeeping owner".into()); }
         let barrier = direct_attachment_fork_barrier();
         let state = barrier
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        if !state.pending_fork_control_fds.is_disjoint(preserved) {
+        if !state.pending_fork_control_fds.is_disjoint(preserved)
+            || state.borrowed_child_close.slots.iter().flatten().any(|(fd, _)| fd.is_some_and(|fd| preserved.contains(&fd)))
+        {
             return Err("inherited authority aliases parent process-control authority".to_owned());
         }
         Ok(state
             .pending_fork_control_fds
             .iter()
             .chain(state.fork_child_close_fds.difference(preserved))
+            .chain(state.borrowed_child_close.slots.iter().flatten().filter_map(|(fd, _)| fd.as_ref()))
             .copied()
             .collect())
     }
@@ -3512,8 +5215,14 @@ impl QuiescedForkSensitiveDescriptors {
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct ForkChildCloseFile {
+    barrier_identity: usize,
+    parent_pid: u32,
+    generation: u64,
     fd: i32,
     file: Option<std::fs::File>,
+    // An explicit close is attempted once. A failed close is not retried by FD
+    // number: Linux may already have released that coordinate on error.
+    explicit_close: Option<Result<(), i32>>,
 }
 
 #[cfg(unix)]
@@ -3534,9 +5243,142 @@ impl std::os::fd::AsRawFd for ForkChildCloseFile {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl ForkChildCloseFile {
+    /// Actual physical observation only. The caller retains its original
+    /// cleanup funding and deadline; success supplies no renewed authority.
+    /// Busy/quiesced/expired refusal leaves the exact registered file intact.
+    pub(crate) fn try_retire_registered(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<bool, String> {
+        // Never touch a copied barrier, or a copied numeric descriptor, first.
+        if self.parent_pid != std::process::id() {
+            return Err("registered close belongs to another process".into());
+        }
+        let barrier = direct_attachment_fork_barrier();
+        if self.barrier_identity != barrier as *const DescriptorForkBarrier as usize {
+            return Err("registered close barrier identity changed".into());
+        }
+        if let Some(result) = self.explicit_close {
+            return result.map(|()| true).map_err(|errno| {
+                format!("original registered close failed with errno {errno}; no FD retry")
+            });
+        }
+        if original.has_elapsed() {
+            return Ok(false);
+        }
+        let mut state = match barrier.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("registered close barrier poisoned".into());
+            }
+        };
+        reopen_settled_strand_locked(barrier, &mut state);
+        if state.fork_quiesced || original.has_elapsed() {
+            return Ok(false);
+        }
+        if state.owned_registration_generations.get(&self.fd) != Some(&self.generation)
+            || !state.fork_child_close_fds.contains(&self.fd)
+        {
+            return Err("original registered close generation missing".into());
+        }
+        if self.file.is_none() { return Err("registered close file already absent".into()); }
+        // The exact registration remains protected until the single syscall
+        // finishes. No fork can snapshot this FD between close and removal.
+        let result = self.close_registered_locked(&mut state);
+        barrier.changed.notify_all();
+        // An observed late close is a physical fact, never a timely grant.
+        result.map(|()| true).map_err(|errno| {
+            format!("original registered close failed with errno {errno}; no FD retry")
+        })
+    }
+
+    /// Caller holds the actual barrier and has checked the original process,
+    /// exact live registration and sole owner. One syscall consumes the file;
+    /// errno is cached because its numeric FD may already have been released.
+    fn close_registered_locked(&mut self, state: &mut DescriptorForkBarrierState) -> Result<(), i32> {
+        self.close_registered_locked_with(state, |fd| {
+            if unsafe { libc::close(fd) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+            }
+        })
+    }
+
+    fn close_registered_locked_with(&mut self, state: &mut DescriptorForkBarrierState,
+        close: impl FnOnce(i32) -> Result<(), i32>) -> Result<(), i32> {
+        use std::os::fd::IntoRawFd as _;
+        let file = self.file.take().expect("validated original registered file");
+        let result = close(file.into_raw_fd());
+        self.explicit_close = Some(result);
+        state.owned_registration_generations.remove(&self.fd);
+        state.fork_child_close_fds.remove(&self.fd);
+        result
+    }
+
+    pub(crate) fn is_registered_live(&self) -> bool {
+        self.parent_pid == std::process::id() && self.file.is_some() && self.explicit_close.is_none()
+    }
+
+    pub(crate) fn explicitly_retired(&self) -> bool {
+        self.parent_pid == std::process::id() && self.explicit_close == Some(Ok(()))
+    }
+}
+
+/// Give up a fork copy's claim to a registered descriptor number without
+/// closing it. In a forked child the number is either still owned by the
+/// original process's registration, or was already consumed by the child's
+/// snapshot disposal and may now name an unrelated descriptor; closing it
+/// would act on custody this copy does not hold. Nothing is retained because
+/// nothing is owned here: the only value is the numeric coordinate, and a
+/// forked child may neither allocate nor enter a copied mutex to record it.
+#[cfg(unix)]
+fn relinquish_foreign_descriptor_coordinate(file: Option<std::fs::File>) {
+    use std::os::fd::IntoRawFd as _;
+    if let Some(file) = file {
+        let _coordinate: i32 = file.into_raw_fd();
+    }
+}
+
+/// Whether this process is the child of a protected fork that installed its
+/// own descriptor barrier. Reads one atomic pointer: no lock, no allocation,
+/// so it is safe between fork and exec.
+pub fn in_forked_child() -> bool {
+    !CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire).is_null()
+}
+
 #[cfg(unix)]
 impl Drop for ForkChildCloseFile {
     fn drop(&mut self) {
+        if self.file.is_none() {
+            // Selected close or the explicit one-attempt close already removed
+            // the exact registration. A cached errno is NOT success evidence.
+            return;
+        }
+        if self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            let child = CHILD_DESCRIPTOR_FORK_BARRIER.load(Ordering::Acquire);
+            if child.is_null() {
+                // No reviewed child transition: never enter the copied mutex
+                // or close a numeric coordinate whose custody was discarded.
+                // The descriptor's owner is the original process; this copy
+                // gives up its claim to the number without closing it.
+                relinquish_foreign_descriptor_coordinate(self.file.take());
+                return;
+            }
+            let barrier = unsafe { &*child };
+            let state = barrier.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.owned_registration_generations.get(&self.fd) != Some(&self.generation) {
+                // Snapshot disposal already consumed this inherited FD. Its
+                // number may now name a different child-local descriptor.
+                relinquish_foreign_descriptor_coordinate(self.file.take());
+                return;
+            }
+        }
         let barrier = direct_attachment_fork_barrier();
         barrier
             .waiting_descriptor_closers
@@ -3548,7 +5390,8 @@ impl Drop for ForkChildCloseFile {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.fork_quiesced {
+        reopen_settled_strand_locked(barrier, &mut state);
+        if state.fork_quiesced && !stranded_without_live_creator(&state) {
             // Returning a timed operation must not wait in this destructor.
             // Preserve the exact live fd and its registration until the
             // snapshot owner releases its protected fork window. This is NOT
@@ -3560,8 +5403,11 @@ impl Drop for ForkChildCloseFile {
             assert!(state.deferred_child_closes.len() <= state.fork_child_close_fds.len());
         } else {
             // Close before deregistration, while no fork can consume a stale
-            // coordinate or see an unregistered live authority.
+            // coordinate or see an unregistered live authority. A window
+            // stranded with its creator settled is included: see
+            // `stranded_without_live_creator` for why that is safe.
             drop(self.file.take());
+            state.owned_registration_generations.remove(&self.fd);
             assert!(
                 state.fork_child_close_fds.remove(&self.fd),
                 "fork-child-close descriptor was not registered"
@@ -3578,6 +5424,63 @@ impl Drop for ForkChildCloseFile {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn selected_close_inherited_copies(
+    copies: &mut Vec<InheritedDescriptorAuthority>,
+    original: crate::time::MonotonicDeadline,
+) -> Result<bool, String> {
+    // Remove only duplicate Arcs for which another SAME vector owner remains.
+    let mut index = 0;
+    while index < copies.len() {
+        if copies[..index]
+            .iter()
+            .any(|prior| Arc::ptr_eq(&prior.handle, &copies[index].handle))
+        {
+            copies.swap_remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    if copies.is_empty() {
+        return Ok(true);
+    }
+    if original.has_elapsed() {
+        return Ok(false);
+    }
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = match barrier.state.try_lock() {
+        Ok(state) => state,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err("selected descriptor barrier poisoned".into());
+        }
+    };
+    reopen_settled_strand_locked(barrier, &mut state);
+    if state.fork_quiesced || original.has_elapsed() {
+        return Ok(false);
+    }
+    for copy in copies.iter_mut() {
+        if let Some(handle) = Arc::get_mut(&mut copy.handle) {
+            if handle.file.is_some() {
+                if original.has_elapsed() {
+                    return Ok(false);
+                }
+                state.owned_registration_generations.remove(&handle.fd);
+                if !state.fork_child_close_fds.remove(&handle.fd) {
+                    return Err("selected inherited descriptor registration missing".into());
+                }
+                // Drop ONLY the uniquely owned plain File, under same barrier.
+                handle.file.take();
+            }
+        }
+    }
+    let closed = copies.iter().all(|copy| copy.handle.file.is_none());
+    // Uniquely closed owners have inert Drop; shared owners remain in ledger.
+    copies.retain(|copy| copy.handle.file.is_some());
+    barrier.changed.notify_all();
+    Ok(closed)
+}
+
 /// Register an already-open descriptor while its caller retains a
 /// fork-sensitive lease acquired before opening it.
 #[cfg(unix)]
@@ -3592,22 +5495,92 @@ pub(crate) fn register_fork_child_close_file(file: std::fs::File) -> ForkChildCl
         !state.fork_quiesced,
         "fork-child-close descriptor registered during a fork"
     );
+    let generation = state.next_owned_registration_generation.checked_add(1)
+        .expect("owned descriptor registration generation exhausted");
     assert!(
         state.fork_child_close_fds.insert(fd),
         "fork-child-close descriptor was already registered"
     );
+    state.next_owned_registration_generation = generation;
+    state.owned_registration_generations.insert(fd, generation);
     ForkChildCloseFile {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
+        generation,
         fd,
         file: Some(file),
+        explicit_close: None,
     }
 }
 
 struct PendingForkControlDescriptor {
     fd: i32,
     writer: Option<std::fs::File>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_borrowed: bool,
 }
 
 impl PendingForkControlDescriptor {
+    #[cfg(target_os = "linux")]
+    fn close_selected_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        self.close_selected_with_request_until(deadline, mode, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn close_selected_with_request_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+        request_expiry: Option<Instant>,
+    ) -> Result<(), String> {
+        if self.writer.is_none() {
+            return Ok(());
+        }
+        loop {
+            mode.check(deadline)?;
+            if matches!(mode, SelectedCleanupMode::BoundedOriginal)
+                && request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+            {
+                return Err("selected request expired before release writer closure".into());
+            }
+            let barrier = direct_attachment_fork_barrier();
+            let locked = barrier.state.try_lock();
+            let mut state = match locked {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::Poisoned(_)) if self.selected_scoped_borrowed => {
+                    return Err("selected scoped release barrier poisoned".into());
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    mode.pause(deadline);
+                    continue;
+                }
+            };
+            reopen_settled_strand_locked(barrier, &mut state);
+            if state.fork_quiesced {
+                drop(state);
+                mode.pause(deadline);
+                continue;
+            }
+            if self.selected_scoped_borrowed {
+                mode.check(deadline)?;
+                if request_expiry.is_some_and(|expiry| Instant::now() >= expiry) {
+                    return Err("selected scoped release closure completed late".into());
+                }
+            }
+            if !state.pending_fork_control_fds.remove(&self.fd) {
+                return Err("selected release descriptor registration lost".into());
+            }
+            self.writer.take();
+            barrier.changed.notify_all();
+            return Ok(());
+        }
+    }
+
     fn write_release(&mut self) -> std::io::Result<()> {
         self.writer
             .as_mut()
@@ -3618,6 +5591,17 @@ impl PendingForkControlDescriptor {
 
 impl Drop for PendingForkControlDescriptor {
     fn drop(&mut self) {
+        // Selected bounded closure already unregistered and closed under the
+        // same barrier. Ordinary descriptors keep their existing Drop path.
+        #[cfg(target_os = "linux")]
+        if self.selected_scoped_borrowed && self.writer.is_some() {
+            // Unresolved final destruction is unsupported: upper must retain
+            // this descriptor. Never enter the unbounded ordinary closer.
+            return;
+        }
+        if self.writer.is_none() {
+            return;
+        }
         let barrier = direct_attachment_fork_barrier();
         barrier
             .waiting_descriptor_closers
@@ -3630,6 +5614,36 @@ impl Drop for PendingForkControlDescriptor {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         while state.fork_quiesced {
+            if state.stranded_fork_custody.is_some() {
+                if settle_stranded_fork_custody_locked(&mut state).is_ok() {
+                    barrier.changed.notify_all();
+                    continue;
+                }
+                if stranded_without_live_creator(&state) {
+                    // Close and deregister below, exactly as with the window
+                    // open; `stranded_without_live_creator` explains why.
+                    break;
+                }
+                // A detached creator may still fork with its snapshot, and
+                // the window cannot reopen yet. Keep the writer open and
+                // registered rather than block this destructor; reopening the
+                // window closes and deregisters it.
+                assert!(
+                    state.pending_fork_control_fds.contains(&self.fd),
+                    "pending fork-control descriptor was not registered"
+                );
+                let writer = self.writer.take().expect("pending fork-control writer present");
+                state.deferred_control_closes.push((self.fd, writer));
+                let previous_closers = barrier
+                    .waiting_descriptor_closers
+                    .fetch_sub(1, Ordering::SeqCst);
+                assert_ne!(
+                    previous_closers, 0,
+                    "pending fork-control closer count underflow"
+                );
+                barrier.changed.notify_all();
+                return;
+            }
             state = barrier
                 .changed
                 .wait(state)
@@ -3668,26 +5682,402 @@ fn register_pending_fork_control_file(file: std::fs::File) -> PendingForkControl
     PendingForkControlDescriptor {
         fd,
         writer: Some(file),
+        #[cfg(target_os = "linux")]
+        selected_scoped_borrowed: false,
     }
 }
 
 impl Drop for QuiescedForkSensitiveDescriptors {
     fn drop(&mut self) {
+        if !self.armed
+            || self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        { return; }
         let barrier = direct_attachment_fork_barrier();
         let mut state = barrier
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(state.fork_quiesced);
-        for (fd, file) in std::mem::take(&mut state.deferred_child_closes) {
-            drop(file);
-            assert!(
-                state.fork_child_close_fds.remove(&fd),
-                "deferred descriptor was not registered"
-            );
-        }
-        state.fork_quiesced = false;
+        debug_assert!(state.stranded_fork_custody.is_none());
+        reopen_fork_window_locked(&mut state);
         barrier.changed.notify_all();
+    }
+}
+
+/// Settle every close deferred during the protected window, then reopen it.
+/// The caller owns the closed window (a live guard or a settled strand).
+fn reopen_fork_window_locked(state: &mut DescriptorForkBarrierState) {
+    settle_deferred_closes_locked(state);
+    state.fork_quiesced = false;
+}
+
+/// Whether the window is closed only by a strand whose creator can no longer
+/// fork with its close snapshot.
+///
+/// Destructors may then close and deregister registered descriptors at once
+/// instead of deferring them. Deferral exists for a live creator: its child,
+/// forked later, closes every snapshot number in its own table, and if the
+/// parent had meanwhile closed one of those numbers and reused it for a
+/// descriptor the creator itself needs, the child would close that instead.
+/// A settled creator forks nothing more, so no snapshot can be consumed late.
+///
+/// This is not physical-release evidence, and is not presented as such: a
+/// stranded child may still hold copies of what the parent closes. No lease is
+/// granted while stranded, and the window reopens only once the creation
+/// witness proves that no such copy remains, so later lease acquisition still
+/// implies every completed close has physically settled. Without this, a
+/// witness-less strand, which never reopens, would hold these descriptors and
+/// any locks they carry for the rest of the process. Explicit selected closes
+/// report physical closure and therefore still refuse while stranded.
+fn stranded_without_live_creator(state: &DescriptorForkBarrierState) -> bool {
+    state
+        .stranded_fork_custody
+        .as_ref()
+        .is_some_and(|stranded| stranded.creator_settled)
+}
+
+/// Close and deregister every descriptor whose close was deferred while the
+/// window was closed. The window itself stays as it is.
+fn settle_deferred_closes_locked(state: &mut DescriptorForkBarrierState) {
+    for (fd, file) in std::mem::take(&mut state.deferred_child_closes) {
+        drop(file);
+        state.owned_registration_generations.remove(&fd);
+        assert!(
+            state.fork_child_close_fds.remove(&fd),
+            "deferred descriptor was not registered"
+        );
+    }
+    for (fd, file) in std::mem::take(&mut state.deferred_control_closes) {
+        // Close before deregistration, exactly as the ordinary closer does.
+        drop(file);
+        assert!(
+            state.pending_fork_control_fds.remove(&fd),
+            "deferred fork-control descriptor was not registered"
+        );
+    }
+}
+
+/// Reopen a stranded window whose witness has hung up, so that an explicit
+/// close does not refuse as busy on a window that is already settled. A
+/// window still stranded stays closed: an explicit close reports physical
+/// closure, which a stranded child's surviving copy would contradict.
+fn reopen_settled_strand_locked(
+    barrier: &DescriptorForkBarrier,
+    state: &mut DescriptorForkBarrierState,
+) {
+    if state.stranded_fork_custody.is_some() && settle_stranded_fork_custody_locked(state).is_ok() {
+        barrier.changed.notify_all();
+    }
+}
+
+/// Re-observe a stranded window's creation witness without waiting. A closed
+/// witness reopens the window; otherwise the recorded fact is the refusal.
+fn settle_stranded_fork_custody_locked(
+    state: &mut DescriptorForkBarrierState,
+) -> Result<(), String> {
+    let Some(stranded) = state.stranded_fork_custody.as_ref() else {
+        return Ok(());
+    };
+    let observed = match stranded.witness.as_ref() {
+        Some(witness) => fork_creation_witness_closed(witness, Duration::ZERO),
+        None => Ok(false),
+    };
+    match observed {
+        Ok(true) => {
+            debug_assert!(state.fork_quiesced);
+            state.stranded_fork_custody = None;
+            reopen_fork_window_locked(state);
+            Ok(())
+        }
+        Ok(false) => Err(format!("fork custody stranded: {}", stranded.fact)),
+        Err(error) => Err(format!(
+            "fork custody stranded: {}; witness observation failed: {error}",
+            stranded.fact
+        )),
+    }
+}
+
+/// How long a failed or abandoned process creation may take to show that no
+/// created process still holds its pre-exec descriptor table. Every creator
+/// has already reaped, killed, or joined its child path before this applies.
+const FORK_CREATION_WITNESS_SETTLE: Duration = Duration::from_secs(5);
+
+/// Whether every write end of a creation witness has closed, waiting at most
+/// `bound`. Nothing ever writes to a witness, so only hang-up is meaningful.
+#[cfg(unix)]
+fn fork_creation_witness_closed(witness: &std::fs::File, bound: Duration) -> std::io::Result<bool> {
+    let deadline = Instant::now() + bound;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let mut descriptor = libc::pollfd {
+            fd: witness.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready > 0 {
+            if descriptor.revents & libc::POLLHUP != 0 {
+                return Ok(true);
+            }
+            return Err(std::io::Error::other(format!(
+                "creation witness reported unexpected poll events {:#x}",
+                descriptor.revents
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn fork_creation_witness_closed(_witness: &std::fs::File, _bound: Duration) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+impl QuiescedForkSensitiveDescriptors {
+    /// End this owner without reopening the window: the creator has no proof
+    /// that every process it may have created disposed of the inherited
+    /// descriptor table. The window stays closed and every later acquisition
+    /// refuses with `fact` instead of waiting. With no witness this is final
+    /// for the life of the process; with one, the window reopens as soon as
+    /// an acquisition observes hang-up. `creator_settled` states that the
+    /// creator forks nothing more with this window's close snapshot.
+    fn strand_with_witness(
+        mut self,
+        fact: String,
+        witness: Option<std::fs::File>,
+        creator_settled: bool,
+    ) {
+        if !self.armed
+            || self.parent_pid != std::process::id()
+            || self.barrier_identity != direct_attachment_fork_barrier() as *const DescriptorForkBarrier as usize
+        {
+            return;
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(state.fork_quiesced);
+        debug_assert!(state.stranded_fork_custody.is_none());
+        state.stranded_fork_custody = Some(StrandedForkCustody {
+            fact,
+            witness,
+            creator_settled,
+        });
+        if creator_settled {
+            // Closes deferred for the live creator are now safe to settle;
+            // see `stranded_without_live_creator`. The window stays closed.
+            settle_deferred_closes_locked(&mut state);
+        }
+        self.armed = false;
+        // Wake every waiter so it observes the fact instead of sleeping on it.
+        barrier.changed.notify_all();
+    }
+
+    /// Attach a creation witness before any process is created under this
+    /// window. Returns the custody and the witness write end, which the
+    /// creator must keep open until creation has happened or cannot happen,
+    /// and then drop. On error no process was created, so the window reopens.
+    ///
+    /// The calling thread is the creator: once it stops, it can fork nothing
+    /// more with this window's close snapshot, however it stops.
+    #[cfg(unix)]
+    pub(crate) fn witness_creation(
+        self,
+        context: &'static str,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        self.witness_creation_by(context, false)
+    }
+
+    /// As `witness_creation`, for a creator running on another thread. Only
+    /// `settle`, called after that thread has been joined, treats the creator
+    /// as finished; any other end assumes it may still fork.
+    #[cfg(unix)]
+    pub(crate) fn witness_detached_creation(
+        self,
+        context: &'static str,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        self.witness_creation_by(context, true)
+    }
+
+    #[cfg(unix)]
+    fn witness_creation_by(
+        self,
+        context: &'static str,
+        creator_elsewhere: bool,
+    ) -> std::io::Result<(WitnessedForkCustody, std::fs::File)> {
+        let (reader, writer) = fork_creation_witness_pipe()?;
+        Ok((
+            WitnessedForkCustody {
+                guard: Some(self),
+                witness: Some(reader),
+                context,
+                creator_elsewhere,
+            },
+            writer,
+        ))
+    }
+}
+
+/// Move a creation-witness write end to `floor` or above, for a child that
+/// replaces fixed low descriptors before its scrub. Replacing the witness
+/// there would hang it up while the child still held unscrubbed descriptors.
+#[cfg(target_os = "linux")]
+pub(crate) fn witness_writer_at_or_above(
+    writer: std::fs::File,
+    floor: i32,
+) -> std::io::Result<std::fs::File> {
+    if writer.as_raw_fd() >= floor {
+        return Ok(writer);
+    }
+    let moved = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+    if moved < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: F_DUPFD_CLOEXEC returned one new uniquely owned descriptor. The
+    // original write end closes when `writer` drops here, before any fork.
+    Ok(unsafe { std::fs::File::from_raw_fd(moved) })
+}
+
+/// Close-on-exec pipe kept off standard I/O, so that no stdio set-up in a
+/// child can replace the inherited write end before any pre-exec hook runs.
+#[cfg(unix)]
+fn fork_creation_witness_pipe() -> std::io::Result<(std::fs::File, std::fs::File)> {
+    let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if created != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the pipe call returned two new uniquely-owned descriptors.
+    let (reader, writer) = unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    for file in [&reader, &writer] {
+        // An unguarded concurrent fork inheriting the write end before the
+        // flag is set can only delay hang-up, never produce it early.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        if flags < 0
+            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok((
+        move_owned_descriptor_above_stdio(reader)?,
+        move_owned_descriptor_above_stdio(writer)?,
+    ))
+}
+
+/// Exclusive fork window held across process creation, with a witness that
+/// can prove when no created process still holds its pre-exec descriptors.
+///
+/// The hazard: a forked child holds a copy of every descriptor open in the
+/// parent at fork, including registered descriptors that carry advisory
+/// locks or one-shot release authority, until it runs the descriptor scrub
+/// and then execs, or exits. While such a child is alive, a parent close is
+/// not a physical release, and lease acquisition must not be granted, since a
+/// lease asserts that completed closes have physically settled.
+///
+/// The witness: the parent creates a close-on-exec pipe before creation and
+/// keeps its write end open until creation has happened or cannot happen.
+/// Every process forked meanwhile, and every process those fork before exec,
+/// inherits the write end. The kernel closes each copy at exec or exit, and a
+/// child can close it earlier only by replacing that exact number after its
+/// first descriptor scrub. Once the parent drops its own write end, hang-up
+/// on the read end therefore proves that no created process still holds an
+/// unscrubbed pre-exec descriptor table, whether creation failed, panicked,
+/// or left a child behind. That is the exact condition for reopening.
+///
+/// `release_observed` is for creators that themselves observed exec or a
+/// post-scrub readiness boundary. Any other end, including unwinding, waits
+/// a bounded time for the witness. Without hang-up the window is stranded
+/// with its witness: acquisition refuses with the fact instead of waiting,
+/// and the window reopens as soon as a later acquisition sees hang-up.
+#[cfg(unix)]
+#[must_use]
+pub(crate) struct WitnessedForkCustody {
+    guard: Option<QuiescedForkSensitiveDescriptors>,
+    witness: Option<std::fs::File>,
+    context: &'static str,
+    // The creator runs on another thread, so this owner's own end does not
+    // show that the creator has stopped forking.
+    creator_elsewhere: bool,
+}
+
+#[cfg(unix)]
+impl WitnessedForkCustody {
+    pub(crate) fn guard(&self) -> &QuiescedForkSensitiveDescriptors {
+        self.guard.as_ref().expect("witnessed fork custody holds its guard")
+    }
+
+    /// The creator observed exec, or readiness emitted after the descriptor
+    /// scrub, for every process it created. Reopen without the witness.
+    pub(crate) fn release_observed(mut self) {
+        drop(self.guard.take());
+    }
+
+    /// Reopen the window once the witness proves disposal; otherwise strand
+    /// it and return the fact. The creator must already have dropped its
+    /// witness write end and finished its own reap, kill, or join.
+    pub(crate) fn settle(mut self) -> Result<(), String> {
+        self.settle_inner(true)
+    }
+
+    /// As `settle`, when a detached creator thread could not be joined within
+    /// its bound. That thread still owns its witness write end and may still
+    /// fork, so a strand keeps every deferred close deferred until hang-up.
+    pub(crate) fn settle_with_live_creator(mut self) -> Result<(), String> {
+        self.settle_inner(false)
+    }
+
+    fn settle_inner(&mut self, creator_settled: bool) -> Result<(), String> {
+        let Some(guard) = self.guard.take() else {
+            return Ok(());
+        };
+        let witness = self.witness.take().expect("witnessed fork custody holds its witness");
+        let fact = match fork_creation_witness_closed(&witness, FORK_CREATION_WITNESS_SETTLE) {
+            Ok(true) => {
+                drop(guard);
+                return Ok(());
+            }
+            Ok(false) => format!(
+                "{}: a created process still held its pre-exec descriptor table {:?} after creation ended",
+                self.context, FORK_CREATION_WITNESS_SETTLE
+            ),
+            Err(error) => format!("{}: creation witness observation failed: {error}", self.context),
+        };
+        guard.strand_with_witness(fact.clone(), Some(witness), creator_settled);
+        Err(format!("fork custody stranded: {fact}"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WitnessedForkCustody {
+    fn drop(&mut self) {
+        // The fact stays recorded in the barrier for every later acquisition.
+        // A creator on this thread has stopped once this owner drops; one on
+        // another thread has not been shown to have stopped.
+        let creator_settled = !self.creator_elsewhere;
+        let _ = self.settle_inner(creator_settled);
     }
 }
 
@@ -3721,6 +6111,117 @@ fn retained_descriptor_scope_diagnostic(state: &DescriptorForkBarrierState) -> S
     }
 }
 
+/// How long a forked window holder may take to exit after it was killed for
+/// overrunning its bound, before reaping passes to a detached reaper thread.
+#[cfg(target_os = "linux")]
+const FORK_HOLDER_KILL_SETTLE: Duration = Duration::from_secs(1);
+
+/// Reap one forked child of this process, waiting at most until `deadline`.
+///
+/// Returns the wait status once the child is reaped, or `Ok(None)` when it is
+/// not, or is no longer, a child of this process (already reaped elsewhere).
+/// A child still running at the deadline is killed: its PID cannot be reused
+/// while it remains an unreaped child, so the signal reaches exactly it. If it
+/// then exits within `FORK_HOLDER_KILL_SETTLE` it is reaped; otherwise a
+/// detached thread reaps it later. Either way the overrun is an error, and the
+/// caller ends its fork window through the creation witness or a strand: it
+/// never blocks on a child that does not exit.
+#[cfg(target_os = "linux")]
+pub(crate) fn reap_fork_holder_until(
+    pid: libc::pid_t,
+    deadline: Instant,
+    context: &str,
+) -> Result<Option<libc::c_int>, String> {
+    if pid <= 1 || pid == unsafe { libc::getpid() } {
+        return Err(format!("{context}: PID {pid} names no forked child"));
+    }
+    let try_reap = || -> Result<Option<Option<libc::c_int>>, String> {
+        loop {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == pid {
+                return Ok(Some(Some(status)));
+            }
+            if waited == 0 {
+                return Ok(None);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return Ok(Some(None)),
+                _ => return Err(format!("{context}: wait for child {pid}: {error}")),
+            }
+        }
+    };
+    if let Some(reaped) = try_reap()? {
+        return Ok(reaped);
+    }
+    // Still an unreaped child: the PID names exactly it until it is reaped.
+    let pidfd = open_pidfd(pid as u32).ok();
+    let wait_exit = |until: Instant| -> Result<Option<Option<libc::c_int>>, String> {
+        loop {
+            if let Some(reaped) = try_reap()? {
+                return Ok(Some(reaped));
+            }
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match pidfd.as_ref() {
+                Some(pidfd) => {
+                    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                    let mut poll = libc::pollfd {
+                        fd: pidfd.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // Readiness or timeout both lead to the reap check above;
+                    // an interrupted poll simply repeats it.
+                    unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+                }
+                None => thread::sleep(remaining.min(Duration::from_millis(5))),
+            }
+        }
+    };
+    if let Some(reaped) = wait_exit(deadline)? {
+        return Ok(reaped);
+    }
+    let signalled = match pidfd.as_ref() {
+        Some(pidfd) => pidfd_send_signal_io(pidfd.as_raw_fd(), libc::SIGKILL),
+        None if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 => Ok(()),
+        None => Err(std::io::Error::last_os_error()),
+    };
+    let settle = Instant::now() + FORK_HOLDER_KILL_SETTLE;
+    match wait_exit(settle)? {
+        Some(_) => Err(format!(
+            "{context}: child {pid} overran its bound and was killed"
+        )),
+        None => {
+            // Never block here. The reaper owns no descriptor and no window.
+            let _ = thread::Builder::new()
+                .name("lillux-fork-holder-reaper".to_owned())
+                .spawn(move || {
+                    let mut status = 0;
+                    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                            break;
+                        }
+                    }
+                });
+            Err(format!(
+                "{context}: child {pid} overran its bound and had not exited {:?} after kill (signal: {signalled:?})",
+                FORK_HOLDER_KILL_SETTLE
+            ))
+        }
+    }
+}
+
+/// Close the fork window for process creation.
+///
+/// Lease acquisition without a deadline waits on this window, so every
+/// holder must end it within a bounded time: wait for a created process only
+/// up to a deadline (see `reap_fork_holder_until`), and on overrun kill it and
+/// settle through the creation witness or strand, never block on it.
 pub(crate) fn quiesce_fork_sensitive_descriptors(
     deadline: Instant,
 ) -> Result<QuiescedForkSensitiveDescriptors, String> {
@@ -3740,10 +6241,24 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
         .waiting_forks
         .checked_add(1)
         .expect("fork-sensitive descriptor waiter count overflow");
-    while state.fork_quiesced
-        || state.retained_scopes != 0
-        || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0
-    {
+    loop {
+        if state.stranded_fork_custody.is_some() {
+            if let Err(fact) = settle_stranded_fork_custody_locked(&mut state) {
+                state.waiting_forks = state
+                    .waiting_forks
+                    .checked_sub(1)
+                    .expect("fork-sensitive descriptor waiter count underflow");
+                barrier.changed.notify_all();
+                return Err(fact);
+            }
+            barrier.changed.notify_all();
+        }
+        if !(state.fork_quiesced
+            || state.retained_scopes != 0
+            || barrier.waiting_descriptor_closers.load(Ordering::SeqCst) != 0)
+        {
+            break;
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             state.waiting_forks = state
@@ -3769,8 +6284,76 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
         .checked_sub(1)
         .expect("fork-sensitive descriptor waiter count underflow");
     state.fork_quiesced = true;
-    Ok(QuiescedForkSensitiveDescriptors)
+    Ok(QuiescedForkSensitiveDescriptors {
+        barrier_identity: barrier as *const DescriptorForkBarrier as usize,
+        parent_pid: std::process::id(),
+        armed: true,
+    })
 }
+/// Install the descriptor scrub before every other user pre-exec hook.
+/// The parent exclusion must survive process creation until the child has
+/// exec'd or the creation witness proves no created process holds its table.
+#[cfg(unix)]
+pub(crate) fn prepare_command_fork_custody(
+    command: &mut process::Command,
+    preserved: &BTreeSet<i32>,
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, String> {
+    use std::os::unix::process::CommandExt as _;
+    let guard = quiesce_fork_sensitive_descriptors(deadline)?;
+    let close_fds = guard.fork_child_close_fds(preserved)?;
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &close_fds {
+                // Never retry close: the descriptor number may already be consumed.
+                if libc::close(*fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(guard)
+}
+
+/// Create the process under the guard's exclusive window.
+///
+/// Success means the child crossed exec, which closed every inherited
+/// close-on-exec descriptor after the scrub hook ran, so the window reopens.
+/// An error exposes no child to this caller and is not itself proof that no
+/// child holds the pre-exec descriptor table. The creation witness supplies
+/// that proof: its write end is dropped here once `spawn` has returned or
+/// unwound, and hang-up then means every forked process has exec'd, exited,
+/// or scrubbed. A spawn that fails after fork reaps its child before
+/// returning, so hang-up is normally immediate; without it the window is
+/// stranded with a recorded fact rather than wedged without one.
+#[cfg(unix)]
+pub(crate) fn spawn_command_with_fork_custody(
+    command: &mut process::Command,
+    guard: Option<QuiescedForkSensitiveDescriptors>,
+) -> std::io::Result<process::Child> {
+    let Some(guard) = guard else {
+        return command.spawn();
+    };
+    let witnessed = guard.witness_creation("process creation")?;
+    // Declared before the write end, so on unwind the write end drops first
+    // and the custody's own settlement observes the witness.
+    let custody = witnessed.0;
+    let witness_writer = witnessed.1;
+    let result = command.spawn();
+    drop(witness_writer);
+    match result {
+        Ok(child) => {
+            custody.release_observed();
+            Ok(child)
+        }
+        Err(error) => match custody.settle() {
+            Ok(()) => Err(error),
+            Err(fact) => Err(std::io::Error::new(error.kind(), format!("{error}; {fact}"))),
+        },
+    }
+}
+
 #[cfg(unix)]
 const ATTACHMENT_ABORT_SIGNAL: i32 = libc::SIGKILL;
 #[cfg(not(unix))]
@@ -3787,6 +6370,74 @@ struct AttachmentWorkerGate {
     prepared_mappings: Option<PreparedInheritedMappings>,
 }
 
+#[cfg(target_os = "linux")]
+struct SelectedScopedPipe<T>(Arc<Mutex<T>>);
+#[cfg(target_os = "linux")]
+impl<T: Read> Read for SelectedScopedPipe<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .read(bytes)
+    }
+}
+#[cfg(target_os = "linux")]
+impl<T: Write> Write for SelectedScopedPipe<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("selected pipe poisoned"))?
+            .flush()
+    }
+}
+
+enum SpawnPipe<T> {
+    Owned(T),
+    #[cfg(target_os = "linux")]
+    Selected(SelectedScopedPipe<T>),
+}
+impl<T: Read> Read for SpawnPipe<T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Owned(pipe) => pipe.read(bytes),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.read(bytes),
+        }
+    }
+}
+impl<T: Write> Write for SpawnPipe<T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Owned(pipe) => pipe.write(bytes),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.write(bytes),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Owned(pipe) => pipe.flush(),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.flush(),
+        }
+    }
+}
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> std::os::fd::AsRawFd for SpawnPipe<T> {
+    fn as_raw_fd(&self) -> i32 {
+        match self {
+            Self::Owned(pipe) => pipe.as_raw_fd(),
+            #[cfg(target_os = "linux")]
+            Self::Selected(pipe) => pipe.0.lock().unwrap_or_else(|p| p.into_inner()).as_raw_fd(),
+        }
+    }
+}
+
 /// A running subprocess that can be waited on later.
 pub struct RunningProcess {
     // Platform ownership stays here. Applications retain the opaque recovery
@@ -3801,6 +6452,14 @@ pub struct RunningProcess {
     pub pid: u32,
     pub pgid: i64,
     mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
+    /// Same exact target descriptor validated by the attachment-pending owner.
+    /// Retain it through running-owner cleanup; it is not namespace or driver
+    /// retirement evidence and creates no new signalling authority.
+    #[cfg(target_os = "linux")]
+    attachment_target_lifetime: Option<Arc<OwnedFd>>,
+    /// Optional protected adapter channel; kept separate from launch status
+    /// and target output through existing running-owner cleanup.
+    native_settlement: Option<NativeSettlementChannel>,
     /// The outer process is retained separately so timeout/overflow cleanup
     /// always reaps the launcher as well as the target process group.
     wrapper_pid: u32,
@@ -3810,8 +6469,36 @@ pub struct RunningProcess {
     stdout_thread: Option<thread::JoinHandle<()>>,
     stderr_thread: Option<thread::JoinHandle<()>>,
     status_thread: Option<thread::JoinHandle<()>>,
+    /// Selected setup retains the same registered status reader until its
+    /// real worker starts. Failed worker/configuration cannot lose the channel.
+    #[cfg(target_os = "linux")]
+    selected_setup_status: Option<InheritedDescriptorAuthority>,
+    /// Only the selected stage machine can suppress legacy cleanup after
+    /// proving every local obligation. Raw native/output custody stays here.
+    #[cfg(target_os = "linux")]
+    selected_cleanup_complete: bool,
+    #[cfg(target_os = "linux")]
+    selected_scoped_borrowed: bool,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stdin: Option<Arc<Mutex<process::ChildStdin>>>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stdout: Option<Arc<Mutex<process::ChildStdout>>>,
+    #[cfg(target_os = "linux")]
+    selected_scoped_stderr: Option<Arc<Mutex<process::ChildStderr>>>,
+    /// Fixed diagnostic facts in stdin/stdout/stderr/status order. A panicked
+    /// join ends that worker lifetime; it is not process or native testimony.
+    #[cfg(target_os = "linux")]
+    selected_worker_panics: [bool; 4],
     applied_receipt_rx:
         Option<std::sync::mpsc::Receiver<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>>,
+    /// Exact selected-channel receive outcome retained before later PID or
+    /// deadline checks. This is raw reader output, not admitted launch proof.
+    applied_receipt_observation: Option<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+    /// A selected receive failure is sticky; this owner never renews its
+    /// original channel wait or retries a consumed observation.
+    applied_receipt_failure: Option<String>,
+    applied_receipt_returned: bool,
+    selected_initial_status: Option<Result<InitialLauncherStatus, String>>,
     stdout_capture: SharedCapture,
     stderr_capture: SharedCapture,
     stdout_reader_taken: bool,
@@ -3834,6 +6521,41 @@ pub struct RunningProcess {
     wrapper_reaped: bool,
 }
 
+/// Process-local raw association from a real held owner, never native proof.
+/// Private fields prohibit descriptor/PID/serialized reconstruction.
+pub struct ProcessLocalHeldOccurrence {
+    #[cfg(target_os = "linux")]
+    pin: Arc<OwnedFd>,
+    held_identity: Option<crate::ExactProcessIdentity>,
+}
+
+impl ProcessLocalHeldOccurrence {
+    /// Validate correspondence only after the raw association is rooted.
+    pub fn require_cached_identity(
+        &self,
+        actual: &crate::ExactProcessIdentity,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = actual;
+            return Err("held pin association unavailable on this platform".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let cached = self
+                .held_identity
+                .as_ref()
+                .ok_or("raw held association lacks selected identity cache")?;
+            cached.validate()?;
+            actual.validate()?;
+            if cached != actual {
+                return Err("actual held identity differs from retained pin association".into());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// A subprocess whose exact target identity exists, but whose target program
 /// cannot execute until the caller durably attaches that identity.
 ///
@@ -3847,7 +6569,7 @@ pub struct ProcessAwaitingAttachment {
     mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
     owner: Option<AttachmentPendingOwner>,
     #[cfg(target_os = "linux")]
-    pidfd: OwnedFd,
+    pidfd: Arc<OwnedFd>,
     request_deadline: Option<Instant>,
 }
 
@@ -3859,6 +6581,2088 @@ enum AttachmentPendingOwner {
     Supervised {
         running: Box<RunningProcess>,
     },
+}
+
+#[cfg(target_os = "linux")]
+fn selected_scoped_pin_exited(pin: &OwnedFd) -> Result<bool, String> {
+    match native_terminal_pin_has_exited(pin) {
+        NativeTerminalPinObservation::Exited => Ok(true),
+        NativeTerminalPinObservation::NotExited | NativeTerminalPinObservation::Interrupted => {
+            Ok(false)
+        }
+        NativeTerminalPinObservation::Error(detail) => Err(detail),
+        NativeTerminalPinObservation::NotAttempted => Err("selected pin not observed".into()),
+    }
+}
+
+/// Private actual lower owners. Only the lexical surface is externally nameable.
+/// A separately reviewed composition must retain storage until ALL duties settle.
+#[cfg(target_os = "linux")]
+struct SelectedScopedCustody {
+    scope_preparation: Option<crate::process_control::SelectedScopePreparation>,
+    request: Option<SubprocessRequest>,
+    scope: Option<crate::ProcessScope>,
+    target: Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+    mounts: Option<crate::LinuxSandboxMountPreparationCommitments>,
+    bounds: Option<SelectedSupervisedBounds>,
+    request_expiry: Option<Instant>,
+    create_started: bool,
+    create_attempted: bool,
+    refused: bool,
+    release_attempted: bool,
+    released: bool,
+    termination_attempted: bool,
+    scope_empty: bool,
+    locally_settled: bool,
+    running: Option<RunningProcess>,
+    setup_child: Option<process::Child>,
+    setup_status: Option<SupervisedProcessStatus>,
+    setup_fds: Vec<InheritedDescriptorAuthority>,
+    setup_mappings: Vec<InheritedDescriptorMapping>,
+    setup_mapping_lifelines: Vec<InheritedDescriptorAuthority>,
+    setup_reaped: bool,
+    terminal: Option<process::ExitStatus>,
+    result: Option<SubprocessResult>,
+    failure: Option<SubprocessResult>,
+    watchdog: Option<SelectedScopedWatchdog>,
+}
+
+/// Opaque whole lower storage, eventually retained inside the composition Box.
+/// No production constructor, borrow issuer or owner extraction exists in L1.
+/// Merely declaring this type does not implement safe unresolved final Drop.
+///
+/// ```compile_fail
+/// let storage = lillux::exec::SelectedScopedStorage::empty();
+/// ```
+/// ```compile_fail
+/// let storage: lillux::exec::SelectedScopedStorage = Default::default();
+/// ```
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedStorage {
+    custody: SelectedScopedCustody,
+}
+
+/// Exclusive lexical mechanics over the SAME private storage. Original bounds
+/// transport mechanics only; App/Executor admission remains a separate issuer.
+/// There is no production mint, owned return, DerefMut or lifetime widening.
+///
+/// ```compile_fail
+/// use lillux::exec::SelectedScopedBorrow;
+/// fn shorten<'long: 'short, 'short>(
+///     loan: SelectedScopedBorrow<'long>,
+/// ) -> SelectedScopedBorrow<'short> { loan }
+/// ```
+/// ```compile_fail
+/// use lillux::exec::{SelectedScopedBorrow, SelectedScopedStorage};
+/// fn extract(loan: SelectedScopedBorrow<'_>) -> SelectedScopedStorage {
+///     loan.into_inner()
+/// }
+/// ```
+/// ```compile_fail
+/// use lillux::exec::{SelectedScopedBorrow, SelectedScopedHeldView};
+/// fn escape(loan: &SelectedScopedBorrow<'_>) -> Option<SelectedScopedHeldView<'static>> {
+///     loan.held()
+/// }
+/// ```
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedBorrow<'loan> {
+    custody: &'loan mut SelectedScopedCustody,
+    invariant: std::marker::PhantomData<fn(&'loan ()) -> &'loan ()>,
+}
+
+// Lillux unit fixtures only. Dependency builds (including Engine tests) do not
+// receive a mint. Native production issuance/restoration remains unimplemented.
+#[cfg(all(test, target_os = "linux"))]
+impl SelectedScopedStorage {
+    pub(crate) fn for_component_test() -> Self {
+        Self {
+            custody: SelectedScopedCustody::empty(),
+        }
+    }
+
+    pub(crate) fn borrow_for_component_test(&mut self) -> SelectedScopedBorrow<'_> {
+        SelectedScopedBorrow {
+            custody: &mut self.custody,
+            invariant: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedBorrow<'_> {
+    pub(crate) fn allocate_scope_into(
+        &mut self,
+        provider: Arc<crate::ProcessScopeProvider>,
+        allocation: crate::ProcessScopeAllocation,
+        limits: Option<crate::ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        self.custody.allocate_scope_into(provider, allocation, limits, original_service, original_cleanup)
+    }
+
+    pub fn prepare_from_compiled_slots(
+        &mut self,
+        request: &mut Option<SubprocessRequest>,
+        scope: &mut Option<crate::ProcessScope>,
+        target: &mut Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+        mounts: &mut Option<crate::LinuxSandboxMountPreparationCommitments>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let result = self.custody.prepare_from_compiled_slots(
+            request,
+            scope,
+            target,
+            mounts,
+            original_service,
+            original_cleanup,
+        );
+        if result.is_err() && self.custody.scope_preparation.is_some() {
+            // Precompile/bind adapters cannot retry a new service request into
+            // an already allocated original scope after compiler refusal.
+            self.custody.refused = true;
+        }
+        result
+    }
+
+    pub fn create(&mut self) -> SelectedScopedObservation {
+        self.custody.create()
+    }
+
+    pub fn held(&self) -> Option<SelectedScopedHeldView<'_>> {
+        self.custody.held()
+    }
+
+    pub fn release_after_attachment(&mut self) -> SelectedScopedObservation {
+        self.custody.release_after_attachment()
+    }
+
+    /// Borrow exact allocation identity for durable binding; no owned scope or
+    /// recovery authority is reconstructed or exported by this lexical view.
+    pub fn retained_scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
+        self.custody.scope.as_ref().map(|scope| scope.recovery())
+    }
+
+    pub fn retained_applied(&self) -> Option<&crate::LinuxSandboxAppliedLaunchReceipt> {
+        self.custody.retained_applied()
+    }
+
+    pub fn retained_result(&self) -> Option<&SubprocessResult> {
+        self.custody.retained_result()
+    }
+
+    pub fn observe_applied(&mut self) -> SelectedScopedObservation {
+        self.custody.observe_applied()
+    }
+
+    pub fn observe_runtime(
+        &mut self,
+        cancelled: impl FnMut() -> bool,
+    ) -> SelectedScopedObservation {
+        self.custody.observe_runtime(cancelled)
+    }
+
+    pub fn observe_cleanup(&mut self) -> SelectedScopedObservation {
+        self.custody.observe_cleanup()
+    }
+
+    pub fn require_recorded_local_scope_settlement(
+        &self,
+        expected: &crate::ProcessScopeRecovery,
+    ) -> Result<(), String> {
+        self.custody.require_recorded_local_scope_settlement(expected)
+    }
+}
+
+/// Same helper PID and cancellation descriptor transferred by plain moves.
+/// No ordinary detached reaper policy on selected ownership.
+#[cfg(target_os = "linux")]
+struct SelectedScopedWatchdog {
+    pid: libc::pid_t,
+    _cancel: Option<std::fs::File>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectedScopedObservation {
+    Pending,
+    Held,
+    Running,
+    Observed,
+    Collected,
+    LocallySettled,
+    Refused,
+    RefusedWithoutChild,
+}
+
+/// Immutable view of the SAME ledger-held pin, never an escaping process owner.
+#[cfg(target_os = "linux")]
+pub struct SelectedScopedHeldView<'a> {
+    running: &'a RunningProcess,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedHeldView<'_> {
+    pub fn pid(&self) -> u32 {
+        self.running.pid
+    }
+    pub fn pgid(&self) -> i64 {
+        self.running.pgid
+    }
+    pub fn check_exact_process_alive(&self) -> Result<(), String> {
+        let pin = self
+            .running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected held pin absent")?;
+        if selected_scoped_pin_exited(pin)? {
+            Err("selected held target exited".into())
+        } else {
+            validate_supervised_attachment_target(
+                self.running.pid,
+                self.running.pgid,
+                pin.as_raw_fd(),
+            )
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopedCustody {
+    fn empty() -> Self {
+        Self {
+            scope_preparation: None,
+            request: None,
+            scope: None,
+            target: None,
+            mounts: None,
+            bounds: None,
+            request_expiry: None,
+            create_started: false,
+            create_attempted: false,
+            refused: false,
+            release_attempted: false,
+            released: false,
+            termination_attempted: false,
+            scope_empty: false,
+            locally_settled: false,
+            running: None,
+            setup_child: None,
+            setup_status: None,
+            setup_fds: Vec::new(),
+            setup_mappings: Vec::new(),
+            setup_mapping_lifelines: Vec::new(),
+            setup_reaped: false,
+            terminal: None,
+            result: None,
+            failure: None,
+            watchdog: None,
+        }
+    }
+
+    fn allocate_scope_into(
+        &mut self,
+        provider: Arc<crate::ProcessScopeProvider>,
+        allocation: crate::ProcessScopeAllocation,
+        limits: Option<crate::ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.refused || self.scope_preparation.is_some() || self.bounds.is_some()
+            || self.scope.is_some() || self.request.is_some() || self.create_started
+        {
+            return Err("selected scope storage occupied or refused".into());
+        }
+        self.bounds = Some(SelectedSupervisedBounds {
+            service: original_service,
+            cleanup: original_cleanup,
+        });
+        self.scope_preparation = Some(crate::process_control::SelectedScopePreparation::retained(
+            provider,
+            allocation,
+            limits,
+            original_service,
+            original_cleanup,
+        ));
+        let result = self.scope_preparation.as_mut().ok_or("selected preparation frame absent")?
+            .allocate_into(&mut self.scope);
+        if result.is_err() {
+            // Frame is already retained before formatting/error bookkeeping.
+            self.refused = true;
+        }
+        result
+    }
+
+    /// Borrow all source slots for validation, then install by infallible moves.
+    /// Only an actual compiler owner may provide meaningful commitments; this
+    /// component API alone is not an authority issuer or a production caller.
+    fn prepare_from_compiled_slots(
+        &mut self,
+        request: &mut Option<SubprocessRequest>,
+        scope: &mut Option<crate::ProcessScope>,
+        target: &mut Option<crate::LinuxSandboxAppliedLaunchCommitments>,
+        mounts: &mut Option<crate::LinuxSandboxMountPreparationCommitments>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if self.refused || self.request.is_some() || self.target.is_some()
+            || self.mounts.is_some() || self.create_started
+        {
+            return Err("selected destination already prepared or refused".into());
+        }
+        let adopted = self.scope_preparation.is_some();
+        if adopted {
+            let bounds = self.bounds.ok_or("selected adopted original bounds absent")?;
+            if scope.is_some() || self.scope.is_none()
+                || bounds.service.is_before(&original_service)
+                || original_service.is_before(&bounds.service)
+                || bounds.cleanup.is_before(&original_cleanup)
+                || original_cleanup.is_before(&bounds.cleanup)
+            {
+                return Err("selected compiler cannot replace adopted scope or original pair".into());
+            }
+        } else if self.bounds.is_some() || self.scope.is_some() {
+            return Err("selected destination already prepared".into());
+        }
+        if original_cleanup.is_before(&original_service) || original_service.has_elapsed() {
+            return Err("selected original bounds inverted or expired".into());
+        }
+        let req = request.as_ref().ok_or("compiled request already spent")?;
+        let actual_scope = self.scope.as_ref().or(scope.as_ref()).ok_or("selected actual scope absent")?;
+        actual_scope.require_selected_launch_right()?;
+        if target.is_none()
+            || mounts.is_none()
+            || !req.supervised_status.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    SupervisedProcessStatusState::AwaitingAttachment { .. }
+                ) && s.applied_receipt_schema.is_some()
+                    && s.mount_preparation_required
+            })
+        {
+            return Err("selected compiled held/applied/mount commitments absent".into());
+        }
+        // Cache request expiry BEFORE extraction. It only narrows original.
+        let anchor = Instant::now();
+        let service_expiry = anchor
+            .checked_add(original_service.remaining())
+            .ok_or("selected request expiry overflow")?;
+        let relative =
+            request_timeout_duration(req.timeout).and_then(|duration| anchor.checked_add(duration));
+        let expiry = relative.map_or(service_expiry, |bound| bound.min(service_expiry));
+        if original_service.has_elapsed() || Instant::now() >= expiry {
+            return Err("selected preparation completed late".into());
+        }
+        // No validation, allocation, callback or destructor below these takes.
+        self.request = request.take();
+        if !adopted {
+            self.scope = scope.take();
+        }
+        self.target = target.take();
+        self.mounts = mounts.take();
+        self.bounds = Some(SelectedSupervisedBounds {
+            service: original_service,
+            cleanup: original_cleanup,
+        });
+        self.request_expiry = Some(expiry);
+        Ok(())
+    }
+
+    fn retain_same_watchdog(&mut self) {
+        if self.watchdog.is_none() {
+            if let Some(watchdog) = self
+                .running
+                .as_mut()
+                .and_then(|r| r.occupancy_watchdog.as_mut())
+            {
+                let retained = SelectedScopedWatchdog {
+                    pid: watchdog.pid,
+                    _cancel: watchdog.cancel.take(),
+                };
+                watchdog.pid = -1;
+                self.watchdog = Some(retained);
+            }
+            if let Some(running) = self.running.as_mut() {
+                running.occupancy_watchdog.take();
+            }
+        }
+    }
+
+    fn service_live(&self) -> Result<(), String> {
+        let bounds = self.bounds.ok_or("selected bounds absent")?;
+        if bounds.service.has_elapsed() || self.request_expiry.is_some_and(|d| Instant::now() >= d)
+        {
+            Err("selected original service/request expired".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_failure(&mut self, result: SubprocessResult) {
+        self.refused = true;
+        if self.failure.is_none() {
+            self.failure = Some(result);
+        }
+    }
+
+    fn refuse(&mut self, detail: impl Into<String>) -> SelectedScopedObservation {
+        self.record_failure(spawn_failure(Instant::now(), detail));
+        SelectedScopedObservation::Refused
+    }
+
+    fn create(&mut self) -> SelectedScopedObservation {
+        if self.create_started || self.refused {
+            return SelectedScopedObservation::Refused;
+        }
+        if let Err(detail) = self.service_live() {
+            return self.refuse(detail);
+        }
+        if self.request.is_none() || self.scope.is_none() {
+            return self.refuse("selected preparation absent");
+        }
+        // Clone SAME backend control before extraction; it has no launch right.
+        let control = self
+            .scope
+            .as_ref()
+            .expect("checked actual scope")
+            .control_authority();
+        self.create_started = true;
+        let original = self.bounds.expect("prepared bounds").service;
+        let request = self.request.take().expect("checked actual request");
+        let outcome = lib_spawn_with_stdio_custody_into(
+            request,
+            false,
+            None,
+            Some(control),
+            None,
+            Some(original),
+            false,
+            SpawnFailureCustodyMode::Ordinary,
+            Some(self),
+        );
+        match outcome {
+            Ok(running) => {
+                self.running = Some(running);
+                self.retain_same_watchdog();
+            }
+            Err(SpawnWithStdioError::ScopedRetained) => return SelectedScopedObservation::Refused,
+            Err(SpawnWithStdioError::WithoutRunningOwner {
+                result,
+                create_attempted,
+            }) => {
+                self.create_attempted |= create_attempted;
+                self.record_failure(result);
+                return SelectedScopedObservation::RefusedWithoutChild;
+            }
+            Err(SpawnWithStdioError::Selected(_)) => unreachable!("scoped ordinary producer"),
+        }
+        let validation = self.validate_held();
+        match validation {
+            Ok(()) => SelectedScopedObservation::Held,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn validate_held(&mut self) -> Result<(), String> {
+        self.service_live()?;
+        let bounds = self.bounds.ok_or("selected bounds absent")?;
+        let scope = self.scope.as_ref().ok_or("selected scope absent")?;
+        let running = self
+            .running
+            .as_mut()
+            .ok_or("selected actual wrapper absent")?;
+        if running.attachment_release.is_none() {
+            return Err("selected held release absent".into());
+        }
+        // Install actual pin BEFORE subsequent validation can fail.
+        let birth = read_linux_process_birth(running.pid)?;
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid)?));
+        let pin = running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected pin absent")?;
+        validate_pinned_process_birth(running.pid, running.pgid, None, &birth, pin.as_raw_fd())?;
+        validate_supervised_attachment_target(running.pid, running.pgid, pin.as_raw_fd())?;
+        scope.require_held_member_until(running.pid, bounds.service)?;
+        let preparation = running
+            .mount_preparation
+            .as_ref()
+            .ok_or("selected mount receipt absent")?;
+        if !preparation.matches_commitments(self.mounts.as_ref().ok_or("compiled mounts absent")?) {
+            return Err("selected held mount commitment mismatch".into());
+        }
+        if let Some(channel) = running.native_settlement.as_mut() {
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native identity expired".into());
+            }
+            let group = u32::try_from(running.pgid).map_err(|_| "selected group out of range")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                running.pid,
+                Some(group),
+                pin.as_fd(),
+            )?;
+            channel.held_target_identity = Some(identity);
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native identity late".into());
+            }
+        }
+        self.service_live()
+    }
+
+    fn held(&self) -> Option<SelectedScopedHeldView<'_>> {
+        if self.refused || self.released {
+            return None;
+        }
+        self.running
+            .as_ref()
+            .filter(|r| r.attachment_target_lifetime.is_some())
+            .map(|running| SelectedScopedHeldView { running })
+    }
+
+    fn release_after_attachment(&mut self) -> SelectedScopedObservation {
+        if self.refused || self.release_attempted {
+            return SelectedScopedObservation::Refused;
+        }
+        let operation = (|| -> Result<(), String> {
+            self.service_live()?;
+            self.held()
+                .ok_or("selected held owner absent")?
+                .check_exact_process_alive()?;
+            let bounds = self.bounds.ok_or("selected bounds absent")?;
+            let expiry = self.request_expiry;
+            let running = self
+                .running
+                .as_mut()
+                .ok_or("selected actual wrapper absent")?;
+            for capture in [&running.stdout_capture, &running.stderr_capture] {
+                if capture
+                    .state
+                    .try_lock()
+                    .map_err(|_| "selected capture unavailable")?
+                    .truncated
+                {
+                    return Err("selected output truncated".into());
+                }
+            }
+            if running.output_overflow_rx.try_recv().is_ok() {
+                return Err("selected output overflow".into());
+            }
+            if !matches!(poll_wrapper(&mut running.child), Ok(WrapperPoll::Running)) {
+                return Err("selected wrapper not releasable".into());
+            }
+            self.release_attempted = true;
+            let boundary = running
+                .attachment_release
+                .as_mut()
+                .ok_or("selected boundary absent")?;
+            let writer = boundary.writer.as_mut().ok_or("selected writer absent")?;
+            let flags = unsafe { libc::fcntl(writer.fd, libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(writer.fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err("selected release nonblocking setup failed".into());
+            }
+            let live =
+                || !bounds.service.has_elapsed() && !expiry.is_some_and(|d| Instant::now() >= d);
+            if !live() {
+                return Err("selected prewrite expired".into());
+            }
+            match writer
+                .writer
+                .as_mut()
+                .ok_or("selected file absent")?
+                .write(&[ATTACHMENT_RELEASE_TOKEN])
+            {
+                Ok(1) => {}
+                _ => return Err("selected release write uncertain; no retry".into()),
+            }
+            if !live() {
+                return Err("selected postwrite expired".into());
+            }
+            writer.close_selected_with_request_until(
+                bounds.service,
+                SelectedCleanupMode::BoundedOriginal,
+                expiry,
+            )?;
+            boundary.writer.take();
+            running.attachment_release.take();
+            if !live() {
+                return Err("selected release handoff late".into());
+            }
+            self.released = true;
+            Ok(())
+        })();
+        match operation {
+            Ok(()) => SelectedScopedObservation::Running,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn retained_applied(&self) -> Option<&crate::LinuxSandboxAppliedLaunchReceipt> {
+        self.running
+            .as_ref()?
+            .applied_receipt_observation
+            .as_ref()?
+            .as_ref()
+            .ok()
+    }
+    fn retained_result(&self) -> Option<&SubprocessResult> {
+        self.result.as_ref().or(self.failure.as_ref())
+    }
+
+    fn observe_applied(&mut self) -> SelectedScopedObservation {
+        if self.refused || !self.released {
+            return SelectedScopedObservation::Refused;
+        }
+        let operation = (|| -> Result<bool, String> {
+            self.service_live()?;
+            let running = self.running.as_mut().ok_or("selected wrapper absent")?;
+            if running.applied_receipt_observation.is_none() {
+                let rx = running
+                    .applied_receipt_rx
+                    .as_ref()
+                    .ok_or("selected receiver absent")?;
+                match rx.try_recv() {
+                    Ok(raw) => {
+                        running.applied_receipt_observation = Some(raw);
+                        running.applied_receipt_rx.take();
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        running.applied_receipt_observation =
+                            Some(Err("selected applied EOF".into()));
+                        running.applied_receipt_rx.take();
+                    }
+                }
+            }
+            let receipt = running
+                .applied_receipt_observation
+                .as_ref()
+                .ok_or("selected raw cache absent")?
+                .as_ref()
+                .map_err(Clone::clone)?;
+            if receipt.owned_child_pid != running.pid
+                || !receipt
+                    .matches_commitments(self.target.as_ref().ok_or("compiled target absent")?)
+                || !receipt.matches_post_release_mounts(
+                    self.mounts.as_ref().ok_or("compiled mounts absent")?,
+                )
+            {
+                return Err("selected applied commitment mismatch".into());
+            }
+            self.service_live()?;
+            Ok(true)
+        })();
+        match operation {
+            Ok(true) => SelectedScopedObservation::Observed,
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn observe_runtime(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> SelectedScopedObservation {
+        if self.refused {
+            return SelectedScopedObservation::Refused;
+        }
+        // Cancellation callback only observes; on unwind all fields remain here.
+        if cancelled() {
+            return self.refuse("selected observation cancelled");
+        }
+        match self.observe_applied() {
+            SelectedScopedObservation::Observed => {}
+            other => return other,
+        }
+        match self.advance_local_observation(false) {
+            Ok(true) => {
+                if let Err(detail) = self.service_live() {
+                    return self.refuse(detail);
+                }
+                SelectedScopedObservation::Collected
+            }
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn revoke_release(&mut self, cleanup: crate::time::MonotonicDeadline) -> Result<(), String> {
+        let boundary = if let Some(running) = self.running.as_mut() {
+            running.attachment_release.as_mut()
+        } else {
+            self.setup_status
+                .as_mut()
+                .and_then(|status| match &mut status.state {
+                    SupervisedProcessStatusState::AwaitingAttachment {
+                        attachment_release, ..
+                    } => Some(attachment_release),
+                    _ => None,
+                })
+        };
+        if let Some(boundary) = boundary {
+            if let Some(writer) = boundary.writer.as_mut() {
+                writer.close_selected_until(cleanup, SelectedCleanupMode::BoundedOriginal)?;
+            }
+            boundary.writer.take();
+        }
+        Ok(())
+    }
+
+    fn observe_cleanup(&mut self) -> SelectedScopedObservation {
+        if self.locally_settled {
+            return SelectedScopedObservation::LocallySettled;
+        }
+        // Entering cleanup closes service irreversibly, including an allocated
+        // precompile/no-child scope whose launch right has not been consumed.
+        self.refused = true;
+        let operation = (|| -> Result<bool, String> {
+            let cleanup = self.bounds.ok_or("selected cleanup bound absent")?.cleanup;
+            // Partial allocation without an actual scope remains pending.
+            // Revocation/control are attempted only while the ORIGINAL is live.
+            if !cleanup.has_elapsed() && self.scope.is_some() {
+                self.revoke_release(cleanup)?;
+                if !self.scope_empty
+                    && !self
+                        .scope
+                        .as_ref()
+                        .ok_or("selected actual scope absent")?
+                        .is_empty()?
+                {
+                    if !self.termination_attempted {
+                        self.termination_attempted = true; // poison before write, including uncertainty
+                        self.scope
+                            .as_ref()
+                            .expect("same scope")
+                            .request_selected_termination_until(cleanup)?;
+                    }
+                }
+            }
+            self.advance_local_observation(true)
+        })();
+        match operation {
+            Ok(true) => SelectedScopedObservation::LocallySettled,
+            Ok(false) => SelectedScopedObservation::Pending,
+            Err(detail) => self.refuse(detail),
+        }
+    }
+
+    fn advance_local_observation(&mut self, cleanup: bool) -> Result<bool, String> {
+        // No relative wait, force, recovery reopen or numeric signal here.
+        let original_cleanup = self.bounds.ok_or("selected cleanup bounds absent")?.cleanup;
+        if !self.setup_mappings.is_empty() || !self.setup_mapping_lifelines.is_empty() {
+            self.setup_fds
+                .reserve(self.setup_mappings.len() + self.setup_mapping_lifelines.len());
+            while let Some(mapping) = self.setup_mappings.pop() {
+                self.setup_fds.push(mapping.source);
+            }
+            while let Some(source) = self.setup_mapping_lifelines.pop() {
+                self.setup_fds.push(source);
+            }
+        }
+        if !selected_close_inherited_copies(&mut self.setup_fds, original_cleanup)? {
+            return Ok(false);
+        }
+        if self.scope.is_none() && self.scope_preparation.is_some() {
+            // Planned/created-unpinned/partial-control is never no-contact or
+            // local scope settlement. Keep the original frame pending.
+            return Ok(false);
+        }
+        if !self.scope_empty {
+            self.scope_empty = self
+                .scope
+                .as_ref()
+                .ok_or("selected actual scope absent")?
+                .is_empty()?;
+            if !self.scope_empty {
+                return Ok(false);
+            }
+        }
+        if let Some(child) = self.setup_child.as_mut() {
+            if !self.setup_reaped {
+                if !matches!(
+                    poll_wrapper(child).map_err(|e| e.to_string())?,
+                    WrapperPoll::ExitedUnreaped
+                ) {
+                    return Ok(false);
+                }
+                let Some(status) = child.try_wait().map_err(|e| e.to_string())? else {
+                    return Ok(false);
+                };
+                self.terminal = Some(status);
+                self.setup_reaped = true;
+            }
+        }
+        let Some(running) = self.running.as_mut() else {
+            // No Child is never no-contact. Actual retained scope emptiness is
+            // the local fact; unresolved release registration still holds duty.
+            if self.setup_status.as_ref().is_some_and(|s| {
+                matches!(&s.state,
+                SupervisedProcessStatusState::AwaitingAttachment { attachment_release, .. }
+                if attachment_release.writer.as_ref().is_some_and(|w| w.writer.is_some()))
+            }) {
+                return Ok(false);
+            }
+            self.locally_settled = true;
+            return Ok(true);
+        };
+        if !running.wrapper_reaped {
+            if !matches!(
+                poll_wrapper(&mut running.child).map_err(|e| e.to_string())?,
+                WrapperPoll::ExitedUnreaped
+            ) {
+                return Ok(false);
+            }
+            let Some(status) = running.child.try_wait().map_err(|e| e.to_string())? else {
+                return Ok(false);
+            };
+            // Cache immediately after consuming wait; no post-reap repoll.
+            self.terminal = Some(status);
+            running.wrapper_reaped = true;
+        }
+        if let Some(pin) = running.attachment_target_lifetime.as_ref() {
+            if !selected_scoped_pin_exited(pin)? {
+                return Ok(false);
+            }
+        }
+        if let Some(watchdog) = self.watchdog.as_mut() {
+            if watchdog.pid > 0 {
+                let mut status = 0;
+                let observed = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
+                if observed == 0 {
+                    return Ok(false);
+                }
+                if observed != watchdog.pid
+                    || !(libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
+                {
+                    return Err("selected watchdog exclusive natural reap uncertain".into());
+                }
+                watchdog.pid = -1;
+            }
+        }
+        // Keep workers until terminal scope/wrapper/pin/helper facts. Natural
+        // collection does not truncate drains; cleanup may stop them only live.
+        if cleanup
+            && !self
+                .bounds
+                .ok_or("selected bounds absent")?
+                .cleanup
+                .has_elapsed()
+        {
+            running.drain_stop.store(true, Ordering::Release);
+            running.selected_scoped_stdin.take();
+            running.selected_scoped_stdout.take();
+            running.selected_scoped_stderr.take();
+        }
+        if running.selected_scoped_stdin.is_some()
+            || running.selected_scoped_stdout.is_some()
+            || running.selected_scoped_stderr.is_some()
+        {
+            return Ok(false);
+        }
+        for (index, slot) in [
+            &mut running.stdin_thread,
+            &mut running.stdout_thread,
+            &mut running.stderr_thread,
+            &mut running.status_thread,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                return Ok(false);
+            }
+            if let Some(handle) = slot.take() {
+                if handle.join().is_err() {
+                    running.selected_worker_panics[index] = true;
+                }
+            }
+        }
+        if running.attachment_release.as_ref().is_some_and(|boundary| {
+            boundary
+                .writer
+                .as_ref()
+                .is_some_and(|writer| writer.writer.is_some())
+        }) {
+            return Ok(false);
+        }
+        if !Self::poll_raw_native(running)? {
+            return Ok(false);
+        }
+        let native_observed = running.poll_native_terminal_testimony();
+        let native_ok = matches!(native_observed, Ok(true));
+        if self.result.is_none() {
+            let out = running
+                .stdout_capture
+                .state
+                .try_lock()
+                .map_err(|_| "selected stdout unavailable")?;
+            let err = running
+                .stderr_capture
+                .state
+                .try_lock()
+                .map_err(|_| "selected stderr unavailable")?;
+            if let Some(channel) = running.native_settlement.as_mut() {
+                if channel.retained_drains.is_none() {
+                    channel.retained_drains = Some((out.clone(), err.clone()));
+                }
+            }
+            let code = self
+                .terminal
+                .as_ref()
+                .and_then(process::ExitStatus::code)
+                .unwrap_or(-1);
+            let late = self
+                .bounds
+                .ok_or("selected bounds absent")?
+                .service
+                .has_elapsed()
+                || self.request_expiry.is_some_and(|d| Instant::now() >= d);
+            let panicked = running.selected_worker_panics.iter().any(|fact| *fact);
+            self.result = Some(SubprocessResult {
+                success: code == 0
+                    && native_ok
+                    && !self.refused
+                    && !late
+                    && !panicked
+                    && !out.truncated
+                    && !err.truncated,
+                stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+                stderr: if panicked {
+                    append_diagnostic(
+                        &String::from_utf8_lossy(&err.bytes),
+                        "selected worker panicked",
+                    )
+                } else {
+                    String::from_utf8_lossy(&err.bytes).into_owned()
+                },
+                exit_code: code,
+                duration_ms: running.start.elapsed().as_secs_f64() * 1000.0,
+                pid: running.pid,
+                timed_out: late,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: output_limit_exceeded(&out, &err),
+                stdout_truncated: out.truncated,
+                stderr_truncated: err.truncated,
+            });
+        }
+        // Cache raw native testimony; semantic native acceptance stays separate.
+        running.selected_cleanup_complete = true;
+        self.locally_settled = true;
+        Ok(true)
+    }
+
+    fn poll_raw_native(running: &mut RunningProcess) -> Result<bool, String> {
+        let Some(channel) = running.native_settlement.as_mut() else {
+            return Ok(true);
+        };
+        if channel.exact_eof {
+            return Ok(true);
+        }
+        use crate::sandbox::native_terminal_wire::{
+            MAX_NATIVE_TERMINAL_FRAME_BYTES, decode_testimony,
+        };
+        let mut bytes = [0u8; MAX_NATIVE_TERMINAL_FRAME_BYTES + 1];
+        let count = unsafe {
+            libc::read(
+                channel.reader.file().as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                return Ok(false);
+            }
+            return Err(error.to_string());
+        }
+        if count == 0 {
+            channel.exact_eof = true; // cache consumed EOF before decoding
+            match decode_testimony(&channel.frame) {
+                Ok(raw) => channel.testimony = Some(raw),
+                Err(detail) => {
+                    if channel.failure.is_none() {
+                        channel.failure = Some(detail);
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        let count = count as usize;
+        let remaining = (MAX_NATIVE_TERMINAL_FRAME_BYTES + 1).saturating_sub(channel.frame.len());
+        channel
+            .frame
+            .extend_from_slice(&bytes[..count.min(remaining)]);
+        if channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES || count > remaining {
+            if channel.failure.is_none() {
+                channel.failure = Some("selected native frame exceeded cap".into());
+            }
+        }
+        Ok(false)
+    }
+
+    /// Pure same-owner local check; NEVER reopen expected recovery authority.
+    fn require_recorded_local_scope_settlement(
+        &self,
+        expected: &crate::ProcessScopeRecovery,
+    ) -> Result<(), String> {
+        if !self.locally_settled
+            || !self.scope_empty
+            || self.scope.as_ref().map(|s| s.recovery()) != Some(expected)
+        {
+            return Err("selected same-scope local settlement absent or mismatched".into());
+        }
+        Ok(())
+    }
+}
+
+/// Selected supervised custody, never a selector issuer or financial proof.
+#[cfg(all(test, target_os = "linux"))]
+mod selected_scoped_component_tests {
+    use super::*;
+
+    fn request(cmd: &str, args: &[&str]) -> SubprocessRequest {
+        SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: args.iter().map(|s| (*s).into()).collect(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 60.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        }
+    }
+    fn pipe_cloexec() -> (std::fs::File, InheritedDescriptorAuthority) {
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        (
+            reader,
+            InheritedDescriptorAuthority::from_owned_file(writer, &lease).unwrap(),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
+    fn selected_expired_allocation_retains_actual_provider_plan_and_pair() {
+        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
+            .expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
+            serde_json::json!({
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
+            }),
+        ).unwrap();
+        let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
+        let allocation = provider.plan_allocation(
+            "retained-expired-no-create", Duration::from_secs(5),
+        ).unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut storage = SelectedScopedStorage::for_component_test();
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).is_err());
+        let preparation = storage.custody.scope_preparation.as_ref().unwrap();
+        assert!(preparation.same_provider_and_plan_for_component_test(&provider, &allocation));
+        let address = preparation as *const _;
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+        ).is_err());
+        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        assert!(storage.custody.scope.is_none() && storage.custody.refused);
+        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert!(!storage.custody.locally_settled);
+        let bounds = storage.custody.bounds.unwrap();
+        assert!(!bounds.service.is_before(&original) && !original.is_before(&bounds.service));
+        assert!(!bounds.cleanup.is_before(&original) && !original.is_before(&bounds.cleanup));
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly delegated disposable cgroup; never auto-run"]
+    fn selected_created_incarnation_ambiguity_refuses_local_settlement_and_service() {
+        let parent = std::env::var_os("LILLUX_TEST_CGROUP_PARENT")
+            .expect("explicit disposable delegation");
+        let configuration: crate::ProcessScopeConfiguration = serde_json::from_value(
+            serde_json::json!({
+                "version": 3,
+                "backend": {"implementation": "linux_cgroup_v2", "parent": parent}
+            }),
+        ).unwrap();
+        let provider = Arc::new(crate::ProcessScopeProvider::open(&configuration).unwrap());
+        let allocation = provider.plan_allocation(
+            &format!("selected-precompile-{:032x}", rand::random::<u128>()),
+            Duration::from_secs(5),
+        ).unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut storage = SelectedScopedStorage::for_component_test();
+        Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).unwrap_err();
+        assert!(storage.custody.request.is_none() && storage.custody.setup_child.is_none());
+        assert!(storage.custody.scope_preparation.as_ref().unwrap()
+            .same_provider_and_plan_for_component_test(&provider, &allocation));
+        assert!(storage.borrow_for_component_test().retained_scope_recovery().is_none());
+        assert_eq!(storage.borrow_for_component_test().observe_cleanup(), SelectedScopedObservation::Pending);
+        assert!(!storage.custody.locally_settled && storage.custody.scope.is_none());
+        let address = storage.custody.scope_preparation.as_ref().unwrap() as *const _;
+        assert!(Arc::clone(&provider).allocate_into_selected_slot(
+            allocation.clone(), &mut storage.borrow_for_component_test(), original, original,
+        ).is_err());
+        assert_eq!(storage.custody.scope_preparation.as_ref().unwrap() as *const _, address);
+        let mut source = Some(request("/never-contact", &[]));
+        let mut source_scope = None;
+        let mut target = None;
+        let mut mounts = None;
+        assert!(storage.borrow_for_component_test().prepare_from_compiled_slots(
+            &mut source, &mut source_scope, &mut target, &mut mounts, original, original,
+        ).is_err());
+        assert!(source.is_some() && storage.custody.scope.is_none());
+        assert_eq!(storage.borrow_for_component_test().create(), SelectedScopedObservation::Refused);
+        // No name reopen, foreign kill, fixture retirement or finance credit.
+        // Explicit disposable delegation remains an operator obligation. This
+        // unrun control does not establish the still-missing final-Drop barrier.
+    }
+
+    #[test]
+    fn lexical_refusal_keeps_actual_request_and_commitment_slots() {
+        let mut source = Some(request("/never-contact", &[]));
+        let request_address = source.as_ref().unwrap() as *const SubprocessRequest;
+        let mut scope = None;
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [5; 32],
+        });
+        let mut storage = SelectedScopedStorage::for_component_test();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(60));
+        {
+            let mut loan = storage.borrow_for_component_test();
+            assert!(
+                loan.prepare_from_compiled_slots(
+                    &mut source,
+                    &mut scope,
+                    &mut target,
+                    &mut mounts,
+                    original,
+                    original,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            source.as_ref().unwrap() as *const SubprocessRequest,
+            request_address
+        );
+        assert!(target.is_some() && mounts.is_some());
+        assert!(storage.custody.request.is_none() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn lexical_expired_refusal_keeps_same_storage_owner_across_reborrow() {
+        let mut storage = SelectedScopedStorage::for_component_test();
+        storage.custody.request = Some(request("/never-contact", &[]));
+        let endpoint = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        storage.custody.bounds = Some(SelectedSupervisedBounds {
+            service: endpoint,
+            cleanup: endpoint,
+        });
+        let owner = &storage.custody as *const SelectedScopedCustody;
+        assert_eq!(
+            storage.borrow_for_component_test().create(),
+            SelectedScopedObservation::Refused
+        );
+        assert_eq!(
+            storage.borrow_for_component_test().create(),
+            SelectedScopedObservation::Refused
+        );
+        assert_eq!(&storage.custody as *const SelectedScopedCustody, owner);
+        assert!(storage.custody.request.is_some() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn lexical_observer_unwind_ends_borrow_without_dropping_actual_request() {
+        let mut storage = SelectedScopedStorage::for_component_test();
+        storage.custody.request = Some(request("/never-contact", &[]));
+        let owner = &storage.custody as *const SelectedScopedCustody;
+        let request_address = storage.custody.request.as_ref().unwrap() as *const SubprocessRequest;
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut loan = storage.borrow_for_component_test();
+            loan.observe_runtime(|| panic!("injected observation-only unwind"));
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(&storage.custody as *const SelectedScopedCustody, owner);
+        assert_eq!(
+            storage.custody.request.as_ref().unwrap() as *const SubprocessRequest,
+            request_address
+        );
+        let mut loan = storage.borrow_for_component_test();
+        assert_eq!(loan.create(), SelectedScopedObservation::Refused);
+        assert!(storage.custody.request.is_some() && !storage.custody.create_attempted);
+    }
+
+    #[test]
+    fn inverted_bounds_leave_actual_source_slots_unspent() {
+        let mut request = Some(request("/missing-component-test-command", &[]));
+        let mut scope = None;
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [5; 32],
+        });
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(60));
+        let cleanup = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut ledger = SelectedScopedCustody::empty();
+        assert!(
+            ledger
+                .prepare_from_compiled_slots(
+                    &mut request,
+                    &mut scope,
+                    &mut target,
+                    &mut mounts,
+                    service,
+                    cleanup
+                )
+                .is_err()
+        );
+        assert!(request.is_some() && target.is_some() && mounts.is_some());
+        assert!(ledger.bounds.is_none() && !ledger.create_attempted);
+    }
+
+    #[test]
+    fn expired_service_refusal_is_sticky_and_does_not_take_request() {
+        let mut ledger = SelectedScopedCustody::empty();
+        let endpoint = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        ledger.bounds = Some(SelectedSupervisedBounds {
+            service: endpoint,
+            cleanup: endpoint,
+        });
+        ledger.request = Some(request("/never-contact", &[]));
+        assert_eq!(ledger.create(), SelectedScopedObservation::Refused);
+        assert_eq!(ledger.create(), SelectedScopedObservation::Refused);
+        assert!(ledger.request.is_some() && !ledger.create_attempted);
+    }
+
+    #[test]
+    fn expired_parent_close_preserves_same_registered_descriptor() {
+        let (reader, authority) = pipe_cloexec();
+        let fd = authority.file().as_raw_fd();
+        let mut copies = vec![authority];
+        assert!(
+            !selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::ZERO)
+            )
+            .unwrap()
+        );
+        assert_eq!(copies[0].file().as_raw_fd(), fd);
+        assert!(
+            direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap()
+                .fork_child_close_fds
+                .contains(&fd)
+        );
+        assert!(
+            selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(1))
+            )
+            .unwrap()
+        );
+        assert!(copies.is_empty());
+        drop(reader);
+    }
+
+    #[test]
+    fn duplicate_parent_aliases_close_once_under_same_barrier() {
+        let (reader, authority) = pipe_cloexec();
+        let fd = authority.file().as_raw_fd();
+        let mut copies = vec![authority.clone(), authority];
+        assert!(
+            selected_close_inherited_copies(
+                &mut copies,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(1))
+            )
+            .unwrap()
+        );
+        assert!(copies.is_empty());
+        assert!(
+            !direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap()
+                .fork_child_close_fds
+                .contains(&fd)
+        );
+        drop(reader);
+    }
+
+    #[test]
+    fn shared_external_alias_remains_an_actual_ledger_obligation() {
+        let (reader, authority) = pipe_cloexec();
+        let mut copies = vec![authority.clone()];
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(1));
+        assert!(!selected_close_inherited_copies(&mut copies, bound).unwrap());
+        assert!(Arc::ptr_eq(&copies[0].handle, &authority.handle));
+        drop(authority);
+        assert!(selected_close_inherited_copies(&mut copies, bound).unwrap());
+        drop(reader);
+    }
+
+    #[test]
+    fn child_only_unwind_restores_actual_child_without_legacy_signal() {
+        // Real local fixture, NOT scoped/admitted/native positive coverage.
+        let child = process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let pin = open_pidfd(pid).unwrap();
+        let mut ledger = SelectedScopedCustody::empty();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SelectedSupervisedSetupGuard {
+                child: Some(child),
+                supervised_status: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                mapping_lifelines: Vec::new(),
+                mode: SpawnFailureCustodyMode::Ordinary,
+                scoped: Some(&mut ledger),
+            };
+            panic!("injected first-Child producer unwind");
+        }));
+        assert!(unwind.is_err() && ledger.refused);
+        assert_eq!(ledger.setup_child.as_ref().unwrap().id(), pid);
+        assert!(!selected_scoped_pin_exited(&pin).unwrap());
+        // Explicit fixture owner disposal; not selected cleanup evidence.
+        let child = ledger.setup_child.as_mut().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn running_setup_unwind_restores_same_workers_and_wrapper() {
+        // Guard transfer control only; no authenticated scope/issuer supplied.
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let pid = running.child.id();
+        let mut ledger = SelectedScopedCustody::empty();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SpawnRunningGuard {
+                running: Some(running),
+                mode: SpawnFailureCustodyMode::Ordinary,
+                scoped: Some(&mut ledger),
+            };
+            panic!("injected actual post-worker unwind");
+        }));
+        assert!(unwind.is_err() && ledger.refused);
+        let retained = ledger.running.as_mut().unwrap();
+        assert_eq!(retained.child.id(), pid);
+        assert!(retained.stdout_thread.is_some() && retained.stderr_thread.is_some());
+        assert!(matches!(
+            poll_wrapper(&mut retained.child),
+            Ok(WrapperPoll::Running)
+        ));
+        // Restore ordinary fixture disposal only AFTER custody assertions.
+        retained.selected_scoped_borrowed = false;
+    }
+
+    #[test]
+    fn raw_applied_reader_failure_is_cached_before_sticky_refusal() {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        running.applied_receipt_rx = Some(receiver);
+        sender
+            .send(Err("actual component reader refusal".into()))
+            .unwrap();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut ledger = SelectedScopedCustody::empty();
+        ledger.running = Some(running);
+        ledger.bounds = Some(SelectedSupervisedBounds {
+            service: original,
+            cleanup: original,
+        });
+        ledger.released = true;
+        assert_eq!(ledger.observe_applied(), SelectedScopedObservation::Refused);
+        let retained = ledger.running.as_ref().unwrap();
+        assert!(
+            matches!(retained.applied_receipt_observation.as_ref(), Some(Err(detail)) if detail == "actual component reader refusal")
+        );
+        assert!(retained.applied_receipt_rx.is_none());
+        assert_eq!(ledger.observe_applied(), SelectedScopedObservation::Refused);
+        assert!(
+            ledger
+                .running
+                .as_ref()
+                .unwrap()
+                .applied_receipt_observation
+                .is_some()
+        );
+        // Ordinary fixture disposal, independently from selected component.
+        ledger.running.as_mut().unwrap().selected_scoped_borrowed = false;
+    }
+
+    #[test]
+    fn consumed_initial_status_survives_same_running_setup_refusal() {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.selected_scoped_borrowed = true;
+        let pid = running.child.id();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Err("actual initial-status reader refusal".to_owned()))
+            .unwrap();
+        let raw = receiver.recv_timeout(Duration::from_secs(1));
+        retain_initial_launcher_status(&mut running, &raw);
+        let mut ledger = SelectedScopedCustody::empty();
+        let guard = SpawnRunningGuard {
+            running: Some(running),
+            mode: SpawnFailureCustodyMode::Ordinary,
+            scoped: Some(&mut ledger),
+        };
+        assert!(matches!(
+            guard.into_spawn_failure(spawn_failure(Instant::now(), "later setup failure")),
+            SpawnWithStdioError::ScopedRetained
+        ));
+        let retained = ledger.running.as_mut().unwrap();
+        assert_eq!(retained.child.id(), pid);
+        assert!(
+            matches!(retained.selected_initial_status.as_ref(), Some(Err(detail)) if detail == "actual initial-status reader refusal")
+        );
+        assert!(retained.stdout_thread.is_some() && retained.stderr_thread.is_some());
+        // Independent ordinary fixture disposal; no selected scope claim.
+        retained.selected_scoped_borrowed = false;
+    }
+}
+
+/// Selected supervised custody, never a selector issuer or financial proof.
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedSpawnOutcome {
+    Held(SelectedSupervisedAttachmentOwner),
+    RefusedWithoutRunningOwner {
+        phase: SelectedSupervisedCreatePhase,
+        result: SubprocessResult,
+    },
+    Refused(SelectedSupervisedFailureOutcome),
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedCreatePhase {
+    Preflight,
+    ProcessCreateAttempt,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedFailurePhase {
+    WrapperSetup,
+    HeldValidation,
+    ReleaseValidation,
+    ReleaseWrite,
+    ReleaseCompletion,
+}
+
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedFailure {
+    pub phase: SelectedSupervisedFailurePhase,
+    pub result: SubprocessResult,
+    pub cleanup_error: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedFailureOutcome {
+    Settled {
+        error: SelectedSupervisedFailure,
+        aborted_before_attachment: Option<AbortedProcess>,
+        custody: SelectedSupervisedFailureOwner,
+    },
+    Unsettled {
+        error: SelectedSupervisedFailure,
+        owner: SelectedSupervisedFailureOwner,
+    },
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedAbortOutcome {
+    Settled {
+        aborted: AbortedProcess,
+        custody: SelectedSupervisedFailureOwner,
+    },
+    Unsettled {
+        error: AttachmentAbortError,
+        owner: SelectedSupervisedFailureOwner,
+    },
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedReleaseOutcome {
+    Running(RunningProcess),
+    Refused(SelectedSupervisedFailureOutcome),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectedSupervisedCleanupStage {
+    GroupAndWrapper,
+    TargetPin,
+    Watchdog,
+    Drains,
+    Complete,
+}
+
+#[cfg(target_os = "linux")]
+pub enum SelectedSupervisedCleanupObservation {
+    Settled,
+    Unsettled {
+        stage: SelectedSupervisedCleanupStage,
+        detail: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct SelectedSupervisedBounds {
+    service: crate::time::MonotonicDeadline,
+    cleanup: crate::time::MonotonicDeadline,
+}
+
+#[cfg(target_os = "linux")]
+enum SelectedSupervisedCustody {
+    Running(RunningProcess),
+    Pending(ProcessAwaitingAttachment),
+}
+
+/// Opaque actual custody. Both settled and unsettled outcomes retain raw
+/// native/receipt observations; neither grants another launch or a refund.
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedFailureOwner {
+    custody: Option<SelectedSupervisedCustody>,
+    bounds: SelectedSupervisedBounds,
+    stage: SelectedSupervisedCleanupStage,
+    release_attempted: bool,
+    held_boundary_revoked: bool,
+}
+
+#[cfg(target_os = "linux")]
+pub struct SelectedSupervisedAttachmentOwner {
+    // This guard also owns terminal cleanup if the held owner is abandoned.
+    retained: SelectedSupervisedFailureOwner,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum SelectedCleanupMode {
+    BoundedOriginal,
+    TerminalDestruction,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedCleanupMode {
+    fn check(self, deadline: crate::time::MonotonicDeadline) -> Result<(), String> {
+        if matches!(self, Self::BoundedOriginal) && deadline.has_elapsed() {
+            Err("selected original cleanup deadline elapsed".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pause(self, deadline: crate::time::MonotonicDeadline) {
+        let delay = match self {
+            Self::BoundedOriginal => PROCESS_POLL_INTERVAL.min(deadline.remaining()),
+            Self::TerminalDestruction => PROCESS_POLL_INTERVAL,
+        };
+        thread::sleep(delay);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedFailureOwner {
+    fn running(running: RunningProcess, bounds: SelectedSupervisedBounds) -> Self {
+        Self {
+            custody: Some(SelectedSupervisedCustody::Running(running)),
+            bounds,
+            stage: SelectedSupervisedCleanupStage::GroupAndWrapper,
+            release_attempted: false,
+            held_boundary_revoked: false,
+        }
+    }
+
+    fn running_mut(&mut self) -> Result<&mut RunningProcess, String> {
+        match self.custody.as_mut() {
+            Some(SelectedSupervisedCustody::Running(running)) => Ok(running),
+            Some(SelectedSupervisedCustody::Pending(pending)) => match pending.owner.as_mut() {
+                Some(AttachmentPendingOwner::Supervised { running }) => Ok(running),
+                _ => Err("selected custody lost its supervised owner".into()),
+            },
+            None => Err("selected custody has already been transferred".into()),
+        }
+    }
+
+    fn identity(&self) -> (u32, i64) {
+        match self.custody.as_ref() {
+            Some(SelectedSupervisedCustody::Running(running)) => (running.pid, running.pgid),
+            Some(SelectedSupervisedCustody::Pending(pending)) => (pending.pid, pending.pgid),
+            None => (0, 0),
+        }
+    }
+
+    pub fn settle_until_original_expiry(&mut self) -> SelectedSupervisedCleanupObservation {
+        self.advance_selected_cleanup(SelectedCleanupMode::BoundedOriginal)
+    }
+
+    fn advance_selected_cleanup(
+        &mut self,
+        mode: SelectedCleanupMode,
+    ) -> SelectedSupervisedCleanupObservation {
+        if self.stage == SelectedSupervisedCleanupStage::Complete {
+            return SelectedSupervisedCleanupObservation::Settled;
+        }
+        let deadline = self.bounds.cleanup;
+        let result = (|| -> Result<(), String> {
+            mode.check(deadline)?;
+            if !self.held_boundary_revoked {
+                let running = self.running_mut()?;
+                // EOF revokes this one-shot boundary; it does not authorize exec.
+                if let Some(boundary) = running.attachment_release.as_mut() {
+                    if let Some(writer) = boundary.writer.as_mut() {
+                        writer.close_selected_until(deadline, mode)?;
+                    }
+                }
+                running.attachment_release.take();
+                self.held_boundary_revoked = true;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::GroupAndWrapper {
+                self.running_mut()?
+                    .settle_selected_group_and_wrapper_until(deadline, mode)?;
+                // Never revisit numeric group authority after its fence is reaped.
+                self.stage = SelectedSupervisedCleanupStage::TargetPin;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::TargetPin {
+                if let Some(pin) = self.running_mut()?.attachment_target_lifetime.as_ref() {
+                    loop {
+                        mode.check(deadline)?;
+                        match native_terminal_pin_has_exited(pin) {
+                            NativeTerminalPinObservation::Exited => break,
+                            NativeTerminalPinObservation::NotExited
+                            | NativeTerminalPinObservation::Interrupted => mode.pause(deadline),
+                            _ => return Err("selected target pin exit remains unproved".into()),
+                        }
+                    }
+                }
+                self.stage = SelectedSupervisedCleanupStage::Watchdog;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::Watchdog {
+                self.running_mut()?
+                    .settle_selected_watchdog_until(deadline, mode)?;
+                self.stage = SelectedSupervisedCleanupStage::Drains;
+            }
+            if self.stage == SelectedSupervisedCleanupStage::Drains {
+                self.running_mut()?
+                    .finish_selected_drains_until(deadline, mode)?;
+                self.running_mut()?.selected_cleanup_complete = true;
+                self.stage = SelectedSupervisedCleanupStage::Complete;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => SelectedSupervisedCleanupObservation::Settled,
+            Err(detail) => SelectedSupervisedCleanupObservation::Unsettled {
+                stage: self.stage,
+                detail,
+            },
+        }
+    }
+
+    fn refused(
+        mut self,
+        phase: SelectedSupervisedFailurePhase,
+        mut result: SubprocessResult,
+    ) -> SelectedSupervisedFailureOutcome {
+        let (pid, pgid) = self.identity();
+        let was_held = self
+            .running_mut()
+            .is_ok_and(|running| running.attachment_release.is_some());
+        let observation = self.settle_until_original_expiry();
+        if let Ok(running) = self.running_mut() {
+            for (panicked, diagnostic) in running.selected_worker_panics.iter().zip([
+                "selected stdin worker panicked",
+                "selected stdout worker panicked",
+                "selected stderr worker panicked",
+                "selected status worker panicked",
+            ]) {
+                if *panicked {
+                    result.stderr = append_diagnostic(&result.stderr, diagnostic);
+                }
+            }
+        }
+        match observation {
+            SelectedSupervisedCleanupObservation::Settled => {
+                let aborted =
+                    (was_held && !self.release_attempted).then_some(AbortedProcess { pid, pgid });
+                result.aborted_before_attachment = aborted;
+                SelectedSupervisedFailureOutcome::Settled {
+                    error: SelectedSupervisedFailure {
+                        phase,
+                        result,
+                        cleanup_error: None,
+                    },
+                    aborted_before_attachment: aborted,
+                    custody: self,
+                }
+            }
+            SelectedSupervisedCleanupObservation::Unsettled { detail, .. } => {
+                result.aborted_before_attachment = None;
+                SelectedSupervisedFailureOutcome::Unsettled {
+                    error: SelectedSupervisedFailure {
+                        phase,
+                        result,
+                        cleanup_error: Some(detail),
+                    },
+                    owner: self,
+                }
+            }
+        }
+    }
+
+    fn complete_selected_terminal_cleanup(&mut self) {
+        if self.custody.is_none() {
+            return;
+        }
+        while !matches!(
+            self.advance_selected_cleanup(SelectedCleanupMode::TerminalDestruction),
+            SelectedSupervisedCleanupObservation::Settled
+        ) {
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SelectedSupervisedFailureOwner {
+    fn drop(&mut self) {
+        // Last-resort actual destruction only; ordinary Err returns this owner.
+        self.complete_selected_terminal_cleanup();
+        // Pending's legacy abort must not repeat numeric cleanup after the
+        // selected stages consumed its wrapper fence. With owner absent its
+        // Drop is inert; the already-settled nested running owner drops here.
+        if let Some(SelectedSupervisedCustody::Pending(pending)) = self.custody.as_mut() {
+            drop(pending.owner.take());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedAttachmentOwner {
+    pub fn held(&self) -> &ProcessAwaitingAttachment {
+        match self.retained.custody.as_ref() {
+            Some(SelectedSupervisedCustody::Pending(pending)) => pending,
+            _ => unreachable!("private selected held construction invariant"),
+        }
+    }
+
+    pub fn abort_and_reap(mut self) -> SelectedSupervisedAbortOutcome {
+        let (pid, pgid) = self.retained.identity();
+        match self.retained.settle_until_original_expiry() {
+            SelectedSupervisedCleanupObservation::Settled => {
+                SelectedSupervisedAbortOutcome::Settled {
+                    aborted: AbortedProcess { pid, pgid },
+                    custody: self.retained,
+                }
+            }
+            SelectedSupervisedCleanupObservation::Unsettled { detail, .. } => {
+                SelectedSupervisedAbortOutcome::Unsettled {
+                    error: AttachmentAbortError { pid, detail },
+                    owner: self.retained,
+                }
+            }
+        }
+    }
+
+    pub fn release_after_attachment(mut self) -> SelectedSupervisedReleaseOutcome {
+        let start = Instant::now();
+        let deadline = self.retained.bounds.service;
+        let request_expiry = self.held().request_deadline;
+        let check_release_window = || -> Result<(), String> {
+            if deadline.has_elapsed()
+                || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+            {
+                Err("selected original service/request release deadline elapsed".into())
+            } else {
+                Ok(())
+            }
+        };
+        let validation = (|| -> Result<(), String> {
+            check_release_window()?;
+            self.held().check_exact_process_alive()?;
+            let running = self.retained.running_mut()?;
+            for capture in [&running.stdout_capture, &running.stderr_capture] {
+                let state = capture
+                    .state
+                    .try_lock()
+                    .map_err(|_| "selected output observation unavailable".to_owned())?;
+                if state.truncated {
+                    return Err("selected launcher output truncated".into());
+                }
+            }
+            if running.output_overflow_rx.try_recv().is_ok() {
+                return Err("selected launcher output exceeded limit".into());
+            }
+            match poll_wrapper(&mut running.child) {
+                Ok(WrapperPoll::Running) => Ok(()),
+                _ => Err("selected wrapper is not releasable".into()),
+            }
+        })();
+        if let Err(detail) = validation {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseValidation,
+                spawn_failure(start, detail),
+            ));
+        }
+        self.retained.release_attempted = true;
+        let release = self.retained.running_mut().and_then(|running| {
+            let boundary = running
+                .attachment_release
+                .as_mut()
+                .ok_or("selected release boundary missing")?;
+            let writer = boundary
+                .writer
+                .as_mut()
+                .ok_or("selected release writer missing")?;
+            let fd = writer.fd;
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            {
+                return Err("selected release nonblocking setup failed".into());
+            }
+            check_release_window()?;
+            let file = writer
+                .writer
+                .as_mut()
+                .ok_or("selected release file missing")?;
+            match file.write(&[ATTACHMENT_RELEASE_TOKEN]) {
+                Ok(1) => {}
+                Ok(_) => return Err("selected release write incomplete".into()),
+                Err(error) => return Err(error.to_string()),
+            }
+            // The byte is irreversible. A late observation retains actual
+            // refused custody rather than claiming the target never ran.
+            check_release_window()?;
+            // A close may be refused by fork quiescence; retain the SAME
+            // consumed writer in a refused owner rather than blocking Drop.
+            writer.close_selected_with_request_until(
+                deadline,
+                SelectedCleanupMode::BoundedOriginal,
+                request_expiry,
+            )?;
+            boundary.writer.take();
+            running.attachment_release.take();
+            Ok(())
+        });
+        if let Err(detail) = release {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseWrite,
+                spawn_failure(start, detail),
+            ));
+        }
+        if check_release_window().is_err() {
+            return SelectedSupervisedReleaseOutcome::Refused(self.retained.refused(
+                SelectedSupervisedFailurePhase::ReleaseCompletion,
+                spawn_failure(start, "selected release completed after original expiry"),
+            ));
+        }
+        // No fallible work between taking actual custody and the success move.
+        match self.retained.custody.take() {
+            Some(SelectedSupervisedCustody::Pending(mut pending)) => match pending.owner.take() {
+                Some(AttachmentPendingOwner::Supervised { running }) => {
+                    SelectedSupervisedReleaseOutcome::Running(*running)
+                }
+                _ => unreachable!("private selected supervised construction invariant"),
+            },
+            _ => unreachable!("private selected pending construction invariant"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RunningProcess {
+    fn settle_selected_group_and_wrapper_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if self.wrapper_reaped {
+            return Ok(());
+        }
+        if self.process_scope.is_some() {
+            return Err("selected unscoped custody unexpectedly has scope".into());
+        }
+        mode.check(deadline)?;
+        kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, true);
+        let _ = self.child.kill();
+        loop {
+            mode.check(deadline)?;
+            match poll_wrapper(&mut self.child).map_err(|error| error.to_string())? {
+                WrapperPoll::ExitedUnreaped => break,
+                WrapperPoll::Running => mode.pause(deadline),
+            }
+        }
+        loop {
+            mode.check(deadline)?;
+            let bound = matches!(mode, SelectedCleanupMode::BoundedOriginal).then_some(deadline);
+            if selected_group_quiescent(self.wrapper_pgid, self.wrapper_pid, bound)? {
+                break;
+            }
+            mode.pause(deadline);
+        }
+        mode.check(deadline)?;
+        match self.child.try_wait().map_err(|error| error.to_string())? {
+            Some(_) => {
+                self.wrapper_reaped = true;
+                self.groups_terminated = true;
+                Ok(())
+            }
+            None => Err("selected wrapper reap remains pending".into()),
+        }
+    }
+
+    fn settle_selected_watchdog_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if let Some(watchdog) = self.occupancy_watchdog.as_mut() {
+            loop {
+                mode.check(deadline)?;
+                if watchdog.pid <= 0 {
+                    break;
+                }
+                let mut status = 0;
+                let result = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
+                if result == watchdog.pid && (libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
+                {
+                    watchdog.pid = -1;
+                    break;
+                }
+                if result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EINTR) {
+                        return Err(error.to_string());
+                    }
+                } else if result != 0 {
+                    return Err("selected watchdog terminal status unsupported".into());
+                }
+                mode.pause(deadline);
+            }
+        }
+        self.occupancy_watchdog.take();
+        Ok(())
+    }
+
+    fn finish_selected_drains_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        mode.check(deadline)?;
+        self.drain_stop.store(true, Ordering::Release);
+        for (index, slot) in [
+            &mut self.stdin_thread,
+            &mut self.stdout_thread,
+            &mut self.stderr_thread,
+            &mut self.status_thread,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            while slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                mode.check(deadline)?;
+                mode.pause(deadline);
+            }
+            mode.check(deadline)?;
+            if let Some(handle) = slot.take() {
+                if handle.join().is_err() {
+                    self.selected_worker_panics[index] = true;
+                }
+            }
+        }
+        mode.check(deadline)?;
+        let out = self
+            .stdout_capture
+            .state
+            .try_lock()
+            .map_err(|_| "selected stdout capture unavailable".to_owned())?;
+        let err = self
+            .stderr_capture
+            .state
+            .try_lock()
+            .map_err(|_| "selected stderr capture unavailable".to_owned())?;
+        if let Some(channel) = self.native_settlement.as_mut() {
+            if channel.retained_drains.is_none() {
+                channel.retained_drains = Some((out.clone(), err.clone()));
+            }
+        }
+        mode.check(deadline)?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn selected_group_quiescent(
+    pgid: i64,
+    retained_leader_pid: u32,
+    original_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<bool, String> {
+    for entry in std::fs::read_dir("/proc").map_err(|error| error.to_string())? {
+        if original_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+            return Err("selected original group observation expired".into());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == retained_leader_pid {
+            continue;
+        }
+        match read_linux_process_birth(pid) {
+            Ok(stat) if stat.process_group == pgid && !matches!(stat.state, 'Z' | 'X') => {
+                return Ok(false);
+            }
+            Ok(_) => {}
+            Err(error) if error.contains("No such file or directory") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
 }
 
 /// Proof that an attachment-pending process (or its pre-identity supervisor)
@@ -3986,6 +8790,23 @@ impl ProcessAwaitingAttachment {
         Err("attachment-pending exact process identity is unavailable on this OS".to_owned())
     }
 
+    /// Structural custody only: no time/context/cache validation, I/O or syscall.
+    /// Missing cache/unsupported OS preserves uncertainty rather than no birth.
+    pub fn capture_existing_held_occurrence(&self) -> ProcessLocalHeldOccurrence {
+        let held_identity = match self.owner.as_ref() {
+            Some(AttachmentPendingOwner::Supervised { running }) => running
+                .native_settlement
+                .as_ref()
+                .and_then(|channel| channel.held_target_identity.clone()),
+            _ => None,
+        };
+        ProcessLocalHeldOccurrence {
+            #[cfg(target_os = "linux")]
+            pin: Arc::clone(&self.pidfd),
+            held_identity,
+        }
+    }
+
     /// Borrow the already-pinned exact process identity. Durable lifecycle
     /// code must capture identity through this descriptor rather than reopen a
     /// potentially recycled numeric PID.
@@ -4097,7 +8918,7 @@ impl ProcessAwaitingAttachment {
                 }
                 drop(release_registration);
                 match worker.join() {
-                    Ok(Ok(running)) => Ok(running),
+                    Ok(Ok(running)) => self.finish_release_before_original_expiry(running),
                     Ok(Err(result)) => {
                         let cleanup = wait_pidfd_exit(
                             self.pidfd.as_raw_fd(),
@@ -4189,7 +9010,7 @@ impl ProcessAwaitingAttachment {
                     }
                 }
                 match running.release_attachment_boundary() {
-                    Ok(()) => Ok(*running),
+                    Ok(()) => self.finish_release_before_original_expiry(*running),
                     Err(error) => {
                         let cleanup = prove_attachment_cleanup(
                             self.pidfd.as_raw_fd(),
@@ -4210,6 +9031,40 @@ impl ProcessAwaitingAttachment {
                 }
             }
         }
+    }
+
+    /// Observe completion at the ownership handoff, not just release entry.
+    /// Late completion is an attempted birth with exact cleanup obligations.
+    fn finish_release_before_original_expiry(
+        &self,
+        mut running: RunningProcess,
+    ) -> Result<RunningProcess, AttachmentReleaseError> {
+        if self
+            .request_deadline
+            .is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            let cleanup = running.abort_and_reap_checked();
+            #[cfg(target_os = "linux")]
+            let cleanup = prove_attachment_cleanup(self.pidfd.as_raw_fd(), cleanup);
+            let (detail, cleanup_is_settled) = self.cleanup_failure_detail(cleanup);
+            return Err(AttachmentReleaseError {
+                phase: "release after attachment",
+                cleanup_is_settled,
+                result: spawn_failure(
+                    Instant::now(),
+                    format!(
+                        "release after attachment refused: original deadline expired before completion handoff{detail}"
+                    ),
+                ),
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Share the same descriptor, never reopen or duplicate the PID.
+            // Once this held owner drops, the running owner retains the pin.
+            running.attachment_target_lifetime = Some(Arc::clone(&self.pidfd));
+        }
+        Ok(running)
     }
 
     /// Fail closed, terminate the exact held child through its pidfd, and join
@@ -4426,6 +9281,261 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Corroborate live-at-check launch facts using the sole receipt observer
+    /// and the original held pin. This neither collects terminal evidence nor
+    /// admits a device, session, cleanup or financial outcome.
+    pub fn require_original_live_launch_correspondence(
+        &mut self,
+        held: &ProcessLocalHeldOccurrence,
+        expected: Result<
+            (
+                &crate::LinuxSandboxAppliedLaunchCommitments,
+                &crate::LinuxSandboxMountPreparationCommitments,
+                crate::time::MonotonicDeadline,
+            ),
+            String,
+        >,
+    ) -> Result<(), String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        let (target, mounts, original) = match expected {
+            Ok(context) => context,
+            Err(failure) => {
+                return self
+                    .fail_selected_applied_launch_receipt(failure)
+                    .map(|_| ());
+            }
+        };
+        if let Err(failure) = self.require_same_held_occurrence(held) {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "original live launch context expired before comparison".into(),
+                )
+                .map(|_| ());
+        }
+        if !self.poll_selected_applied_receipt_for_collection()? {
+            // Pending is not an irreversible refusal: retain the sole receiver.
+            return Err("original live launch receipt remains pending".into());
+        }
+        let result = (|| {
+            self.require_same_held_occurrence(held)?;
+            let receipt = match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) => receipt,
+                _ => return Err("original live launch lacks accepted cached receipt".into()),
+            };
+            if !receipt.matches_commitments(target)
+                || !receipt.matches_post_release_mounts(mounts)
+                || !self
+                    .mount_preparation
+                    .as_ref()
+                    .is_some_and(|held_mount| held_mount.matches_commitments(mounts))
+            {
+                return Err(
+                    "original live launch differs from compiled target/mount expectations".into(),
+                );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let pin = self
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .ok_or("original live launch lost held pin")?;
+                if !matches!(
+                    native_terminal_pin_has_exited(pin),
+                    NativeTerminalPinObservation::NotExited
+                ) {
+                    return Err("original live launch pin is exited or unobserved".into());
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err("original live launch unavailable on this platform".into());
+            self.require_same_held_occurrence(held)?;
+            if original.has_elapsed() {
+                return Err("original live launch context expired during comparison".into());
+            }
+            Ok(())
+        })();
+        if let Err(failure) = result {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        Ok(())
+    }
+
+    /// Compare the existing OS owner and cached incarnation, without reopening,
+    /// duplicating, reading, waiting or reconstructing terminal evidence.
+    pub fn require_same_held_occurrence(
+        &self,
+        held: &ProcessLocalHeldOccurrence,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = held;
+            return Err("running held association unavailable on this platform".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let channel = self
+                .native_settlement
+                .as_ref()
+                .ok_or("held association lacks selected running channel")?;
+            if channel.original_deadline.has_elapsed() {
+                return Err("original held association expired before comparison".into());
+            }
+            if channel.failure.is_some()
+                || self.applied_receipt_failure.is_some()
+                || channel.selected_wait_phase == SelectedNativeTerminalWaitPhase::Failed
+            {
+                return Err("original held association retains a native refusal".into());
+            }
+            let pin = self
+                .attachment_target_lifetime
+                .as_ref()
+                .ok_or("running owner lost actual held lifetime pin")?;
+            if !Arc::ptr_eq(pin, &held.pin) {
+                return Err("running owner differs from actual held pin owner".into());
+            }
+            let identity = channel
+                .held_target_identity
+                .as_ref()
+                .ok_or("running owner lacks original held identity cache")?;
+            held.require_cached_identity(identity)?;
+            if channel.original_deadline.has_elapsed() {
+                return Err("original held association expired during comparison".into());
+            }
+            Ok(())
+        }
+    }
+
+    /// Borrow the selected channel's retained raw observations and terminal result.
+    pub fn native_terminal_raw_view(&self) -> Option<NativeTerminalRawView<'_>> {
+        let channel = self.native_settlement.as_ref()?;
+        let drains = channel.retained_drains.as_ref().map(|(stdout, stderr)| {
+            (
+                stdout.bytes.as_slice(),
+                stdout.truncated,
+                stderr.bytes.as_slice(),
+                stderr.truncated,
+            )
+        });
+        Some(NativeTerminalRawView {
+            frame: &channel.frame,
+            exact_eof: channel.exact_eof,
+            applied_receipt: self.applied_receipt_observation.as_ref(),
+            pin_observation: &channel.pin_observation,
+            pin_timely: channel.pin_timely,
+            failure: channel.failure.as_deref(),
+            wait_phase: channel.selected_wait_phase,
+            retained_drains: drains,
+            terminal_result: channel.retained_terminal_result.as_ref(),
+        })
+    }
+
+    /// Compare cached raw facts only; never receive, decode, wait or mint proof.
+    /// An upstream protected-context refusal is retained in the same channel.
+    /// Actual private constructor lineage supplies the same original deadline;
+    /// arbitrary caller-supplied expectations do not grant admission authority.
+    pub fn require_cached_native_terminal_correspondence(
+        &mut self,
+        expected: Result<
+            (
+                &crate::LinuxSandboxAppliedLaunchCommitments,
+                &crate::LinuxSandboxMountPreparationCommitments,
+                crate::time::MonotonicDeadline,
+            ),
+            String,
+        >,
+    ) -> Result<(), String> {
+        let Some(channel) = self.native_settlement.as_mut() else {
+            return Err("native terminal correspondence lacks selected channel".into());
+        };
+        if let Some(failure) = &channel.failure {
+            return Err(failure.clone());
+        }
+        let result: Result<(), String> = (|| {
+            let (target, mounts, original) = expected?;
+            if original.has_elapsed() || channel.original_deadline.has_elapsed() {
+                return Err("original native correspondence expired before comparison".into());
+            }
+            if channel.selected_wait_phase != SelectedNativeTerminalWaitPhase::Collected
+                || !channel.exact_eof
+                || !channel.pin_timely
+                || !matches!(
+                    channel.pin_observation,
+                    NativeTerminalPinObservation::Exited
+                )
+                || channel.retained_terminal_result.is_none()
+                || channel.retained_drains.is_none()
+            {
+                return Err(
+                    "native terminal collection lacks complete timely retained facts".into(),
+                );
+            }
+            let testimony = channel
+                .testimony
+                .as_ref()
+                .ok_or("native terminal collection lacks cached canonical testimony")?;
+            if channel.held_target_identity.as_ref() != Some(&testimony.process_identity)
+                || self.mount_preparation.as_ref() != Some(&testimony.held_mount)
+                || !testimony.held_mount.matches_commitments(mounts)
+            {
+                return Err(
+                    "native terminal held context differs from independent mount expectations"
+                        .into(),
+                );
+            }
+            if testimony.launch_failure.is_some() {
+                return Err(
+                    "born native pre-exec refusal is not successful launch correspondence".into(),
+                );
+            }
+            // Raw Ok was cached before PID/expiry validation. Only an actual
+            // successful selected observer return with no sticky refusal may
+            // supply accepted receipt correspondence; never rehabilitate it.
+            if self.applied_receipt_failure.is_some() || !self.applied_receipt_returned {
+                return Err(
+                    "actual applied-launch observation was refused or never returned successfully"
+                        .into(),
+                );
+            }
+            let actual = match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) => receipt,
+                Some(Err(_)) => {
+                    return Err("actual applied-launch observer retained a refusal".into());
+                }
+                None => {
+                    return Err(
+                        "native terminal correspondence lacks actual cached applied receipt".into(),
+                    );
+                }
+            };
+            if testimony.applied_launch.as_ref() != Some(actual)
+                || actual.owned_child_pid != testimony.process_identity.target_pid
+                || !actual.matches_commitments(target)
+                || !actual.matches_post_release_mounts(mounts)
+            {
+                return Err("native testimony and actual receipt differ from independent target/mount expectations".into());
+            }
+            if original.has_elapsed() || channel.original_deadline.has_elapsed() {
+                return Err("original native correspondence expired during comparison".into());
+            }
+            Ok(())
+        })();
+        if let Err(failure) = &result {
+            // Retain every irreversible raw observation, drain and actual result.
+            channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+        }
+        result
+    }
+
     /// Await the second, exact trusted-launcher status after attachment and
     /// release. The reader reports success only after the status writer closes
     /// cleanly, so extra or partial documents cannot be laundered by a first
@@ -4434,6 +9544,9 @@ impl RunningProcess {
         &mut self,
         timeout: Duration,
     ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        if self.native_settlement.is_some() {
+            return self.wait_selected_applied_launch_receipt(timeout);
+        }
         if timeout.is_zero() {
             return Err("applied-launch receipt deadline elapsed".into());
         }
@@ -4456,6 +9569,195 @@ impl RunningProcess {
         }
         self.applied_receipt_rx = None;
         Ok(receipt)
+    }
+
+    fn wait_selected_applied_launch_receipt(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        if self.applied_receipt_returned {
+            return Err("applied-launch receipt was already returned".into());
+        }
+        if self.applied_receipt_observation.is_some() {
+            return Err("applied-launch receipt observation was already consumed".into());
+        }
+
+        let Some(original_deadline) = self
+            .native_settlement
+            .as_ref()
+            .map(|channel| channel.original_deadline)
+        else {
+            return self.fail_selected_applied_launch_receipt(
+                "selected native receipt channel is missing".into(),
+            );
+        };
+        let remaining = original_deadline.remaining();
+        if remaining.is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "native settlement original deadline expired before applied receipt".into(),
+            );
+        }
+        if timeout.is_zero() {
+            return self.fail_selected_applied_launch_receipt(
+                "applied-launch receipt deadline elapsed".into(),
+            );
+        }
+        let receive_timeout = timeout.min(remaining);
+        let received = match self.applied_receipt_rx.as_ref() {
+            Some(receiver) => receiver.recv_timeout(receive_timeout),
+            None => {
+                return self.fail_selected_applied_launch_receipt(
+                    "running process has no required applied-launch receipt channel".into(),
+                );
+            }
+        };
+        let observation = match received {
+            Ok(observation) => observation,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return self.fail_selected_applied_launch_receipt(
+                    "timed out awaiting applied-launch receipt".into(),
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return self.fail_selected_applied_launch_receipt(
+                    "applied-launch status reader ended without a receipt".into(),
+                );
+            }
+        };
+
+        // recv_timeout consumed this exact channel item. Retain it and disarm
+        // the receiver before any expiry, PID, or reader-failure return.
+        self.applied_receipt_observation = Some(observation);
+        self.applied_receipt_rx = None;
+        self.validate_selected_cached_applied_receipt(original_deadline)?;
+        let receipt = match self.applied_receipt_observation.as_ref() {
+            Some(Ok(receipt)) => receipt.clone(),
+            _ => unreachable!("cached selected receipt was validated above"),
+        };
+        if original_deadline.has_elapsed() {
+            return self.fail_selected_applied_launch_receipt(
+                "native settlement original deadline expired before applied receipt return".into(),
+            );
+        }
+        self.applied_receipt_returned = true;
+        Ok(receipt)
+    }
+
+    // Borrow the exact cached observation. Both existing public observation
+    // and selected collection use this validator; raw Ok is not acceptance.
+    fn validate_selected_cached_applied_receipt(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let refusal = if original.has_elapsed() {
+            Some("native settlement original deadline expired after applied receipt".to_owned())
+        } else {
+            match self.applied_receipt_observation.as_ref() {
+                Some(Ok(receipt)) if receipt.owned_child_pid == self.pid => None,
+                Some(Ok(_)) => {
+                    Some("applied-launch receipt differs from exact running target".into())
+                }
+                Some(Err(failure)) => Some(failure.clone()),
+                None => Some("selected applied receipt lacks actual cached observation".into()),
+            }
+        };
+        if let Some(failure) = refusal {
+            return self
+                .fail_selected_applied_launch_receipt(failure)
+                .map(|_| ());
+        }
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "native settlement original deadline expired before applied receipt return"
+                        .into(),
+                )
+                .map(|_| ());
+        }
+        Ok(())
+    }
+
+    // One nonblocking observation of the sole existing receiver per core loop.
+    // Empty preserves it for a later slice; no public DTO delivery or replay.
+    fn poll_selected_applied_receipt_for_collection(&mut self) -> Result<bool, String> {
+        if let Some(failure) = &self.applied_receipt_failure {
+            return Err(failure.clone());
+        }
+        let original = self
+            .native_settlement
+            .as_ref()
+            .ok_or("selected receipt collection lacks original channel")?
+            .original_deadline;
+        if original.has_elapsed() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "native settlement original deadline expired before applied receipt".into(),
+                )
+                .map(|_| true);
+        }
+        if self.applied_receipt_returned {
+            if !matches!(self.applied_receipt_observation, Some(Ok(_))) {
+                return self
+                    .fail_selected_applied_launch_receipt(
+                        "successful selected receipt lacks cached Ok".into(),
+                    )
+                    .map(|_| true);
+            }
+            self.validate_selected_cached_applied_receipt(original)?;
+            return Ok(true);
+        }
+        if self.applied_receipt_observation.is_some() {
+            return self
+                .fail_selected_applied_launch_receipt(
+                    "unaccepted cached applied observation cannot be replayed".into(),
+                )
+                .map(|_| true);
+        }
+        let observation = match self.applied_receipt_rx.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(observation) => observation,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if original.has_elapsed() {
+                        return self.fail_selected_applied_launch_receipt(
+                            "native settlement original deadline expired awaiting applied receipt".into(),
+                        ).map(|_| true);
+                    }
+                    return Ok(false);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return self
+                        .fail_selected_applied_launch_receipt(
+                            "applied-launch status reader ended without a receipt".into(),
+                        )
+                        .map(|_| true);
+                }
+            },
+            None => {
+                return self
+                    .fail_selected_applied_launch_receipt(
+                        "running process has no required applied-launch receipt channel".into(),
+                    )
+                    .map(|_| true);
+            }
+        };
+        // Consuming a real item is irreversible; cache and disarm first.
+        self.applied_receipt_observation = Some(observation);
+        self.applied_receipt_rx = None;
+        self.validate_selected_cached_applied_receipt(original)?;
+        self.applied_receipt_returned = true;
+        Ok(true)
+    }
+
+    fn fail_selected_applied_launch_receipt(
+        &mut self,
+        failure: String,
+    ) -> Result<crate::LinuxSandboxAppliedLaunchReceipt, String> {
+        self.applied_receipt_rx = None;
+        self.applied_receipt_failure = Some(failure.clone());
+        Err(failure)
     }
 
     pub fn scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
@@ -4506,6 +9808,140 @@ impl RunningProcess {
         }
     }
 
+    /// Raw adapter testimony correlation only. This does not authenticate a
+    /// native generation, admit launch context, or issue retirement evidence.
+    /// One nonblocking read per existing wait iteration; no second waiter.
+    fn poll_native_terminal_testimony(&mut self) -> Result<bool, String> {
+        let Some(channel) = self.native_settlement.as_mut() else {
+            return Ok(true);
+        };
+        if let Some(failure) = &channel.failure {
+            return Err(failure.clone());
+        }
+        if channel.original_deadline.remaining().is_zero() {
+            let failure = "native terminal original deadline expired".to_string();
+            channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+            return Err(failure);
+        }
+        if matches!(
+            &channel.pin_observation,
+            NativeTerminalPinObservation::Exited
+        ) {
+            return Ok(channel.pin_timely);
+        }
+        let observation = (|| {
+            if channel.original_deadline.remaining().is_zero() {
+                return Err("native terminal original deadline expired".to_string());
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err("native terminal collection requires Linux".to_string());
+            #[cfg(target_os = "linux")]
+            {
+                use crate::sandbox::native_terminal_wire::{
+                    MAX_NATIVE_TERMINAL_FRAME_BYTES, decode_testimony,
+                };
+                if !channel.exact_eof {
+                    // One extra byte detects overflow even for an exact-cap frame.
+                    let mut bytes = [0u8; MAX_NATIVE_TERMINAL_FRAME_BYTES + 1];
+                    let capacity = bytes.len() - channel.frame.len();
+                    let count = unsafe {
+                        libc::read(
+                            channel.reader.file().as_raw_fd(),
+                            bytes.as_mut_ptr().cast(),
+                            capacity,
+                        )
+                    };
+                    if count < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) {
+                            return Err(format!("read native terminal testimony: {error}"));
+                        }
+                    } else if count == 0 {
+                        // EOF is an actual descriptor observation, never inferred
+                        // from a newline or the wrapper's exit.
+                        channel.exact_eof = true;
+                        channel.testimony = Some(decode_testimony(&channel.frame)?);
+                    } else {
+                        channel.frame.extend_from_slice(&bytes[..count as usize]);
+                        if channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES {
+                            return Err("native terminal frame exceeds atomic cap".into());
+                        }
+                    }
+                }
+                if channel.original_deadline.remaining().is_zero() {
+                    return Err(
+                        "native terminal original deadline expired during collection".into(),
+                    );
+                }
+                let Some(testimony) = &channel.testimony else {
+                    return Ok(false);
+                };
+                if channel.held_target_identity.as_ref() != Some(&testimony.process_identity)
+                    || self.mount_preparation.as_ref() != Some(&testimony.held_mount)
+                {
+                    return Err(
+                        "native terminal testimony differs from retained held context".into(),
+                    );
+                }
+                let pin = self
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .ok_or("native terminal target lifetime pin is missing")?;
+                if channel.original_deadline.remaining().is_zero() {
+                    return Err(
+                        "native terminal original deadline expired before pin observation".into(),
+                    );
+                }
+                let pin_observation = native_terminal_pin_has_exited(pin);
+                channel.pin_observation = pin_observation.clone();
+                let expired_after_pin = channel.original_deadline.remaining().is_zero();
+                channel.pin_timely =
+                    matches!(pin_observation, NativeTerminalPinObservation::Exited)
+                        && !expired_after_pin;
+                let exited = match pin_observation {
+                    NativeTerminalPinObservation::Exited => true,
+                    NativeTerminalPinObservation::NotExited
+                    | NativeTerminalPinObservation::Interrupted => false,
+                    NativeTerminalPinObservation::Error(error) => return Err(error),
+                    NativeTerminalPinObservation::NotAttempted => false,
+                };
+                if expired_after_pin {
+                    return Err(
+                        "native terminal original deadline expired after pin observation".into(),
+                    );
+                }
+                Ok(exited)
+            }
+        })();
+        if let Err(failure) = &observation {
+            // Parse/context/EOF/expiry failures cannot be rehabilitated by
+            // cleanup-induced EOF or a later read of an emptied pipe.
+            channel.failure = Some(failure.clone());
+            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+        }
+        observation
+    }
+
+    fn native_terminal_wait_bound(&self, ordinary: Duration) -> Duration {
+        self.native_settlement.as_ref().map_or(ordinary, |channel| {
+            ordinary.min(channel.original_deadline.remaining())
+        })
+    }
+
+    fn natural_wait_poll_bound(&self, deadline: Instant) -> Duration {
+        if self.native_settlement.is_none() {
+            PROCESS_POLL_INTERVAL
+        } else {
+            self.native_terminal_wait_bound(
+                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            )
+        }
+    }
+
     /// Wait up to `timeout` for a natural process exit without terminating a
     /// still-running process. Ownership is returned on timeout, failed
     /// observation, or unproved cleanup. For a dedicated process scope, an Ok
@@ -4518,53 +9954,292 @@ impl RunningProcess {
     /// while a child that merely dropped the channel remains available for
     /// the caller's ordinary abort policy.
     pub fn wait_for_natural_exit(mut self, timeout: Duration) -> Result<SubprocessResult, Self> {
-        let Some(deadline) = Instant::now().checked_add(timeout) else {
+        let selected_phase = self
+            .native_settlement
+            .as_ref()
+            .map(|channel| channel.selected_wait_phase);
+        let cached_result = self
+            .native_settlement
+            .as_ref()
+            .is_some_and(|channel| channel.retained_terminal_result.is_some());
+        let sticky_failure = self
+            .native_settlement
+            .as_ref()
+            .is_some_and(|channel| channel.failure.is_some());
+        if cached_result
+            && (sticky_failure || selected_phase == Some(SelectedNativeTerminalWaitPhase::Failed))
+        {
             return Err(self);
+        }
+        if cached_result && selected_phase == Some(SelectedNativeTerminalWaitPhase::Collected) {
+            return Ok(self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+                .expect("collected native result checked above"));
+        }
+        match self.natural_wait_core(timeout, false) {
+            NaturalWaitCoreOutcome::Completed(_, Some(result)) => Ok(result),
+            NaturalWaitCoreOutcome::Completed(owner, None)
+            | NaturalWaitCoreOutcome::Incomplete(owner)
+            | NaturalWaitCoreOutcome::Failed(owner) => Err(owner),
+        }
+    }
+
+    /// Selected-channel wait that retains terminal bytes and the exact result
+    /// in this owner. `Incomplete` may be resumed before the original expiry.
+    pub fn wait_for_natural_exit_retaining_native(
+        self,
+        timeout: Duration,
+    ) -> Result<SelectedNativeTerminalWaitOutcome, Self> {
+        if self.native_settlement.is_none() {
+            return Err(self);
+        }
+        match self.natural_wait_core(timeout, true) {
+            NaturalWaitCoreOutcome::Completed(owner, _) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Collected(owner))
+            }
+            NaturalWaitCoreOutcome::Incomplete(owner) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Incomplete(owner))
+            }
+            NaturalWaitCoreOutcome::Failed(owner) => {
+                Ok(SelectedNativeTerminalWaitOutcome::Failed(owner))
+            }
+        }
+    }
+
+    fn natural_wait_core(
+        mut self,
+        timeout: Duration,
+        retain_selected_result: bool,
+    ) -> NaturalWaitCoreOutcome {
+        if retain_selected_result {
+            if let Some(channel) = self.native_settlement.as_ref() {
+                match channel.selected_wait_phase {
+                    SelectedNativeTerminalWaitPhase::Collected => {
+                        // Historical timely collection is not invalidated by
+                        // later diagnostic expiry; never receive here again.
+                        if self.applied_receipt_failure.is_some()
+                            || !self.applied_receipt_returned
+                            || !matches!(self.applied_receipt_observation, Some(Ok(_)))
+                        {
+                            if let Some(channel) = self.native_settlement.as_mut() {
+                                channel.failure = Some(
+                                    "cached collected state lacks accepted applied receipt".into(),
+                                );
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
+                            }
+                            return NaturalWaitCoreOutcome::Failed(self);
+                        }
+                        return NaturalWaitCoreOutcome::Completed(self, None);
+                    }
+                    SelectedNativeTerminalWaitPhase::Failed => {
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
+                    SelectedNativeTerminalWaitPhase::Pending => {}
+                }
+            }
+        }
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return NaturalWaitCoreOutcome::Incomplete(self);
         };
         loop {
+            if retain_selected_result {
+                match self.poll_selected_applied_receipt_for_collection() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let bound = self.natural_wait_poll_bound(deadline);
+                        if bound.is_zero() {
+                            // Recheck original expiry before declaring a slice
+                            // incomplete; retain the same receiver on Pending.
+                            if self
+                                .native_settlement
+                                .as_ref()
+                                .is_some_and(|channel| channel.original_deadline.has_elapsed())
+                            {
+                                let failure = "native settlement original deadline expired awaiting applied receipt".to_owned();
+                                let _ = self.fail_selected_applied_launch_receipt(failure.clone());
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure = Some(failure);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                                return NaturalWaitCoreOutcome::Failed(self);
+                            }
+                            return NaturalWaitCoreOutcome::Incomplete(self);
+                        }
+                        thread::sleep(bound);
+                        continue;
+                    }
+                    Err(failure) => {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.failure = Some(failure);
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
+                }
+            }
+            let complete = match self.poll_native_terminal_testimony() {
+                Ok(complete) => complete,
+                Err(_) => return NaturalWaitCoreOutcome::Failed(self),
+            };
+            if !complete && Instant::now() >= deadline {
+                return NaturalWaitCoreOutcome::Incomplete(self);
+            }
             match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) if !complete => {
+                    let bound = self.natural_wait_poll_bound(deadline);
+                    if bound.is_zero() {
+                        return NaturalWaitCoreOutcome::Incomplete(self);
+                    }
+                    thread::sleep(bound);
+                }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // WNOWAIT retains the exact wrapper identity while the
                     // scope's kernel populated bit proves every descendant
                     // has naturally left. Without this check the ordinary
                     // settlement below could kill a live descendant and
                     // misreport forced cleanup as natural completion.
-                    if let Some(scope) = self.process_scope.as_ref()
-                        && scope
-                            .wait_empty(deadline.saturating_duration_since(Instant::now()))
-                            .is_err()
-                    {
-                        return Err(self);
+                    if let Some(scope) = self.process_scope.as_ref() {
+                        let wait_bound = self.native_terminal_wait_bound(
+                            deadline.saturating_duration_since(Instant::now()),
+                        );
+                        if let Err(error) = scope.wait_empty(wait_bound) {
+                            let original_expired =
+                                self.native_settlement.as_ref().is_some_and(|channel| {
+                                    channel.original_deadline.remaining().is_zero()
+                                });
+                            let slice_timeout = error.contains("did not settle before deadline")
+                                || error.contains("control needs a positive bounded timeout");
+                            if retain_selected_result && slice_timeout && !original_expired {
+                                return NaturalWaitCoreOutcome::Incomplete(self);
+                            }
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure = Some(error);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                            }
+                            return NaturalWaitCoreOutcome::Failed(self);
+                        }
                     }
                     // Readiness callers treat Ok as completed cleanup. Do
                     // not turn a failed scope/group barrier into that proof
                     // merely by attaching a diagnostic to an exit result.
                     // Keep the typed owner available for checked abort/retry.
-                    if self.settle_processes_before_drains().is_err() {
-                        return Err(self);
+                    if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
+                    if let Err(error) = self.settle_processes_before_drains() {
+                        if retain_selected_result {
+                            if let Some(channel) = self.native_settlement.as_mut() {
+                                channel.failure = Some(error);
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
+                            }
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
                     }
                     // Child retains its reaped status; this does not reap a
                     // second process or reopen a numeric PID.
                     return match self.child.wait() {
-                        Ok(status) => Ok(self.completed_result(status)),
-                        Err(_) => Err(self),
+                        Ok(status) => {
+                            let result = self.completed_result(status);
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    // Preserve this exact non-Clone result before
+                                    // any post-drain pin/deadline observation.
+                                    channel.retained_terminal_result = Some(result);
+                                }
+                                if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                                    if let Some(channel) = self.native_settlement.as_mut() {
+                                        channel.selected_wait_phase =
+                                            SelectedNativeTerminalWaitPhase::Failed;
+                                    }
+                                    return NaturalWaitCoreOutcome::Failed(self);
+                                }
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Collected;
+                                }
+                                return NaturalWaitCoreOutcome::Completed(self, None);
+                            }
+                            // A late drain cannot make Ok mean settled. The
+                            // exact Child cached status remains in Err(owner).
+                            if !matches!(self.poll_native_terminal_testimony(), Ok(true)) {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.retained_terminal_result = Some(result);
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                                NaturalWaitCoreOutcome::Failed(self)
+                            } else {
+                                NaturalWaitCoreOutcome::Completed(self, Some(result))
+                            }
+                        }
+                        Err(error) => {
+                            if retain_selected_result {
+                                if let Some(channel) = self.native_settlement.as_mut() {
+                                    channel.failure =
+                                        Some(format!("reap settled wrapper: {error}"));
+                                    channel.selected_wait_phase =
+                                        SelectedNativeTerminalWaitPhase::Failed;
+                                }
+                            }
+                            NaturalWaitCoreOutcome::Failed(self)
+                        }
                     };
                 }
                 #[cfg(not(target_os = "linux"))]
                 Ok(WrapperPoll::ExitedReaped(status)) => {
                     self.wrapper_reaped = true;
                     if self.settle_processes_before_drains().is_err() {
-                        return Err(self);
+                        return NaturalWaitCoreOutcome::Failed(self);
                     }
-                    return Ok(self.completed_result(status));
+                    let result = self.completed_result(status);
+                    if retain_selected_result {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.retained_terminal_result = Some(result);
+                            channel.selected_wait_phase = if channel.failure.is_some() {
+                                SelectedNativeTerminalWaitPhase::Failed
+                            } else {
+                                SelectedNativeTerminalWaitPhase::Collected
+                            };
+                        }
+                        return if self
+                            .native_settlement
+                            .as_ref()
+                            .is_some_and(|channel| channel.failure.is_some())
+                        {
+                            NaturalWaitCoreOutcome::Failed(self)
+                        } else {
+                            NaturalWaitCoreOutcome::Completed(self, None)
+                        };
+                    }
+                    return NaturalWaitCoreOutcome::Completed(self, Some(result));
                 }
                 Ok(WrapperPoll::Running) => {
                     if Instant::now() >= deadline {
-                        return Err(self);
+                        return NaturalWaitCoreOutcome::Incomplete(self);
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    let bound = self.natural_wait_poll_bound(deadline);
+                    if bound.is_zero() {
+                        return NaturalWaitCoreOutcome::Incomplete(self);
+                    }
+                    thread::sleep(bound);
                 }
-                Err(_) => return Err(self),
+                Err(error) => {
+                    if retain_selected_result {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.failure = Some(format!("observe supervised wrapper: {error}"));
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                    }
+                    return NaturalWaitCoreOutcome::Failed(self);
+                }
             }
         }
     }
@@ -4669,6 +10344,22 @@ impl RunningProcess {
         result
     }
 
+    /// Best-effort SIGKILL of the retained execution scope or process group,
+    /// for an owner process that is about to exit without running destructors.
+    /// Nothing is reaped or settled, and delivery is never cleanup proof. The
+    /// unreaped wrapper still reserves the numeric PGID while it is signalled.
+    /// Returns the wrapper PID that owns the group.
+    pub fn kill_retained_group_before_exit(&self) -> u32 {
+        if let Some(scope) = &self.process_scope {
+            // A selected scope never degrades to numeric group signalling.
+            let _ = scope.terminate_and_wait(ATTACHMENT_ABORT_SETTLE_TIMEOUT);
+            return self.wrapper_pid;
+        }
+        #[cfg(unix)]
+        kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, !self.wrapper_reaped);
+        self.wrapper_pid
+    }
+
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(self) -> SubprocessResult {
         self.wait_interruptible(|| false)
@@ -4738,6 +10429,31 @@ impl RunningProcess {
     /// The predicate grants no signal handle: this owner alone terminates
     /// and reaps the supervised process before returning its failed result.
     pub fn wait_interruptible(mut self, mut interrupted: impl FnMut() -> bool) -> SubprocessResult {
+        let retained_failure = self
+            .native_settlement
+            .as_ref()
+            .and_then(|channel| channel.failure.clone());
+        if self.native_settlement.as_ref().is_some_and(|channel| {
+            channel.selected_wait_phase == SelectedNativeTerminalWaitPhase::Collected
+        }) {
+            if let Some(result) = self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+            {
+                return result;
+            }
+        }
+        if let Some(failure) = retained_failure
+            && let Some(mut result) = self
+                .native_settlement
+                .as_mut()
+                .and_then(|channel| channel.retained_terminal_result.take())
+        {
+            result.success = false;
+            result.stderr = append_diagnostic(&result.stderr, &failure);
+            return result;
+        }
         if self.attachment_release.is_some() {
             self.kill_supervised_processes();
             self.reap_wrapper();
@@ -4763,7 +10479,43 @@ impl RunningProcess {
         let timeout = request_timeout_duration(self.timeout);
 
         loop {
+            let complete = match self.poll_native_terminal_testimony() {
+                Ok(complete) => complete,
+                Err(error) => return self.wait_error_result(std::io::Error::other(error)),
+            };
+            // Keep the publisher alive until the protected record and actual
+            // EOF arrive. Existing cancellation/overflow/deadline policy still
+            // applies while an exited wrapper is retained unreaped.
+            if !complete {
+                if interrupted() {
+                    return self.wait_error_result(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "process observation failed",
+                    ));
+                }
+                if self.output_overflow_rx.try_recv().is_ok() {
+                    self.kill_supervised_processes();
+                    self.reap_wrapper();
+                    let (out, err) = self.finish_drains();
+                    let exceeded = output_limit_exceeded(&out, &err)
+                        .expect("overflow notification requires a truncated capture");
+                    return self.output_limit_result(out, err, exceeded);
+                }
+                if self
+                    .absolute_deadline
+                    .is_some_and(|deadline| deadline.has_elapsed())
+                    || timeout.is_some_and(|limit| self.start.elapsed() >= limit)
+                {
+                    self.kill_supervised_processes();
+                    self.reap_wrapper();
+                    let (out, err) = self.finish_drains();
+                    return self.timeout_result(out, err);
+                }
+            }
             match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) if !complete => {
+                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
+                }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // Preserve the wrapper as an unreaped zombie until every
                     // owned group has been revalidated and signalled. Its PID
@@ -4810,7 +10562,7 @@ impl RunningProcess {
                         let (out, err) = self.finish_drains();
                         return self.timeout_result(out, err);
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
                 }
                 Err(error) => return self.wait_error_result(error),
             }
@@ -4819,6 +10571,17 @@ impl RunningProcess {
 
     fn completed_result(&mut self, status: process::ExitStatus) -> SubprocessResult {
         let (out, err) = self.finish_drains();
+        let native_terminal_failure = match self.poll_native_terminal_testimony() {
+            Ok(true) => None,
+            Ok(false) => {
+                let failure = "native terminal testimony is incomplete after drains".to_string();
+                if let Some(channel) = self.native_settlement.as_mut() {
+                    channel.failure = Some(failure.clone());
+                }
+                Some(failure)
+            }
+            Err(error) => Some(error),
+        };
         let code = status.code().unwrap_or(-1);
         if let Some(exceeded) = output_limit_exceeded(&out, &err) {
             return self.output_limit_result(out, err, exceeded);
@@ -4831,9 +10594,20 @@ impl RunningProcess {
             .absolute_deadline
             .is_some_and(|deadline| deadline.has_elapsed());
         SubprocessResult {
-            success: code == 0 && self.scope_cleanup_error.is_none() && !timed_out,
+            success: code == 0
+                && self.scope_cleanup_error.is_none()
+                && !timed_out
+                && native_terminal_failure.is_none(),
             stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
-            stderr: self.with_scope_cleanup_diagnostic(&String::from_utf8_lossy(&err.bytes)),
+            stderr: {
+                let diagnostic =
+                    self.with_scope_cleanup_diagnostic(&String::from_utf8_lossy(&err.bytes));
+                native_terminal_failure
+                    .as_ref()
+                    .map_or(diagnostic.clone(), |failure| {
+                        append_diagnostic(&diagnostic, failure)
+                    })
+            },
             exit_code: code,
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
@@ -5033,7 +10807,7 @@ impl RunningProcess {
         if let Some(handle) = self.status_thread.take() {
             let _ = handle.join();
         }
-        (
+        let captures = (
             if settle_stdout {
                 take_capture(&self.stdout_capture)
             } else {
@@ -5044,7 +10818,13 @@ impl RunningProcess {
             } else {
                 BoundedCapture::default()
             },
-        )
+        );
+        if let Some(channel) = self.native_settlement.as_mut()
+            && (settle_stdout || settle_stderr)
+        {
+            channel.retained_drains = Some((captures.0.clone(), captures.1.clone()));
+        }
+        captures
     }
 
     fn timeout_result(&self, out: BoundedCapture, err: BoundedCapture) -> SubprocessResult {
@@ -5108,8 +10888,24 @@ impl RunningProcess {
 
 impl Drop for RunningProcess {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.selected_cleanup_complete || self.selected_scoped_borrowed {
+            // Already-settled selected custody must never re-poll/signall a
+            // numeric wrapper identity after its exact Child fence was reaped.
+            return;
+        }
         let _ = self.abort_and_reap_inner();
     }
+}
+
+fn retain_initial_launcher_status(
+    running: &mut RunningProcess,
+    raw: &Result<Result<InitialLauncherStatus, String>, std::sync::mpsc::RecvTimeoutError>,
+) {
+    running.selected_initial_status = Some(match raw {
+        Ok(observation) => observation.clone(),
+        Err(detail) => Err(detail.to_string()),
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -5224,12 +11020,15 @@ fn lib_spawn_until_with_inheritance(
     } else {
         deadline
     };
-    let _lease = retain_fork_sensitive_descriptors_until(deadline)
-        .map_err(|_| spawn_deadline_failure(start))?;
-    request.timeout = deadline.remaining().as_secs_f64();
+    // No shared descriptor lease is taken here. The calling thread would then
+    // hold one across process creation, which the fork barrier refuses
+    // outright. Barrier acquisition is instead the exclusive fork-custody
+    // quiesce inside process creation, bounded by this same deadline; it waits
+    // for every shared lease to drop and settles any stranded window first.
     if deadline.has_elapsed() {
         return Err(spawn_deadline_failure(start));
     }
+    request.timeout = deadline.remaining().as_secs_f64();
     lib_spawn_with_stdio(
         request,
         false,
@@ -5277,10 +11076,216 @@ pub fn lib_spawn_awaiting_attachment(
 
 #[cfg(target_os = "linux")]
 pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
-    mut request: SubprocessRequest,
+    request: SubprocessRequest,
     process_scope: Option<crate::ProcessScope>,
 ) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment_in_scope_with_deadline(request, process_scope, None)
+}
+
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment_in_scope_with_deadline(request, None, Some(deadline))
+}
+
+/// Selected supervised/unscoped launch. Deadlines narrow caller bounds;
+/// arguments themselves authenticate neither selection nor original funding.
+/// No-owner refusal is custody information, never NeverBorn/refund proof.
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_selected_supervised_awaiting_attachment_until(
+    request: SubprocessRequest,
+    original_service_deadline: crate::time::MonotonicDeadline,
+    original_cleanup_deadline: crate::time::MonotonicDeadline,
+) -> SelectedSupervisedSpawnOutcome {
     let start = Instant::now();
+    if original_cleanup_deadline.is_before(&original_service_deadline) {
+        return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+            phase: SelectedSupervisedCreatePhase::Preflight,
+            result: spawn_failure(start, "selected original cleanup precedes service deadline"),
+        };
+    }
+    let bounds = SelectedSupervisedBounds {
+        service: original_service_deadline,
+        cleanup: original_cleanup_deadline,
+    };
+    // Anchor BEFORE sampling remaining, so this cached Instant only narrows
+    // the same service bound and never creates now-plus-original-duration.
+    let service_expiry = start.checked_add(bounds.service.remaining());
+    let timeout_expiry =
+        request_timeout_duration(request.timeout).and_then(|duration| start.checked_add(duration));
+    let request_expiry = match (timeout_expiry, service_expiry) {
+        (Some(timeout), Some(service)) => Some(timeout.min(service)),
+        (timeout, service) => timeout.or(service),
+    };
+    if bounds.service.has_elapsed()
+        || request_expiry.is_none()
+        || !request.supervised_status.as_ref().is_some_and(|status| {
+            matches!(
+                status.state,
+                SupervisedProcessStatusState::AwaitingAttachment { .. }
+            )
+        })
+    {
+        return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+            phase: SelectedSupervisedCreatePhase::Preflight,
+            result: spawn_failure(
+                start,
+                "selected launch requires unexpired supervised attachment bounds",
+            ),
+        };
+    }
+    let running = match lib_spawn_with_stdio_custody(
+        request,
+        false,
+        None,
+        None,
+        None,
+        Some(bounds.service),
+        false,
+        SpawnFailureCustodyMode::Selected(bounds),
+    ) {
+        Ok(running) => running,
+        Err(SpawnWithStdioError::ScopedRetained) => unreachable!("unscoped producer"),
+        Err(SpawnWithStdioError::Selected(outcome)) => {
+            return SelectedSupervisedSpawnOutcome::Refused(outcome);
+        }
+        Err(SpawnWithStdioError::WithoutRunningOwner {
+            result,
+            create_attempted,
+        }) => {
+            return SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: if create_attempted {
+                    SelectedSupervisedCreatePhase::ProcessCreateAttempt
+                } else {
+                    SelectedSupervisedCreatePhase::Preflight
+                },
+                result,
+            };
+        }
+    };
+    // Immediately root the same running owner before held validation can fail.
+    let mut retained = SelectedSupervisedFailureOwner::running(running, bounds);
+    let validation = (|| -> Result<(), String> {
+        let running = retained.running_mut()?;
+        if bounds.service.has_elapsed()
+            || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            return Err("selected held validation expired".into());
+        }
+        if running.attachment_release.is_none() {
+            return Err("selected held boundary disappeared".into());
+        }
+        let observed_birth = read_linux_process_birth(running.pid)?;
+        let pin = Arc::new(open_pidfd(running.pid)?);
+        // Retain pin before subsequent validation or native identity capture.
+        running.attachment_target_lifetime = Some(pin);
+        let pin = running
+            .attachment_target_lifetime
+            .as_ref()
+            .ok_or("selected pin absent")?;
+        validate_pinned_process_birth(
+            running.pid,
+            running.pgid,
+            None,
+            &observed_birth,
+            pin.as_raw_fd(),
+        )?;
+        validate_supervised_attachment_target(running.pid, running.pgid, pin.as_raw_fd())?;
+        if let Some(channel) = running.native_settlement.as_mut() {
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native held identity expired".into());
+            }
+            let group = u32::try_from(running.pgid).map_err(|_| "selected group outside range")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                running.pid,
+                Some(group),
+                pin.as_fd(),
+            )?;
+            channel.held_target_identity = Some(identity);
+            if channel.original_deadline.has_elapsed() {
+                return Err("selected native held identity completed late".into());
+            }
+        }
+        if bounds.service.has_elapsed()
+            || request_expiry.is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            return Err("selected held validation completed late".into());
+        }
+        Ok(())
+    })();
+    if let Err(detail) = validation {
+        return SelectedSupervisedSpawnOutcome::Refused(retained.refused(
+            SelectedSupervisedFailurePhase::HeldValidation,
+            spawn_failure(start, detail),
+        ));
+    }
+    let (pid, pgid, mount_preparation, pidfd) = {
+        let running = retained
+            .running_mut()
+            .expect("selected validated running custody");
+        (
+            running.pid,
+            running.pgid,
+            running.mount_preparation.clone(),
+            Arc::clone(
+                running
+                    .attachment_target_lifetime
+                    .as_ref()
+                    .expect("selected validated pin"),
+            ),
+        )
+    };
+    // All observation/allocation above occurs while the actual owner is guarded.
+    let running = match retained.custody.take() {
+        Some(SelectedSupervisedCustody::Running(running)) => running,
+        _ => unreachable!("selected private running constructor"),
+    };
+    retained.custody = Some(SelectedSupervisedCustody::Pending(
+        ProcessAwaitingAttachment {
+            process_scope: None,
+            pid,
+            pgid,
+            mount_preparation,
+            owner: Some(AttachmentPendingOwner::Supervised {
+                running: Box::new(running),
+            }),
+            pidfd,
+            // Cached expiry only narrows the SAME opaque service deadline.
+            request_deadline: request_expiry,
+        },
+    ));
+    SelectedSupervisedSpawnOutcome::Held(SelectedSupervisedAttachmentOwner { retained })
+}
+
+#[cfg(target_os = "linux")]
+fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
+    mut request: SubprocessRequest,
+    process_scope: Option<crate::ProcessScope>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    let start = Instant::now();
+    if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
+        return Err(spawn_deadline_failure(start));
+    }
+    // Sampling remaining after `start` can only narrow the original expiry.
+    // No host instant crosses the public Lillux boundary.
+    let original_expiry = match absolute_deadline {
+        Some(deadline) => Some(
+            start
+                .checked_add(deadline.remaining())
+                .ok_or_else(|| spawn_deadline_failure(start))?,
+        ),
+        None => None,
+    };
+    let narrow_expiry = |relative: Option<Instant>| match (relative, original_expiry) {
+        (Some(relative), Some(original)) => Some(relative.min(original)),
+        (relative, original) => relative.or(original),
+    };
+    let relative_setup = supervised_setup_deadline(start, request.timeout);
+    let setup_deadline =
+        original_expiry.map_or(relative_setup, |expiry| relative_setup.min(expiry));
     let attachment_scope = process_scope
         .as_ref()
         .map(crate::ProcessScope::control_authority);
@@ -5295,7 +11300,15 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
             ));
         }
         let timeout = request.timeout;
-        let running = lib_spawn_with_stdio(request, false, None, process_scope, None, None, false)?;
+        let mut running = lib_spawn_with_stdio(
+            request,
+            false,
+            None,
+            process_scope,
+            None,
+            absolute_deadline,
+            false,
+        )?;
         if running.attachment_release.is_none() {
             return Err(running.into_spawn_failure(spawn_failure(
                 start,
@@ -5335,6 +11348,43 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                 format!("Invalid supervised target awaiting attachment: {error}"),
             )));
         }
+        if let Some(channel) = running.native_settlement.as_ref() {
+            let captured = if channel.original_deadline.has_elapsed() {
+                Err("original native terminal deadline expired before held identity capture".into())
+            } else {
+                u32::try_from(running.pgid)
+                    .map_err(|_| "native terminal group identity is outside range".to_owned())
+                    .and_then(|group| {
+                        crate::process_control::capture_exact_process_identity_from_pidfd(
+                            running.pid,
+                            Some(group),
+                            pidfd.as_fd(),
+                        )
+                    })
+                    .and_then(|identity| {
+                        if channel.original_deadline.has_elapsed() {
+                            Err("original native terminal deadline expired during held identity capture".into())
+                        } else {
+                            Ok(identity)
+                        }
+                    })
+            };
+            match captured {
+                Ok(identity) => {
+                    running
+                        .native_settlement
+                        .as_mut()
+                        .expect("same selected native channel retained")
+                        .held_target_identity = Some(identity);
+                }
+                Err(error) => {
+                    return Err(running.into_spawn_failure(spawn_failure(
+                        start,
+                        format!("Failed to retain exact held native terminal identity: {error}"),
+                    )));
+                }
+            }
+        }
         return verify_scoped_attachment(
             ProcessAwaitingAttachment {
                 process_scope: attachment_scope,
@@ -5344,18 +11394,23 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                 owner: Some(AttachmentPendingOwner::Supervised {
                     running: Box::new(running),
                 }),
-                pidfd,
-                request_deadline: request_timeout_duration(timeout)
-                    .and_then(|duration| start.checked_add(duration)),
+                pidfd: Arc::new(pidfd),
+                request_deadline: narrow_expiry(
+                    request_timeout_duration(timeout)
+                        .and_then(|duration| start.checked_add(duration)),
+                ),
             },
             start,
-            supervised_setup_deadline(start, timeout),
+            setup_deadline,
         );
     }
     let timeout = request.timeout;
-    let setup_deadline = supervised_setup_deadline(start, timeout);
+    // Descriptor leases taken during setup wait no longer than setup itself.
+    let setup_lease_deadline = crate::time::MonotonicDeadline::after(
+        setup_deadline.saturating_duration_since(Instant::now()),
+    );
     let cwd_directory = match request.cwd.take() {
-        Some(path) => Some(open_attachment_cwd(&path, start)?),
+        Some(path) => Some(open_attachment_cwd(&path, start, setup_lease_deadline)?),
         None => None,
     };
     let raw_inherited = normalize_inherited_descriptors(&request.inherited_fds)
@@ -5364,6 +11419,7 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         &request.inherited_fd_mappings,
         &raw_inherited,
         &inherited_mapping_control_descriptors(None, request.supervised_status.as_ref()),
+        Some(setup_lease_deadline),
     )
     .map_err(|error| spawn_failure(start, error))?;
     // Keep exact request/mapping lifelines through the protected setup window.
@@ -5387,7 +11443,7 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         .collect();
     // No other direct child may fork while these control pipes are created.
     // Snapshot the control descriptors of already-held children so the new
-    // child can close only those known authorities at its final setup hook.
+    // child can close only those known authorities in its first pre-exec hook.
     let fork_sensitive_descriptors =
         quiesce_fork_sensitive_descriptors(setup_deadline).map_err(|error| {
             spawn_failure(
@@ -5418,11 +11474,45 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
     // fork. Quiesce scopes which own descriptor-backed authority until the
     // worker reports the final hold boundary; otherwise a concurrent child can
     // inherit an advisory lock and deadlock the owner's durable attach path.
+    // From thread creation onward, worker failure/panic does not itself prove
+    // that a partially created child disposed its inherited descriptors.
+    // Only READY, which the child emits after its scrub, releases directly.
+    // Every other end, including unwinding, settles through the creation
+    // witness: its only parent write end belongs to the worker and drops when
+    // the worker finishes, so hang-up proves the worker can no longer fork and
+    // that every child it forked has exec'd, exited, or scrubbed. Failure
+    // branches below join and abort, kill, or reap first, each within a bound,
+    // so the bounded settlement normally observes hang-up at once; a worker
+    // that cannot be joined in time is detached, and the window strands.
+    // The creator is the worker thread, not this one: only a joined worker
+    // has shown that it forks nothing more with this window's snapshot.
+    let witnessed = fork_sensitive_descriptors
+        .witness_detached_creation("awaiting attachment creation")
+        .map_err(|error| {
+            spawn_failure(
+                start,
+                format!("Failed to create awaiting attachment creation witness: {error}"),
+            )
+        })?;
+    let fork_custody = witnessed.0;
+    let fork_custody_witness = witnessed.1;
     let worker = thread::Builder::new()
         .name("lillux-attachment-spawn".to_string())
         .spawn(move || {
-            lib_spawn_with_stdio(request, false, Some(gate), process_scope, None, None, false)
+            let result = lib_spawn_with_stdio(
+                request,
+                false,
+                Some(gate),
+                process_scope,
+                None,
+                absolute_deadline,
+                false,
+            );
+            drop(fork_custody_witness);
+            result
         })
+        // A refused thread drops the closure and its witness write end, so
+        // the custody below settles at once on this early return.
         .map_err(|error| {
             spawn_failure(
                 start,
@@ -5435,15 +11525,12 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
             Ok(identity) => identity,
             Err(error) => {
                 drop(release_writer);
-                let worker_detail = match worker.join() {
-                    Ok(Err(result)) if !result.stderr.is_empty() => format!("; {}", result.stderr),
-                    Ok(Ok(running)) => {
-                        running.abort();
-                        String::new()
-                    }
-                    Ok(Err(_)) => String::new(),
-                    Err(_) => "; attachment spawn worker panicked".to_string(),
-                };
+                let worker_detail = settle_failed_attachment_setup(
+                    worker,
+                    None,
+                    attachment_scope.as_ref(),
+                    fork_custody,
+                );
                 return Err(spawn_failure(
                     start,
                     format!("Failed to spawn awaiting attachment: {error}{worker_detail}"),
@@ -5452,26 +11539,30 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         };
     if let Err(error) = validate_direct_attachment_identity(identity.pid, identity.pgid) {
         drop(release_writer);
-        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        let cleanup = settle_failed_attachment_setup(
+            worker,
+            Some(identity.pid),
+            attachment_scope.as_ref(),
+            fork_custody,
+        );
         return Err(spawn_failure(
             start,
-            format!(
-                "Failed to spawn awaiting attachment: {error}{}",
-                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-            ),
+            format!("Failed to spawn awaiting attachment: {error}{cleanup}"),
         ));
     }
     let observed_birth = match read_linux_process_birth(identity.pid) {
         Ok(birth) => birth,
         Err(error) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
-                format!(
-                    "Failed to inspect process awaiting attachment: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-                ),
+                format!("Failed to inspect process awaiting attachment: {error}{cleanup}"),
             ));
         }
     };
@@ -5479,13 +11570,15 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         Ok(pidfd) => pidfd,
         Err(error) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
-                format!(
-                    "Failed to pin process awaiting attachment: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-                ),
+                format!("Failed to pin process awaiting attachment: {error}{cleanup}"),
             ));
         }
     };
@@ -5497,13 +11590,15 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         pidfd.as_raw_fd(),
     ) {
         drop(release_writer);
-        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        let cleanup = settle_failed_attachment_setup(
+            worker,
+            Some(identity.pid),
+            attachment_scope.as_ref(),
+            fork_custody,
+        );
         return Err(spawn_failure(
             start,
-            format!(
-                "Process identity changed while awaiting attachment: {error}{}",
-                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
-            ),
+            format!("Process identity changed while awaiting attachment: {error}{cleanup}"),
         ));
     }
     let ready = match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_READY_PHASE)
@@ -5511,7 +11606,12 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
         Ok(ready) if ready.pid == identity.pid && ready.pgid == identity.pgid => ready,
         Ok(ready) => {
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
                 format!(
@@ -5520,19 +11620,24 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                     identity.pgid,
                     ready.pid,
                     ready.pgid,
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    cleanup
                 ),
             ));
         }
         Err(error) => {
             let _ = pidfd_send_signal(pidfd.as_raw_fd(), ATTACHMENT_ABORT_SIGNAL);
             drop(release_writer);
-            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            let cleanup = settle_failed_attachment_setup(
+                worker,
+                Some(identity.pid),
+                attachment_scope.as_ref(),
+                fork_custody,
+            );
             return Err(spawn_failure(
                 start,
                 format!(
                     "Failed to reach final attachment boundary: {error}{}",
-                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    cleanup
                 ),
             ));
         }
@@ -5542,8 +11647,9 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
     // own pre-exec hook, without touching Rust's private exec-error channel or
     // any caller-declared inherited descriptor.
     let release_registration =
-        fork_sensitive_descriptors.register_pending_fork_control(release_writer);
-    drop(fork_sensitive_descriptors);
+        fork_custody.guard().register_pending_fork_control(release_writer);
+    // READY is emitted only after the child's known snapshot was scrubbed.
+    fork_custody.release_observed();
 
     verify_scoped_attachment(
         ProcessAwaitingAttachment {
@@ -5555,9 +11661,10 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                 worker,
                 release_registration,
             }),
-            pidfd,
-            request_deadline: request_timeout_duration(timeout)
-                .and_then(|duration| start.checked_add(duration)),
+            pidfd: Arc::new(pidfd),
+            request_deadline: narrow_expiry(
+                request_timeout_duration(timeout).and_then(|duration| start.checked_add(duration)),
+            ),
         },
         start,
         setup_deadline,
@@ -5648,7 +11755,7 @@ struct PreparedInheritedMappings {
 }
 
 #[cfg(unix)]
-fn normalize_inherited_descriptors(
+pub(crate) fn normalize_inherited_descriptors(
     authorities: &[InheritedDescriptorAuthority],
 ) -> Result<Vec<i32>, String> {
     authorities
@@ -5665,6 +11772,7 @@ fn prepare_inherited_fd_mappings(
     mappings: &[InheritedDescriptorMapping],
     ordinary_inherited: &[i32],
     forbidden_targets: &BTreeSet<i32>,
+    deadline: Option<crate::time::MonotonicDeadline>,
 ) -> Result<PreparedInheritedMappings, String> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
@@ -5721,7 +11829,13 @@ fn prepare_inherited_fd_mappings(
         .checked_add(1)
         .ok_or_else(|| "mapped inherited target descriptor overflows".to_owned())?
         .max(3);
-    let lease = retain_fork_sensitive_descriptors();
+    // A caller's operation deadline also bounds the wait for this lease.
+    let lease = match deadline {
+        Some(deadline) => {
+            retain_fork_sensitive_descriptors_until(deadline).map_err(|error| error.to_string())?
+        }
+        None => try_retain_fork_sensitive_descriptors()?,
+    };
     let mut source_copies = Vec::with_capacity(normalized.len());
     for (source, _) in &normalized {
         let duplicate = unsafe { libc::fcntl(*source, libc::F_DUPFD_CLOEXEC, temporary_floor) };
@@ -5805,7 +11919,218 @@ pub fn lib_spawn_awaiting_attachment(
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn lib_spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    _deadline: crate::time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    lib_spawn_awaiting_attachment(request)
+}
+
+enum SpawnWithStdioError {
+    WithoutRunningOwner {
+        result: SubprocessResult,
+        create_attempted: bool,
+    },
+    #[cfg(target_os = "linux")]
+    Selected(SelectedSupervisedFailureOutcome),
+    #[cfg(target_os = "linux")]
+    ScopedRetained,
+}
+
+impl From<SubprocessResult> for SpawnWithStdioError {
+    fn from(result: SubprocessResult) -> Self {
+        Self::WithoutRunningOwner {
+            result,
+            create_attempted: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpawnFailureCustodyMode {
+    Ordinary,
+    #[cfg(target_os = "linux")]
+    Selected(SelectedSupervisedBounds),
+}
+
+struct SpawnRunningGuard<'a> {
+    running: Option<RunningProcess>,
+    mode: SpawnFailureCustodyMode,
+    #[cfg(target_os = "linux")]
+    scoped: Option<&'a mut SelectedScopedCustody>,
+    #[cfg(not(target_os = "linux"))]
+    lifetime: std::marker::PhantomData<&'a ()>,
+}
+
+impl std::ops::Deref for SpawnRunningGuard<'_> {
+    type Target = RunningProcess;
+    fn deref(&self) -> &RunningProcess {
+        self.running.as_ref().expect("spawn guard owns running")
+    }
+}
+impl std::ops::DerefMut for SpawnRunningGuard<'_> {
+    fn deref_mut(&mut self) -> &mut RunningProcess {
+        self.running.as_mut().expect("spawn guard owns running")
+    }
+}
+impl SpawnRunningGuard<'_> {
+    fn into_spawn_failure(mut self, result: SubprocessResult) -> SpawnWithStdioError {
+        #[cfg(target_os = "linux")]
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            destination.running = self.running.take();
+            destination.retain_same_watchdog();
+            destination.record_failure(result);
+            return SpawnWithStdioError::ScopedRetained;
+        }
+        let running = self.running.take().expect("spawn guard owns running");
+        match self.mode {
+            SpawnFailureCustodyMode::Ordinary => {
+                SpawnWithStdioError::from(running.into_spawn_failure(result))
+            }
+            #[cfg(target_os = "linux")]
+            SpawnFailureCustodyMode::Selected(bounds) => SpawnWithStdioError::Selected(
+                SelectedSupervisedFailureOwner::running(running, bounds)
+                    .refused(SelectedSupervisedFailurePhase::WrapperSetup, result),
+            ),
+        }
+    }
+}
+impl Drop for SpawnRunningGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            if self.running.is_some() {
+                destination.running = self.running.take();
+                destination.retain_same_watchdog();
+                destination.refused = true;
+            }
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let SpawnFailureCustodyMode::Selected(bounds) = self.mode {
+            if let Some(running) = self.running.take() {
+                // Selected terminal Drop, including arbitrary setup unwind.
+                drop(SelectedSupervisedFailureOwner::running(running, bounds));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct SelectedSupervisedSetupGuard<'a> {
+    child: Option<process::Child>,
+    supervised_status: Option<SupervisedProcessStatus>,
+    inherited_fds: Vec<InheritedDescriptorAuthority>,
+    inherited_fd_mappings: Vec<InheritedDescriptorMapping>,
+    mapping_lifelines: Vec<InheritedDescriptorAuthority>,
+    mode: SpawnFailureCustodyMode,
+    scoped: Option<&'a mut SelectedScopedCustody>,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedSupervisedSetupGuard<'_> {
+    fn revoke_held_boundary(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+        mode: SelectedCleanupMode,
+    ) -> Result<(), String> {
+        if let Some(status) = self.supervised_status.as_mut() {
+            if let SupervisedProcessStatusState::AwaitingAttachment {
+                attachment_release, ..
+            } = &mut status.state
+            {
+                if let Some(writer) = attachment_release.writer.as_mut() {
+                    writer.close_selected_until(deadline, mode)?;
+                }
+                attachment_release.writer.take();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SelectedSupervisedSetupGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(destination) = self.scoped.as_deref_mut() {
+            // Actual first Child/status/lifelines are restored by plain moves.
+            destination.setup_child = self.child.take();
+            destination.setup_status = self.supervised_status.take();
+            if !self.inherited_fds.is_empty() {
+                destination.setup_fds = std::mem::take(&mut self.inherited_fds);
+            }
+            destination.setup_mappings = std::mem::take(&mut self.inherited_fd_mappings);
+            destination.setup_mapping_lifelines = std::mem::take(&mut self.mapping_lifelines);
+            destination.refused = true;
+            return;
+        }
+        let bounds = match self.mode {
+            SpawnFailureCustodyMode::Selected(bounds) => bounds,
+            SpawnFailureCustodyMode::Ordinary => return,
+        };
+        if self.child.is_none() {
+            return;
+        }
+        // Revoke the SAME held boundary BEFORE any group signal. A refused
+        // close retains child/status/writer and makes no termination claim.
+        while self
+            .revoke_held_boundary(bounds.cleanup, SelectedCleanupMode::TerminalDestruction)
+            .is_err()
+        {
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        // Child-only construction unwind: retain channels/fence while polling.
+        // Terminal destruction never mints an attempt deadline or native proof.
+        loop {
+            let pid = child.id();
+            kill_owned_process_group(pid, i64::from(pid), true);
+            let _ = child.kill();
+            let quiescent = matches!(poll_wrapper(child), Ok(WrapperPoll::ExitedUnreaped))
+                && selected_group_quiescent(i64::from(pid), pid, None).unwrap_or(false);
+            if quiescent && matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+}
+
 fn lib_spawn_with_stdio(
+    request: SubprocessRequest,
+    inherit_stdio: bool,
+    #[cfg(target_os = "linux")] attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(not(target_os = "linux"))] attachment_gate: Option<()>,
+    process_scope: Option<crate::ProcessScope>,
+    account: Option<&crate::ControllerAccount>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+    exact_inheritance: bool,
+) -> Result<RunningProcess, SubprocessResult> {
+    match lib_spawn_with_stdio_custody(
+        request,
+        inherit_stdio,
+        attachment_gate,
+        process_scope,
+        account,
+        absolute_deadline,
+        exact_inheritance,
+        SpawnFailureCustodyMode::Ordinary,
+    ) {
+        Ok(running) => Ok(running),
+        Err(SpawnWithStdioError::WithoutRunningOwner { result, .. }) => Err(result),
+        #[cfg(target_os = "linux")]
+        Err(SpawnWithStdioError::ScopedRetained) => unreachable!("ordinary producer"),
+        #[cfg(target_os = "linux")]
+        Err(SpawnWithStdioError::Selected(_)) => {
+            unreachable!("ordinary mode never constructs selected custody")
+        }
+    }
+}
+
+fn lib_spawn_with_stdio_custody(
     request: SubprocessRequest,
     inherit_stdio: bool,
     #[cfg(target_os = "linux")] mut attachment_gate: Option<AttachmentWorkerGate>,
@@ -5814,7 +12139,37 @@ fn lib_spawn_with_stdio(
     account: Option<&crate::ControllerAccount>,
     absolute_deadline: Option<crate::time::MonotonicDeadline>,
     exact_inheritance: bool,
-) -> Result<RunningProcess, SubprocessResult> {
+    failure_mode: SpawnFailureCustodyMode,
+) -> Result<RunningProcess, SpawnWithStdioError> {
+    lib_spawn_with_stdio_custody_into(
+        request,
+        inherit_stdio,
+        #[cfg(target_os = "linux")]
+        attachment_gate,
+        #[cfg(not(target_os = "linux"))]
+        _attachment_gate,
+        process_scope,
+        account,
+        absolute_deadline,
+        exact_inheritance,
+        failure_mode,
+        #[cfg(target_os = "linux")]
+        None,
+    )
+}
+
+fn lib_spawn_with_stdio_custody_into(
+    request: SubprocessRequest,
+    inherit_stdio: bool,
+    #[cfg(target_os = "linux")] mut attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(not(target_os = "linux"))] _attachment_gate: Option<()>,
+    process_scope: Option<crate::ProcessScope>,
+    account: Option<&crate::ControllerAccount>,
+    absolute_deadline: Option<crate::time::MonotonicDeadline>,
+    exact_inheritance: bool,
+    failure_mode: SpawnFailureCustodyMode,
+    #[cfg(target_os = "linux")] scoped: Option<&mut SelectedScopedCustody>,
+) -> Result<RunningProcess, SpawnWithStdioError> {
     let start = Instant::now();
     #[cfg(not(target_os = "linux"))]
     let _ = exact_inheritance;
@@ -5831,6 +12186,35 @@ fn lib_spawn_with_stdio(
         inherited_fd_mappings,
         supervised_status,
     } = request;
+    #[cfg(target_os = "linux")]
+    let mut setup = SelectedSupervisedSetupGuard {
+        child: None,
+        supervised_status,
+        inherited_fds,
+        inherited_fd_mappings,
+        mapping_lifelines: Vec::new(),
+        mode: failure_mode,
+        scoped,
+    };
+    #[cfg(target_os = "linux")]
+    if setup.scoped.is_some() {
+        if let Some(status) = setup.supervised_status.as_mut() {
+            if let SupervisedProcessStatusState::AwaitingAttachment {
+                attachment_release, ..
+            } = &mut status.state
+            {
+                if let Some(writer) = attachment_release.writer.as_mut() {
+                    writer.selected_scoped_borrowed = true;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let inherited_fds = &setup.inherited_fds;
+    #[cfg(target_os = "linux")]
+    let inherited_fd_mappings = &setup.inherited_fd_mappings;
+    #[cfg(target_os = "linux")]
+    let supervised_status = &setup.supervised_status;
     if stdin_data.is_some()
         && inherited_fd_mappings
             .iter()
@@ -5839,7 +12223,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: buffered stdin conflicts with an inherited fd-0 mapping",
-        ));
+        )
+        .into());
     }
     if inherit_stdio
         && limits.as_ref().is_some_and(|limits| {
@@ -5849,7 +12234,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited stdio cannot enforce captured-output byte limits",
-        ));
+        )
+        .into());
     }
 
     #[cfg(unix)]
@@ -5860,14 +12246,16 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited descriptors are unsupported on this platform",
-        ));
+        )
+        .into());
     }
     #[cfg(not(target_os = "linux"))]
     if supervised_status.is_some() {
         return Err(spawn_failure(
             start,
             "Failed to spawn: supervised launcher status is supported only on Linux",
-        ));
+        )
+        .into());
     }
 
     #[cfg(target_os = "linux")]
@@ -5892,6 +12280,7 @@ fn lib_spawn_with_stdio(
                 &inherited_fd_mappings,
                 &raw_inherited_fds,
                 &forbidden_mapping_targets,
+                absolute_deadline,
             )
             .map_err(|error| spawn_failure(start, format!("Failed to spawn: {error}")))?,
         }
@@ -5902,7 +12291,8 @@ fn lib_spawn_with_stdio(
             return Err(spawn_failure(
                 start,
                 format!("mapped target {target} aliases process-control authority"),
-            ));
+            )
+            .into());
         }
     }
     #[cfg(unix)]
@@ -5920,7 +12310,7 @@ fn lib_spawn_with_stdio(
             .iter()
             .map(|(source, _)| *source)
             .collect();
-        for mapping in &inherited_fd_mappings {
+        for mapping in inherited_fd_mappings.iter() {
             copies.insert(mapping.source.file().as_raw_fd());
         }
         copies.retain(|fd| !targets.contains(fd) && !raw_inherited_fds.contains(fd));
@@ -5940,7 +12330,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: custom argv[0] is unsupported on this platform",
-        ));
+        )
+        .into());
     }
     command.args(&args);
     command.env_clear();
@@ -5952,7 +12343,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             "Failed to spawn: inherited stdio cannot also carry buffered stdin data",
-        ));
+        )
+        .into());
     }
     command.stdin(if inherit_stdio {
         Stdio::inherit()
@@ -5971,6 +12363,60 @@ fn lib_spawn_with_stdio(
     } else {
         Stdio::piped()
     });
+    #[cfg(unix)]
+    let ordinary_fork_guard = {
+        #[cfg(target_os = "linux")]
+        let already_quiesced = attachment_gate.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let already_quiesced = false;
+        if already_quiesced {
+            // The attachment owner already holds the window and its snapshot.
+            // Its scrub is still the first hook, ahead of process-scope
+            // placement and every credential change: a child that blocks in
+            // any later hook, such as placement into a frozen cgroup, has
+            // already closed every registered parent descriptor.
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = attachment_gate.as_ref() {
+                use std::os::unix::process::CommandExt as _;
+                let close_fds = gate.inherited_child_close_fds.clone();
+                unsafe {
+                    command.pre_exec(move || {
+                        for fd in &close_fds {
+                            // Never retry close: the number may be consumed.
+                            libc::close(*fd);
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            None
+        } else {
+            let mut preserved = BTreeSet::from([0, 1, 2]);
+            preserved.extend(raw_inherited_fds.iter().copied());
+            for (source, target) in &raw_inherited_fd_mappings {
+                preserved.insert(*source);
+                preserved.insert(*target);
+            }
+            let mut deadline = supervised_setup_deadline(start, timeout);
+            if let Some(original) = absolute_deadline {
+                let observed = Instant::now();
+                deadline = deadline.min(observed.checked_add(original.remaining()).unwrap_or(observed));
+            }
+            Some(
+                prepare_command_fork_custody(&mut command, &preserved, deadline).map_err(
+                    |error| {
+                        let mut failure = spawn_failure(start, format!("fork custody: {error}"));
+                        // An expired caller deadline is the settled cause even
+                        // when the barrier reported a different fact; that fact
+                        // stays in the failure text.
+                        failure.timed_out =
+                            absolute_deadline.is_some_and(|original| original.has_elapsed());
+                        failure
+                    },
+                )?,
+            )
+        }
+    };
     // Placement must precede inherited-descriptor remapping, final attachment
     // hold and exec. Platform code owns the exact operation and closes its
     // controls at exec; they never enter workload channel/mount authority.
@@ -6003,7 +12449,8 @@ fn lib_spawn_with_stdio(
                 return Err(spawn_failure(
                     start,
                     "Failed to spawn awaiting attachment: parent PID is not positive",
-                ));
+                )
+                .into());
             }
             Some(pid)
         } else {
@@ -6020,7 +12467,6 @@ fn lib_spawn_with_stdio(
                         gate.child_status_reader_fd,
                         gate.child_release_writer_fd,
                         gate.cwd_directory,
-                        gate.inherited_child_close_fds.clone(),
                     )
                 });
         unsafe {
@@ -6053,7 +12499,6 @@ fn lib_spawn_with_stdio(
                     status_reader,
                     release_writer,
                     cwd_directory,
-                    pending_control_fds,
                 )) = &attachment_setup
                 {
                     direct_attachment_identity_pre_exec(
@@ -6062,7 +12507,6 @@ fn lib_spawn_with_stdio(
                         *status_reader,
                         *release_writer,
                         *cwd_directory,
-                        pending_control_fds,
                     )?;
                 }
                 for (source, target) in &raw_inherited_fd_mappings {
@@ -6113,7 +12557,8 @@ fn lib_spawn_with_stdio(
         return Err(spawn_failure(
             start,
             format!("Failed to spawn: invalid resource limits: {reason}"),
-        ));
+        )
+        .into());
     }
 
     // This hook is deliberately registered last. The child has already
@@ -6154,16 +12599,56 @@ fn lib_spawn_with_stdio(
         }
     }
     if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
-        return Err(spawn_deadline_failure(start));
+        return Err(spawn_deadline_failure(start).into());
     }
-    let child = match command.spawn() {
+    // Allocate captures before process creation. No returned Child exists
+    // outside selected setup custody at an allocation or panic boundary.
+    let stdout_capture = Arc::new(OutputCapture::default());
+    let stderr_capture = Arc::new(OutputCapture::default());
+    let drain_stop = Arc::new(AtomicBool::new(false));
+    let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
+    #[cfg(target_os = "linux")]
+    {
+        setup.mapping_lifelines = inherited_fd_mapping_lifelines;
+        if setup.scoped.is_some() {
+            setup
+                .inherited_fds
+                .reserve(setup.inherited_fd_mappings.len() + setup.mapping_lifelines.len());
+        }
+        if let Some(destination) = setup.scoped.as_deref_mut() {
+            destination.create_attempted = true;
+            destination
+                .scope
+                .as_mut()
+                .expect("prepared actual scope")
+                .consume_selected_launch_right()
+                .map_err(|detail| spawn_failure(start, detail))?;
+        }
+    }
+    #[cfg(unix)]
+    let spawn_result = spawn_command_with_fork_custody(&mut command, ordinary_fork_guard);
+    #[cfg(not(unix))]
+    let spawn_result = command.spawn();
+    let child = match spawn_result {
         Ok(c) => c,
         Err(_) if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) => {
-            return Err(spawn_deadline_failure(start));
+            return Err(SpawnWithStdioError::WithoutRunningOwner {
+                result: spawn_deadline_failure(start),
+                create_attempted: true,
+            });
         }
-        Err(e) => return Err(spawn_failure(start, format!("Failed to spawn: {e}"))),
+        Err(e) => {
+            return Err(SpawnWithStdioError::WithoutRunningOwner {
+                result: spawn_failure(start, format!("Failed to spawn: {e}")),
+                create_attempted: true,
+            });
+        }
     };
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        setup.child = Some(child);
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     drop(inherited_fd_mapping_lifelines);
     #[cfg(target_os = "linux")]
     drop(attachment_gate);
@@ -6171,8 +12656,42 @@ fn lib_spawn_with_stdio(
     // request-owned parent copies promptly: in particular, keeping the status
     // writer open here would hide a launcher's pre-target EOF and force every
     // failed setup to wait for the full supervision timeout.
-    drop(inherited_fds);
-    drop(inherited_fd_mappings);
+    #[cfg(target_os = "linux")]
+    {
+        if setup.scoped.is_some() {
+            // Capacity reserved before Child; each source move is infallible.
+            while let Some(mapping) = setup.inherited_fd_mappings.pop() {
+                setup.inherited_fds.push(mapping.source);
+            }
+            while let Some(source) = setup.mapping_lifelines.pop() {
+                setup.inherited_fds.push(source);
+            }
+            let bound = absolute_deadline.expect("scoped original service bound");
+            selected_close_inherited_copies(&mut setup.inherited_fds, bound)
+                .map_err(|detail| spawn_failure(start, detail))?;
+            // Shared actual descriptors stay rooted in destination until their
+            // external borrowers release them. No ordinary Drop for closers.
+            if let Some(destination) = setup.scoped.as_deref_mut() {
+                destination.setup_fds = std::mem::take(&mut setup.inherited_fds);
+            }
+        } else {
+            setup.mapping_lifelines.clear();
+            setup.inherited_fds.clear();
+            setup.inherited_fd_mappings.clear();
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(inherited_fds);
+        drop(inherited_fd_mappings);
+    }
+    #[cfg(target_os = "linux")]
+    let wrapper_pid = setup
+        .child
+        .as_ref()
+        .expect("setup owns returned Child")
+        .id();
+    #[cfg(not(target_os = "linux"))]
     let wrapper_pid = child.id();
 
     // On Unix with setsid, pid == pgid since the child is its own process group leader.
@@ -6181,55 +12700,86 @@ fn lib_spawn_with_stdio(
     #[cfg(not(unix))]
     let wrapper_pgid = -1i64;
 
-    let stdout_capture = Arc::new(OutputCapture::default());
-    let stderr_capture = Arc::new(OutputCapture::default());
-    let drain_stop = Arc::new(AtomicBool::new(false));
-    let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
-    let (status_reader, attachment_release, applied_receipt_schema, mount_preparation_required) =
-        match supervised_status {
-            Some(SupervisedProcessStatus {
-                state: SupervisedProcessStatusState::Run { reader },
-                applied_receipt_schema,
-                mount_preparation_required,
-            }) => (
-                Some(reader),
-                None,
-                applied_receipt_schema,
-                mount_preparation_required,
-            ),
-            Some(SupervisedProcessStatus {
-                state:
-                    SupervisedProcessStatusState::AwaitingAttachment {
-                        reader,
-                        attachment_release,
-                    },
-                applied_receipt_schema,
-                mount_preparation_required,
-            }) => (
-                Some(reader),
-                Some(attachment_release),
-                applied_receipt_schema,
-                mount_preparation_required,
-            ),
-            None => (None, None, None, false),
-        };
+    #[cfg(target_os = "linux")]
+    let supervised_status = setup.supervised_status.take();
+    let (
+        status_reader,
+        attachment_release,
+        applied_receipt_schema,
+        mount_preparation_required,
+        native_settlement,
+    ) = match supervised_status {
+        Some(SupervisedProcessStatus {
+            state: SupervisedProcessStatusState::Run { reader },
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        }) => (
+            Some(reader),
+            None,
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        ),
+        Some(SupervisedProcessStatus {
+            state:
+                SupervisedProcessStatusState::AwaitingAttachment {
+                    reader,
+                    attachment_release,
+                },
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        }) => (
+            Some(reader),
+            Some(attachment_release),
+            applied_receipt_schema,
+            mount_preparation_required,
+            native_settlement,
+        ),
+        None => (None, None, None, false, None),
+    };
     // The wrapper is already an owned process, even before its target report.
     // Reuse that owner for every subsequent setup failure instead of reaping
     // the wrapper first and losing the exact process-group cleanup fence.
-    let mut running = RunningProcess {
+    let running = RunningProcess {
         process_scope,
         scope_cleanup_error: None,
         pid: wrapper_pid,
         pgid: wrapper_pgid,
         mount_preparation: None,
+        #[cfg(target_os = "linux")]
+        attachment_target_lifetime: None,
+        native_settlement,
         wrapper_pid,
         wrapper_pgid,
+        #[cfg(target_os = "linux")]
+        child: setup.child.take().expect("setup owns returned Child"),
+        #[cfg(not(target_os = "linux"))]
         child,
         stdin_thread: None,
         stdout_thread: None,
         stderr_thread: None,
         status_thread: None,
+        #[cfg(target_os = "linux")]
+        selected_setup_status: None,
+        #[cfg(target_os = "linux")]
+        selected_cleanup_complete: false,
+        #[cfg(target_os = "linux")]
+        selected_scoped_borrowed: false,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stdin: None,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stdout: None,
+        #[cfg(target_os = "linux")]
+        selected_scoped_stderr: None,
+        #[cfg(target_os = "linux")]
+        selected_worker_panics: [false; 4],
         applied_receipt_rx: None,
+        applied_receipt_observation: None,
+        applied_receipt_failure: None,
+        applied_receipt_returned: false,
+        selected_initial_status: None,
         stdout_capture,
         stderr_capture,
         stdout_reader_taken: false,
@@ -6244,80 +12794,153 @@ fn lib_spawn_with_stdio(
         groups_terminated: false,
         wrapper_reaped: false,
     };
-    let (stdout_thread, stderr_thread) = if inherit_stdio {
+    let mut running = SpawnRunningGuard {
+        running: Some(running),
+        mode: failure_mode,
+        #[cfg(target_os = "linux")]
+        scoped: setup.scoped.take(),
+        #[cfg(not(target_os = "linux"))]
+        lifetime: std::marker::PhantomData,
+    };
+    #[cfg(target_os = "linux")]
+    if running.scoped.is_some() {
+        running.selected_scoped_borrowed = true;
+    }
+    let mut status_reader = status_reader;
+    #[cfg(target_os = "linux")]
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) || running.scoped.is_some() {
+        running.selected_setup_status = status_reader.take();
+    }
+    if inherit_stdio {
         running.stdout_capture.state.lock().unwrap().closed = true;
         running.stderr_capture.state.lock().unwrap().closed = true;
-        (thread::spawn(|| {}), thread::spawn(|| {}))
+        running.stdout_thread = Some(thread::spawn(|| {}));
+        running.stderr_thread = Some(thread::spawn(|| {}));
     } else {
-        let mut stdout_handle = running
+        let stdout_handle = running
             .child
             .stdout
-            .take()
+            .as_ref()
             .expect("stdout configured as piped");
-        let mut stderr_handle = running
+        let stderr_handle = running
             .child
             .stderr
-            .take()
+            .as_ref()
             .expect("stderr configured as piped");
-        if let Err(error) = configure_nonblocking_fd(&mut stdout_handle)
-            .and_then(|_| configure_nonblocking_fd(&mut stderr_handle))
+        if let Err(error) = configure_nonblocking_fd(stdout_handle)
+            .and_then(|_| configure_nonblocking_fd(stderr_handle))
         {
             return Err(running.into_spawn_failure(spawn_failure(
                 start,
                 format!("Failed to spawn: configure bounded output capture: {error}"),
             )));
         }
-        (
-            spawn_bounded_drain(
-                stdout_handle,
-                Some(
-                    limits
-                        .as_ref()
-                        .and_then(|limits| limits.max_stdout_bytes)
-                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-                ),
-                CapturedStream::Stdout,
-                Arc::clone(&running.stdout_capture),
-                Arc::clone(&running.drain_stop),
-                output_overflow_tx.clone(),
+        let stdout_handle = running
+            .child
+            .stdout
+            .take()
+            .expect("configured stdout retained");
+        let stderr_handle = running
+            .child
+            .stderr
+            .take()
+            .expect("configured stderr retained");
+        #[cfg(target_os = "linux")]
+        let (stdout_handle, stderr_handle) = if running.scoped.is_some() {
+            let stdout = Arc::new(Mutex::new(stdout_handle));
+            running.selected_scoped_stdout = Some(Arc::clone(&stdout));
+            let stderr = Arc::new(Mutex::new(stderr_handle));
+            running.selected_scoped_stderr = Some(Arc::clone(&stderr));
+            (
+                SpawnPipe::Selected(SelectedScopedPipe(stdout)),
+                SpawnPipe::Selected(SelectedScopedPipe(stderr)),
+            )
+        } else {
+            (
+                SpawnPipe::Owned(stdout_handle),
+                SpawnPipe::Owned(stderr_handle),
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (stdout_handle, stderr_handle) = (
+            SpawnPipe::Owned(stdout_handle),
+            SpawnPipe::Owned(stderr_handle),
+        );
+        running.stdout_thread = Some(spawn_bounded_drain(
+            stdout_handle,
+            Some(
+                limits
+                    .as_ref()
+                    .and_then(|limits| limits.max_stdout_bytes)
+                    .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
             ),
-            spawn_bounded_drain(
-                stderr_handle,
-                Some(
-                    limits
-                        .as_ref()
-                        .and_then(|limits| limits.max_stderr_bytes)
-                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-                ),
-                CapturedStream::Stderr,
-                Arc::clone(&running.stderr_capture),
-                Arc::clone(&running.drain_stop),
-                output_overflow_tx,
+            CapturedStream::Stdout,
+            Arc::clone(&running.stdout_capture),
+            Arc::clone(&running.drain_stop),
+            output_overflow_tx.clone(),
+        ));
+        // Install each actual JoinHandle before the next thread can panic.
+        running.stderr_thread = Some(spawn_bounded_drain(
+            stderr_handle,
+            Some(
+                limits
+                    .as_ref()
+                    .and_then(|limits| limits.max_stderr_bytes)
+                    .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
             ),
-        )
-    };
-    running.stdout_thread = Some(stdout_thread);
-    running.stderr_thread = Some(stderr_thread);
+            CapturedStream::Stderr,
+            Arc::clone(&running.stderr_capture),
+            Arc::clone(&running.drain_stop),
+            output_overflow_tx,
+        ));
+    }
 
     // Never write request input on the spawning thread. A child can stop
     // reading before the pipe buffer is empty; the dedicated writer may then
     // wait on WouldBlock, but it observes the same cleanup flag as the bounded
     // drainers. The request deadline can therefore terminate and join every
     // pipe worker even when the child never consumes the remaining input.
-    running.stdin_thread = match spawn_stdin_writer(
-        running.child.stdin.take(),
-        stdin_data,
-        Arc::clone(&running.drain_stop),
-    ) {
-        Ok(thread) => thread,
-        Err(error) => {
-            return Err(running.into_spawn_failure(spawn_failure(
-                start,
-                format!("Failed to spawn: configure nonblocking stdin: {error}"),
-            )));
+    #[cfg(target_os = "linux")]
+    {
+        running.selected_scoped_stdout.take();
+        running.selected_scoped_stderr.take();
+    }
+    // Retain stdin through configuration and worker-creation failure/unwind.
+    #[cfg(target_os = "linux")]
+    if running.scoped.is_some() {
+        if let Some(stdin) = running.child.stdin.as_ref() {
+            if let Err(error) = configure_nonblocking_fd(stdin) {
+                return Err(running.into_spawn_failure(spawn_failure(start, error.to_string())));
+            }
         }
-    };
+    }
+    let stdin_handle = running.child.stdin.take().map(|stdin| {
+        #[cfg(target_os = "linux")]
+        if running.scoped.is_some() {
+            let retained = Arc::new(Mutex::new(stdin));
+            running.selected_scoped_stdin = Some(Arc::clone(&retained));
+            return SpawnPipe::Selected(SelectedScopedPipe(retained));
+        }
+        SpawnPipe::Owned(stdin)
+    });
+    running.stdin_thread =
+        match spawn_stdin_writer(stdin_handle, stdin_data, Arc::clone(&running.drain_stop)) {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Err(running.into_spawn_failure(spawn_failure(
+                    start,
+                    format!("Failed to spawn: configure nonblocking stdin: {error}"),
+                )));
+            }
+        };
 
+    #[cfg(target_os = "linux")]
+    running.selected_scoped_stdin.take();
+    #[cfg(target_os = "linux")]
+    if matches!(failure_mode, SpawnFailureCustodyMode::Selected(_)) || running.scoped.is_some() {
+        // SAME registered descriptor Arc, not a new FD or inherited peer.
+        status_reader = running.selected_setup_status.clone();
+    }
     if let Some(reader) = status_reader {
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let (applied_tx, applied_rx) = if applied_receipt_schema.is_some() {
@@ -6344,10 +12967,22 @@ fn lib_spawn_with_stdio(
             }
         };
         running.status_thread = Some(status_thread);
+        #[cfg(target_os = "linux")]
+        running.selected_setup_status.take();
         running.applied_receipt_rx = applied_rx;
-        let setup_deadline = supervised_setup_deadline(start, timeout);
+        let relative_setup = supervised_setup_deadline(start, timeout);
+        let setup_deadline = absolute_deadline.map_or(relative_setup, |original| {
+            // Sample on the original worker clock; never restart its expiry.
+            start
+                .checked_add(original.remaining())
+                .map_or(Instant::now(), |expiry| relative_setup.min(expiry))
+        });
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
-        let reported_pid = match status_rx.recv_timeout(setup_wait) {
+        let initial_observation = status_rx.recv_timeout(setup_wait);
+        // Cache consumed raw status BEFORE mount/PID/expiry checks; actual
+        // Child/scope/channels remain guarded. Raw data grants no authority.
+        retain_initial_launcher_status(&mut running, &initial_observation);
+        let reported_pid = match initial_observation {
             Ok(Ok(InitialLauncherStatus::Target(pid, preparation))) => {
                 if mount_preparation_required && preparation.is_none() {
                     return Err(running.into_spawn_failure(spawn_failure(
@@ -6403,11 +13038,11 @@ fn lib_spawn_with_stdio(
     if absolute_deadline.is_some_and(|deadline| deadline.has_elapsed()) {
         return Err(running.into_spawn_failure(spawn_deadline_failure(start)));
     }
-    Ok(running)
+    Ok(running.running.take().expect("spawn guard owns running"))
 }
 
 fn spawn_stdin_writer(
-    stdin: Option<process::ChildStdin>,
+    stdin: Option<SpawnPipe<process::ChildStdin>>,
     data: Option<String>,
     stop: Arc<AtomicBool>,
 ) -> Result<Option<thread::JoinHandle<()>>, String> {
@@ -6877,6 +13512,243 @@ mod applied_status_tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod selected_applied_receipt_cache_tests {
+    use super::*;
+
+    fn receipt(pid: u32) -> crate::LinuxSandboxAppliedLaunchReceipt {
+        crate::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: pid,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
+        }
+    }
+
+    fn selected_running(
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> (
+        RunningProcess,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        InheritedDescriptorAuthority,
+    ) {
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/sleep".into(),
+            argv0: None,
+            args: vec!["30".into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 30.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        let mut status = supervised_launcher_attachment_status_pipe().unwrap();
+        status.reader.require_mount_preparation_receipt().unwrap();
+        status
+            .reader
+            .require_applied_launch_receipt("test.applied-launch/v2")
+            .unwrap();
+        let writer = status
+            .prepare_native_settlement_channel(original_deadline)
+            .unwrap();
+        running.native_settlement = status.reader.native_settlement.take();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        running.applied_receipt_rx = Some(receiver);
+        (running, sender, writer)
+    }
+
+    #[test]
+    fn selected_receipt_empty_slice_retains_receiver_then_actual_delivery_resumes() {
+        let (running, sender, _writer) = selected_running(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(2),
+        ));
+        let mut owner = match running.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Incomplete(owner)) => owner,
+            _ => panic!("empty live receipt must be Incomplete"),
+        };
+        assert!(owner.applied_receipt_rx.is_some());
+        assert!(owner.applied_receipt_failure.is_none());
+        let actual = receipt(owner.pid);
+        sender.send(Ok(actual.clone())).unwrap();
+        assert!(
+            owner
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert_eq!(owner.applied_receipt_observation, Some(Ok(actual)));
+        assert!(owner.applied_receipt_returned);
+        assert!(owner.applied_receipt_rx.is_none());
+        assert!(
+            owner
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert!(
+            owner
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_collection_receipt_refusal_retains_item_and_sticks_without_replay() {
+        let (running, sender, _writer) = selected_running(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(2),
+        ));
+        sender.send(Err("actual reader refusal".into())).unwrap();
+        let owner = match running.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Failed(owner)) => owner,
+            _ => panic!("actual reader refusal must fail collection"),
+        };
+        assert_eq!(
+            owner.applied_receipt_observation,
+            Some(Err("actual reader refusal".into()))
+        );
+        assert!(!owner.applied_receipt_returned);
+        assert!(owner.applied_receipt_rx.is_none());
+        let owner = match owner.wait_for_natural_exit_retaining_native(Duration::ZERO) {
+            Ok(SelectedNativeTerminalWaitOutcome::Failed(owner)) => owner,
+            _ => panic!("sticky refusal must remain Failed"),
+        };
+        assert!(owner.native_terminal_raw_view().unwrap().failure.is_some());
+        assert!(sender.send(Ok(receipt(owner.pid))).is_err());
+    }
+
+    #[test]
+    fn public_selected_receipt_then_collection_reuses_cached_actual_success() {
+        let (mut running, sender, _writer) = selected_running(
+            crate::time::MonotonicDeadline::after(Duration::from_secs(2)),
+        );
+        let actual = receipt(running.pid);
+        sender.send(Ok(actual.clone())).unwrap();
+        assert_eq!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap(),
+            actual
+        );
+        assert!(
+            running
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap()
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
+    fn selected_pid_failure_retains_consumed_receipt_and_is_sticky() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed = receipt(running.pid.wrapping_add(1));
+        sender.send(Ok(observed.clone())).unwrap();
+
+        let failure = running
+            .wait_applied_launch_receipt(Duration::from_secs(1))
+            .unwrap_err();
+        assert!(failure.contains("differs from exact running target"));
+        assert_eq!(running.applied_receipt_observation, Some(Ok(observed)));
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(failure)
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
+    fn selected_reader_failure_is_cached_before_return_and_never_retried() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed_failure = "status reader rejected applied-launch document".to_owned();
+        sender.send(Err(observed_failure.clone())).unwrap();
+
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(observed_failure.clone())
+        );
+        assert_eq!(
+            running.applied_receipt_observation,
+            Some(Err(observed_failure.clone()))
+        );
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(observed_failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(observed_failure)
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+
+    #[test]
+    fn selected_timeout_is_sticky_and_never_receives_a_later_item() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let failure = running
+            .wait_applied_launch_receipt(Duration::from_millis(1))
+            .unwrap_err();
+        assert!(failure.contains("timed out awaiting"));
+        assert!(running.applied_receipt_observation.is_none());
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+        assert_eq!(
+            running.wait_applied_launch_receipt(Duration::from_secs(1)),
+            Err(failure)
+        );
+    }
+
+    #[test]
+    fn selected_valid_receipt_is_returned_once_and_remains_cached() {
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let (mut running, sender, _writer) = selected_running(deadline);
+        let observed = receipt(running.pid);
+        sender.send(Ok(observed.clone())).unwrap();
+
+        assert_eq!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap(),
+            observed
+        );
+        assert_eq!(running.applied_receipt_observation, Some(Ok(observed)));
+        assert!(running.applied_receipt_returned);
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .wait_applied_launch_receipt(Duration::from_secs(1))
+                .unwrap_err()
+                .contains("already returned")
+        );
+        assert!(sender.send(Ok(receipt(running.pid))).is_err());
+    }
+}
+
 fn reject_duplicate_status_keys(line: &[u8]) -> Result<(), serde_json::Error> {
     const MAX_STATUS_JSON_DEPTH: usize = 32;
 
@@ -7109,6 +13981,7 @@ fn attachment_pipe(
 fn open_attachment_cwd(
     path: &str,
     start: Instant,
+    deadline: crate::time::MonotonicDeadline,
 ) -> Result<InheritedDescriptorAuthority, SubprocessResult> {
     let path = std::ffi::CString::new(path).map_err(|_| {
         spawn_failure(
@@ -7116,7 +13989,9 @@ fn open_attachment_cwd(
             "Failed to spawn awaiting attachment: cwd contains an interior NUL byte",
         )
     })?;
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = retain_fork_sensitive_descriptors_until(deadline).map_err(|refused| {
+        spawn_failure(start, format!("Failed to spawn awaiting attachment: {refused}"))
+    })?;
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -7148,14 +14023,11 @@ fn direct_attachment_identity_pre_exec(
     status_reader_fd: i32,
     release_writer_fd: i32,
     cwd_directory_fd: Option<i32>,
-    inherited_child_close_fds: &[i32],
 ) -> std::io::Result<()> {
     unsafe {
+        // The registered-descriptor scrub already ran as the first hook.
         libc::close(status_reader_fd);
         libc::close(release_writer_fd);
-        for fd in inherited_child_close_fds {
-            libc::close(*fd);
-        }
 
         validate_attachment_parent(libc::getppid(), expected_parent_pid)?;
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
@@ -7658,6 +14530,111 @@ fn reap_exact_child_pid(pid: u32) -> Result<(), String> {
     }
 }
 
+/// Join an attachment spawn worker within a bound.
+///
+/// A worker still running at the bound is blocked in `Command::spawn` on its
+/// child, which runs nothing that can block before the registered-descriptor
+/// scrub; it can block only later, such as in placement into a frozen process
+/// scope. Terminating that scope ends such a child, and the worker returns.
+/// A worker that still has not finished is detached, never waited on: its
+/// witness write end then keeps the window from reopening until it finishes.
+#[cfg(target_os = "linux")]
+fn join_attachment_worker_bounded<T>(
+    worker: thread::JoinHandle<T>,
+    scope: Option<&crate::ProcessScope>,
+) -> Result<thread::Result<T>, String> {
+    let finished_within = |worker: &thread::JoinHandle<T>, bound: Duration| {
+        let until = Instant::now() + bound;
+        while !worker.is_finished() {
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        true
+    };
+    if finished_within(&worker, ATTACHMENT_ABORT_SETTLE_TIMEOUT) {
+        return Ok(worker.join());
+    }
+    let terminated = match scope {
+        Some(scope) => scope.terminate_and_wait(ATTACHMENT_ABORT_SETTLE_TIMEOUT),
+        None => Err("no process scope to terminate".to_owned()),
+    };
+    if finished_within(&worker, ATTACHMENT_ABORT_SETTLE_TIMEOUT) {
+        return Ok(worker.join());
+    }
+    drop(worker);
+    Err(format!(
+        "attachment spawn worker did not finish within its bound and was detached{}",
+        terminated.err().map_or_else(String::new, |error| format!("; scope termination: {error}"))
+    ))
+}
+
+/// End an attachment setup that failed before READY, within bounded time:
+/// join the worker, settle its child, and then end the fork custody. Returns
+/// the diagnostic suffix for the caller's failure, empty when all settled.
+#[cfg(target_os = "linux")]
+fn settle_failed_attachment_setup(
+    worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
+    pid: Option<u32>,
+    scope: Option<&crate::ProcessScope>,
+    custody: WitnessedForkCustody,
+) -> String {
+    let mut details = Vec::new();
+    match join_attachment_worker_bounded(worker, scope) {
+        Ok(joined) => {
+            let cleanup = match (joined, pid) {
+                (Ok(Ok(running)), None) => {
+                    running.abort();
+                    Ok(())
+                }
+                (Ok(Ok(running)), Some(_)) => running.abort_and_reap_checked(),
+                (Ok(Err(result)), None) => {
+                    if !result.stderr.is_empty() {
+                        details.push(result.stderr);
+                    }
+                    Ok(())
+                }
+                (Ok(Err(_)), Some(pid)) => reap_attachment_child_bounded(pid),
+                (Err(_), None) => {
+                    details.push("attachment spawn worker panicked".to_owned());
+                    Ok(())
+                }
+                (Err(_), Some(pid)) => reap_attachment_child_bounded(pid)
+                    .map_err(|error| format!("attachment worker panicked; {error}")),
+            };
+            if let Err(error) = cleanup {
+                details.push(format!("cleanup failed: {error}"));
+            }
+            // The worker is joined: it forks nothing more.
+            if let Err(fact) = custody.settle() {
+                details.push(fact);
+            }
+        }
+        Err(detached) => {
+            details.push(format!("cleanup failed: {detached}"));
+            if let Err(fact) = custody.settle_with_live_creator() {
+                details.push(fact);
+            }
+        }
+    }
+    details.iter().map(|detail| format!("; {detail}")).collect()
+}
+
+/// Reap the exact attachment child after its worker returned without a
+/// running owner, killing it if it has not exited within the bound. A child
+/// already reaped by `Command::spawn` is settled.
+#[cfg(target_os = "linux")]
+fn reap_attachment_child_bounded(pid: u32) -> Result<(), String> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    reap_fork_holder_until(
+        pid,
+        Instant::now() + ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+        "attachment child",
+    )
+    .map(|_| ())
+}
+
 fn settle_direct_attachment_worker(
     pid: u32,
     worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
@@ -7939,6 +14916,387 @@ fn spawn_deadline_failure(start: Instant) -> SubprocessResult {
 }
 
 #[cfg(all(test, unix))]
+mod fork_creation_custody_tests {
+    use super::*;
+
+    const ISOLATED_TEST: &str = "LILLUX_TEST_FORK_CUSTODY_ISOLATED";
+
+    /// Run the named test of this module alone in a fresh copy of the test
+    /// binary, because it strands that process's fork window on purpose and
+    /// a stranded window would refuse every later test's descriptor lease.
+    /// Returns whether the caller is that fresh copy and must run the body.
+    fn run_isolated(name: &str) -> bool {
+        if std::env::var_os(ISOLATED_TEST).is_some_and(|value| value == name) {
+            return true;
+        }
+        let mut command = process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                &format!("exec::fork_creation_custody_tests::{name}"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(ISOLATED_TEST, name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let guard = prepare_command_fork_custody(
+            &mut command,
+            &BTreeSet::from([0, 1, 2]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("fork window for the isolated test process");
+        let output = spawn_command_with_fork_custody(&mut command, Some(guard))
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated {name} failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    fn cloexec_pipe() -> (std::fs::File, std::fs::File) {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    /// A nonblocking pipe read end, to observe whether every writer closed.
+    fn nonblocking_reader() -> (std::fs::File, std::fs::File) {
+        let (reader, writer) = cloexec_pipe();
+        let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        (reader, writer)
+    }
+
+    fn writer_closed(reader: &mut std::fs::File) -> bool {
+        match reader.read(&mut [0]) {
+            Ok(0) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            other => panic!("unexpected probe read: {other:?}"),
+        }
+    }
+
+    fn lease_within(seconds: u64) -> std::io::Result<ForkSensitiveDescriptorLease> {
+        retain_fork_sensitive_descriptors_until(crate::time::MonotonicDeadline::after(
+            Duration::from_secs(seconds),
+        ))
+    }
+
+    fn guarded_spawn(program: &str) -> std::io::Result<process::Child> {
+        let mut command = process::Command::new(program);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let guard = prepare_command_fork_custody(
+            &mut command,
+            &BTreeSet::from([0, 1, 2]),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("fork window must be available");
+        spawn_command_with_fork_custody(&mut command, Some(guard))
+    }
+
+    #[test]
+    fn failed_exec_reopens_window_for_spawn_and_descriptor_leases() {
+        let error = guarded_spawn("/nonexistent/lillux-fork-custody-missing-binary")
+            .expect_err("a missing binary cannot exec");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        drop(lease_within(5).expect("failed exec must reopen the descriptor window"));
+
+        let mut child = guarded_spawn("/bin/true").expect("later spawn must not wait on a leak");
+        assert!(child.wait().unwrap().success());
+        // Undeadlined acquisition must also return, not sleep on the window.
+        drop(try_retain_fork_sensitive_descriptors().unwrap());
+
+        // The same sequence through the public supervised spawn.
+        let request = |cmd: &str| SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        if let Ok(process) = lib_spawn(request("/nonexistent/lillux-fork-custody-missing-binary")) {
+            process.abort();
+            panic!("missing binary produced a running process");
+        }
+        let result = match lib_spawn(request("/bin/true")) {
+            Ok(process) => process.wait(),
+            Err(result) => panic!("spawn after failed exec refused: {}", result.stderr),
+        };
+        assert!(result.success, "{}", result.stderr);
+        drop(lease_within(5).expect("descriptor lease after supervised spawns"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pre_exec_holder_strands_window_until_witness_hangs_up() {
+        use std::os::unix::process::CommandExt as _;
+
+        if !run_isolated("live_pre_exec_holder_strands_window_until_witness_hangs_up") {
+            return;
+        }
+        let pipe = cloexec_pipe;
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let (custody, witness_writer) = guard.witness_creation("test creation").unwrap();
+        // A child created under the window that stays alive before exec.
+        let (mut forked_reader, forked_writer) = pipe();
+        let (release_reader, mut release_writer) = pipe();
+        let forked_fd = forked_writer.as_raw_fd();
+        let release_fd = release_reader.as_raw_fd();
+        let mut command = process::Command::new("/bin/true");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = [1_u8];
+                if libc::write(forked_fd, byte.as_ptr().cast(), 1) != 1
+                    || libc::read(release_fd, byte.as_mut_ptr().cast(), 1) != 1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let creator = thread::spawn(move || command.spawn());
+        let mut byte = [0_u8];
+        forked_reader.read_exact(&mut byte).unwrap();
+        drop(forked_writer);
+        drop(release_reader);
+        drop(witness_writer);
+
+        let fact = custody.settle().expect_err("a live pre-exec child must strand the window");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        let refused = match lease_within(5) {
+            Ok(_) => panic!("lease granted while a pre-exec child holds the table"),
+            Err(error) => error.to_string(),
+        };
+        assert!(refused.contains("fork custody stranded"), "{refused}");
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("undeadlined lease granted while a pre-exec child holds the table"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused
+                .stranded_fact()
+                .is_some_and(|fact| fact.contains("fork custody stranded")),
+            "{refused}"
+        );
+        let refused = match quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)) {
+            Ok(_) => panic!("fork window reopened while a pre-exec child holds the table"),
+            Err(error) => error,
+        };
+        assert!(refused.contains("fork custody stranded"), "{refused}");
+
+        // Let the child exec; exec closes its witness copy.
+        release_writer.write_all(&[1]).unwrap();
+        let mut child = creator.join().unwrap().expect("held child must exec");
+        assert!(child.wait().unwrap().success());
+        drop(lease_within(5).expect("witness hang-up must reopen the stranded window"));
+        let mut later = guarded_spawn("/bin/true").expect("process creation after settlement");
+        assert!(later.wait().unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_holder_reap_returns_status_and_kills_an_overrunning_child() {
+        let exiting = unsafe { libc::fork() };
+        assert!(exiting >= 0);
+        if exiting == 0 {
+            unsafe { libc::_exit(7) };
+        }
+        let status = reap_fork_holder_until(exiting, Instant::now() + Duration::from_secs(5), "test")
+            .unwrap()
+            .expect("an exited child is reaped");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
+
+        let paused = unsafe { libc::fork() };
+        assert!(paused >= 0);
+        if paused == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let started = Instant::now();
+        let error = reap_fork_holder_until(paused, Instant::now() + Duration::from_millis(50), "test")
+            .expect_err("a child that never exits overruns its bound");
+        assert!(error.contains("overran its bound and was killed"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // Killed and reaped: the PID is no longer a child of this process.
+        assert_eq!(unsafe { libc::waitpid(paused, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overrunning_holder_is_killed_and_strands_until_its_descendant_exits() {
+        if !run_isolated("overrunning_holder_is_killed_and_strands_until_its_descendant_exits") {
+            return;
+        }
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let witnessed = guard.witness_creation("test holder creation").unwrap();
+        let custody = witnessed.0;
+        let witness_writer = witnessed.1;
+        let (mut report_reader, report_writer) = cloexec_pipe();
+        let holder = unsafe { libc::fork() };
+        assert!(holder >= 0);
+        if holder == 0 {
+            // A holder that never finishes, whose descendant keeps its copy
+            // of the witness after the holder itself is killed.
+            let descendant = unsafe { libc::fork() };
+            if descendant == 0 {
+                loop {
+                    unsafe { libc::pause() };
+                }
+            }
+            let bytes = descendant.to_ne_bytes();
+            unsafe { libc::write(report_writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        drop(report_writer);
+        drop(witness_writer);
+        let mut bytes = [0_u8; 4];
+        report_reader.read_exact(&mut bytes).unwrap();
+        let descendant = libc::pid_t::from_ne_bytes(bytes);
+
+        let started = Instant::now();
+        let error = reap_fork_holder_until(holder, Instant::now() + Duration::from_millis(100), "test holder")
+            .expect_err("the holder overruns its bound");
+        assert!(error.contains("overran its bound and was killed"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let fact = custody.settle().expect_err("a live descendant keeps the witness open");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("lease granted while a created process holds the witness"),
+            Err(refused) => refused,
+        };
+        assert!(refused.stranded_fact().is_some(), "{refused}");
+
+        // Once the last created process exits, the next acquisition reopens.
+        assert_eq!(unsafe { libc::kill(descendant, libc::SIGKILL) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match try_retain_fork_sensitive_descriptors() {
+                Ok(lease) => {
+                    drop(lease);
+                    break;
+                }
+                Err(refused) if Instant::now() < deadline => {
+                    assert!(refused.stranded_fact().is_some(), "{refused}");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(refused) => panic!("window stayed stranded after the last exit: {refused}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn settled_strand_closes_registered_descriptors_without_deferral() {
+        if !run_isolated("settled_strand_closes_registered_descriptors_without_deferral") {
+            return;
+        }
+        let (mut early_reader, early_writer) = nonblocking_reader();
+        let (mut late_reader, late_writer) = nonblocking_reader();
+        let (mut control_reader, control_writer) = nonblocking_reader();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let early = InheritedDescriptorAuthority::from_owned_file(early_writer, &lease).unwrap();
+        let late = InheritedDescriptorAuthority::from_owned_file(late_writer, &lease).unwrap();
+        drop(lease);
+        let control = register_pending_fork_control_file(control_writer);
+        let control_fd = control.fd;
+        let late_fd = late.handle.fd;
+
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        // A live creator's snapshot defers the close.
+        drop(early);
+        assert!(!writer_closed(&mut early_reader));
+        // A witness-less strand never reopens. Its creator is settled, so the
+        // deferred close settles now and later closes happen at once.
+        guard.strand_with_witness("test creator ended without disposal proof".to_owned(), None, true);
+        assert!(writer_closed(&mut early_reader));
+        drop(late);
+        assert!(writer_closed(&mut late_reader));
+        drop(control);
+        assert!(writer_closed(&mut control_reader));
+        {
+            let state = direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(state.fork_quiesced);
+            assert!(!state.fork_child_close_fds.contains(&late_fd));
+            assert!(!state.pending_fork_control_fds.contains(&control_fd));
+            assert!(state.deferred_child_closes.is_empty());
+            assert!(state.deferred_control_closes.is_empty());
+        }
+        // Closing is not settlement evidence: the window still refuses.
+        let refused = match try_retain_fork_sensitive_descriptors() {
+            Ok(_) => panic!("witness-less strand granted a lease"),
+            Err(refused) => refused,
+        };
+        assert!(refused.stranded_fact().is_some(), "{refused}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_creator_strand_keeps_registered_closes_deferred_until_hang_up() {
+        if !run_isolated("live_creator_strand_keeps_registered_closes_deferred_until_hang_up") {
+            return;
+        }
+        let (mut reader, writer) = nonblocking_reader();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        let registered = InheritedDescriptorAuthority::from_owned_file(writer, &lease).unwrap();
+        drop(lease);
+        let guard = quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5))
+            .expect("fork window must be available");
+        let witnessed = guard.witness_detached_creation("test detached creation").unwrap();
+        let custody = witnessed.0;
+        // The detached creator still owns its write end and may still fork.
+        let creator_witness = witnessed.1;
+        let fact = custody
+            .settle_with_live_creator()
+            .expect_err("an open creator write end strands the window");
+        assert!(fact.contains("fork custody stranded"), "{fact}");
+        drop(registered);
+        assert!(!writer_closed(&mut reader), "a live creator's snapshot must defer the close");
+        // The creator finishes: hang-up reopens and settles the deferred close.
+        drop(creator_witness);
+        drop(lease_within(5).expect("hang-up reopens the window"));
+        assert!(writer_closed(&mut reader));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod absolute_spawn_deadline_tests {
     use super::*;
 
@@ -7975,6 +15333,19 @@ mod absolute_spawn_deadline_tests {
     }
 
     #[test]
+    fn current_thread_lease_observation_tracks_only_the_holding_thread() {
+        assert!(!current_thread_retains_fork_sensitive_descriptors());
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
+        assert!(current_thread_retains_fork_sensitive_descriptors());
+        let observed_elsewhere = thread::spawn(current_thread_retains_fork_sensitive_descriptors)
+            .join()
+            .unwrap();
+        assert!(!observed_elsewhere);
+        drop(lease);
+        assert!(!current_thread_retains_fork_sensitive_descriptors());
+    }
+
+    #[test]
     fn absolute_spawn_queued_descriptor_barrier_expires_without_fork() {
         // This harness deliberately holds the real exclusive fork barrier.
         // The operation must expire without waiting for us to release it.
@@ -8000,6 +15371,153 @@ mod absolute_spawn_deadline_tests {
         let error = observed.expect("deadline must expire while barrier remains held");
         assert!(error.timed_out);
         assert_eq!(error.pid, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_expired_before_acquisition_has_no_child() {
+        let error = match lib_spawn_awaiting_attachment_until(
+            request("exit 0"),
+            crate::time::MonotonicDeadline::after(Duration::ZERO),
+        ) {
+            Ok(held) => {
+                held.abort_and_reap().unwrap();
+                panic!("expired held spawn admitted child")
+            }
+            Err(error) => error,
+        };
+        assert!(error.timed_out);
+        assert_eq!(error.pid, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_queued_barrier_expires_without_native_birth() {
+        let barrier =
+            quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let original = crate::time::MonotonicDeadline::after(Duration::from_millis(40));
+        let worker = thread::spawn(move || {
+            let result = lib_spawn_awaiting_attachment_until(request("exit 0"), original);
+            let error = match result {
+                Ok(held) => {
+                    held.abort_and_reap().unwrap();
+                    panic!("expired barrier admitted held child")
+                }
+                Err(error) => error,
+            };
+            sent.send(error).unwrap();
+        });
+        let observed = received.recv_timeout(Duration::from_secs(2));
+        drop(barrier);
+        worker.join().unwrap();
+        let error = observed.expect("held spawn must expire while original barrier retained");
+        assert_eq!(error.pid, 0);
+        assert!(!error.success);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_remains_original_during_attachment_hold() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        // The held child is real; releasing after the original expiry must
+        // fail and retain the existing lifecycle's exact settlement evidence.
+        thread::sleep(original.remaining() + Duration::from_millis(5));
+        let error = match held.release_after_attachment() {
+            Ok(process) => {
+                process.abort();
+                panic!("held release renewed original expiry")
+            }
+            Err(error) => error,
+        };
+        assert!(error.result.stderr.contains("deadline expired"));
+        assert!(error.cleanup_is_settled()); // process settlement, not driver/funding proof
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_held_raw_pin_survives_expiry_and_missing_selected_cache_without_acceptance() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        let actual = held.exact_process_identity().unwrap();
+        thread::sleep(original.remaining() + Duration::from_millis(5));
+        assert!(original.has_elapsed());
+        // Direct ordinary held owner has no selected cache. Structural capture
+        // still retains its real pin AFTER expiry, without minting authority.
+        let raw = held.capture_existing_held_occurrence();
+        assert!(Arc::ptr_eq(&raw.pin, &held.pidfd));
+        assert!(raw.held_identity.is_none());
+        assert!(raw.require_cached_identity(&actual).is_err());
+        let error = match held.release_after_attachment() {
+            Err(error) => error,
+            Ok(running) => {
+                running.abort();
+                panic!("late held release must refuse");
+            }
+        };
+        assert!(error.cleanup_is_settled()); // ordinary process cleanup only
+        assert!(raw.require_cached_identity(&actual).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_original_deadline_delayed_worker_ack_refuses_success_handoff() {
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut held =
+            lib_spawn_awaiting_attachment_until(request("exec /bin/sleep 30"), original).unwrap();
+        let exact_pid = held.pid;
+        assert_ne!(exact_pid, 0); // actual attempted native birth, not no-birth evidence
+        let owner = held.owner.take().unwrap();
+        let AttachmentPendingOwner::Direct {
+            worker,
+            release_registration,
+        } = owner
+        else {
+            panic!("actual direct held worker required");
+        };
+        let (completed, observed) = std::sync::mpsc::channel();
+        let (allow_ack, wait_ack) = std::sync::mpsc::channel();
+        // Test-only proxy delays the real existing worker acknowledgement.
+        // It does not create a replacement process or production launcher.
+        let delayed_worker = thread::spawn(move || {
+            let actual = worker.join().expect("original attachment worker must join");
+            completed.send(actual.is_ok()).unwrap();
+            wait_ack.recv().unwrap();
+            actual
+        });
+        held.owner = Some(AttachmentPendingOwner::Direct {
+            worker: delayed_worker,
+            release_registration,
+        });
+        let releasing = thread::spawn(move || held.release_after_attachment());
+        let completion = observed.recv_timeout(Duration::from_secs(1));
+        let completed_in_original_window = !original.has_elapsed();
+        if matches!(&completion, Ok(true)) {
+            thread::sleep(original.remaining() + Duration::from_millis(5));
+        }
+        allow_ack.send(()).unwrap(); // always release test proxy before any assertion
+        let result = releasing.join().expect("actual release owner must join");
+        assert!(
+            matches!(&completion, Ok(true)),
+            "real attachment worker did not successfully complete before controlled ACK delay"
+        );
+        assert!(
+            completed_in_original_window,
+            "test failed to enter before original expiry"
+        );
+        let error = match result {
+            Ok(process) => {
+                process.abort();
+                panic!("late worker ACK published successful running owner")
+            }
+            Err(error) => error,
+        };
+        assert_eq!(error.phase, "release after attachment");
+        assert!(error.result.stderr.contains("completion handoff"));
+        assert!(error.cleanup_is_settled()); // exact process cleanup; no driver/funding refund authority
     }
 
     #[test]
@@ -8069,6 +15587,496 @@ mod absolute_spawn_deadline_tests {
         assert!(result.aborted_before_attachment.is_none());
         assert!(!result.stderr.contains("cleanup remains unproved"));
         assert!(!is_alive(pid));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod selected_supervised_custody_tests {
+    use super::*;
+
+    // Real same-group child blocked on the actual one-byte release pipe.
+    // A local IPC fixture, not an authenticated GPU/native/financial positive.
+    fn held_fixture() -> (
+        SelectedSupervisedAttachmentOwner,
+        crate::time::MonotonicDeadline,
+    ) {
+        held_fixture_with_timeout(2.0)
+    }
+
+    fn held_fixture_with_timeout(
+        timeout: f64,
+    ) -> (
+        SelectedSupervisedAttachmentOwner,
+        crate::time::MonotonicDeadline,
+    ) {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let forbidden = inherited_mapping_control_descriptors(None, Some(&status.reader));
+        let roles: Vec<_> = (3..=9)
+            .filter(|fd| !forbidden.contains(fd))
+            .take(3)
+            .collect();
+        assert_eq!(roles.len(), 3, "fixture needs three shell descriptor roles");
+        let script = format!(
+            r#"(/bin/dd bs=1 count=1 <&{} >/dev/null 2>&1; exec /bin/sleep 30) & child=$!; printf '{{"child-pid":%s}}\n' "$child" >&{}; wait"#,
+            roles[1], roles[0]
+        );
+        let mut req = request("/bin/sh", &["-c", &script]);
+        req.timeout = timeout;
+        req.inherited_fd_mappings = vec![
+            InheritedDescriptorMapping {
+                source: status.writer,
+                target_fd: roles[0] as u32,
+            },
+            InheritedDescriptorMapping {
+                source: status.attachment_release_reader,
+                target_fd: roles[1] as u32,
+            },
+            InheritedDescriptorMapping {
+                source: status.attachment_release_keepalive_writer,
+                target_fd: roles[2] as u32,
+            },
+        ];
+        req.supervised_status = Some(status.reader);
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        match lib_spawn_selected_supervised_awaiting_attachment_until(req, bound, bound) {
+            SelectedSupervisedSpawnOutcome::Held(held) => (held, bound),
+            _ => panic!("real local held fixture must acquire its actual owner"),
+        }
+    }
+
+    fn request(cmd: &str, args: &[&str]) -> SubprocessRequest {
+        SubprocessRequest {
+            cmd: cmd.into(),
+            argv0: None,
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 2.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        }
+    }
+
+    fn live_owner(cleanup: crate::time::MonotonicDeadline) -> SelectedSupervisedFailureOwner {
+        let mut running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid).unwrap()));
+        SelectedSupervisedFailureOwner::running(
+            running,
+            SelectedSupervisedBounds {
+                service: cleanup,
+                cleanup,
+            },
+        )
+    }
+
+    #[test]
+    fn selected_direct_request_is_preflight_refusal_without_owner() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        assert!(matches!(
+            lib_spawn_selected_supervised_awaiting_attachment_until(
+                request("/bin/sleep", &["30"]),
+                bound,
+                bound
+            ),
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::Preflight,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn selected_reversed_bounds_refuse_before_creation_without_substituting_cleanup() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/ryeos-selected-test-no-such-executable", &[]);
+        req.supervised_status = Some(status.reader);
+        let cleanup = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(4));
+        match lib_spawn_selected_supervised_awaiting_attachment_until(req, service, cleanup) {
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::Preflight,
+                result,
+            } => assert!(result.stderr.contains("cleanup precedes service")),
+            _ => panic!("reversed bounds must refuse before process creation attempt"),
+        }
+    }
+
+    #[test]
+    fn selected_missing_executable_reports_create_attempt_without_running_owner() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/ryeos-selected-test-no-such-executable", &[]);
+        req.supervised_status = Some(status.reader);
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        assert!(matches!(
+            lib_spawn_selected_supervised_awaiting_attachment_until(req, bound, bound),
+            SelectedSupervisedSpawnOutcome::RefusedWithoutRunningOwner {
+                phase: SelectedSupervisedCreatePhase::ProcessCreateAttempt,
+                ..
+            }
+        ));
+        // This is custody/phase coverage only, never accounting NeverBorn proof.
+    }
+
+    #[test]
+    fn selected_expired_cleanup_retains_same_child_pin_and_unjoined_drains() {
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut owner = live_owner(expired);
+        let child = owner.identity();
+        let (pin, capture) = {
+            let running = owner.running_mut().unwrap();
+            (
+                Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+                Arc::clone(&running.stdout_capture),
+            )
+        };
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Unsettled {
+                stage: SelectedSupervisedCleanupStage::GroupAndWrapper,
+                ..
+            }
+        ));
+        assert_eq!(owner.identity(), child);
+        let running = owner.running_mut().unwrap();
+        assert_eq!(running.child.id(), child.0);
+        assert!(!running.wrapper_reaped);
+        assert!(running.stdout_thread.is_some());
+        assert!(Arc::ptr_eq(&capture, &running.stdout_capture));
+        assert!(Arc::ptr_eq(
+            &pin,
+            running.attachment_target_lifetime.as_ref().unwrap()
+        ));
+        // Terminal destruction makes progress despite the already-expired bound.
+        drop(owner);
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
+    }
+
+    #[test]
+    fn selected_setup_unwind_runs_terminal_cleanup_for_same_running_owner() {
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let running = lib_spawn(request("/bin/sleep", &["30"])).unwrap();
+        let pin = open_pidfd(running.pid).unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = SpawnRunningGuard {
+                running: Some(running),
+                mode: SpawnFailureCustodyMode::Selected(SelectedSupervisedBounds {
+                    service: expired,
+                    cleanup: expired,
+                }),
+                scoped: None,
+            };
+            panic!("injected actual post-child setup unwind");
+        }));
+        assert!(unwind.is_err());
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
+    }
+
+    #[test]
+    fn selected_drain_timeout_retains_actual_worker_after_wrapper_reap() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut owner = live_owner(bound);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Settled
+        ));
+        let (sent, received) = std::sync::mpsc::channel();
+        owner.running_mut().unwrap().stdout_thread = Some(thread::spawn(move || {
+            let _ = received.recv();
+        }));
+        // Actual unfinished local worker; no fabricated process/scope testimony.
+        owner.stage = SelectedSupervisedCleanupStage::Drains;
+        owner.running_mut().unwrap().selected_cleanup_complete = false;
+        owner.bounds.cleanup = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Unsettled {
+                stage: SelectedSupervisedCleanupStage::Drains,
+                ..
+            }
+        ));
+        assert!(owner.running_mut().unwrap().wrapper_reaped);
+        assert!(owner.running_mut().unwrap().stdout_thread.is_some());
+        sent.send(()).unwrap();
+        drop(owner);
+    }
+
+    #[test]
+    fn selected_finished_worker_panic_is_retained_without_native_settlement_claim() {
+        let bound = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let mut owner = live_owner(bound);
+        assert!(matches!(
+            owner.settle_until_original_expiry(),
+            SelectedSupervisedCleanupObservation::Settled
+        ));
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(()).unwrap();
+            panic!("injected real drainer panic");
+        });
+        received.recv().unwrap();
+        let running = owner.running_mut().unwrap();
+        running.stdout_thread = Some(worker);
+        running.selected_cleanup_complete = false;
+        owner.stage = SelectedSupervisedCleanupStage::Drains;
+        let outcome = owner.refused(
+            SelectedSupervisedFailurePhase::WrapperSetup,
+            spawn_failure(Instant::now(), "fixture setup refused"),
+        );
+        match outcome {
+            SelectedSupervisedFailureOutcome::Settled {
+                error, mut custody, ..
+            } => {
+                assert!(
+                    error
+                        .result
+                        .stderr
+                        .contains("selected stdout worker panicked")
+                );
+                let running = custody.running_mut().unwrap();
+                assert!(running.selected_worker_panics[1]);
+                assert!(running.stdout_thread.is_none());
+                assert!(running.wrapper_reaped);
+                assert!(running.selected_cleanup_complete);
+                assert!(running.native_settlement.is_none());
+            }
+            _ => panic!("finished panic is a retained worker diagnostic, not a live worker"),
+        }
+    }
+
+    #[test]
+    fn selected_post_child_setup_refusal_returns_actual_running_custody() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let mut req = request("/bin/sh", &["-c", "exit 0"]);
+        req.supervised_status = Some(status.reader);
+        let service = crate::time::MonotonicDeadline::after(Duration::from_secs(2));
+        let bounds = SelectedSupervisedBounds {
+            service,
+            cleanup: crate::time::MonotonicDeadline::after(Duration::ZERO),
+        };
+        // Exercise the real shared producer with already-expired cleanup; no
+        // native acceptance/held-positive or refreshed public bound is claimed.
+        let error = match lib_spawn_with_stdio_custody(
+            req,
+            false,
+            None,
+            None,
+            None,
+            Some(service),
+            false,
+            SpawnFailureCustodyMode::Selected(bounds),
+        ) {
+            Err(error) => error,
+            Ok(running) => {
+                running.abort();
+                panic!("closed status must refuse");
+            }
+        };
+        match error {
+            SpawnWithStdioError::Selected(SelectedSupervisedFailureOutcome::Unsettled {
+                mut owner,
+                ..
+            }) => {
+                let running = owner.running_mut().unwrap();
+                assert_ne!(running.child.id(), 0);
+                assert!(!running.wrapper_reaped);
+                assert!(running.stdout_thread.is_some());
+            }
+            _ => panic!("post-child failure must return actual unsettled custody"),
+        }
+    }
+
+    #[test]
+    fn selected_pending_abort_expiry_returns_same_pending_pin_and_child() {
+        let (held, bound) = held_fixture();
+        let child = held.held().pid;
+        let pin = Arc::clone(&held.held().pidfd);
+        thread::sleep(bound.remaining() + Duration::from_millis(1));
+        match held.abort_and_reap() {
+            SelectedSupervisedAbortOutcome::Unsettled { error, mut owner } => {
+                assert_eq!(error.pid, child);
+                let Some(SelectedSupervisedCustody::Pending(pending)) = owner.custody.as_ref()
+                else {
+                    panic!("abort must retain same pending custody");
+                };
+                assert_eq!(pending.pid, child);
+                assert!(Arc::ptr_eq(&pin, &pending.pidfd));
+                assert!(pending.owner.is_some());
+                assert!(!owner.running_mut().unwrap().wrapper_reaped);
+                drop(owner);
+                assert!(matches!(
+                    native_terminal_pin_has_exited(&pin),
+                    NativeTerminalPinObservation::Exited
+                ));
+            }
+            _ => panic!("expired bounded abort must return its actual owner"),
+        }
+    }
+
+    #[test]
+    fn selected_pending_release_expiry_preserves_same_custody_without_retry() {
+        let (held, bound) = held_fixture();
+        let child = held.held().pid;
+        let pin = Arc::clone(&held.held().pidfd);
+        thread::sleep(bound.remaining() + Duration::from_millis(1));
+        match held.release_after_attachment() {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, mut owner },
+            ) => {
+                assert!(matches!(
+                    error.phase,
+                    SelectedSupervisedFailurePhase::ReleaseValidation
+                ));
+                assert_eq!(owner.identity().0, child);
+                let Some(SelectedSupervisedCustody::Pending(pending)) = owner.custody.as_ref()
+                else {
+                    panic!("release must retain same pending custody");
+                };
+                assert!(Arc::ptr_eq(&pin, &pending.pidfd));
+                assert!(pending.owner.is_some());
+                assert!(owner.running_mut().unwrap().attachment_release.is_some());
+                // Failure owner exposes cleanup only, never another release.
+                drop(owner);
+                assert!(matches!(
+                    native_terminal_pin_has_exited(&pin),
+                    NativeTerminalPinObservation::Exited
+                ));
+            }
+            _ => panic!("expired release must retain actual refused owner"),
+        }
+    }
+
+    #[test]
+    fn selected_request_timeout_refuses_release_before_longer_service_expiry() {
+        let (held, service) = held_fixture_with_timeout(0.5);
+        let request_expiry = held.held().request_deadline.unwrap();
+        thread::sleep(
+            request_expiry.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
+        assert!(
+            !service.has_elapsed(),
+            "fixture request must precede service"
+        );
+        let outcome = held.release_after_attachment();
+        let (error, custody) = match outcome {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Settled { error, custody, .. },
+            ) => (error, custody),
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, owner },
+            ) => (error, owner),
+            _ => panic!("shorter original request timeout must prevent release"),
+        };
+        assert!(matches!(
+            error.phase,
+            SelectedSupervisedFailurePhase::ReleaseValidation
+        ));
+        assert!(!custody.release_attempted);
+    }
+
+    #[test]
+    fn selected_request_expiry_after_write_retains_same_consumed_boundary() {
+        let (held, _) = held_fixture_with_timeout(0.5);
+        let pin = Arc::clone(&held.held().pidfd);
+        let barrier =
+            quiesce_fork_sensitive_descriptors(Instant::now() + Duration::from_secs(5)).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(held.release_after_attachment())
+                .unwrap_or_else(|_| panic!("test result receiver lost"));
+        });
+        let outcome = received.recv_timeout(Duration::from_secs(4));
+        drop(barrier);
+        worker.join().unwrap();
+        match outcome.unwrap() {
+            SelectedSupervisedReleaseOutcome::Refused(
+                SelectedSupervisedFailureOutcome::Unsettled { error, mut owner },
+            ) => {
+                assert!(matches!(
+                    error.phase,
+                    SelectedSupervisedFailurePhase::ReleaseWrite
+                ));
+                assert!(owner.release_attempted);
+                assert!(error.result.aborted_before_attachment.is_none());
+                let running = owner.running_mut().unwrap();
+                assert!(Arc::ptr_eq(
+                    &pin,
+                    running.attachment_target_lifetime.as_ref().unwrap()
+                ));
+                assert!(
+                    running
+                        .attachment_release
+                        .as_ref()
+                        .unwrap()
+                        .writer
+                        .is_some()
+                );
+                drop(owner);
+            }
+            _ => panic!("uncertain post-write close must retain actual owner"),
+        }
+    }
+
+    #[test]
+    fn selected_child_only_guard_revokes_actual_pipe_before_any_signal() {
+        let status = supervised_launcher_attachment_status_pipe().unwrap();
+        let reader = status.attachment_release_reader;
+        drop(status.attachment_release_keepalive_writer);
+        drop(status.writer);
+        let mut command = process::Command::new("/bin/sleep");
+        command.arg("30");
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let bound = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let mut guard = SelectedSupervisedSetupGuard {
+            child: None,
+            supervised_status: Some(status.reader),
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            mapping_lifelines: Vec::new(),
+            mode: SpawnFailureCustodyMode::Selected(SelectedSupervisedBounds {
+                service: bound,
+                cleanup: bound,
+            }),
+            scoped: None,
+        };
+        guard.child = Some(command.spawn().unwrap());
+        let pin = open_pidfd(guard.child.as_ref().unwrap().id()).unwrap();
+        configure_nonblocking_fd(reader.file()).unwrap();
+        guard
+            .revoke_held_boundary(bound, SelectedCleanupMode::TerminalDestruction)
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            reader.file().read(&mut byte).unwrap(),
+            0,
+            "actual boundary must have EOF"
+        );
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::NotExited
+        ));
+        drop(guard);
+        assert!(matches!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        ));
     }
 }
 
@@ -8277,6 +16285,48 @@ pub fn configure_subprocess_limits(
     }
     if limits.is_some_and(|limits| limits.deny_process_creation) {
         configure_no_process_creation(command)?;
+    }
+    Ok(())
+}
+
+/// Install restrictions in the already-created native target, after trusted
+/// namespace/descriptor setup and before any target code or applied receipt.
+/// The caller must be the single-threaded sandbox child, never the daemon.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_target_subprocess_limits(
+    limits: Option<&SubprocessLimits>,
+) -> Result<(), String> {
+    validate_subprocess_limits(limits)?;
+    if limits.is_some_and(|limits| {
+        limits.max_stdout_bytes.is_some() || limits.max_stderr_bytes.is_some()
+    }) {
+        return Err("native target cannot own pipe-output retention limits".to_owned());
+    }
+    let installed = validated_rlimits(limits)?;
+    for (resource, value) in [
+        (libc::RLIMIT_NOFILE, installed[0]),
+        (libc::RLIMIT_AS, installed[1]),
+        (libc::RLIMIT_CPU, installed[2]),
+        (libc::RLIMIT_NPROC, installed[3]),
+    ] {
+        if let Some(value) = value {
+            let limit = libc::rlimit {
+                rlim_cur: value,
+                rlim_max: value,
+            };
+            if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+                return Err(format!(
+                    "install native target resource limit: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+    }
+    if limits.is_some_and(|limits| limits.deny_process_creation) {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        install_no_process_creation_filter().map_err(|error| error.to_string())?;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return Err("no-process-creation limit is unsupported on this host".to_owned());
     }
     Ok(())
 }
@@ -8666,6 +16716,8 @@ pub enum ExecAction {
         #[arg(long)]
         configuration: String,
         #[arg(long)]
+        node_resources: String,
+        #[arg(long)]
         uid: u32,
         #[arg(long)]
         gid: u32,
@@ -8795,6 +16847,7 @@ pub fn run(action: ExecAction) -> serde_json::Value {
     match action {
         ExecAction::ScopeController {
             configuration,
+            node_resources,
             uid,
             gid,
             cmd,
@@ -8805,6 +16858,8 @@ pub fn run(action: ExecAction) -> serde_json::Value {
             let outcome = (|| -> Result<std::convert::Infallible, String> {
                 let configuration: crate::ProcessScopeConfiguration =
                     serde_json::from_str(&configuration).map_err(|error| error.to_string())?;
+                let node_resources: crate::ProcessScopeResourceLimits =
+                    serde_json::from_str(&node_resources).map_err(|error| error.to_string())?;
                 let environment: Vec<(String, String)> = envs
                     .iter()
                     .map(|entry| {
@@ -8837,6 +16892,7 @@ pub fn run(action: ExecAction) -> serde_json::Value {
                     .ok_or("controller executable is absent")?;
                 configuration.exec_controller(
                     &crate::ControllerAccount::unix(uid, gid),
+                    node_resources,
                     &executable,
                     &args,
                     &cwd,
@@ -8974,7 +17030,19 @@ fn do_stream(
     });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = match command.spawn() {
+    #[cfg(unix)]
+    let guard = match prepare_command_fork_custody(
+        &mut command, &BTreeSet::from([0, 1, 2]),
+        supervised_setup_deadline(Instant::now(), timeout),
+    ) {
+        Ok(guard) => guard,
+        Err(error) => { eprintln!("fork custody: {error}"); return 125; }
+    };
+    #[cfg(unix)]
+    let spawn_result = spawn_command_with_fork_custody(&mut command, Some(guard));
+    #[cfg(not(unix))]
+    let spawn_result = command.spawn();
+    let mut child = match spawn_result {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to spawn: {e}");
@@ -9032,7 +17100,7 @@ fn do_stream(
     };
     let stream_stop = Arc::new(AtomicBool::new(false));
     let mut stdin_thread = match spawn_stdin_writer(
-        child.stdin.take(),
+        child.stdin.take().map(SpawnPipe::Owned),
         stdin_data.map(str::to_owned),
         Arc::clone(&stream_stop),
     ) {
@@ -9110,6 +17178,11 @@ fn spawn_detached(
         Stdio::null()
     });
     setup_log(&mut command, log)?;
+    let mut preserved = BTreeSet::from([0, 1, 2]);
+    preserved.extend(inherited_fds.iter().map(|fd| fd.file().as_raw_fd()));
+    let guard = prepare_command_fork_custody(
+        &mut command, &preserved, supervised_setup_deadline(Instant::now(), 0.0),
+    )?;
     configure_inherited_fds(&mut command, inherited_fds)?;
     unsafe {
         command.pre_exec(|| {
@@ -9117,8 +17190,7 @@ fn spawn_detached(
             Ok(())
         });
     }
-    let mut child = command
-        .spawn()
+    let mut child = spawn_command_with_fork_custody(&mut command, Some(guard))
         .map_err(|e| format!("Failed to spawn: {e}"))?;
     write_stdin(&mut child, stdin_data);
     Ok(child.id())
@@ -9273,5 +17345,937 @@ mod pinned_attachment_cwd_tests {
         };
         assert!(result.success);
         assert_eq!(result.stdout.trim(), moved.to_str().unwrap());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_existing_wait_tests {
+    use super::*;
+
+    fn selected_wait(
+        running: RunningProcess,
+        timeout: Duration,
+    ) -> SelectedNativeTerminalWaitOutcome {
+        match running.wait_for_natural_exit_retaining_native(timeout) {
+            Ok(outcome) => outcome,
+            Err(owner) => {
+                owner.abort();
+                panic!("selected wait unexpectedly had no selected channel")
+            }
+        }
+    }
+
+    fn selected_live_child_with_testimony(
+        delay: &str,
+    ) -> (RunningProcess, InheritedDescriptorAuthority, Vec<u8>) {
+        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender(delay);
+        sender.send(Ok(applied)).unwrap();
+        (running, writer, frame)
+    }
+
+    fn selected_child_with_receipt_sender(
+        delay: &str,
+    ) -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        crate::LinuxSandboxAppliedLaunchReceipt,
+    ) {
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/sleep".into(),
+            argv0: None,
+            args: vec![delay.into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        let identity = crate::capture_exact_process_identity(
+            running.pid,
+            Some(u32::try_from(running.pgid).unwrap()),
+        )
+        .unwrap();
+        let mount = crate::LinuxSandboxMountPreparationReceipt {
+            schema: 1,
+            owned_child_pid: running.pid,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
+                Duration::from_secs(4),
+            ))
+            .unwrap();
+        running.native_settlement = held.reader.native_settlement.take();
+        running.mount_preparation = Some(mount.clone());
+        running.attachment_target_lifetime = Some(Arc::new(open_pidfd(running.pid).unwrap()));
+        let (receipt_sender, receipt_receiver) = std::sync::mpsc::channel();
+        let applied = crate::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: running.pid,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
+        };
+        running.applied_receipt_rx = Some(receipt_receiver);
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .held_target_identity = Some(identity.clone());
+        let record = crate::sandbox::native_terminal_wire::NativeTerminalTestimony {
+            schema: crate::sandbox::native_terminal_wire::NATIVE_TERMINAL_SCHEMA.to_owned(),
+            process_identity: identity,
+            held_mount: mount,
+            applied_launch: Some(applied.clone()),
+            exit: crate::sandbox::native_terminal_wire::NativeTerminalExit::Code(0),
+            owner_requested_termination: false,
+            launch_failure: None,
+        };
+        let mut frame = serde_json::to_vec(&record).unwrap();
+        frame.push(b'\n');
+        (running, writer, frame, receipt_sender, applied)
+    }
+
+    // Negative collection controls only: this ordinary child supplies no
+    // native identity/admitted context and can never qualify testimony.
+    fn negative_owner() -> (RunningProcess, InheritedDescriptorAuthority) {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
+                Duration::from_secs(5),
+            ))
+            .unwrap();
+        let mut running = lib_spawn(SubprocessRequest {
+            cmd: "/bin/true".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        })
+        .unwrap();
+        running.native_settlement = held.reader.native_settlement.take();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(crate::LinuxSandboxAppliedLaunchReceipt {
+                owned_child_pid: running.pid,
+                namespace_pid: 1,
+                effective_uid: 1,
+                effective_gid: 1,
+                no_new_privs: true,
+                seccomp_mode: 2,
+                executable_sha256: [1; 32],
+                argv_sha256: [2; 32],
+                environment_sha256: [3; 32],
+                cwd_sha256: [4; 32],
+                post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                    schema: 1,
+                    mount_count: 0,
+                    destination_access_sha256: [0; 32],
+                },
+            }))
+            .unwrap();
+        running.applied_receipt_rx = Some(receiver);
+        (running, writer)
+    }
+
+    #[test]
+    fn retained_actual_pidfd_reports_death_after_owned_child_reap() {
+        let mut child = process::Command::new("/bin/true").spawn().unwrap();
+        let pin = open_pidfd(child.id()).unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            native_terminal_pin_has_exited(&pin),
+            NativeTerminalPinObservation::Exited
+        );
+    }
+
+    #[test]
+    fn partial_record_requires_actual_eof_and_parse_failure_is_sticky() {
+        let (mut running, writer) = negative_owner();
+        let mut file = writer.file();
+        file.write_all(b"{\"schema\":").unwrap();
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        drop(writer);
+        let failure = running.poll_native_terminal_testimony().unwrap_err();
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert!(channel.exact_eof);
+        assert_eq!(channel.frame, b"{\"schema\":");
+        assert_eq!(
+            running.poll_native_terminal_testimony().unwrap_err(),
+            failure
+        );
+        running.abort();
+    }
+
+    #[test]
+    fn another_write_alias_prevents_eof_after_original_writer_closes() {
+        let (mut running, writer) = negative_owner();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        drop(writer);
+        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        drop(alias);
+        assert!(running.poll_native_terminal_testimony().is_err());
+        assert!(running.native_settlement.as_ref().unwrap().exact_eof);
+        running.abort();
+    }
+
+    #[test]
+    fn natural_wait_returns_same_pending_channel_and_expiry_stays_failed() {
+        let (running, writer) = negative_owner();
+        let reader_fd = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file()
+            .as_raw_fd();
+        let mut running = match running.wait_for_natural_exit(Duration::ZERO) {
+            Err(owner) => owner,
+            Ok(_) => panic!("missing native EOF was reported settled"),
+        };
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file()
+                .as_raw_fd(),
+            reader_fd
+        );
+        assert!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .failure
+                .is_none()
+        );
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .selected_wait_phase,
+            SelectedNativeTerminalWaitPhase::Pending
+        );
+        // A deterministic already-expired negative fixture, never renewal.
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .original_deadline = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        let failure = running.poll_native_terminal_testimony().unwrap_err();
+        drop(writer);
+        assert_eq!(
+            running.poll_native_terminal_testimony().unwrap_err(),
+            failure
+        );
+        assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
+        running.abort();
+    }
+
+    // Ordinary real-child fixture only; copied comparisons cannot issue
+    // protected startup, native or device admission.
+    #[test]
+    fn live_launch_pending_preserves_receiver_owner_and_terminal_bytes() {
+        let (mut running, writer, _frame, _sender, _applied) =
+            selected_child_with_receipt_sender("1");
+        let channel = running.native_settlement.as_ref().unwrap();
+        let original = channel.original_deadline;
+        let held = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        let target = crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let mounts = crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        let pid = running.pid;
+        assert!(
+            running
+                .require_original_live_launch_correspondence(
+                    &held,
+                    Ok((&target, &mounts, original))
+                )
+                .unwrap_err()
+                .contains("pending")
+        );
+        assert_eq!(running.pid, pid);
+        assert!(running.applied_receipt_rx.is_some());
+        assert!(running.applied_receipt_failure.is_none());
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof);
+        assert!(raw.terminal_result.is_none() && raw.retained_drains.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
+        running.abort();
+    }
+
+    #[test]
+    fn live_launch_upstream_refusal_stays_sticky_without_terminal_collection() {
+        let (mut running, writer, _frame, sender, applied) =
+            selected_child_with_receipt_sender("1");
+        let held = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .held_target_identity
+                .clone(),
+        };
+        sender.send(Ok(applied)).unwrap();
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &held,
+                    Err("protected capture refused".into())
+                )
+                .unwrap_err(),
+            "protected capture refused"
+        );
+        assert!(running.applied_receipt_observation.is_none());
+        assert!(running.applied_receipt_rx.is_none());
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some("protected capture refused")
+        );
+        assert_eq!(
+            running
+                .poll_selected_applied_receipt_for_collection()
+                .unwrap_err(),
+            "protected capture refused"
+        );
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof && raw.terminal_result.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
+        running.abort();
+    }
+
+    #[test]
+    fn live_launch_foreign_pin_then_correct_pin_preserves_first_refusal() {
+        let (mut running, writer, _frame, sender, applied) =
+            selected_child_with_receipt_sender("1");
+        let channel = running.native_settlement.as_ref().unwrap();
+        let original = channel.original_deadline;
+        let correct = ProcessLocalHeldOccurrence {
+            pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        // Independently opened pidfd is not the original Arc owner, even for
+        // the same ordinary fixture child. Neither association is proof.
+        let foreign = ProcessLocalHeldOccurrence {
+            pin: Arc::new(open_pidfd(running.pid).unwrap()),
+            held_identity: channel.held_target_identity.clone(),
+        };
+        let target = crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let mounts = crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        };
+        sender.send(Ok(applied)).unwrap();
+        let pid = running.pid;
+        let failure = running
+            .require_original_live_launch_correspondence(&foreign, Ok((&target, &mounts, original)))
+            .unwrap_err();
+        assert!(failure.contains("differs from actual held pin"));
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &correct,
+                    Ok((&target, &mounts, original))
+                )
+                .unwrap_err(),
+            failure
+        );
+        assert_eq!(
+            running
+                .require_original_live_launch_correspondence(
+                    &correct,
+                    Err("later capture failure".into())
+                )
+                .unwrap_err(),
+            failure
+        );
+        assert_eq!(
+            running.applied_receipt_failure.as_deref(),
+            Some(failure.as_str())
+        );
+        assert!(
+            running.applied_receipt_rx.is_none() && running.applied_receipt_observation.is_none()
+        );
+        assert_eq!(running.pid, pid);
+        assert!(Arc::ptr_eq(
+            running.attachment_target_lifetime.as_ref().unwrap(),
+            &correct.pin
+        ));
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert!(raw.frame.is_empty() && !raw.exact_eof && raw.terminal_result.is_none());
+        assert!(!writer.file().as_raw_fd().is_negative());
+        running.abort();
+    }
+
+    #[test]
+    fn empty_receipt_then_real_delivery_reaches_full_terminal_same_owner() {
+        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender("0.05");
+        let pid = running.pid;
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            _ => panic!("empty receipt must retain owner as Incomplete"),
+        };
+        assert!(running.applied_receipt_rx.is_some());
+        sender.send(Ok(applied.clone())).unwrap();
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(2)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("actual receipt and EOF must reach full terminal collection"),
+        };
+        assert_eq!(running.pid, pid);
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert_eq!(raw.frame, frame.as_slice());
+        assert!(raw.exact_eof && raw.pin_timely);
+        assert!(raw.terminal_result.is_some() && raw.retained_drains.is_some());
+        assert_eq!(raw.applied_receipt, Some(&Ok(applied)));
+    }
+
+    #[test]
+    fn timely_collected_reentry_after_original_expiry_preserves_historical_result() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.01");
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(2)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("fixture must collect before original expiry"),
+        };
+        let deadline = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        // Expire the actual original clock, never replace it with test metadata.
+        thread::sleep(deadline.remaining() + Duration::from_millis(1));
+        assert!(deadline.has_elapsed());
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("historical timely collection must remain Collected"),
+        };
+        let raw = running.native_terminal_raw_view().unwrap();
+        assert_eq!(raw.frame, frame.as_slice());
+        assert!(raw.exact_eof && raw.pin_timely && raw.failure.is_none());
+        assert!(raw.terminal_result.is_some());
+        assert!(running.applied_receipt_rx.is_none());
+    }
+
+    #[test]
+    fn selected_core_pid_refusal_retains_actual_consumed_receipt_and_writer_owner() {
+        let (running, writer, _frame, sender, mut applied) =
+            selected_child_with_receipt_sender("0.1");
+        applied.owned_child_pid += 1;
+        sender.send(Ok(applied.clone())).unwrap();
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("actual wrong PID receipt must fail selected core"),
+        };
+        assert_eq!(running.applied_receipt_observation, Some(Ok(applied)));
+        assert!(running.applied_receipt_failure.is_some());
+        assert!(!running.applied_receipt_returned);
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .native_terminal_raw_view()
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        assert!(!writer.file().as_raw_fd().is_negative());
+    }
+
+    #[test]
+    fn pending_receipt_original_expiry_fails_same_owner_without_consuming_late_item() {
+        let (running, writer, _frame, sender, applied) = selected_child_with_receipt_sender("0.01");
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            _ => panic!("empty receipt must remain Pending"),
+        };
+        let original = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        thread::sleep(original.remaining() + Duration::from_millis(1));
+        sender.send(Ok(applied)).unwrap();
+        let running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("expired original must fail before late receive"),
+        };
+        assert!(running.applied_receipt_observation.is_none());
+        assert!(running.applied_receipt_failure.is_some());
+        assert!(running.applied_receipt_rx.is_none());
+        assert!(
+            running
+                .native_terminal_raw_view()
+                .unwrap()
+                .failure
+                .is_some()
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn selected_incomplete_resumes_same_owner_and_caches_collected_result() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let split = frame.len() / 2;
+        let mut writer_file = writer.file();
+        writer_file.write_all(&frame[..split]).unwrap();
+        let mut running = match selected_wait(running, Duration::ZERO) {
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Collected(_) => {
+                panic!("partial testimony was reported collected")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(_) => {
+                panic!("partial testimony became sticky failure")
+            }
+        };
+        let reader_fd = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file()
+            .as_raw_fd();
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .selected_wait_phase,
+            SelectedNativeTerminalWaitPhase::Pending
+        );
+        assert!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .failure
+                .is_none()
+        );
+
+        writer_file.write_all(&frame[split..]).unwrap();
+        drop(writer_file);
+        drop(writer);
+        running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("completed selected child remained incomplete")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => {
+                let failure = owner
+                    .native_settlement
+                    .as_ref()
+                    .and_then(|channel| channel.failure.as_deref())
+                    .unwrap_or("unknown selected collection failure")
+                    .to_owned();
+                owner.abort();
+                panic!("selected collection failed: {failure}")
+            }
+        };
+        let first = running.native_terminal_raw_view().unwrap();
+        assert!(first.exact_eof);
+        assert_eq!(first.frame, frame);
+        assert!(matches!(
+            first.pin_observation,
+            &NativeTerminalPinObservation::Exited
+        ));
+        assert!(first.pin_timely);
+        assert!(first.terminal_result.unwrap().success);
+        assert_eq!(
+            running
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file()
+                .as_raw_fd(),
+            reader_fd
+        );
+        drop(first);
+        let running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            _ => panic!("cached selected result changed phase on reentry"),
+        };
+        let second = running.native_terminal_raw_view().unwrap();
+        assert!(second.terminal_result.unwrap().success);
+        assert_eq!(second.wait_phase, NativeTerminalWaitPhase::Collected);
+    }
+
+    #[test]
+    fn legacy_natural_wait_takes_cached_selected_result_without_recollection() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.05");
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(3)) {
+            SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("selected child did not finish within its wait slice")
+            }
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => {
+                let failure = owner
+                    .native_settlement
+                    .as_ref()
+                    .and_then(|channel| channel.failure.as_deref())
+                    .unwrap_or("unknown selected collection failure")
+                    .to_owned();
+                owner.abort();
+                panic!("selected collection failed: {failure}")
+            }
+        };
+        let result = match running.wait_for_natural_exit(Duration::ZERO) {
+            Ok(result) => result,
+            Err(owner) => {
+                owner.abort();
+                panic!("legacy entrypoint did not return cached collected result")
+            }
+        };
+        assert!(result.success);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn selected_sticky_failure_reentry_preserves_raw_frame_and_owner() {
+        let (running, writer) = negative_owner();
+        writer.file().write_all(b"{\"schema\":").unwrap();
+        drop(writer);
+        let running = match selected_wait(running, Duration::from_secs(1)) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            SelectedNativeTerminalWaitOutcome::Collected(owner)
+            | SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("malformed EOF did not become sticky failure")
+            }
+        };
+        let channel = running.native_settlement.as_ref().unwrap();
+        let frame = channel.frame.clone();
+        let reader_fd = channel.reader.file().as_raw_fd();
+        let failure = channel.failure.clone().unwrap();
+        let running = match selected_wait(running, Duration::from_secs(1)) {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner,
+            _ => panic!("sticky failure was rehabilitated on reentry"),
+        };
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert_eq!(channel.frame, frame);
+        assert_eq!(channel.failure.as_deref(), Some(failure.as_str()));
+        assert_eq!(channel.reader.file().as_raw_fd(), reader_fd);
+        running.abort();
+    }
+
+    #[test]
+    fn timely_cached_pin_stays_raw_but_original_expiry_fails_pending_collection() {
+        let (mut running, writer, frame) = selected_live_child_with_testimony("0.01");
+        thread::sleep(Duration::from_millis(50));
+        writer.file().write_all(&frame).unwrap();
+        drop(writer);
+        let original_deadline = running
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .original_deadline;
+        loop {
+            match running.poll_native_terminal_testimony() {
+                Ok(true) => break,
+                Ok(false) => {
+                    let remaining = original_deadline.remaining();
+                    assert!(
+                        !remaining.is_zero(),
+                        "same collector did not observe pin before original expiry"
+                    );
+                    thread::sleep(Duration::from_millis(1).min(remaining));
+                }
+                Err(error) => panic!("same collector failed before pin observation: {error}"),
+            }
+        }
+        {
+            let channel = running.native_settlement.as_ref().unwrap();
+            assert_eq!(
+                channel.pin_observation,
+                NativeTerminalPinObservation::Exited
+            );
+            assert!(channel.pin_timely);
+            assert_eq!(
+                channel.selected_wait_phase,
+                NativeTerminalWaitPhase::Pending
+            );
+        }
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .original_deadline = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(running.poll_native_terminal_testimony().is_err());
+        let channel = running.native_settlement.as_ref().unwrap();
+        assert_eq!(
+            channel.pin_observation,
+            NativeTerminalPinObservation::Exited
+        );
+        assert!(channel.pin_timely);
+        assert_eq!(channel.selected_wait_phase, NativeTerminalWaitPhase::Failed);
+        assert!(channel.failure.is_some());
+        running.abort();
+    }
+
+    #[test]
+    fn ordinary_short_wait_returns_resumable_owner_without_sticky_failure() {
+        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let split = frame.len() / 2;
+        writer.file().write_all(&frame[..split]).unwrap();
+        let mut running = match running.wait_for_natural_exit(Duration::ZERO) {
+            Err(owner) => owner,
+            Ok(_) => panic!("ordinary wait accepted an incomplete selected channel"),
+        };
+        {
+            let channel = running.native_settlement.as_ref().unwrap();
+            assert_eq!(channel.frame, frame[..split]);
+            assert!(channel.failure.is_none());
+            assert_eq!(
+                channel.selected_wait_phase,
+                NativeTerminalWaitPhase::Pending
+            );
+        }
+        writer.file().write_all(&frame[split..]).unwrap();
+        drop(writer);
+        let result = match running.wait_for_natural_exit(Duration::from_secs(3)) {
+            Ok(result) => result,
+            Err(owner) => {
+                owner.abort();
+                panic!("ordinary wait did not resume the same selected collector")
+            }
+        };
+        assert!(result.success);
+        assert_eq!(result.exit_code, 0);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_borrowed_role_guard_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_pipe_roles_reject_duplicate_writer_and_same_pipe_reader() {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let reader_fd = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .inherited_descriptor()
+            .unwrap();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[reader_fd],
+                    deadline
+                )
+                .is_err()
+        );
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[alias.inherited_descriptor().unwrap()],
+                    deadline
+                )
+                .is_err()
+        );
+        // Both peers remain their original registered owners after borrowed checks.
+        assert!(
+            held.reader
+                .native_settlement
+                .as_ref()
+                .unwrap()
+                .reader
+                .file_identity()
+                .is_ok()
+        );
+        assert!(alias.file_identity().is_ok());
+    }
+
+    #[test]
+    fn borrowed_role_inspection_preserves_live_stdio_and_original_expiry() {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        writer
+            .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                &[0, 1, 2],
+                deadline,
+            )
+            .unwrap();
+        for descriptor in [0, 1, 2] {
+            assert!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0);
+        }
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(
+            writer
+                .require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                    &[0, 1, 2],
+                    expired
+                )
+                .is_err()
+        );
+        assert!(writer.file_identity().is_ok());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_terminal_atomic_pipe_write_tests {
+    use super::*;
+
+    fn pipe() -> (
+        SupervisedLauncherAttachmentStatusPipe,
+        InheritedDescriptorAuthority,
+        crate::time::MonotonicDeadline,
+    ) {
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        (held, writer, deadline)
+    }
+
+    #[test]
+    fn atomic_pipe_write_returns_actual_count_and_invalid_sizes_write_nothing() {
+        let (held, writer, deadline) = pipe();
+        let record = vec![b'x'; libc::PIPE_BUF as usize];
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&record, deadline)
+                .unwrap(),
+            record.len()
+        );
+        let mut reader = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file();
+        let mut received = vec![0; record.len()];
+        reader.read_exact(&mut received).unwrap();
+        assert_eq!(received, record);
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&[], deadline)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            writer
+                .write_atomic_pipe_record_until(&vec![b'x'; libc::PIPE_BUF as usize + 1], deadline,)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let mut sentinel = [0];
+        assert_eq!(
+            reader.read(&mut sentinel).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn closed_reader_or_expired_window_fails_without_consuming_writer_owner() {
+        let (held, writer, deadline) = pipe();
+        drop(held);
+        assert!(
+            writer
+                .write_atomic_pipe_record_until(b"one\n", deadline)
+                .is_err()
+        );
+        assert!(writer.file_identity().is_ok());
+
+        let (held, writer, _) = pipe();
+        let expired = crate::time::MonotonicDeadline::after(Duration::ZERO);
+        assert!(
+            writer
+                .write_atomic_pipe_record_until(b"one\n", expired)
+                .is_err()
+        );
+        let mut reader = held
+            .reader
+            .native_settlement
+            .as_ref()
+            .unwrap()
+            .reader
+            .file();
+        assert_eq!(
+            reader.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(writer.file_identity().is_ok());
     }
 }

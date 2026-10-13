@@ -11,6 +11,9 @@
 //! completion fence, cloud lifetime, or retained worker result. Scratch state
 //! is retained for the enclosing disposable fixture owner, including failures.
 
+/// Owner token carried by the secure temporaries this adapter publishes.
+const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
+
 use anyhow::{Context as _, Result, ensure};
 use lillux::{
     PinnedDirectory,
@@ -22,7 +25,6 @@ use std::{
     ffi::OsStr,
     io::{Seek as _, Write as _},
     path::Path,
-    sync::Arc,
 };
 
 const MEMBERS: [&str; 5] = [
@@ -219,6 +221,7 @@ fn stage_runtime(
                 path.file_name().context("runtime filename absent")?,
                 &bytes,
                 0o755,
+                SYNTHETIC_TEMP_PURPOSE,
             )?
             .context("runtime member already exists")?;
     }
@@ -233,16 +236,21 @@ fn observe(relative: &str, request: Request) -> Result<Observation> {
     stage_runtime(&input, &runtime, &request.runtime_sha256)?;
     let candidate = scratch.create_child(OsStr::new("candidate"), 0o700)?;
     candidate
-        .atomic_create_pinned_regular(OsStr::new("counter"), b"0000000000000000", 0o644)?
+        .atomic_create_pinned_regular(
+            OsStr::new("counter"),
+            b"0000000000000000",
+            0o644,
+            SYNTHETIC_TEMP_PURPOSE,
+        )?
         .context("counter already exists")?;
     // Ordinary private CAS initialization, not a fabricated candidate-launch
     // binding. It contains no signed heads, project admission or worker state.
     let state_root = scratch.create_child(OsStr::new("cas-state"), 0o700)?;
-    let state =
-        ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))?;
-    let authority = state.pinned_authority()?;
-    let guard = authority.acquire_shared_guard()?;
-    drop(state);
+    let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)
+        .context("initialize private probe CAS")?;
+    let guard = authority
+        .acquire_shared_guard()
+        .context("guard private probe CAS")?;
     let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
         ryeos_state::project_sync::ProjectSyncScope::FullProject,
         Vec::new(),
@@ -290,6 +298,7 @@ fn observe(relative: &str, request: Request) -> Result<Observation> {
         contain_process_group: true,
         nested_sandbox: false,
         aggregate_limits: None,
+        target_limits: None,
     };
     let (mut held, pipes) =
         lillux::prepare_linux_sandbox_piped(request_native).map_err(anyhow::Error::msg)?;
@@ -468,7 +477,12 @@ fn guest_parent() -> Result<()> {
     })
     .map_err(anyhow::Error::msg)?;
     drop(child.take_input().map_err(anyhow::Error::msg)?);
-    work.atomic_create_pinned_regular(OsStr::new("parent.ready"), b"1", 0o644)?
+    work.atomic_create_pinned_regular(
+        OsStr::new("parent.ready"),
+        b"1",
+        0o644,
+        SYNTHETIC_TEMP_PURPOSE,
+    )?
         .context("guest handshake already present")?;
     let deadline = MonotonicDeadline::after(Duration::from_secs(45));
     while !deadline.has_elapsed() {

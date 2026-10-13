@@ -1,0 +1,37 @@
+category: local-inference
+version: "1.0.0"
+description: Normalize one owner-staged Modal guest driver capture into an unqualified tree product.
+effects: recorded
+product_recipe: config:ryeos-runtime/modal-user-driver-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.ryeos-runtime/modal-user-driver-products
+      - ryeos.execute.tool.local-inference/modal-driver-normalize/normalize
+config:
+  start: normalize
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    normalize:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:local-inference/modal-driver-normalize/normalize
+        ref_bindings: {}
+        params:
+          schema: ryeos.modal_driver_normalizer_request.v1
+          capture_root: inputs/modal-driver-capture
+          output_root: products/modal-guest-user-driver
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

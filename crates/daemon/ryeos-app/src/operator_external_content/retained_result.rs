@@ -69,7 +69,7 @@ fn import_inner(
         bail!("expected_file_sha256 requires a file source and a canonical digest");
     }
     let policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     if request.maximum_bytes == 0 || request.maximum_bytes > policy.limits.max_total_bytes {
         bail!("retained result import maximum_bytes is outside node policy");

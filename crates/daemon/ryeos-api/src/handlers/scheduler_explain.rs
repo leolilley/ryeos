@@ -25,27 +25,30 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let _read_guard = scheduler
+        .acquire_read()
+        .await
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let db = scheduler.scheduler_db();
+    ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
-    let spec = state
-        .scheduler_db
+    let spec = db
         .get_spec(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.execution.principal_id()))?;
 
-    let last_fire = state
-        .scheduler_db
+    let last_fire = db
         .get_last_fire(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let total_fires = state
-        .scheduler_db
+    let total_fires = db
         .count_fires(&req.schedule_id, None)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let cursor = state
-        .scheduler_db
+    let cursor = db
         .get_cursor(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .filter(|cursor| cursor.spec_hash == spec.spec_hash);

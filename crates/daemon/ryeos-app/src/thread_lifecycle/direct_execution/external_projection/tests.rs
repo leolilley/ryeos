@@ -27,7 +27,7 @@ fn compiled_direct_token_requires_exact_reservation_owner_tuple() {
     };
 
     let directory = tempfile::tempdir().unwrap();
-    let db = crate::runtime_db::RuntimeDb::open(&directory.path().join("runtime.sqlite3")).unwrap();
+    let db = crate::runtime_db::test_native::TestRuntime::open(&directory.path().join("runtime.sqlite3"));
     let mut reservation =
         crate::runtime_db::external_execution::tests::direct_owner_reservation(&db);
     let exact_program = Fixture::new().compile().unwrap();
@@ -190,10 +190,12 @@ struct Fixture {
 #[test]
 fn ordinary_direct_preflight_two_node_plan_reaches_endpoint_admission() {
     let root = tempfile::tempdir().unwrap();
-    let state = crate::state::test_support::build(root.path()).unwrap();
+    let (_state_owner, state) = crate::state::test_support::build(root.path()).unwrap();
     let fixture = Fixture::new();
     assert!(state.node_config.external_execution.is_empty());
     let prepared = super::super::PreparedItemPlan {
+        resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
+        persistent_session_capsule_hash: None,
         timeout_secs: 30,
         plan: fixture.plan,
         root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
@@ -309,7 +311,7 @@ impl Fixture {
             descriptor_path: PathBuf::from("/fixture/protocol.yaml"),
         };
         let inputs = serde_json::from_value(json!({
-            "schema":4, "base_snapshot":{"descriptor":3,"snapshot_hash":"1".repeat(64),
+            "schema":ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, "workspace_view":"full_snapshot", "base_snapshot":{"descriptor":3,"snapshot_hash":"1".repeat(64),
                 "closure_digest":"2".repeat(64),"object_count":3,"blob_count":1,"total_bytes":1024},
             "workspace_outputs":null,
             "inputs":[{"role":"product","authority_id":"runtime","descriptor":4,
@@ -773,6 +775,8 @@ fn external_closure_capture_is_portable_and_rechecks_final_authority() {
         ]);
         let mut project = immutable_project_authority("1".repeat(64));
         let mut prepared = super::super::PreparedItemPlan {
+            resource_policy: super::super::PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
             timeout_secs: 30,
             plan: fixture.plan,
             root_subject_source_identity: DirectRootSourceIdentity::Project,
@@ -1119,8 +1123,119 @@ fn external_direct_prebirth_constraints_need_no_born_program_or_guest_inputs() {
 }
 
 #[test]
+fn mechanical_projection_checks_do_not_enable_ordinary_guest_support() {
+    let mut fixture = Fixture::new();
+    fixture.plan.filesystem_authority_ceiling = IsolationFilesystemAuthorityCeiling::CapturedInputs;
+    fixture.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+        max_open_files: Some(128),
+        max_address_space_bytes: Some(256 * 1024 * 1024),
+        max_cpu_seconds: Some(2),
+        max_processes: None,
+        deny_process_creation: true,
+        max_stdout_bytes: Some(32768),
+        max_stderr_bytes: Some(8192),
+    });
+    // Mechanical validation grants no root/purpose, compiled fixture, process,
+    // allocation, or qualification authority. Ordinary admission remains shut.
+    validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor).unwrap();
+    assert!(validate_external_direct_plan(&fixture.plan, &fixture.protocol.descriptor).is_err());
+    for invalid in [0, u64::MAX] {
+        fixture
+            .plan
+            .subprocess_limits
+            .as_mut()
+            .unwrap()
+            .max_cpu_seconds = Some(invalid);
+        assert!(
+            validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+                .is_err()
+        );
+    }
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .max_cpu_seconds = Some(2);
+    fixture.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::NodePolicy;
+    assert!(
+        validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+            .is_err()
+    );
+    fixture.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::Isolated;
+    fixture.protocol.descriptor.env_injections.push(
+        ryeos_engine::protocol_vocabulary::EnvInjection {
+            name: "AUTHORITY".into(),
+            source: EnvInjectionSource::ThreadAuthToken,
+        },
+    );
+    assert!(
+        validate_external_direct_plan_semantics(&fixture.plan, &fixture.protocol.descriptor)
+            .is_err()
+    );
+}
+
+#[test]
+fn feature_claims_follow_sealed_view_and_target_limits_not_output_only_caps() {
+    use ryeos_external_execution_contract::{
+        CAPTURED_INPUTS_SUPPORT_CLAIM, TARGET_LIMITS_SUPPORT_CLAIM,
+    };
+    let mut fixture = Fixture::new();
+    fixture.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+        max_open_files: None,
+        max_address_space_bytes: None,
+        max_cpu_seconds: None,
+        max_processes: None,
+        deny_process_creation: false,
+        max_stdout_bytes: Some(32768),
+        max_stderr_bytes: Some(8192),
+    });
+    assert!(
+        required_direct_feature_claims(&fixture.plan)
+            .unwrap()
+            .is_empty()
+    );
+    fixture.plan.filesystem_authority_ceiling = IsolationFilesystemAuthorityCeiling::CapturedInputs;
+    assert_eq!(
+        required_direct_feature_claims(&fixture.plan).unwrap(),
+        vec![CAPTURED_INPUTS_SUPPORT_CLAIM]
+    );
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .deny_process_creation = true;
+    assert_eq!(
+        required_direct_feature_claims(&fixture.plan).unwrap(),
+        vec![CAPTURED_INPUTS_SUPPORT_CLAIM, TARGET_LIMITS_SUPPORT_CLAIM]
+    );
+    fixture
+        .plan
+        .subprocess_limits
+        .as_mut()
+        .unwrap()
+        .max_cpu_seconds = Some(u64::MAX);
+    assert!(required_direct_feature_claims(&fixture.plan).is_err());
+    // This control derives requirements; unsupported source remains refused
+    // by admission and cannot use the data assertion as execution authority.
+    assert!(validate_external_direct_plan(&fixture.plan, &fixture.protocol.descriptor).is_err());
+}
+
+#[test]
 fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
-    for (name, mutate) in [
+    let cases: [(&str, fn(&mut Fixture)); 15] = [
+        ("native limits", |f: &mut Fixture| {
+            f.plan.subprocess_limits = Some(ryeos_engine::contracts::ExecutionSubprocessLimits {
+                max_open_files: None,
+                max_address_space_bytes: Some(134217728),
+                max_cpu_seconds: Some(3),
+                max_processes: None,
+                deny_process_creation: true,
+                max_stdout_bytes: Some(32768),
+                max_stderr_bytes: Some(8192),
+            });
+        }),
         (
             "model",
             (|f: &mut Fixture| f.plan.capabilities.requires_model = true) as fn(&mut Fixture),
@@ -1172,7 +1287,8 @@ fn external_direct_projection_refuses_semantics_it_cannot_preserve() {
         ("network-ceiling", |f: &mut Fixture| {
             f.plan.network_authority_ceiling = IsolationNetworkAuthorityCeiling::NodePolicy
         }),
-    ] {
+    ];
+    for (name, mutate) in cases {
         let mut fixture = Fixture::new();
         mutate(&mut fixture);
         if name != "source-entry" {
@@ -1319,4 +1435,9 @@ fn external_direct_projection_preserves_ordinary_environment_source_authority() 
         no_path.compile().is_err(),
         "search without PATH was discarded"
     );
+}
+
+pub(super) fn project_file_plan_fixture() -> (ExecutionPlan, ExternalGuestInputProjection) {
+    let fixture = Fixture::new();
+    (fixture.plan, fixture.inputs)
 }

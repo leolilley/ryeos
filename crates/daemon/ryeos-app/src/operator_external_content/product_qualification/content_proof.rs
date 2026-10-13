@@ -12,12 +12,12 @@ use std::sync::Arc;
 use super::{
     CurrentVerifierContent, CurrentVerifierContext, ProductQualificationResult,
     ProductQualificationVerifier, authorize_qualification_terminal, execution_evidence,
-    require_reproducible_current_verifier_lane,
-    resolve_current_bundle_verifier_identity_against_admitted,
+    require_reproducible_current_verifier_lane, require_unguarded_resolution,
+    resolve_current_bundle_verifier_identity_against_admitted, with_state_guard,
 };
 use crate::handler_context::HandlerContext;
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::operator_external_content::content_qualification::{
     ContentQualificationLaunchRequest, prepare_source,
 };
@@ -63,8 +63,9 @@ pub struct ContentQualificationResponse {
     pub idempotent: bool,
 }
 
-/// Fresh, read-only eligibility for a protected runtime binding. This does not
-/// authorize provider contact or qualify a restored guest-owner snapshot.
+/// Fresh eligibility for a protected runtime binding. Consumer admission may
+/// stage exact CAS inputs; this does not authorize provider contact or qualify
+/// a restored guest-owner snapshot.
 pub(crate) fn load_current_qualified_content(
     state: &AppState,
     context: &HandlerContext,
@@ -76,22 +77,30 @@ pub(crate) fn load_current_qualified_content(
     ryeos_state::external_content::qualification_publication::PublishedContentQualification,
 > {
     crate::operator_authority::require_admitted_operator(state, context)?;
+    require_unguarded_resolution("current content qualification check")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let published = ryeos_state::external_content::qualification_publication::lookup_exact(
-        &authority,
-        coordinate,
-        qualification_hash,
-        &context.fingerprint,
-        state.identity.verifying_key(),
-        limits,
-        &guard,
-    )?
-    .context("content qualification is not published at the exact coordinate")?;
+    // Source preparation and verifier resolution below start handler
+    // processes, so the published witness is read in its own guarded segment
+    // and re-read in a final one rather than guarded across resolution.
+    let lookup = |authority: &ryeos_state::PinnedStateAuthority| {
+        with_state_guard(authority, |guard| {
+            ryeos_state::external_content::qualification_publication::lookup_exact(
+                authority,
+                coordinate,
+                qualification_hash,
+                &context.fingerprint,
+                state.identity.verifying_key(),
+                limits,
+                guard,
+            )?
+            .context("content qualification is not published at the exact coordinate")
+        })
+    };
+    let published = lookup(&authority)?;
     if published
         .attestation
         .is_expired_at(&lillux::time::iso8601_now())?
@@ -116,7 +125,6 @@ pub(crate) fn load_current_qualified_content(
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         &authority,
-        &guard,
         context,
         &purpose.verifier_ref,
         &purpose.policy_source.policy.verifier_parameters,
@@ -139,7 +147,10 @@ pub(crate) fn load_current_qualified_content(
     content.verify_verifier_realizations(&current.realizations, &purpose.subject_declaration_id)?;
     // The current verifier lookup is another checked-generation observation.
     // Rejoin source/policy rather than treating the first preparation as a lock.
-    prepared.require_current(state, context, AcquisitionMode::Offline)?;
+    prepared.require_current_consumer(state, context, AcquisitionMode::Offline, purpose)?;
+    if lookup(&authority)? != published {
+        bail!("content qualification changed while its current verifier was re-resolved");
+    }
     Ok(published)
 }
 
@@ -155,7 +166,6 @@ pub async fn qualify(
     tokio::task::spawn_blocking(move || {
         let evidence = prove_blocking(&state, &context, &request)?;
         let authority = state.state_store.pinned_state_authority()?;
-        let guard = authority.acquire_shared_guard()?;
         let limits = state
             .node_policy
             .require::<NodeObjectClosurePolicy>()?
@@ -165,6 +175,8 @@ pub async fn qualify(
         };
         // Proof construction and publication are separate cuts. Rejoin signed
         // source eligibility rather than relying on the earlier observation.
+        // That rejoin resolves signed sources and starts handler processes,
+        // so it runs before the publication guard is taken.
         prepare_source(
             &state,
             &context,
@@ -172,7 +184,19 @@ pub async fn qualify(
             AcquisitionMode::Offline,
             &content.realization,
         )?
-        .validate_purpose(&evidence.purpose)?;
+        .require_current_consumer(
+            &state,
+            &context,
+            AcquisitionMode::Offline,
+            &evidence.purpose,
+        )?;
+        // Guarded publication cut. The retained verifier terminal is re-read
+        // under this guard, and publication re-authenticates the capsule and
+        // realization closures the evidence names under the same guard.
+        let guard = authority.acquire_shared_guard()?;
+        recheck_content_evidence_guarded(
+            &state, &context, &request, &authority, &guard, &evidence,
+        )?;
         let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
         let attestation = evidence.sign_attestation(&signer, lillux::time::iso8601_now(), None)?;
         let _permit = state
@@ -206,8 +230,11 @@ fn prove_blocking(
 ) -> anyhow::Result<ContentQualificationEvidence> {
     crate::operator_authority::require_admitted_operator(state, context)?;
     request.validate()?;
+    // Source preparation, verifier resolution and evidence projection start
+    // handler processes. No guard is held across them; CAS reads run in short
+    // guarded segments and publication rechecks under its own guard.
+    require_unguarded_resolution("content qualification proof")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
@@ -235,19 +262,18 @@ fn prove_blocking(
         .admitted_launch_capsule_hash
         .as_deref()
         .context("content qualification terminal has no capsule")?;
-    let cas = authority.cas_store()?;
-    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+    let (capsule, realization) = with_state_guard(&authority, |_guard| {
+        let cas = authority.cas_store()?;
+        let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(&cas, capsule_hash)?,
+        )?;
+        let realization = capsule.verify_retained_execution_realization(
             &cas,
-            capsule_hash,
-            limits.max_object_bytes,
-        )?,
-    )?;
-    let realization = capsule.verify_retained_execution_realization(
-        &cas,
-        &authority.large_object_store()?,
-        authority.trust_store(),
-    )?;
+            &authority.large_object_store()?,
+            authority.trust_store(),
+        )?;
+        Ok((capsule, realization))
+    })?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
@@ -284,13 +310,12 @@ fn prove_blocking(
         AcquisitionMode::Offline,
         &content.realization,
     )?;
-    prepared.validate_purpose(purpose)?;
+    prepared.require_current_consumer(state, context, AcquisitionMode::Offline, purpose)?;
     let admitted = sealed.admitted_effective_resolution()?;
     require_reproducible_current_verifier_lane(&admitted.composed.derived, true)?;
     let current = resolve_current_bundle_verifier_identity_against_admitted(
         state,
         &authority,
-        &guard,
         context,
         &purpose.verifier_ref,
         &purpose.policy_source.policy.verifier_parameters,
@@ -330,7 +355,6 @@ fn prove_blocking(
     let (projected, execution_proof, settlement) = execution_evidence::prove(
         state,
         &authority,
-        &guard,
         limits,
         context,
         &terminal,
@@ -375,6 +399,59 @@ fn prove_blocking(
     };
     evidence.validate()?;
     Ok(evidence)
+}
+
+/// Guarded admission half of content qualification publication. Under the
+/// publication guard it re-reads the root verifier terminal, every participant
+/// child terminal and the subordinate-attempt journal named by the execution
+/// proof (see `recheck_execution_proof_journal_guarded`). Publication then
+/// re-authenticates the complete retained verifier, participant and source
+/// closures that the evidence names under that same guard before it writes.
+fn recheck_content_evidence_guarded(
+    state: &AppState,
+    context: &HandlerContext,
+    request: &ContentQualificationProofRequest,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    evidence: &ContentQualificationEvidence,
+) -> anyhow::Result<()> {
+    authority.ensure_guard(guard)?;
+    let root = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&request.verifier_chain_root_id)?
+        .context("content qualification verifier root disappeared before publication")?;
+    let (terminal, has_continuation, _) = state
+        .state_store
+        .get_authoritative_thread_snapshot_with_continuation_presence(
+            &request.verifier_chain_root_id,
+            &request.verifier_thread_id,
+        )?
+        .context("content qualification terminal disappeared before publication")?;
+    authorize_qualification_terminal(
+        &root,
+        &terminal,
+        has_continuation,
+        &request.verifier_chain_root_id,
+        &request.verifier_thread_id,
+        &context.fingerprint,
+    )?;
+    if ryeos_state::objects::thread_snapshot::hash_snapshot(&terminal)?
+        != evidence.verifier.terminal_snapshot_hash
+        || terminal.admitted_launch_capsule_hash.as_deref()
+            != Some(evidence.verifier.admitted_launch_capsule_hash.as_str())
+    {
+        bail!("content qualification terminal changed between proof and publication");
+    }
+    super::recheck_execution_proof_journal_guarded(
+        state,
+        authority,
+        guard,
+        &terminal,
+        &evidence.verifier,
+        &evidence.execution_proof,
+    )?;
+    authority.ensure_guard(guard)?;
+    Ok(())
 }
 
 #[cfg(test)]

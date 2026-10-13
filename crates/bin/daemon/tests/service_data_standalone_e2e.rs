@@ -11,7 +11,7 @@ use common::{StandaloneHarness, run_service_standalone_fresh};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_rebuild_runs_on_fresh_state() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:projection/rebuild", None)
+    let (out, _node) = run_service_standalone_fresh("service:projection/rebuild", None)
         .await
         .expect("run-service rebuild");
     assert!(
@@ -53,7 +53,12 @@ async fn standalone_rebuild_runs_on_fresh_state() {
 async fn standalone_bundle_install_then_list_then_remove() {
     // Persistent harness: core is installed under .ai/bundles/core/
     // so preflight's discover_installed_bundle_roots finds it.
-    let harness = StandaloneHarness::new_initialized().expect("standalone harness init");
+    // `testbundle` is granted explicit (empty) command-registration
+    // authority in the sealed node policy; install refuses any active bundle
+    // the node policy does not name.
+    let harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
+        .await
+        .expect("standalone harness init");
 
     // Build a minimal published candidate with its own kind namespace. Reusing
     // a core kind would create two providers in the prospective graph, while an
@@ -61,9 +66,10 @@ async fn standalone_bundle_install_then_list_then_remove() {
     let src = tempfile::tempdir().expect("src tempdir");
     let src_kinds = src.path().join(".ai/node/engine/kinds/testkind");
     std::fs::create_dir_all(&src_kinds).unwrap();
+    // Core is installed as an ordinary bundle below the node app root.
     let core_kind = harness
         .app_root
-        .join(".ai/node/engine/kinds/config/config.kind-schema.yaml");
+        .join(".ai/bundles/core/.ai/node/engine/kinds/config/config.kind-schema.yaml");
     let config_schema = std::fs::read_to_string(&core_kind).expect("read core config kind schema");
     let test_schema = lillux::signature::strip_signature_lines(&config_schema)
         .replace(

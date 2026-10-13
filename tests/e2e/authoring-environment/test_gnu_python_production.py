@@ -1,5 +1,6 @@
 import copy
 import ast
+import hashlib
 from pathlib import Path
 import io
 import json
@@ -26,6 +27,12 @@ POLICY_PATH = ROOT / "bundles/standard/.ai/config/ryeos/environments/qualificati
 CONSUMER_PATH = ROOT / ".ai/config/development/ryeos/gnu-python-qualified-runtime.yaml"
 VERIFIER_PATH = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/gnu-python.yaml"
 VERIFIER_BOOTSTRAP_PATH = ROOT / "bundles/standard/.ai/config/development/ryeos/gnu-python-verifier-bootstrap-activation.yaml"
+PRIVATE_PRODUCTS_PATH = ROOT / ".ai/config/development/ryeos/gnu-python-private-products.yaml"
+PRIVATE_GRAPH_PATH = ROOT / ".ai/graphs/ryeos/development/gnu-python-private-production.yaml"
+GPU_DRAFT_PRODUCTS_PATH = ROOT / "bundles/local-inference/.ai/config/ryeos-runtime/gnu-cuda-products-draft.yaml"
+PRIVATE_VERIFIER_PATH = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/gnu-python-private.yaml"
+PRIVATE_POLICY_PATH = ROOT / "bundles/standard/.ai/config/ryeos/environments/qualification/gnu-python-private.yaml"
+PRIVATE_RUNTIME_PATH = ROOT / ".ai/config/development/ryeos/gnu-python-private-qualified-runtime.yaml"
 
 
 def contract():
@@ -63,6 +70,8 @@ class GnuPythonProductionTests(unittest.TestCase):
                 "mode": "first_match",
             },
         })
+        self.assertEqual(tool["config_schema"]["properties"]["profile"], {
+            "type": "string", "enum": ["fixed_absolute_v1", "private_origin_v1"]})
         declarations = {entry["id"]: entry for entry in tool["external_content"]}
         archive = declarations["gnu-python-archives"]
         self.assertEqual(archive["digest"], contract()["archives"]["manifest"]["digest"])
@@ -71,7 +80,12 @@ class GnuPythonProductionTests(unittest.TestCase):
 
     def test_exact_authored_contract_produces_only_after_exact_input_check(self):
         value = contract()
-        self.assertEqual(value["schema"], "ryeos.gnu_python_production_inputs.v2")
+        self.assertEqual(value["schema"], "ryeos.gnu_python_production_inputs.v3")
+        self.assertEqual(value["private_profile"], {
+            "id": "private_origin_v1",
+            "runtime_root": "/ryeos/realizations/python-gnu-private/python",
+            "runpath_policy": "member-relative-origin-v1",
+        })
         self.assertIs(validate_contract(value), value)
         with mock.patch(
             "gnu_python_production._check_archive_tree",
@@ -80,6 +94,24 @@ class GnuPythonProductionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fixture exact archive check"):
                 produce(Path("/unused-after-refusal"), value)
         exact_archive.assert_called_once()
+
+    def test_evidence_config_hash_covers_the_actual_v3_contract(self):
+        value = contract()
+        expected = hashlib.sha256(production.canonical_json(value)).hexdigest()
+        self.assertEqual(production._config_digest(value), expected)
+        changed = copy.deepcopy(value)
+        changed["private_profile"]["runtime_root"] += "-changed"
+        self.assertNotEqual(production._config_digest(value),
+                            production._config_digest(changed))
+        for field, replacement in (
+            ("id", "other_profile"),
+            ("runtime_root", "/tmp/python"),
+            ("runpath_policy", "fixed"),
+        ):
+            changed = copy.deepcopy(value)
+            changed["private_profile"][field] = replacement
+            with self.assertRaisesRegex(ValueError, "private GNU Python profile"):
+                validate_contract(changed)
 
     def test_single_config_resolve_body_is_consumed_without_a_path_map(self):
         value = contract()
@@ -99,6 +131,25 @@ class GnuPythonProductionTests(unittest.TestCase):
                            side_effect=lambda _project, supplied: validate_contract(supplied)):
             stdin.buffer = io.BytesIO(nested)
             with self.assertRaises(ValueError):
+                run_production()
+
+    def test_private_profile_is_a_closed_tool_parameter(self):
+        request = json.dumps({"resolved_config": contract(),
+                              "profile": "private_origin_v1"}).encode()
+        with mock.patch.object(sys, "argv", ["produce-gnu-python", "--project-path", "/tmp"]), \
+                mock.patch.object(sys, "stdin") as stdin, \
+                mock.patch("gnu_python_production.produce",
+                           return_value={"output_path": production.PRIVATE_OUTPUT.as_posix()}) as run, \
+                mock.patch.object(sys, "stdout", new=io.StringIO()):
+            stdin.buffer = io.BytesIO(request)
+            run_production()
+        run.assert_called_once_with(Path("/tmp"), contract(), "private_origin_v1")
+
+        request = json.dumps({"resolved_config": contract(), "profile": "invented"}).encode()
+        with mock.patch.object(sys, "argv", ["produce-gnu-python", "--project-path", "/tmp"]), \
+                mock.patch.object(sys, "stdin") as stdin:
+            stdin.buffer = io.BytesIO(request)
+            with self.assertRaisesRegex(ValueError, "unsupported GNU Python output profile"):
                 run_production()
 
     def test_qualification_requirement_is_source_contract_not_proof(self):
@@ -220,6 +271,116 @@ class GnuPythonProductionTests(unittest.TestCase):
         self.assertIn('"subject_manifest_hash": subject["manifest_hash"]', program)
         self.assertNotIn('"success": True', program)
         self.assertIn("print(json.dumps(result", program)
+
+    def test_private_profile_selects_distinct_graph_recipe_root_and_draft_worker_relation(self):
+        graph = yaml.safe_load(PRIVATE_GRAPH_PATH.read_text())
+        products = yaml.safe_load(PRIVATE_PRODUCTS_PATH.read_text())
+        draft = yaml.safe_load(GPU_DRAFT_PRODUCTS_PATH.read_text())
+        self.assertEqual(graph["product_recipe"],
+                         "config:development/ryeos/gnu-python-private-products")
+        action = graph["config"]["nodes"]["produce"]["action"]
+        self.assertEqual(action["item_id"],
+                         "tool:ryeos/development/authoring-environment-production/produce-gnu-python")
+        self.assertEqual(action["params"], {"profile": "private_origin_v1"})
+        self.assertEqual(products["build_products"]["output_roots"][0]["path"],
+                         "products/gnu-python-relocatable-distribution")
+        runtime = products["build_products"]["products"][0]
+        self.assertEqual(runtime["name"], "runtime_private")
+        self.assertEqual(runtime["path"], "products/gnu-python-relocatable-distribution")
+        relation = draft["product_relationships"]["relationships"][0]
+        self.assertEqual(relation["producer"], {
+            "canonical_ref": "graph:ryeos/development/gnu-python-private-production",
+            "recipe_binding": "product_recipe",
+            "product_name": "runtime_private",
+            "parameters": {},
+        })
+        self.assertEqual(relation["qualification"], {
+            "policy_ref": "config:ryeos/environments/qualification/gnu-python-private",
+            "required_claims": ["gnu_python_private_origin_startup_providers_v1",
+                                "gnu_python_zlib_1_3_2"],
+        })
+
+    def test_private_qualification_verifier_refuses_without_origin_and_omission_checks(self):
+        verifier = yaml.safe_load(PRIVATE_VERIFIER_PATH.read_text())
+        policy = yaml.safe_load(PRIVATE_POLICY_PATH.read_text())
+        runtime = yaml.safe_load(PRIVATE_RUNTIME_PATH.read_text())
+        products = yaml.safe_load(PRIVATE_PRODUCTS_PATH.read_text())
+        programs = [entry["literal"] for entry in verifier["config"]["args"]
+                    if isinstance(entry, dict) and "literal" in entry]
+        self.assertEqual(len(programs), 2)
+        self.assertEqual(verifier["external_content"][0]["digest"],
+                         "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf")
+        self.assertEqual([slot["id"] for slot in verifier["external_product_slots"]],
+                         ["subject", "fixed_control", "gnu-python-support"])
+        self.assertEqual(verifier["external_product_slots"][1]["relationship"],
+                         "runtime_to_private_qualification_control")
+        self.assertEqual(verifier["external_product_slots"][2]["relationship"],
+                         "prepared_inputs_to_gnu_python_private_qualification")
+        for program in programs:
+            compile(program, str(PRIVATE_VERIFIER_PATH), "exec")
+        outer = programs[0]
+        probe = programs[-1]
+        self.assertEqual(policy["product_qualification_policy"]["allowed_claims"], [
+            "gnu_python_private_origin_startup_providers_v1", "gnu_python_zlib_1_3_2"])
+        self.assertEqual(runtime["external_product_slots"][0]["relationship"],
+                         "runtime_private_to_qualified_runtime")
+        relation = next(item for item in products["product_relationships"]["relationships"]
+                        if item["name"] == "runtime_private_to_qualified_runtime")
+        self.assertEqual(relation["qualification"]["policy_ref"],
+                         "config:ryeos/environments/qualification/gnu-python-private")
+        self.assertIn('"failure_before_python") is not True', outer)
+        self.assertIn('"failure_output_sha256"', outer)
+        self.assertIn('"provider_mappings"', outer)
+        self.assertIn('"ryeos.gnu-python-elf-inventory.v3"', probe)
+        self.assertIn('"private_origin_v1"', probe)
+        self.assertIn('distribution + "/elf-inventory.json"', probe)
+        self.assertIn('distribution + "/notices/python-build-standalone/PYTHON.json"', probe)
+        self.assertIn('"$ORIGIN/../lib"', probe)
+        self.assertIn('"$ORIGIN/../.."', probe)
+        self.assertIn('"$ORIGIN"', probe)
+        self.assertIn('"/proc/self/maps"', probe)
+        self.assertIn('"/ryeos/realizations/python-gnu/python/lib/libgcc_s.so.1"', probe)
+        self.assertIn('fixed_control_entry_dynamic = readelf_path(', probe)
+        self.assertIn('"/ryeos/realizations/python-gnu/python/bin/python3.14", "-d")', probe)
+        self.assertIn('fixed_control_entry_runpath != ["/ryeos/realizations/python-gnu/python/lib"]', probe)
+        self.assertIn('"30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"', probe)
+        self.assertIn('support + "/elf/bin/readelf"', probe)
+        self.assertIn('actual_runpath != item["runpath"]', probe)
+        self.assertIn('actual_nodeflib != item["nodeflib"]', probe)
+        self.assertIn('read_regular(root + "/" + member', probe)
+        self.assertIn('shutil.copytree(root, probe_root, symlinks=True)', probe)
+        self.assertIn('"error while loading shared libraries: libgcc_s.so.1"', probe)
+        self.assertNotIn('os.symlink(root + "/lib/" + name', probe)
+        self.assertIn('"failure_before_python": True', probe)
+        self.assertIn('"selected_copy_is_complete_runtime": True', probe)
+        self.assertIn('"same_loader_complete_control_exit_code": positive_status', probe)
+        self.assertIn('"same_loader_complete_control_started_python": os.path.exists(sentinel)', probe)
+        self.assertIn('"failure_output_sha256": hashlib.sha256(failed_output).hexdigest()', probe)
+        self.assertIn('"provider_mappings": {name: next(iter(paths))', probe)
+        self.assertIn('os.path.exists(sentinel)', probe)
+        self.assertIn('"gnu_python_private_origin_startup_providers_v1"', probe)
+        self.assertIn('"gnu_python_zlib_1_3_2"', probe)
+        self.assertIn("def run_limited(", probe)
+        self.assertIn("limit + 1 - total", probe)
+        self.assertNotIn("subprocess.run(", probe)
+        tree = ast.parse(probe)
+        re_import = next(node for node in tree.body
+                         if isinstance(node, ast.Import) and
+                         any(alias.name == "re" for alias in node.names))
+        expected = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and
+                        node.name == "expected_runpath")
+        namespace = {}
+        exec(compile(ast.Module(body=[re_import, expected], type_ignores=[]),
+                     str(PRIVATE_VERIFIER_PATH), "exec"), namespace)
+        path_for = namespace["expected_runpath"]
+        self.assertEqual(path_for("bin/python3.14"), "$ORIGIN/../lib")
+        self.assertEqual(path_for("lib/libc.so.6"), "$ORIGIN")
+        self.assertEqual(path_for("lib/python3.14/lib-dynload/math.so"), "$ORIGIN/../..")
+        with self.assertRaisesRegex(SystemExit, "unsafe member path"):
+            path_for("../../etc/passwd")
+        with self.assertRaisesRegex(SystemExit, "unsupported relative layout"):
+            path_for("other/module.so")
 
     def test_independent_verifier_rejects_self_verification_before_subject_execution(self):
         verifier = yaml.safe_load(VERIFIER_PATH.read_text())
@@ -369,7 +530,7 @@ class GnuPythonProductionTests(unittest.TestCase):
         })
         policy = yaml.safe_load(POLICY_PATH.read_text())["product_qualification_policy"]
         self.assertEqual(policy, {
-            "schema": "ryeos.product_qualification_policy.v3",
+            "schema": "ryeos.product_qualification_policy.v4",
             "verifier_ref": "tool:ryeos/environments/qualification/gnu-python",
             "subject_declaration_id": "subject",
             "allowed_claims": ["gnu_python_extension_startup_providers_v1",

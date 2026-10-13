@@ -115,6 +115,10 @@ impl ScopedProducerObservation {
                         ),
                 "scoped relay handoff differs from retained process and producer source"
             );
+            require_applied_launch_commitment_digest(
+                &handoff.expected_applied_launch_digest,
+                &self.applied_launch,
+            )?;
         }
         ensure!(
             self.producer_source.recipe_digest == self.recipe_digest
@@ -223,6 +227,72 @@ impl ScopedProducerObservation {
             "observation misclassifies producer exit"
         );
         Ok(())
+    }
+}
+
+/// Recheck the held target plan against the retained post-release receipt.
+/// The live launch checked this before observing the child; qualification and
+/// replay must not accept a CAS observation whose target bytes contradict the
+/// daemon-authored relay handoff.
+fn require_applied_launch_commitment_digest(
+    expected: &str,
+    actual: &lillux::LinuxSandboxAppliedLaunchReceipt,
+) -> Result<()> {
+    let target = lillux::LinuxSandboxAppliedLaunchCommitments {
+        executable_sha256: actual.executable_sha256,
+        argv_sha256: actual.argv_sha256,
+        environment_sha256: actual.environment_sha256,
+        cwd_sha256: actual.cwd_sha256,
+    };
+    ensure!(
+        digest_json(&target)? == expected,
+        "scoped observation applied target differs from retained relay handoff"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod applied_launch_commitment_tests {
+    use super::*;
+
+    #[test]
+    fn retained_relay_target_rejects_each_changed_applied_field() {
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        let expected = digest_json(&lillux::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: receipt.executable_sha256,
+            argv_sha256: receipt.argv_sha256,
+            environment_sha256: receipt.environment_sha256,
+            cwd_sha256: receipt.cwd_sha256,
+        })
+        .unwrap();
+        require_applied_launch_commitment_digest(&expected, &receipt).unwrap();
+
+        for field in 0..4 {
+            let mut changed = receipt.clone();
+            match field {
+                0 => changed.executable_sha256[0] ^= 1,
+                1 => changed.argv_sha256[0] ^= 1,
+                2 => changed.environment_sha256[0] ^= 1,
+                _ => changed.cwd_sha256[0] ^= 1,
+            }
+            assert!(require_applied_launch_commitment_digest(&expected, &changed).is_err());
+        }
     }
 }
 
@@ -630,7 +700,7 @@ fn replay_observation(
     let _guard = authority.acquire_shared_guard()?;
     let value = authority
         .cas_store()?
-        .get_object(hash)?
+        .get_object_bounded(hash, MAX_OBSERVATION_RESPONSE_BYTES as u64)?
         .context("committed scoped observation CAS object absent")?;
     let observation: ScopedProducerObservation =
         serde_json::from_value(value.clone()).context("decode committed scoped observation")?;
@@ -649,7 +719,6 @@ fn replay_observation(
 pub(crate) fn qualification_scoped_attempt_proof(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    _guard: &ryeos_state::CasMutationGuard,
     owner: &LaunchOwner,
     purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ExecutionEvidenceCandidateScopedAttemptWire,
@@ -707,17 +776,37 @@ pub(crate) fn qualification_scoped_attempt_proof(
             && record.retirement_evidence_digest.is_some(),
         "projected scoped attempt differs from settled daemon journal"
     );
-    let value = authority
-        .cas_store()?
-        .get_object(
-            record
-                .observation_object_hash
-                .as_deref()
-                .context("settled scoped attempt has no retained observation")?,
-        )?
-        .context("settled scoped observation CAS object is missing")?;
+    // Producer recipe resolution above starts handler processes, so the
+    // caller holds no CAS guard. The retained observation is read under a
+    // short guard of its own that covers only this exact-hash CAS read.
+    let value = {
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object_bounded(
+                record
+                    .observation_object_hash
+                    .as_deref()
+                    .context("settled scoped attempt has no retained observation")?,
+                MAX_OBSERVATION_RESPONSE_BYTES as u64,
+            )?
+            .context("settled scoped observation CAS object is missing")?;
+        authority.ensure_guard(&guard)?;
+        value
+    };
     let observation: ScopedProducerObservation = serde_json::from_value(value)?;
     observation.validate_against(&record)?;
+    match (&current.recipe.loopback_ingress, &observation.relay_handoff) {
+        (Some(ingress), Some(handoff)) => handoff.validate_for_verifier(
+            &owner.thread_id,
+            &candidate.scenario_id,
+            source,
+            ingress,
+        )?,
+        (None, None) => {}
+        _ => bail!("scoped observation relay handoff differs from signed producer recipe"),
+    }
     if purpose
         .policy_source()
         .policy

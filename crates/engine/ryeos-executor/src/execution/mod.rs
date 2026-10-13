@@ -4,6 +4,7 @@
 //! 1. Checkout project from CAS to working directory
 //! 2. After execution, diff working dir and fold back changes
 
+mod admitted_callback_authority;
 pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
@@ -15,19 +16,32 @@ pub(crate) mod external_content;
 mod external_direct_inputs;
 pub(crate) mod external_guest_inputs;
 pub mod external_guest_runtime_product;
+pub mod external_qualification_inputs;
+pub(crate) mod external_qualification_local_materials;
+pub(crate) mod external_qualification_local_worker;
+pub(crate) mod external_qualification_relay;
+pub mod external_qualification_start;
+pub(crate) mod external_structured_session_relay;
 pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod mechanism_input_custody;
 pub mod persistent_session;
 pub(crate) mod prepared_content_identity;
 pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
+pub(crate) mod retained_consumer_archive;
 pub mod runner;
 pub mod runtime_dispatch;
+mod selected_invocation_root;
+pub use selected_invocation_root::{
+    SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, abandoned_selected_compositions,
+};
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
@@ -534,6 +548,7 @@ pub(crate) fn checkout_project_snapshot(
                 let _ = staging_root.remove_contents_recursive().and_then(|()| {
                     cache_root
                         .remove_empty_child_if_same(&staging_name, &staging_root)
+                        .map(|receipt| receipt.is_some())
                         .and_then(|removed| {
                             if removed {
                                 Ok(())
@@ -2380,7 +2395,7 @@ mod pinned_child_authority_tests {
     fn workspace_capture_deduplicates_scope_across_distinct_process_groups() {
         let boot = "00000000-0000-4000-8000-000000000000";
         let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
@@ -2449,7 +2464,7 @@ mod pinned_child_authority_tests {
 
         let state_root = tempfile::tempdir().unwrap();
         let state_db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+            ryeos_app::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
                 .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();

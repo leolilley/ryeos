@@ -29,7 +29,7 @@ pub struct CandidateAuthoringBundle {
 /// use tuple only after independently previewing the signed Worker source.
 pub fn sign_candidate_qualification_inputs(
     bundle_root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     parameters: &serde_json::Value,
@@ -43,7 +43,7 @@ pub fn sign_candidate_qualification_inputs(
     };
     let ai = bundle_root.join(".ai");
     let policy = format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: Exact synthetic external candidate runtime qualification\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v3\n  verifier_ref: tool:fixtures/verify-external-runtime\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: Exact synthetic external candidate runtime qualification\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: tool:fixtures/verify-external-runtime\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
     );
     let path = ai.join("config/fixtures/qualification.yaml");
     std::fs::write(
@@ -301,7 +301,7 @@ mod runtime_recipe_tests {
 pub fn write_candidate_authoring_bundle(
     repository_source_root: &Path,
     root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     real_codex: bool,
@@ -401,7 +401,7 @@ config_schema:
     let session_response = br#"{"additionalProperties":false,"properties":{"thread":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["thread"],"type":"object"}"#;
     let turn_response = br#"{"additionalProperties":false,"properties":{"turn":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["turn"],"type":"object"}"#;
     let mut profile = serde_json::json!({
-        "schema_version": 10,
+        "schema_version": 11,
         "external_candidate": joined_external_candidate_requirement(),
         "transport": "stdio_jsonrpc",
         "http_sse": null,
@@ -416,6 +416,11 @@ config_schema:
         "baseline_destination": "fixture.json",
         "auxiliary_configs": [],
         "runtime_configs": [],
+        "configuration_absence": {
+            "absolute_paths": [],
+            "startup_ancestor_paths": [],
+            "route_ancestor_paths": []
+        },
         "portable_state": {
             "schema":1,
             "restore_contract":"ryeos.worker_session.restore.v1",
@@ -991,7 +996,7 @@ pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
 }
 
 pub fn signed_candidate_operation_sources(
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> BTreeMap<String, (Vec<u8>, u32)> {
     let metadata = |description: &str, workspace_access: &str| {
         format!(

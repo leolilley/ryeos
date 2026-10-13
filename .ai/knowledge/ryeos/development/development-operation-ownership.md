@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-24T03:39:11Z:a47c2e4d0af14f386650d898b1dfa085fadd3e8191d1efdb2c50385f2b06d8e9:afd/U89P1q8ChN5REkxNK8X2pUjHx9GcHiluSXvqUxNop7te9Lp78J6zS0hi8bGrCgg5gpMpuoOauo31Vo4sCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-29T01:29:18Z:84e727ed0f8ae969ffe619073ee8b82a16013b30b18d161d5cab305605f21a62:sI9BSiMImUQ7H2yzQXQvg2AtRsK0+hnVMM9JTWVr30ZQBUxlMjclIV7ULeinW2drVxB/DwqqYjAhJIiEd8R7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.5.0"
+version: "1.6.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -21,8 +21,6 @@ merely because the operation has acquired a Tool definition.
 
 ## Continuation rules from the Stage-0 handoff correction
 
-The active implementation sequence is section 0 of
-`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 Finish release-authority prerequisites, calibration/catalog bootstrap, then
 data-only and binary-bearing bundle publication/activation on another node.
 The full development-worker proof is separate. The source inventory below is
@@ -144,6 +142,31 @@ by moving source into a different directory.
 | `dev/free-build-space.py` | Host build-cache housekeeping, not project production or node GC. Existing Cargo cache and RyeOS GC owners must remain separate. | Remove personal default path and silent deletion errors, require exact exclusively owned target and explicit destructive intent. Do not run it against active builds or add node/host mounts to a Tool. |
 
 ## Acquisition and production are different authorities
+
+### Qualification definitions and release dispatch
+
+Development qualification policy Configs select the checker and its bounded
+parameters. Platform bootstrap provenance and static-link byte expectations
+are signed policy data. The Tools retain the algorithms, supported layouts,
+fixed claims and exact bootstrap interpreter declarations. GNU Python keeps
+its fixed startup/zlib propositions; Cargo-vendor keeps its exact lock/checksum
+and offline Cargo semantics. See
+[the qualification contract](remote-development-and-qualification.md#signed-development-checker-expectations)
+for the supported profile fields and trust limits.
+
+Release qualification uses the existing protected qualification launch owner.
+The release stage captures its exact signed recipe overlay, composes the
+verifier with the subject and qualified `python` selection, and requires the
+signed policy's checker and complete prepared inputs to match that composition.
+The protected owner reserves the launch, retains a read-only snapshot, seals
+the qualification purpose, and dispatches. The release stage reads the exact
+retained terminal before asking the existing qualification owner to publish.
+The four checker families retain their domain algorithms and current-policy
+consumer checks. Build and capture Graphs retain COW output authority.
+
+These are source contracts. Passing checker or admission tests does not record
+live calibration, publication, transfer or activation. Their operational owners
+must retain the exact accepted coordinates when integrating this generation.
 
 The current registry fetch helper requires host Python/PyYAML, curl >= 8.4,
 resolver files, trusted TLS roots and public network access. Its URL/byte/time

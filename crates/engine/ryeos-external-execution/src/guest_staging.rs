@@ -528,7 +528,9 @@ fn remove_staged_generation(
 ) -> Result<()> {
     root.remove_contents_recursive_bounded(staging_budget())?;
     ensure!(
-        parent.remove_empty_child_if_same(name, root)?,
+        parent
+            .remove_empty_child_if_same(name, root)
+            .map(|receipt| receipt.is_some())?,
         "guest staging generation changed before cleanup"
     );
     Ok(())
@@ -720,7 +722,7 @@ mod tests {
             },
         };
         let bootstrap = ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
                 schema: 2,
                 network_inputs,
@@ -730,7 +732,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
-            },
+            }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-staging-test".into(),
             occurrence_id: "occ-staging-test".into(),
@@ -763,6 +765,14 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
         };
         bootstrap.canonical_bytes().unwrap()
     }
@@ -774,6 +784,7 @@ mod tests {
         let launcher = b"start".as_slice();
         let supervisor = b"runrun".as_slice();
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -872,7 +883,7 @@ mod tests {
     #[test]
     fn exact_base_closure_can_be_staged_without_publishing_it() {
         let state = tempfile::tempdir().unwrap();
-        let db = ryeos_state::StateDb::open(state.path(), Arc::new(ryeos_state::TrustStore::new()))
+        let db = ryeos_state::test_support::TestState::open(state.path(), Arc::new(ryeos_state::TrustStore::new()))
             .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
@@ -1129,6 +1140,7 @@ mod tests {
         }
         entries.sort_by(|left, right| left.path().cmp(right.path()));
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -1838,6 +1850,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let opened =
@@ -1973,6 +1986,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let artifacts = private

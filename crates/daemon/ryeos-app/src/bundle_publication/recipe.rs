@@ -4,6 +4,7 @@
 //! filesystem allowance, or signature payload. Signing does not admit execution:
 //! the normal resolver and product lifecycle must still admit the returned item.
 
+use ryeos_bundle_publication_contract::{PORTABLE_QUALIFIER, SUBSTRATE_QUALIFIER};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,10 +42,8 @@ pub const PORTABLE_BUILD_RECIPE_REF: &str = "config:bundle-release/portable-buil
 pub const CAPTURE_RECIPE_REF: &str = "config:bundle-release/signed-capture-products";
 pub const PORTABLE_CAPTURE_RECIPE_REF: &str =
     "config:bundle-release/portable-signed-capture-products";
-pub const PORTABLE_QUALIFIER: &str = "tool:ryeos/bundle-release/portable-qualify";
 pub const SUBSTRATE_BUILD_RECIPE_REF: &str = "config:bundle-release/substrate-build-products";
 pub const SUBSTRATE_BUILD_GRAPH: &str = "graph:ryeos/bundle-release/substrate-build";
-pub const SUBSTRATE_QUALIFIER: &str = "tool:ryeos/bundle-release/substrate-qualify";
 
 /// The publisher may authorize only this receipt-shaped substrate producer.
 /// No Config body, graph reference, output path, or signing payload is caller supplied.
@@ -651,14 +650,14 @@ mod tests {
             bundle_publication_policy_section_digest: "a".repeat(64),
             trust_epoch: 1,
             release_input: json!({
-                "schema":"ryeos.bundle_release_input_plan.v1",
+                "schema":"ryeos.bundle_release_input_plan.v2",
                 "project_path":"/release/source", "bundle_name":"central-auth",
                 "authored_manifest":{"name":"central-auth","version":"0.1.0","provides_kinds":[]},
                 "source_snapshot_hash":"b".repeat(64), "predecessor_generation_hash":null,
                 "target":{"kind":"portable"}, "build_profile":"release",
                 "payload_ownership_item_ref":"config:bundle-release/payload-ownership",
                 "payload_ownership_content_hash":"c".repeat(64),
-                "payloads":[], "cargo_packages":[], "build_classes":[],
+                "payloads":[], "cargo_packages":[], "cargo_feature_selections":[], "build_classes":[],
                 "requires_binary_build":false,"clean_output_required":true,"ambient_target_reuse_allowed":false
             }),
             child_product_selections: vec![],
@@ -874,9 +873,12 @@ mod tests {
             "binary":"ryeos-web-tools",
             "cargo_package":"ryeos-web-tools",
             "build_class":"release",
-            "bundle_sets":["release-authority"]
+            "bundle_sets":["release-authority"],
+            "required_features":[]
         }]);
         request.release_input["cargo_packages"] = json!(["ryeos-web-tools"]);
+        request.release_input["cargo_feature_selections"] =
+            json!([{"cargo_package":"ryeos-web-tools","features":[]}]);
         request.release_input["build_classes"] = json!(["release"]);
         request.release_input["requires_binary_build"] = json!(true);
 
@@ -950,7 +952,7 @@ mod tests {
         let request = request();
         let temp = tempfile::tempdir().unwrap();
         let identity =
-            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
         let body = request.config_body().unwrap();
         let signed = lillux::signature::sign_content(&body, identity.signing_key(), "#", None);
         let response = json!({"schema":"ryeos.bundle_build_recipe_authorization.v1",

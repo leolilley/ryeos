@@ -8,7 +8,10 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 
 use crate::dispatch_error::DispatchError;
 
-use super::super::process_attachment::AttachedProcessGuard;
+use super::super::process_attachment::{
+    AttachOptions, AttachedLaunch, AttachedProcessGuard, AuthorizedLaunch, HeldLaunch,
+    HeldProcess, LaunchFailure, LaunchOwnerCoordinate, ReleaseTestimony, ReleasedLaunch,
+};
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::envelope::RuntimeResultStatus;
 use ryeos_runtime::process_outcome::RuntimeProcessOutcome;
@@ -46,7 +49,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub launch_owner: &'a str,
     pub chain_root_id: &'a str,
     pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
-    pub vault_bindings: &'a [(String, String)],
+    /// Authorized values; the protocol spec receives their names only.
+    pub secret_env: &'a ryeos_engine::contracts::DeliveredSecretEnv,
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
@@ -196,7 +200,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         launch_owner,
         chain_root_id,
         accounting_scope,
-        vault_bindings,
+        secret_env,
         thread_auth_token,
         roots,
         isolation,
@@ -214,7 +218,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     // isolation setup and process contact. An arbitrary error returned later
     // must not be retroactively classified as a preparation refusal.
     let (spec, request, isolation_daemon_socket_path) = (|| -> Result<_> {
-        let secret_map: BTreeMap<String, String> = vault_bindings.iter().cloned().collect();
         let callback_socket_requested = descriptor.env_injections.iter().any(|injection| {
             injection.source
                 == ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
@@ -308,9 +311,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             ));
         }
 
-        let declared_secret_bindings = secret_map
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()));
         spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -319,14 +319,17 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 )
             }))?
             .with_daemon_roots(roots)?
-            .with_bindings(
-                ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
-                declared_secret_bindings,
-            )?
+            .with_declared_secret_names(secret_env.names())?
             .with_typed_bindings(protocol_bindings)?
             .build();
 
-        let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
+        let mut request = super::super::lillux_bridge::to_lillux_request(&spec)?;
+        // Values join only this final request; the spec carries names only.
+        secret_env.append_to(&mut request.envs).map_err(|name| {
+            anyhow::anyhow!(
+                "delivered secret `{name}` collides with an environment name already bound by the runtime protocol"
+            )
+        })?;
         Ok((spec, request, isolation_daemon_socket_path))
     })()
     .map_err(|error| settle_unattached_runtime_failure(state, thread_id, launch_owner, error))?;
@@ -363,6 +366,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         // above; its original owner explicitly returns no template descriptor.
         None
     };
+    let verbatim_env_names: Vec<String> = secret_env.names().map(str::to_owned).collect();
     let isolation_context = ryeos_engine::isolation::IsolationLaunchContext {
         project_path: &spec.project_path,
         project_authority,
@@ -385,6 +389,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         target_channels: &[],
         item_ref: &isolation_item_ref,
         thread_id,
+        verbatim_env_names: &verbatim_env_names,
     };
     let mut resource_scope = ryeos_app::execution_resources::prepare_process_resource_scope(
         state,
@@ -623,217 +628,129 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     // The runtime cannot self-attach before release. An existing identity at
     // this boundary is therefore an invariant violation, not an adoption race.
-    let attach_params = ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
-        thread_id: thread_id.to_string(),
-        pid: spawned.pid() as i64,
-        pgid: spawned.pgid(),
-        process_identity: Some(process_identity.clone()),
-        metadata: None,
-        // Spawn metadata was seeded before launch. An empty self-attach
-        // preserves it while establishing the immutable process identity.
-        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-    };
-    let attach_result = if rearm_native_resume_budget_after_attach {
-        state
-            .threads
-            .attach_new_process_owned_rearming_resume_budget(&attach_params, launch_owner)
-    } else {
-        state
-            .threads
-            .attach_new_process_owned(&attach_params, launch_owner)
-    };
-    if let Err(error) = attach_result {
-        let error = error.context("attach held managed runtime process identity");
-        return match abort_unattached_runtime_resource_scope(
-            state,
-            resource_reservation.as_ref(),
+    // Spawn metadata was seeded before launch; the empty attach metadata
+    // preserves it while establishing the immutable process identity.
+    let resource_occupancy_limit = process_identity.resource_occupancy_limit.clone();
+    let resource_cleanup_allowance_ms = process_identity.resource_cleanup_allowance_ms;
+    let held = HeldLaunch::new(
+        state,
+        LaunchOwnerCoordinate::thread(thread_id, launch_owner),
+        process_identity,
+        ManagedHeld {
             spawned,
-        ) {
-            Err(cleanup) => {
-                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
-            }
-            Ok(_) => {
-                let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
-                    &process_identity,
-                );
-                let financial = ryeos_app::execution_resources::
-                    settle_process_resource_operations_after_cleanup(
-                        state,
-                        &process_identity,
-                        &evidence?,
-                    );
-                Err(match financial {
-                    Ok(()) => {
-                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
-                    }
-                    Err(financial) => {
-                        error.context(format!("resource cleanup settlement failed: {financial:#}"))
-                    }
-                })
-            }
-        };
-    }
-    let mut attached_process =
-        match AttachedProcessGuard::new(state, thread_id, launch_owner, process_identity.clone()) {
-            Ok(guard) => guard,
-            Err(error) => {
-                let cleanup = spawned
-                    .abort_and_reap()
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| {
-                        super::super::runner::clear_finished_process(
-                            state,
-                            thread_id,
-                            &process_identity,
-                            launch_owner,
-                        )
-                    });
-                return Err(match cleanup {
-                    Ok(()) => {
-                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
-                    }
-                    Err(cleanup) => error.context(format!(
-                        "pending attachment owner cleanup failed; retaining authority: {cleanup:#}"
-                    )),
-                });
-            }
-        };
-    if let Err(error) = super::super::runner::activate_workspace_after_process_attachment(
-        state,
-        workspace_lifeline.as_ref(),
-        owns_workspace,
-        thread_id,
-        launch_owner,
-        &process_identity,
-    ) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        let error = error.context("activate managed-runtime workspace after attachment");
-        return Err(match cleanup {
-            Some(cleanup) => error.context(format!("pending-process cleanup failed: {cleanup}")),
-            None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
-        });
-    }
-    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
-        state,
-        &process_identity.resource_operations,
-    ) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| {
-                let proposed = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
-                    &process_identity,
-                )?;
-                let evidence = state.state_store.prove_thread_resource_owner_cleanup(
-                    thread_id,
-                    &process_identity,
-                    &proposed,
-                )?;
-                ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
-                    state,
-                    &process_identity,
-                    &evidence,
-                )
-            })
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        return Err(match cleanup {
-            Some(cleanup) => error.context(format!(
-                "resource issue failed and cleanup remains unresolved: {cleanup:#}"
-            )),
-            None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
-        });
-    }
-    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
-        state,
-        &process_identity.resource_operations,
-    )
-    .and_then(|()| {
-        state
-            .threads
-            .authorize_process_release_owned(thread_id, &process_identity, launch_owner)
-    }) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        if let Some(cleanup) = cleanup {
-            return Err(error.context(format!(
-                "pending-process cleanup failed; retaining authority: {cleanup}"
-            )));
-        }
-        let stop_settlement =
-            super::super::process_attachment::finalize_requested_stop_if_present(state, thread_id);
-        let error = match stop_settlement {
-            Ok(true) => {
-                anyhow::anyhow!("managed runtime stopped before attachment release: {error}")
-            }
-            Ok(false) => error.context("authorize managed runtime release after durable attachment"),
-            Err(stop_error) => error.context(format!(
-                "authorize managed runtime release after durable attachment; stop settlement also failed: {stop_error:#}"
-            )),
-        };
-        return Err(settle_unattached_runtime_failure(
-            state,
-            thread_id,
-            launch_owner,
-            error,
-        ));
-    }
-    let release = match (
-        process_identity.resource_occupancy_limit.clone(),
-        process_identity.resource_cleanup_allowance_ms,
-    ) {
-        (Some(limit), Some(cleanup_ms)) => spawned.release_after_attachment_with_occupancy(
-            limit,
-            lillux::time::Duration::from_millis(cleanup_ms),
-        ),
-        (None, None) => spawned.release_after_attachment(),
-        _ => unreachable!("validated process identity has a complete occupancy contract"),
-    };
-    let spawned = match release {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            if !error.cleanup_is_settled() {
-                // A dead numeric process/group is not proof that the selected
-                // scope and release-wrapper resources were settled. Preserve
-                // the exact attachment and membership for existing recovery.
-                return Err(anyhow::Error::new(error)
-                    .context("managed runtime release cleanup is unproved; retaining authority"));
-            }
-            let settlement = attached_process.settle_after_reap();
-            return Err(match settlement {
-                Ok(()) => settle_unattached_runtime_failure(
-                    state,
-                    thread_id,
-                    launch_owner,
-                    anyhow::Error::new(error)
-                        .context("release managed runtime after durable process attachment"),
-                ),
-                Err(settlement) => anyhow::Error::new(error).context(format!(
-                    "release failed; exact attachment retained: {settlement:#}"
-                )),
-            });
+            reservation: resource_reservation,
+        },
+    );
+    let launch = held
+        .attach(AttachOptions {
+            workspace_lifeline: workspace_lifeline.as_ref(),
+            owns_workspace,
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            rearm_resume_budget: rearm_native_resume_budget_after_attach,
+        })
+        .and_then(AttachedLaunch::authorize_release)
+        .and_then(AuthorizedLaunch::release);
+    let ReleasedLaunch {
+        running,
+        settlement,
+    } = match launch {
+        Ok(released) => released,
+        // Unproved cleanup retains the exact attachment and membership for
+        // existing recovery; it is never settled or terminalized here.
+        Err(failure) if failure.is_unsettled() => return Err(anyhow::Error::new(failure)),
+        Err(failure) => {
+            let LaunchFailure { error, .. } = failure;
+            return Err(settle_unattached_runtime_failure(
+                state,
+                thread_id,
+                launch_owner,
+                error.context("managed runtime launch"),
+            ));
         }
     };
     Ok(SpawnedRuntime {
         thread_id: thread_id.to_string(),
         runtime_ref: item_ref.to_string(),
         observation_declarations: observation_declarations.clone(),
-        process: Some(spawned),
-        resource_occupancy_limit: process_identity.resource_occupancy_limit.clone(),
-        resource_cleanup_allowance_ms: process_identity.resource_cleanup_allowance_ms,
-        attached_process: Some(attached_process),
+        process: Some(running),
+        resource_occupancy_limit,
+        resource_cleanup_allowance_ms,
+        attached_process: Some(settlement),
         workspace_lifeline,
         external_realizations,
         source_closure,
         immediate_result: None,
     })
+}
+
+/// Class A held process: the managed runtime plus its selected resource scope
+/// reservation, which an unattached abort retires.
+struct ManagedHeld {
+    spawned: lillux::ProcessAwaitingAttachment,
+    reservation: Option<ryeos_app::runtime_db::ProcessResourceReservationRecord>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ManagedReleaseError {
+    /// Refused before Lillux release; the held process was dropped without
+    /// abort proof, so its cleanup is unproved.
+    #[error("resource occupancy release contract is incomplete")]
+    IncompleteOccupancyContract,
+    #[error("release managed runtime after durable process attachment")]
+    Release(#[source] lillux::exec::AttachmentReleaseError),
+}
+
+impl ReleaseTestimony for ManagedReleaseError {
+    fn cleanup_is_settled(&self) -> bool {
+        matches!(self, Self::Release(error) if error.cleanup_is_settled())
+    }
+}
+
+impl HeldProcess for ManagedHeld {
+    type Running = lillux::RunningProcess;
+    type ReleaseError = ManagedReleaseError;
+    fn pid(&self) -> u32 {
+        self.spawned.pid()
+    }
+    fn pgid(&self) -> i64 {
+        self.spawned.pgid()
+    }
+    fn abort_unattached(
+        self,
+        state: &ryeos_app::state::AppState,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        abort_unattached_runtime_resource_scope(state, self.reservation.as_ref(), self.spawned)?;
+        let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(identity)?;
+        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+            state, identity, &evidence,
+        )
+        .context("resource cleanup settlement failed")
+    }
+    fn abort_attached(self) -> Result<()> {
+        self.spawned
+            .abort_and_reap()
+            .map(drop)
+            .map_err(anyhow::Error::from)
+            .context("abort and reap attached managed runtime")
+    }
+    fn release(
+        self,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> std::result::Result<lillux::RunningProcess, ManagedReleaseError> {
+        match (
+            identity.resource_occupancy_limit.clone(),
+            identity.resource_cleanup_allowance_ms,
+        ) {
+            (Some(limit), Some(cleanup_ms)) => self.spawned.release_after_attachment_with_occupancy(
+                limit,
+                lillux::time::Duration::from_millis(cleanup_ms),
+            ),
+            (None, None) => self.spawned.release_after_attachment(),
+            _ => return Err(ManagedReleaseError::IncompleteOccupancyContract),
+        }
+        .map_err(ManagedReleaseError::Release)
+    }
 }
 
 /// Called only from a bounded pre-contact region or after checked abort/reap.
@@ -1086,7 +1003,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_precontact_failure_settles_only_exact_bound_child() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let owner = store.get_launch_claim(child).unwrap().unwrap();
@@ -1125,7 +1042,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_wrong_owner_and_unknown_contact_preserve_membership() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let binding = store.thread_workspace_binding(child).unwrap();

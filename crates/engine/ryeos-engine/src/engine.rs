@@ -290,6 +290,29 @@ fn authority_snapshot_from_request(
     }
 }
 
+/// A project-content authority answers only for the live project its planning
+/// context names: the same root, under mutable live-filesystem authority.
+fn require_live_project_context(ctx: &PlanContext, project_root: &Path) -> Result<(), EngineError> {
+    ctx.subject_resolution_authority
+        .validate_for_project_context(&ctx.project_context)
+        .map_err(|error| EngineError::Internal(error.to_string()))?;
+    if !matches!(
+        ctx.subject_resolution_authority,
+        SubjectResolutionAuthority::LiveFs
+    ) {
+        return Err(EngineError::Internal(
+            "project-content authority requires live project resolution authority".to_string(),
+        ));
+    }
+    if project_root_from_context(ctx) != Some(project_root) {
+        return Err(EngineError::Internal(
+            "project-content authority names a different root from its planning context"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn project_root_from_context(context: &PlanContext) -> Option<&Path> {
     match &context.project_context {
         ProjectContext::LocalPath { path } => Some(path.as_path()),
@@ -1699,6 +1722,25 @@ impl Engine {
         })
     }
 
+    /// Capture the request snapshot of a live project through an exact
+    /// owner-bearing project-content authority: project trust keys and the
+    /// parser overlay are read from `project_content`, never by reopening
+    /// `project_root`.
+    pub fn effective_request_snapshot_under_project_authority(
+        &self,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        self.checked_bundle_generation(|| {
+            self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                subject_resolution_authority,
+            )
+        })
+    }
+
     /// Reuse the complete immutable request snapshot admitted through the
     /// opaque state proof. Parser descriptors are parsed values and dispatch
     /// through the installed handler registry; they retain no disposable
@@ -2426,6 +2468,158 @@ impl Engine {
                 &source,
                 &request_authority,
             )
+        })
+    }
+
+    /// Resolve, verify, and attest one live-project subject through an exact
+    /// owner-bearing project-content authority. Discovery, source bytes,
+    /// project trust and parser overlay all come from `project_content`; the
+    /// planning context must name `project_root` as its live project.
+    pub fn resolve_attested_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        self.checked_bundle_generation(|| {
+            require_live_project_context(ctx, project_root)?;
+            let request_snapshot = self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                &ctx.subject_resolution_authority,
+            )?;
+            let (resolved, source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                item_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+            let request_authority = authority_snapshot_from_request(&request_snapshot);
+            let verified_subject = self.verify_static_cached_with_source_under_authority(
+                ctx,
+                resolved,
+                &source,
+                &request_authority,
+            )?;
+            let subject_digest = self.attested_subject_digest(
+                &verified_subject.resolved,
+                Some(project_root),
+                &ctx.subject_resolution_authority,
+            )?;
+            Ok(VerifiedArtifactAttestation {
+                verified_subject: Arc::new(verified_subject),
+                source_bytes: Arc::from(source.into_bytes()),
+                subject_digest,
+                engine_generation_identity: self.request_engine_generation_identity(),
+                trust_identity: request_authority.effective_trust_identity,
+                request_registry_fingerprint: request_authority.registry_fingerprint,
+                subject_resolution_authority: ctx.subject_resolution_authority.clone(),
+                admitted_content_generation: None,
+                resolution_closure_digest: None,
+            })
+        })
+    }
+
+    /// Run the canonical resolution pipeline for an attested live-project root
+    /// through the same project-content authority that attested it, and bind
+    /// the exact positive/negative closure to that attestation. The root is
+    /// re-resolved through `project_content` first, so a source or precedence
+    /// change since attestation refuses rather than binding stale evidence.
+    pub fn resolve_verified_resolution_closure_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        root_attestation: &VerifiedArtifactAttestation,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedResolutionClosure, EngineError> {
+        self.checked_bundle_generation(|| {
+            require_live_project_context(ctx, project_root)?;
+            let subject_resolution_authority = &ctx.subject_resolution_authority;
+            let request_snapshot = self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                subject_resolution_authority,
+            )?;
+            let request_authority = authority_snapshot_from_request(&request_snapshot);
+            let canonical_ref = &root_attestation.verified_subject.resolved.canonical_ref;
+            let (current, _source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                canonical_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+            if self.attested_subject_digest(
+                &current,
+                Some(project_root),
+                subject_resolution_authority,
+            )? != root_attestation.subject_digest
+            {
+                return Err(EngineError::Internal(
+                    "verified artifact attestation source or resolution precedence changed before admission"
+                        .to_string(),
+                ));
+            }
+            let verified_root = self.consume_verified_attestation_under_authority(
+                ctx,
+                root_attestation,
+                subject_resolution_authority,
+                &request_authority,
+                false,
+            )?;
+            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let (output, probed_absent) =
+                crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
+                    &verified_root.resolved.canonical_ref,
+                    &self.kinds,
+                    &request_snapshot.parser_dispatcher,
+                    &roots,
+                    &request_snapshot.trust_store,
+                    &self.composers,
+                    project_root,
+                    project_content,
+                )
+                .map_err(|error| {
+                    resolution_error_to_engine(error, &verified_root.resolved.canonical_ref)
+                })?;
+            if output.root.resolved_ref != verified_root.resolved.canonical_ref.to_string()
+                || output.root.source_space != verified_root.resolved.source_space
+                || output.root.raw_content_digest != verified_root.resolved.raw_content_digest
+                || output.root.source_content_digest != verified_root.resolved.content_hash
+            {
+                return Err(EngineError::Internal(
+                    "canonical resolution closure root differs from its verified root subject"
+                        .to_string(),
+                ));
+            }
+            let resolution_closure_digest = self.resolution_closure_digest(
+                &output,
+                &probed_absent,
+                Some(project_root),
+                subject_resolution_authority,
+            )?;
+            let attestation = VerifiedArtifactAttestation {
+                verified_subject: root_attestation.verified_subject.clone(),
+                source_bytes: root_attestation.source_bytes.clone(),
+                subject_digest: root_attestation.subject_digest.clone(),
+                engine_generation_identity: root_attestation.engine_generation_identity.clone(),
+                trust_identity: root_attestation.trust_identity.clone(),
+                request_registry_fingerprint: root_attestation
+                    .request_registry_fingerprint
+                    .clone(),
+                subject_resolution_authority: root_attestation
+                    .subject_resolution_authority
+                    .clone(),
+                admitted_content_generation: root_attestation.admitted_content_generation.clone(),
+                resolution_closure_digest: Some(resolution_closure_digest),
+            };
+            Ok(VerifiedResolutionClosure {
+                output,
+                probed_absent,
+                attestation,
+            })
         })
     }
 
@@ -4060,6 +4254,44 @@ impl Engine {
         self.checked_bundle_generation(|| {
             tracing::debug!(plan_id = %plan.plan_id, "spawning plan with selected resources");
             crate::dispatch::spawn_plan_with_resources(plan, ctx, selections, devices)
+        })
+    }
+
+    /// Preserve the original expiry through this existing held launch owner.
+    /// This accepts no new process scope or financial/native admission authority.
+    pub fn spawn_plan_with_resources_until(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: Option<&lillux::CharacterDeviceSet>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_resources_until(
+                plan, ctx, selections, devices, deadline,
+            )
+        })
+    }
+
+    /// Carry the original funded window through the existing plan owner.
+    /// This does not mint admission, a financial debit or settlement authority.
+    pub fn spawn_plan_with_original_namespace_occupancy(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_original_namespace_occupancy(
+                plan,
+                ctx,
+                selections,
+                devices,
+                original_window,
+            )
         })
     }
 

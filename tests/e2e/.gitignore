@@ -89,6 +89,8 @@ __pycache__/
 !environment-products/native-authoring/check-fixture.py
 !authoring-environment/test_production.py
 !authoring-environment/test_development_contract.py
+!authoring-environment/test_cargo_vendor_finalizer.py
+!authoring-environment/test_static_link_producer_intent.py
 !authoring-environment/test_candidate_evaluator.py
 !authoring-environment/test_preparation.py
 !authoring-environment/test_utilities.py
@@ -147,3 +149,8 @@ __pycache__/
 !development-toolchain-stage0/test-artifact.sh
 !development-toolchain-stage0/test-runtime.sh
 !development-toolchain-stage0/test-ownership.sh
+
+# Source fixtures included by verifier and daemon regression tests.
+!external-execution/fixtures/
+!external-execution/fixtures/independent-scripted-config.toml.template
+!external-execution/fixtures/independent-environments.toml.template

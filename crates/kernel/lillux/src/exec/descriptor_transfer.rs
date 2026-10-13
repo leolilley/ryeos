@@ -12,7 +12,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use super::duplex_deadline::wait_ready;
 use super::{
     InheritedDescriptorAuthority, SubprocessRequest, bind_inherited_channel_to_subprocess_request,
-    retain_fork_sensitive_descriptors,
+    try_retain_fork_sensitive_descriptors,
 };
 use crate::time::MonotonicDeadline;
 
@@ -140,7 +140,7 @@ pub fn inherited_descriptor_transfer_pair() -> io::Result<(
     InheritedDescriptorTransferReceiver,
     InheritedDescriptorTransferChildAuthority,
 )> {
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors()?;
     let mut descriptors = [-1; 2];
     // SAFETY: the output array has exactly two writable descriptor slots.
     if unsafe {
@@ -186,9 +186,10 @@ pub unsafe fn take_inherited_descriptor_transfer_sender(
     if descriptor <= libc::STDERR_FILENO {
         return Err(invalid("inherited packet descriptor overlaps standard I/O"));
     }
-    let lease = retain_fork_sensitive_descriptors();
-    // SAFETY: unique ownership is the caller's explicit precondition.
+    // SAFETY: unique ownership is the caller's explicit precondition. Adopt
+    // before the lease so a refused lease still closes the transferred owner.
     let socket = unsafe { File::from_raw_fd(descriptor) };
+    let lease = try_retain_fork_sensitive_descriptors()?;
     super::protect_descriptor_from_exec(&socket).map_err(io::Error::other)?;
     for (option, expected) in [
         (libc::SO_TYPE, libc::SOCK_SEQPACKET),
@@ -739,7 +740,7 @@ mod tests {
     #[test]
     fn adopting_wrong_descriptor_type_closes_the_transferred_owner() {
         let (probe, writer) = pipe_probe();
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
         let file = writer.file().try_clone().unwrap();
         drop(writer);
         // SAFETY: this test transfers its uniquely owned live pipe descriptor.
@@ -960,6 +961,7 @@ mod tests {
             &mappings,
             &[],
             &std::collections::BTreeSet::new(),
+            None,
         )
         .expect("an occupied parent coordinate is replaced only in the child");
         assert_eq!(occupied.file_identity().unwrap(), identity);
@@ -1115,7 +1117,7 @@ mod tests {
         drop(settlement);
         // Release removed the exact registration, so reuse and re-registration
         // at this coordinate cannot collide with a stale deferred owner.
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors().unwrap();
         let source = tempfile::tempfile().unwrap();
         let reused = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD_CLOEXEC, endpoint_fd) };
         assert!(reused >= endpoint_fd);

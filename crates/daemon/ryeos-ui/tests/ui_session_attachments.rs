@@ -72,7 +72,7 @@ fn secondary_attachment(
 
 #[tokio::test]
 async fn detach_refuses_surface_attachment() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let (session_id, ctx) = activate(&state, context("surface:ryeos/ui/base"));
     let session = get_ui_state(&state)
         .unwrap()
@@ -95,7 +95,7 @@ async fn detach_refuses_surface_attachment() {
 
 #[tokio::test]
 async fn detach_is_session_exact_fences_dispatch_and_replays() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let (owner_id, owner_ctx) = activate(&state, context("surface:ryeos/ui/base"));
     let coordinate = secondary_attachment(&state, &owner_id);
     let (_other_id, other_ctx) = activate(&state, context("surface:ryeos/ui/base"));

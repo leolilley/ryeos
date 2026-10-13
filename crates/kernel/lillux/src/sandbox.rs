@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod native_terminal_wire;
+
 /// Access granted to one exact descriptor-backed mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxSandboxMountAccess {
@@ -168,15 +170,22 @@ pub struct LinuxSandboxRequest {
     /// PID-local proc becomes writable for child UID/GID maps, never host proc.
     pub nested_sandbox: bool,
     pub aggregate_limits: Option<LinuxSandboxAggregateLimits>,
+    /// Installed in the actual target after trusted setup, before receipt/exec.
+    /// Pipe retention belongs to the launch owner and must not appear here.
+    pub target_limits: Option<crate::SubprocessLimits>,
 }
+
+const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
 
 /// Whether a guest mount would overlap namespace structure owned by Lillux.
 /// Higher layers may reserve their own authored destinations, but must never
 /// reproduce the host backend's proc/device/system/private-tmp layout.
 pub fn linux_sandbox_mount_overlaps_managed_namespace(destination: &Path) -> bool {
+    let staging = Path::new("/").join(SEALED_STAGING_NAME);
     ["/proc", "/dev", "/sys", "/tmp"]
         .into_iter()
         .map(Path::new)
+        .chain(std::iter::once(staging.as_path()))
         .any(|managed| destination.starts_with(managed) || managed.starts_with(destination))
 }
 
@@ -324,6 +333,10 @@ pub struct LinuxSandboxProcess {
     /// never for helper/probe children. Kept private and non-serializable.
     #[cfg(target_os = "linux")]
     namespace_lifetime: Option<std::os::fd::OwnedFd>,
+    /// Present only for the existing externally-held adapter route which
+    /// bound this actual native fork before readiness. Drop is never cancel.
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_watchdog: Option<crate::exec::OccupancyWatchdog>,
     /// Lillux-private, close-on-exec evidence channel. A record proves setup
     /// or exec failed before the workload existed. EOF alone does not prove
     /// execution: killing a pre-exec child also closes its descriptor. It is
@@ -344,6 +357,10 @@ pub struct LinuxSandboxProcess {
     /// presented as an independently observed target completion.
     #[cfg(target_os = "linux")]
     termination_requested: bool,
+    /// Selected original native owner context and irreversible terminal state.
+    /// Never reconstructed from numeric PID, ordinary exit or candidate bytes.
+    #[cfg(target_os = "linux")]
+    native_terminal_observation: Option<NativeTerminalObservationState>,
 }
 
 /// Native testimony from the exact owned PID-namespace init immediately
@@ -537,6 +554,83 @@ pub struct LinuxSandboxTermination {
     launch_failure: Option<LinuxSandboxLaunchFailure>,
 }
 
+/// Opaque terminal observation from the same selected native process owner.
+/// Actual identity was pinned while held, before death. The caller must still
+/// join independently admitted launch/mount/device authority and its protected
+/// channel. This grants no driver/scratch/refund or prospective death proof.
+/// Deliberately non-Clone with private fields and no Deserialize constructor.
+#[derive(Debug)]
+pub struct LinuxSandboxNativeTerminalObservation {
+    context: NativeTerminalContext,
+    exit: LinuxSandboxExit,
+    owner_requested_termination: bool,
+    applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    launch_failure: Option<LinuxSandboxLaunchFailure>,
+}
+
+#[derive(Debug)]
+struct NativeTerminalContext {
+    identity: crate::ExactProcessIdentity,
+    held_mount: LinuxSandboxMountPreparationReceipt,
+    original_deadline: crate::time::MonotonicDeadline,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum NativeTerminalObservationState {
+    Prepared(NativeTerminalContext),
+    Reaped(NativeTerminalReap),
+    Delivered,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct NativeTerminalReap {
+    context: NativeTerminalContext,
+    exit: LinuxSandboxExit,
+    owner_requested_termination: bool,
+    applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    // Read only once after actual reap. A malformed or missing channel keeps
+    // permanent uncertainty; later retries cannot turn consumed EOF into None.
+    launch_failure: Option<Result<Option<LinuxSandboxLaunchFailure>, String>>,
+    watchdog_reaped: bool,
+}
+
+impl LinuxSandboxNativeTerminalObservation {
+    /// Encode complete private testimony within the atomic pipe frame cap.
+    /// Borrowing preserves this observation on error/oversize. Bytes alone
+    /// are not accepted namespace, launch, driver or financial evidence.
+    pub fn encode_native_terminal_record(&self) -> Result<Vec<u8>, String> {
+        native_terminal_wire::encode_observation(self)
+    }
+
+    pub fn process_identity(&self) -> &crate::ExactProcessIdentity {
+        &self.context.identity
+    }
+
+    pub fn held_mount_preparation(&self) -> &LinuxSandboxMountPreparationReceipt {
+        &self.context.held_mount
+    }
+
+    pub fn exit(&self) -> LinuxSandboxExit {
+        self.exit
+    }
+
+    /// Absence of this owner's request is not independent natural-completion
+    /// or driver retirement proof; other actors may have killed the target.
+    pub fn owner_requested_termination(&self) -> bool {
+        self.owner_requested_termination
+    }
+
+    pub fn applied_launch(&self) -> Option<&LinuxSandboxAppliedLaunchReceipt> {
+        self.applied_launch.as_ref()
+    }
+
+    pub fn launch_failure(&self) -> Option<&LinuxSandboxLaunchFailure> {
+        self.launch_failure.as_ref()
+    }
+}
+
 /// Terminal status observed for the exact released target without requesting
 /// termination. The native target itself is namespace PID 1, not a wait shim.
 /// A launch failure is distinct from a workload exit, even for code 125.
@@ -588,6 +682,24 @@ impl LinuxSandboxLaunchFailure {
     }
 }
 
+/// Private one-use enforcement witness from the actual native PID-1 owner.
+/// Only this module can construct it, after its native readiness and pidfd pin.
+/// It is neither a serialized mount receipt nor a process-group assertion.
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeNamespaceOccupancyAuthority {
+    lifetime: std::os::fd::OwnedFd,
+    owned_fork_pid: u32,
+}
+#[cfg(target_os = "linux")]
+impl NativeNamespaceOccupancyAuthority {
+    pub(crate) fn into_pidfd(self) -> std::os::fd::OwnedFd {
+        self.lifetime
+    }
+    pub(crate) fn into_parts(self) -> (std::os::fd::OwnedFd, u32) {
+        (self.lifetime, self.owned_fork_pid)
+    }
+}
+
 /// Native target prepared through readiness, but held before exec until the
 /// exact owner releases it. Like native launch, construction changes the
 /// calling process's namespaces and belongs in a dedicated launcher process.
@@ -598,6 +710,10 @@ pub struct HeldLinuxSandboxProcess {
     release: Option<std::fs::File>,
     #[cfg(target_os = "linux")]
     release_succeeded: bool,
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_attempted: bool,
+    #[cfg(target_os = "linux")]
+    namespace_occupancy_watchdog: Option<crate::exec::OccupancyWatchdog>,
 }
 
 /// Held target whose dedicated launcher remains the non-dumpable custodian of
@@ -612,6 +728,131 @@ pub struct HeldPrivateSourceSandboxProcess {
 impl HeldPrivateSourceSandboxProcess {
     pub fn held(&mut self) -> &mut HeldLinuxSandboxProcess {
         &mut self.held
+    }
+}
+
+/// Structural coordinates for one immediate child of a sealed private root.
+/// These are not authenticated bytes, product roles or launch authority.
+pub struct LinuxPrivateSourceMount<'a> {
+    pub child: &'a std::ffi::OsStr,
+    pub destination: &'a Path,
+}
+
+fn validate_private_source_selections(
+    selections: &[LinuxPrivateSourceMount<'_>],
+    mount_count: usize,
+) -> Result<(), String> {
+    if selections.is_empty() || selections.len() > 4096 || selections.len() > mount_count {
+        return Err("private source selection count exceeds the finite request".into());
+    }
+    let mut children = BTreeSet::new();
+    let mut destinations: Vec<&Path> = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let child = selection
+            .child
+            .to_str()
+            .ok_or("private source child is not UTF-8")?;
+        if child.is_empty()
+            || child.len() > 255
+            || child == "."
+            || child == ".."
+            || child.contains('/')
+            || child.chars().any(char::is_control)
+        {
+            return Err("private source child is not an exact immediate name".into());
+        }
+        let destination = selection
+            .destination
+            .to_str()
+            .ok_or("private source destination is not UTF-8")?;
+        if !destination.starts_with('/')
+            || destination.len() > 4096
+            || destination[1..]
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || destination.chars().any(char::is_control)
+        {
+            return Err(
+                "private source destination is not a canonical strict absolute path".into(),
+            );
+        }
+        if !children.insert(selection.child)
+            || destinations.iter().any(|prior| {
+                prior.starts_with(selection.destination) || selection.destination.starts_with(prior)
+            })
+        {
+            return Err("private source selections duplicate or overlap".into());
+        }
+        destinations.push(selection.destination);
+    }
+    Ok(())
+}
+
+// Inspect every destination, including foreign filesystems. Read-only foreign
+// descendants still replace authenticated code. Existing fixed-parent checks
+// separately require directory ancestors installed before their children.
+fn validate_private_source_mount_topology(
+    selections: &[LinuxPrivateSourceMount<'_>],
+    request: &LinuxSandboxRequest,
+) -> Result<(), String> {
+    for selection in selections {
+        if request
+            .mounts
+            .iter()
+            .filter(|mount| mount.destination.as_path() == selection.destination)
+            .count()
+            != 1
+        {
+            return Err("private source destination lacks one exact request mount".into());
+        }
+        if request.mounts.iter().any(|mount| {
+            mount.destination.as_path() != selection.destination
+                && mount.destination.starts_with(selection.destination)
+        }) {
+            return Err("another mount replaces a selected private source descendant".into());
+        }
+        if request
+            .fixed_parent_views
+            .iter()
+            .any(|view| view.destination.starts_with(selection.destination))
+        {
+            return Err("fixed-parent view replaces a selected private source subtree".into());
+        }
+    }
+    Ok(())
+}
+
+/// Dedicated original custodian. Field order disposes the actual process before
+/// its private source. There is no raw process borrow or ownership extraction.
+/// Drop reaps a direct child; it is NOT whole-scope cancellation, native terminal
+/// evidence or a substitute for original negative cleanup. Retain this owner
+/// across actual native/watchdog settlement AND terminal publication uncertainty.
+#[cfg(target_os = "linux")]
+pub struct PrivateSourceLinuxSandboxProcess {
+    process: LinuxSandboxProcess,
+    _source: LinuxSealedPrivateSourceFilesystem,
+}
+
+#[cfg(target_os = "linux")]
+impl PrivateSourceLinuxSandboxProcess {
+    pub fn child_pid(&self) -> u32 {
+        self.process.child_pid()
+    }
+
+    pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        self.process.mount_preparation_receipt()
+    }
+
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxAppliedLaunchReceipt>, String> {
+        self.process.try_observe_applied_launch()
+    }
+
+    pub fn try_observe_native_terminal(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxNativeTerminalObservation>, String> {
+        self.process.try_observe_native_terminal()
     }
 }
 
@@ -659,71 +900,271 @@ impl LinuxSandboxPipes {
     }
 }
 
-pub fn prepare_linux_sandbox_piped(
-    request: LinuxSandboxRequest,
-) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
-    if !request.target_channels.is_empty() {
-        return Err("piped candidate cannot inherit extra target channels".into());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        fn pipe() -> Result<(std::fs::File, std::fs::File), String> {
-            let mut fds = [-1; 2];
-            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-                return Err(format!(
-                    "create candidate protocol pipe: {}",
-                    std::io::Error::last_os_error()
-                ));
+/// Remaining owned output ends after protocol input reached EOF. Keeps the
+/// original deadline so later borrowing never renews the caller's budget.
+pub struct LinuxSandboxOutputPipes {
+    pub stdout: std::fs::File,
+    pub stderr: std::fs::File,
+    deadline: crate::time::MonotonicDeadline,
+}
+
+/// Exclusively borrowed output ends under the original absolute deadline.
+pub struct LinuxSandboxOutputStreams<'a> {
+    pub output: crate::exec::DeadlinePipeStream<'a>,
+    pub diagnostics: crate::exec::DeadlinePipeStream<'a>,
+}
+
+impl LinuxSandboxPipes {
+    /// Write the complete input under one absolute deadline, then close the
+    /// input end so the target observes EOF. A refused write returns these
+    /// pipes unchanged with the error, so the caller keeps every end.
+    pub fn finish_input_into_output_pipes_until(
+        self,
+        input: &[u8],
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxOutputPipes, (Self, std::io::Error)> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write as _;
+            use std::os::fd::AsFd as _;
+            let written = crate::exec::DeadlinePipeStream::new(self.stdin.as_fd(), deadline)
+                .and_then(|mut stream| stream.write_all(input));
+            if let Err(error) = written {
+                return Err((self, error));
             }
-            if let Err(error) = imp::relocate_internal_descriptors(
-                &mut fds,
-                &std::collections::BTreeSet::from([0, 1, 2]),
-                "candidate protocol pipe",
-            ) {
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(error);
-            }
-            Ok(unsafe {
-                (
-                    std::fs::File::from_raw_fd(fds[0]),
-                    std::fs::File::from_raw_fd(fds[1]),
-                )
-            })
-        }
-        let (input, stdin) = pipe()?;
-        let (stdout, output) = pipe()?;
-        let (stderr, error) = pipe()?;
-        for file in [&stdin, &stdout, &stderr] {
-            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0
-                || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                    < 0
-            {
-                return Err(format!(
-                    "set candidate relay nonblocking: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
-        let process = prepare_linux_sandbox_inner(request, Some(&[input, output, error]), None)?;
-        Ok((
-            process,
-            LinuxSandboxPipes {
+            let LinuxSandboxPipes {
                 stdin,
                 stdout,
                 stderr,
-            },
-        ))
+            } = self;
+            drop(stdin);
+            Ok(LinuxSandboxOutputPipes {
+                stdout,
+                stderr,
+                deadline,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (input, deadline);
+            let error = std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sandbox protocol pipes require Linux",
+            );
+            Err((self, error))
+        }
+    }
+}
+
+impl LinuxSandboxOutputPipes {
+    /// Borrow the owned nonblocking output ends for bounded multiplexed reads.
+    pub fn output_streams(&mut self) -> std::io::Result<LinuxSandboxOutputStreams<'_>> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            Ok(LinuxSandboxOutputStreams {
+                output: crate::exec::DeadlinePipeStream::new(self.stdout.as_fd(), self.deadline)?,
+                diagnostics: crate::exec::DeadlinePipeStream::new(
+                    self.stderr.as_fd(),
+                    self.deadline,
+                )?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sandbox protocol pipes require Linux",
+            ))
+        }
+    }
+}
+
+// Piped launches exclusively own stdin/stdout/stderr. The common native
+// validator still enforces sorted unique channels and all source-role aliases.
+fn require_piped_target_channels(request: &LinuxSandboxRequest) -> Result<(), String> {
+    if request
+        .target_channels
+        .iter()
+        .any(|(_, target)| *target < 3)
+    {
+        return Err("piped sandbox target channels cannot replace stdin/stdout/stderr".into());
+    }
+    Ok(())
+}
+
+pub fn prepare_linux_sandbox_piped(
+    request: LinuxSandboxRequest,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    require_piped_target_channels(&request)?;
+    #[cfg(target_os = "linux")]
+    {
+        prepare_linux_sandbox_piped_linux(request, None)
     }
     #[cfg(not(target_os = "linux"))]
     Err("piped native sandbox is unavailable on this platform".into())
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_linux_sandbox_piped_linux(
+    request: LinuxSandboxRequest,
+    occupancy: Option<crate::exec::PendingNamespaceWatchdog>,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    require_piped_target_channels(&request)?;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    // Reserve both mapped targets and source coordinates before allocating
+    // stdio. A closed source must never be revived by an internally owned pipe.
+    let mut reserved = std::collections::BTreeSet::from([0, 1, 2]);
+    for (source, target) in &request.target_channels {
+        reserved.insert(i32::try_from(*source).map_err(|error| error.to_string())?);
+        reserved.insert(i32::try_from(*target).map_err(|error| error.to_string())?);
+    }
+    fn pipe(
+        reserved: &std::collections::BTreeSet<i32>,
+    ) -> Result<(std::fs::File, std::fs::File), String> {
+        let mut fds = [-1; 2];
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(format!(
+                "create candidate protocol pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if let Err(error) =
+            imp::relocate_internal_descriptors(&mut fds, reserved, "candidate protocol pipe")
+        {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(error);
+        }
+        Ok(unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        })
+    }
+    let (input, stdin) = pipe(&reserved)?;
+    let (stdout, output) = pipe(&reserved)?;
+    let (stderr, error) = pipe(&reserved)?;
+    for file in [&stdin, &stdout, &stderr] {
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(format!(
+                "set candidate relay nonblocking: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    let process =
+        prepare_linux_sandbox_inner_linux(request, Some(&[input, output, error]), None, occupancy)?;
+    Ok((
+        process,
+        LinuxSandboxPipes {
+            stdin,
+            stdout,
+            stderr,
+        },
+    ))
+}
+
+/// SAME held native owner with an outside watcher before user/PID transition.
+/// Actual qualified cessation and higher Runtime/funding release stay required.
+#[cfg(target_os = "linux")]
+pub fn prepare_linux_sandbox_piped_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    require_piped_target_channels(&request)?;
+    let pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    prepare_linux_sandbox_piped_linux(request, Some(pending))
+}
+
+/// Same native held owner, retaining existing extra admitted target channels.
+#[cfg(target_os = "linux")]
+pub fn prepare_linux_sandbox_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    let pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    prepare_linux_sandbox_inner_linux(request, None, None, Some(pending))
+}
+
 impl HeldLinuxSandboxProcess {
+    /// Arm the SAME existing watchdog on this actual held native namespace.
+    /// This installs stronger termination while retaining the held owner. It
+    /// grants NO release: independently admitted cessation and the higher
+    /// original Runtime/funding authorization are still missing.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepare_namespace_occupancy(
+        &mut self,
+        limit: &crate::time::OccupancyLimit,
+        cleanup_allowance: crate::time::Duration,
+    ) -> Result<(), String> {
+        if self.namespace_occupancy_attempted || self.release_succeeded || self.release.is_none() {
+            return Err(
+                "original native namespace occupancy attempt cannot replay or follow release"
+                    .into(),
+            );
+        }
+        // Poison before a fallible step. Refusal retains the release handle
+        // and original native owner, but cannot fall through to bare release.
+        self.namespace_occupancy_attempted = true;
+        if !matches!(
+            limit.window(cleanup_allowance)?,
+            crate::time::OccupancyWindowState::Service { .. }
+        ) {
+            return Err("original namespace occupancy service window is not open".into());
+        }
+        if self.process.termination_requested || self.process.pid <= 0 {
+            return Err("namespace occupancy requires the original live held PID-1 owner".into());
+        }
+        let lifetime = self
+            .process
+            .namespace_lifetime
+            .as_ref()
+            .ok_or("ordinary sandbox process has no native namespace lifetime authority")?;
+        let preparation = self.process.mount_preparation_receipt()?;
+        if preparation.owned_child_pid != self.process.child_pid() {
+            return Err("native namespace occupancy changed its actual child readiness".into());
+        }
+        let authority = NativeNamespaceOccupancyAuthority {
+            owned_fork_pid: self.process.child_pid(),
+            lifetime: lifetime
+                .try_clone()
+                .map_err(|error| format!("retain native PID-1 lifetime: {error}"))?,
+        };
+        self.namespace_occupancy_watchdog = Some(crate::exec::arm_namespace_occupancy_watchdog(
+            authority,
+            limit,
+            cleanup_allowance,
+        )?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cancel_namespace_occupancy_after_exact_death(&mut self) -> Result<(), String> {
+        if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
+            watchdog.cancel_and_reap()?;
+        }
+        self.namespace_occupancy_watchdog = None;
+        Ok(())
+    }
     pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
         self.process.mount_preparation_receipt()
     }
@@ -748,6 +1189,9 @@ impl HeldLinuxSandboxProcess {
         #[cfg(target_os = "linux")]
         {
             use std::io::Write as _;
+            if self.namespace_occupancy_attempted {
+                return Err("namespace occupancy release requires independently admitted cessation and original Runtime authorization; bare release refused".into());
+            }
             // Consume authority before writing: even an ambiguous write error
             // cannot authorize a second release attempt.
             let mut release = self
@@ -823,7 +1267,10 @@ impl HeldLinuxSandboxProcess {
         {
             self.release = None;
         }
-        self.process.terminate_namespace_for_export(timeout)
+        let termination = self.process.terminate_namespace_for_export(timeout)?;
+        #[cfg(target_os = "linux")]
+        self.cancel_namespace_occupancy_after_exact_death()?;
+        Ok(termination)
     }
 
     /// Terminate beneath one caller-owned absolute deadline while keeping the
@@ -882,58 +1329,7 @@ fn prepare_linux_sandbox_inner(
     }
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        let mut reserved = request
-            .target_channels
-            .iter()
-            .map(|(_, target)| i32::try_from(*target))
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if stdio.is_some() {
-            reserved.extend([0, 1, 2]);
-        }
-        let mut descriptors = [-1; 2];
-        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(format!(
-                "create native release pipe: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        if let Err(error) =
-            imp::relocate_internal_descriptors(&mut descriptors, &reserved, "native release pipe")
-        {
-            unsafe {
-                libc::close(descriptors[0]);
-                libc::close(descriptors[1]);
-            }
-            return Err(error);
-        }
-        // SAFETY: pipe2/relocation returned distinct newly owned descriptors.
-        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
-        let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
-        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
-            release_fd: u32::try_from(reader.as_raw_fd()).map_err(|error| error.to_string())?,
-            release_keepalive_fd: u32::try_from(writer.as_raw_fd())
-                .map_err(|error| error.to_string())?,
-        };
-        let mut process = imp::launch_with_stdio(request, stdio, private_source)?;
-        // Only held execution requests the stronger terminal-export primitive.
-        // Ordinary native launch retains its existing capability floor. The
-        // child remains blocked on release while its exact lifetime is pinned.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0u32) };
-        if fd < 0 {
-            return Err(format!(
-                "pin held namespace lifetime: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        process.namespace_lifetime = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
-        drop(reader);
-        Ok(HeldLinuxSandboxProcess {
-            process,
-            release: Some(writer),
-            release_succeeded: false,
-        })
+        prepare_linux_sandbox_inner_linux(request, stdio, private_source, None)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -942,7 +1338,260 @@ fn prepare_linux_sandbox_inner(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_linux_sandbox_inner_linux(
+    mut request: LinuxSandboxRequest,
+    stdio: Option<&[std::fs::File; 3]>,
+    private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+    mut occupancy: Option<crate::exec::PendingNamespaceWatchdog>,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    if request.lifecycle != LinuxSandboxLifecycle::Run {
+        return Err("held native preparation owns its release channel".into());
+    }
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let mut reserved = request
+        .target_channels
+        .iter()
+        .map(|(_, target)| i32::try_from(*target))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if stdio.is_some() {
+        reserved.extend([0, 1, 2]);
+    }
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "create native release pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if let Err(error) =
+        imp::relocate_internal_descriptors(&mut descriptors, &reserved, "native release pipe")
+    {
+        unsafe {
+            libc::close(descriptors[0]);
+            libc::close(descriptors[1]);
+        }
+        return Err(error);
+    }
+    // SAFETY: pipe2/relocation returned distinct newly owned descriptors.
+    let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+    let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+    request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+        release_fd: u32::try_from(reader.as_raw_fd()).map_err(|error| error.to_string())?,
+        release_keepalive_fd: u32::try_from(writer.as_raw_fd())
+            .map_err(|error| error.to_string())?,
+    };
+    let mut process = imp::launch_with_stdio_with_namespace_watchdog(
+        request,
+        stdio,
+        private_source,
+        occupancy.as_mut(),
+    )?;
+    // Only held execution requests the stronger terminal-export primitive.
+    // Ordinary native launch retains its existing capability floor. The
+    // child remains blocked on release while its exact lifetime is pinned.
+    if process.namespace_lifetime.is_none() {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0u32) };
+        if fd < 0 {
+            return Err(format!(
+                "pin held namespace lifetime: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        process.namespace_lifetime = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
+    }
+    let namespace_occupancy_watchdog = occupancy.map(|pending| pending.finish()).transpose()?;
+    let namespace_occupancy_attempted = namespace_occupancy_watchdog.is_some();
+    drop(reader);
+    Ok(HeldLinuxSandboxProcess {
+        process,
+        release: Some(writer),
+        release_succeeded: false,
+        namespace_occupancy_attempted,
+        namespace_occupancy_watchdog,
+    })
+}
+
 impl LinuxSandboxProcess {
+    /// Observe exact selected native terminal state without consuming this
+    /// owner on timeout/error. Native reap is recorded before any fallible
+    /// failure-pipe read or watchdog cancellation; retry never repeats waitpid.
+    /// No input deadline is accepted: only the original held context is used.
+    pub fn try_observe_native_terminal(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxNativeTerminalObservation>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let original_deadline = match self.native_terminal_observation.as_ref() {
+                Some(NativeTerminalObservationState::Prepared(context)) => {
+                    context.original_deadline
+                }
+                Some(NativeTerminalObservationState::Reaped(reaped)) => {
+                    reaped.context.original_deadline
+                }
+                Some(NativeTerminalObservationState::Delivered) => {
+                    return Err("native terminal observation was already delivered".into());
+                }
+                None => {
+                    return Err(
+                        "native terminal observation lacks original selected context".into(),
+                    );
+                }
+            };
+            if original_deadline.has_elapsed() {
+                return Err(
+                    "native terminal original deadline expired; owner remains retained".into(),
+                );
+            }
+            if let Some(NativeTerminalObservationState::Prepared(context)) =
+                self.native_terminal_observation.as_ref()
+            {
+                if self.pid <= 0 || self.pid as u32 != context.identity.target_pid {
+                    return Err("native terminal owner lost its exact unreaped child".into());
+                }
+                let lifetime = self
+                    .namespace_lifetime
+                    .as_ref()
+                    .ok_or("native terminal owner lost its original lifetime pin")?;
+                let mut descriptor = libc::pollfd {
+                    fd: lifetime.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+                if ready == 0 {
+                    return Ok(None);
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        return Ok(None);
+                    }
+                    return Err(format!("observe exact native terminal lifetime: {error}"));
+                }
+                if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0
+                    || descriptor.revents & libc::POLLIN == 0
+                {
+                    return Err("native terminal lifetime lacks exact exit readiness".into());
+                }
+                let mut status = 0;
+                let waited = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+                if waited == 0 {
+                    return Ok(None);
+                }
+                if waited < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                    return Ok(None);
+                }
+                if waited != self.pid {
+                    return Err("native terminal lacks exclusive owned child wait".into());
+                }
+                let exit = if libc::WIFEXITED(status) {
+                    LinuxSandboxExit::Code(libc::WEXITSTATUS(status))
+                } else if libc::WIFSIGNALED(status) {
+                    LinuxSandboxExit::Signal(libc::WTERMSIG(status))
+                } else {
+                    return Err("native terminal lacks supported terminal wait status".into());
+                };
+                let state = self
+                    .native_terminal_observation
+                    .as_mut()
+                    .expect("selected context retained");
+                let NativeTerminalObservationState::Prepared(context) =
+                    std::mem::replace(state, NativeTerminalObservationState::Delivered)
+                else {
+                    unreachable!("same borrowed owner retains prepared context")
+                };
+                self.pid = 0;
+                self.namespace_lifetime = None;
+                // Irreversible kernel result is rooted BEFORE every following
+                // fallible step; the same owner can retry only pending work.
+                self.native_terminal_observation =
+                    Some(NativeTerminalObservationState::Reaped(NativeTerminalReap {
+                        context,
+                        exit,
+                        owner_requested_termination: self.termination_requested,
+                        applied_launch: self.observed_applied_launch.clone(),
+                        launch_failure: None,
+                        watchdog_reaped: false,
+                    }));
+            }
+            if original_deadline.has_elapsed() {
+                return Err("native terminal original deadline expired after owned reap".into());
+            }
+            let needs_failure_read = matches!(
+                self.native_terminal_observation.as_ref(),
+                Some(NativeTerminalObservationState::Reaped(NativeTerminalReap {
+                    launch_failure: None,
+                    ..
+                }))
+            );
+            if needs_failure_read {
+                let result = match self.launch_failure.take() {
+                    Some(channel) => imp::read_launch_failure(Some(channel)),
+                    None => Err("native terminal launch-failure channel is missing".into()),
+                };
+                let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                    self.native_terminal_observation.as_mut()
+                else {
+                    unreachable!("same borrowed owner retains owned reap")
+                };
+                reaped.launch_failure = Some(result);
+            }
+            let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                self.native_terminal_observation.as_ref()
+            else {
+                unreachable!("same borrowed owner retains owned reap")
+            };
+            if let Some(Err(error)) = reaped.launch_failure.as_ref() {
+                return Err(format!(
+                    "native terminal retained launch uncertainty: {error}"
+                ));
+            }
+            if !reaped.watchdog_reaped {
+                self.namespace_occupancy_watchdog
+                    .as_mut()
+                    .ok_or("native terminal lost its original watchdog owner")?
+                    .cancel_and_reap_until(original_deadline)?;
+                let Some(NativeTerminalObservationState::Reaped(reaped)) =
+                    self.native_terminal_observation.as_mut()
+                else {
+                    unreachable!("same borrowed owner retains owned reap")
+                };
+                reaped.watchdog_reaped = true;
+                self.namespace_occupancy_watchdog = None;
+            }
+            // Late helper/read completion never renews the original window.
+            // Retain its truthful completed state instead of redoing any wait.
+            if original_deadline.has_elapsed() {
+                return Err("native terminal original deadline expired before delivery".into());
+            }
+            let state = self
+                .native_terminal_observation
+                .as_mut()
+                .expect("owned reap retained");
+            let NativeTerminalObservationState::Reaped(reaped) =
+                std::mem::replace(state, NativeTerminalObservationState::Delivered)
+            else {
+                unreachable!("same borrowed owner retains completed native reap")
+            };
+            let Some(Ok(launch_failure)) = reaped.launch_failure else {
+                unreachable!("only observed launch-failure boundary reaches delivery")
+            };
+            Ok(Some(LinuxSandboxNativeTerminalObservation {
+                context: reaped.context,
+                exit: reaped.exit,
+                owner_requested_termination: reaped.owner_requested_termination,
+                applied_launch: reaped.applied_launch,
+                launch_failure,
+            }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native terminal observation is unavailable on this platform".into())
+    }
+
     /// Return the exact child-origin final-root preparation observation. This
     /// precedes release; it must not be presented as applied-exec evidence.
     pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
@@ -1111,10 +1760,23 @@ impl LinuxSandboxProcess {
             return Err("sandbox namespace has an unsupported terminal status".into());
         };
         let launch_failure = imp::read_launch_failure(self.launch_failure.take())?;
+        self.cancel_namespace_occupancy_after_owned_reap()?;
         Ok(Some(LinuxSandboxTermination {
             exit,
             launch_failure,
         }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cancel_namespace_occupancy_after_owned_reap(&mut self) -> Result<(), String> {
+        if self.pid != 0 {
+            return Err("watchdog cancellation requires exact owned native reap".into());
+        }
+        if let Some(watchdog) = self.namespace_occupancy_watchdog.as_mut() {
+            watchdog.cancel_and_reap()?;
+        }
+        self.namespace_occupancy_watchdog = None;
+        Ok(())
     }
 
     pub fn child_pid(&self) -> u32 {
@@ -1139,6 +1801,9 @@ impl LinuxSandboxProcess {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
                 if waited == self.pid {
                     self.pid = 0;
+                    if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                        self.cancel_namespace_occupancy_after_owned_reap()?;
+                    }
                     if libc::WIFEXITED(status) {
                         let exit = LinuxSandboxExit::Code(libc::WEXITSTATUS(status));
                         if let Some(failure) = imp::read_launch_failure(self.launch_failure.take())?
@@ -1181,17 +1846,15 @@ impl LinuxSandboxProcess {
 impl Drop for LinuxSandboxProcess {
     fn drop(&mut self) {
         if self.pid > 0 {
-            unsafe {
-                libc::kill(self.pid, libc::SIGKILL);
-                loop {
-                    let result = libc::waitpid(self.pid, std::ptr::null_mut(), 0);
-                    if result >= 0
-                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
-                    {
-                        break;
-                    }
-                }
-            }
+            unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            // A killed process normally exits at once. This drop may run while
+            // a creator holds the fork window, so one that does not exit is
+            // passed to a detached reaper instead of being waited on here.
+            let _ = crate::exec::reap_fork_holder_until(
+                self.pid,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                "dropped sandbox process",
+            );
             self.pid = 0;
         }
     }
@@ -1254,6 +1917,107 @@ pub fn inspect_linux_sandbox() -> Result<LinuxSandboxInspection, String> {
 /// process, not an application daemon.
 pub fn launch_linux_sandbox(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
     imp::launch(request)
+}
+
+/// Same externally-held adapter lifecycle and actual native custodian, with
+/// the original outside watcher. This owns no release writer or financial
+/// authority; the existing outer attachment/Runtime owner remains responsible.
+/// No ordinary Run request can select this stronger held-only operation.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_with_original_namespace_occupancy(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+) -> Result<LinuxSandboxProcess, String> {
+    if !matches!(
+        request.lifecycle,
+        LinuxSandboxLifecycle::AwaitRelease { .. }
+    ) {
+        return Err(
+            "original namespace occupancy requires existing externally-held lifecycle".into(),
+        );
+    }
+    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    let mut process =
+        imp::launch_with_stdio_with_namespace_watchdog(request, None, None, Some(&mut pending))?;
+    process.namespace_occupancy_watchdog = Some(pending.finish()?);
+    Ok(process)
+}
+
+/// Same original native owner, borrowing one protected adapter-only writer.
+/// The caller owns publication and must have inspected its complete inherited
+/// role inventory; this operation grants no authenticated terminal evidence.
+/// The writer is never part of a worker request or target descriptor mapping.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_with_original_namespace_occupancy_and_terminal_writer(
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+    writer: &crate::InheritedDescriptorAuthority,
+) -> Result<LinuxSandboxProcess, String> {
+    imp::validate_terminal_writer_request(&request, writer, original_deadline)?;
+    let mut pending = crate::exec::PendingNamespaceWatchdog::prepare(
+        limit,
+        cleanup_allowance,
+        original_deadline,
+    )?;
+    let mut process =
+        imp::launch_with_namespace_watchdog_and_terminal_writer(request, &mut pending, writer)?;
+    process.namespace_occupancy_watchdog = Some(pending.finish()?);
+    Ok(process)
+}
+
+/// Unused primitive composition for a dedicated private-source owner and the
+/// SAME original externally-held target/window/terminal writer. The constructor
+/// must authenticate all bytes/search roots, exclude writable aliases and close
+/// writers before sealing. This checks only the supplied private mount/channel
+/// relation; it proves neither selected products nor prelaunch tmpfs accounting.
+/// No new release pipe, deadline, funding owner or ordinary fallback is created.
+/// Failures after private namespace entry are fatal in this dedicated owner.
+#[cfg(target_os = "linux")]
+pub fn launch_linux_sandbox_from_sealed_sources_with_original_namespace_occupancy_and_terminal_writer(
+    source: LinuxSealedPrivateSourceFilesystem,
+    selections: &[LinuxPrivateSourceMount<'_>],
+    request: LinuxSandboxRequest,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: crate::time::Duration,
+    original_deadline: crate::time::MonotonicDeadline,
+    writer: &crate::InheritedDescriptorAuthority,
+) -> Result<PrivateSourceLinuxSandboxProcess, String> {
+    imp::validate_private_sources_request(&source, selections, &request)
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    imp::validate_terminal_writer_request(&request, writer, original_deadline)
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let mut pending =
+        crate::exec::PendingNamespaceWatchdog::prepare(limit, cleanup_allowance, original_deadline)
+            .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let mut process = imp::launch_with_private_sources_namespace_watchdog_and_terminal_writer(
+        request,
+        &source,
+        &mut pending,
+        writer,
+    )
+    .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    match pending.finish() {
+        Ok(watchdog) => process.namespace_occupancy_watchdog = Some(watchdog),
+        Err(error) => {
+            // Dispose actual native process before dropping source or exiting;
+            // this direct-child reap is not whole-scope settlement testimony.
+            drop(process);
+            drop(source);
+            imp::fatal_private_source_transition(&error);
+        }
+    }
+    Ok(PrivateSourceLinuxSandboxProcess {
+        process,
+        _source: source,
+    })
 }
 
 /// Launch a held isolated target with one exact namespace-local listener.
@@ -1347,6 +2111,39 @@ pub unsafe fn read_sealed_inherited_descriptor_from_env(
 /// running this dedicated adapter process.
 pub fn validate_current_executable_descriptor(fd: u32) -> Result<(), String> {
     imp::validate_current_executable(fd)
+}
+
+/// Largest executable image `current_executable_digest` measures.
+pub const MAX_CURRENT_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// SHA-256 digest of the executable image running this process: the inode
+/// `/proc/self/exe` opens, proven to be that image, read once in full while
+/// its size and identity hold still. A pathname is never measured, since it
+/// can be replaced after the process starts.
+pub fn current_executable_digest() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let executable = std::fs::File::open("/proc/self/exe")
+            .map_err(|error| format!("open the running executable: {error}"))?;
+        let fd = u32::try_from(executable.as_raw_fd())
+            .map_err(|_| "the running executable descriptor is invalid".to_owned())?;
+        validate_current_executable_descriptor(fd)?;
+        let size = executable
+            .metadata()
+            .map_err(|error| format!("inspect the running executable: {error}"))?
+            .len();
+        if size == 0 || size > MAX_CURRENT_EXECUTABLE_BYTES {
+            return Err(format!(
+                "the running executable is {size} bytes, outside 1..={MAX_CURRENT_EXECUTABLE_BYTES}"
+            ));
+        }
+        crate::secure_fs::digest_open_regular_file_stable_exact(&executable, size)
+            .map(|(digest, _)| digest)
+            .map_err(|error| format!("digest the running executable: {error:#}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("the running executable cannot be measured on this platform".to_owned())
 }
 
 /// Prove an inherited descriptor is one connected Unix stream socket.
@@ -1471,9 +2268,11 @@ mod imp {
         create_overlay_template, take_overlay_template, validate_overlay_template,
     };
 
+    /// How long the native inspection probe may hold the fork window,
+    /// including its report and its exit. A liveness cap only.
+    const SANDBOX_INSPECTION_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
     const ROOT: &str = "/tmp";
     const OLD_ROOT: &str = "/tmp/.lillux-old-root";
-    const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
     const CHILD_READY: u8 = 0;
     const CHILD_TARGET_READY: u8 = 2;
     const MOUNT_PREPARATION_SCHEMA: u8 = 1;
@@ -1530,6 +2329,24 @@ mod imp {
                 available.nested_sandbox = false;
                 continue;
             }
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(5))
+                .ok_or("sandbox inspection fork wait bound overflow")?;
+            let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(deadline)?;
+            let preserved = [inherited_directory.file().as_raw_fd(), inherited_bytes.file().as_raw_fd()]
+                .into_iter().collect();
+            let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
+            let child_barrier = fork_guard.prepare_child_descriptor_barrier(&preserved)?;
+            // The parent write end stays open until the fork has happened or
+            // failed. The probe never execs, so its copy, and the copies of
+            // any probe process it forks, close only when those exit.
+            let witnessed = fork_guard
+                .witness_creation("native sandbox inspection creation")
+                .map_err(|error| format!("create sandbox inspection creation witness: {error}"))?;
+            // Declared before the write end, so that on any early return the
+            // write end drops first and the custody's settlement observes it.
+            let fork_custody = witnessed.0;
+            let fork_custody_witness = witnessed.1;
             let mut report = [0; 2];
             syscall_zero(
                 unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -1545,6 +2362,8 @@ mod imp {
                 ));
             }
             if pid == 0 {
+                for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
+                unsafe { child_barrier.install_in_actual_fork_child() };
                 close_fd(report[0]);
                 let result = (|| {
                     // The shared-view probe reaps its creator before starting
@@ -1579,16 +2398,33 @@ mod imp {
                 }
                 unsafe { libc::_exit(if result.is_ok() { 0 } else { 125 }) };
             }
+            drop(fork_custody_witness);
             close_fd(report[1]);
-            let outcome = read_child_ready(report[0]);
+            // The probe holds the fork window, so both its report and its
+            // exit are awaited only within one bound; a probe that overruns
+            // it is killed rather than waited on.
+            let hold = crate::time::MonotonicDeadline::after(SANDBOX_INSPECTION_BOUND);
+            let outcome = read_child_ready_until(report[0], hold);
             close_fd(report[0]);
-            let mut status = 0;
-            if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
-                return Err(format!(
-                    "wait for native sandbox inspection: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
+            let reaped = std::time::Instant::now()
+                .checked_add(hold.remaining())
+                .ok_or_else(|| "sandbox inspection bound overflow".to_owned())
+                .and_then(|bound| {
+                    crate::exec::reap_fork_holder_until(pid, bound, "native sandbox inspection")
+                });
+            // A reaped probe has closed its own witness copy. Without that
+            // proof the window strands with its fact rather than let a parent
+            // lease close claim inherited descriptors settled.
+            let custody = fork_custody.settle();
+            let status = match (reaped, custody) {
+                (Ok(Some(status)), Ok(())) => status,
+                (Ok(None), Ok(())) => {
+                    return Err("native sandbox inspection was reaped by another owner".to_owned());
+                }
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(fact)) => return Err(fact),
+                (Err(error), Err(fact)) => return Err(format!("{error}; {fact}")),
+            };
             if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
                 if nested {
                     available.nested_sandbox = false;
@@ -1628,7 +2464,8 @@ mod imp {
         // uniquely. The signed launch request supplies its exact coordinate.
         let sender = unsafe { crate::take_inherited_descriptor_transfer_sender(transfer_fd) }
             .map_err(|error| format!("adopt loopback transfer endpoint: {error}"))?;
-        let (process, source) = launch_with_stdio_and_loopback(request, None, Some(address), None)?;
+        let (process, source) =
+            launch_with_stdio_and_loopback(request, None, Some(address), None, None, None)?;
         let source = source.ok_or("isolated loopback listener was not created")?;
         source
             .transfer(sender, payload, deadline)
@@ -1641,8 +2478,109 @@ mod imp {
         stdio: Option<&[std::fs::File; 3]>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, stdio, None, private_source)
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, None, None)
             .map(|(process, _)| process)
+    }
+
+    pub(super) fn launch_with_stdio_with_namespace_watchdog(
+        request: LinuxSandboxRequest,
+        stdio: Option<&[std::fs::File; 3]>,
+        private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+        occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+    ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(request, stdio, None, private_source, occupancy, None)
+            .map(|(process, _)| process)
+    }
+
+    pub(super) fn validate_terminal_writer_request(
+        request: &LinuxSandboxRequest,
+        writer: &crate::InheritedDescriptorAuthority,
+        original_deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        if original_deadline.remaining().is_zero() {
+            return Err(
+                "native terminal writer original window expired before request validation".into(),
+            );
+        }
+        validate_request(request)?;
+        if !matches!(
+            request.lifecycle,
+            LinuxSandboxLifecycle::AwaitRelease { .. }
+        ) {
+            return Err(
+                "native terminal writer requires the original externally-held lifecycle".into(),
+            );
+        }
+        let descriptor = writer.inherited_descriptor()?;
+        if request
+            .target_channels
+            .iter()
+            .any(|(source, destination)| *source == descriptor || *destination == descriptor)
+        {
+            return Err(
+                "native terminal writer cannot be a target channel source or destination".into(),
+            );
+        }
+        let mut peers = vec![0, 1, 2];
+        peers.extend(request.mounts.iter().map(|mount| mount.source_fd));
+        peers.extend(
+            request
+                .character_devices
+                .iter()
+                .map(|device| device.source_fd),
+        );
+        peers.extend(request.target_channels.iter().map(|(source, _)| *source));
+        if let Some(overlay) = &request.overlay {
+            peers.push(
+                overlay
+                    .template
+                    .inherited_authority()
+                    .inherited_descriptor()?,
+            );
+            peers.extend(
+                overlay
+                    .writable_descendant_mounts
+                    .iter()
+                    .map(|mount| mount.source_fd),
+            );
+        }
+        if let LinuxSandboxLifecycle::AwaitRelease {
+            release_fd,
+            release_keepalive_fd,
+        } = request.lifecycle
+        {
+            peers.extend([release_fd, release_keepalive_fd]);
+        }
+        writer.require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+            &peers,
+            original_deadline,
+        )
+    }
+
+    pub(super) fn launch_with_namespace_watchdog_and_terminal_writer(
+        request: LinuxSandboxRequest,
+        occupancy: &mut crate::exec::PendingNamespaceWatchdog,
+        writer: &crate::InheritedDescriptorAuthority,
+    ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(request, None, None, None, Some(occupancy), Some(writer))
+            .map(|(process, _)| process)
+    }
+
+    pub(super) fn launch_with_private_sources_namespace_watchdog_and_terminal_writer(
+        request: LinuxSandboxRequest,
+        source: &LinuxSealedPrivateSourceFilesystem,
+        occupancy: &mut crate::exec::PendingNamespaceWatchdog,
+        writer: &crate::InheritedDescriptorAuthority,
+    ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(
+            request,
+            None,
+            None,
+            Some(source),
+            Some(occupancy),
+            Some(writer),
+        )
+        .map(|(process, _)| process)
     }
 
     fn launch_with_stdio_and_loopback(
@@ -1650,6 +2588,8 @@ mod imp {
         stdio: Option<&[std::fs::File; 3]>,
         ingress: Option<std::net::SocketAddr>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+        occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+        terminal_writer: Option<&crate::InheritedDescriptorAuthority>,
     ) -> Result<
         (
             LinuxSandboxProcess,
@@ -1666,6 +2606,16 @@ mod imp {
         let pre_transition_paths = private_source
             .map(|_| pre_transition_source_paths(&request))
             .transpose()?;
+        if let Some(watchdog) = occupancy.as_ref() {
+            watchdog.require_original_window()?;
+        }
+        if let Some(writer) = terminal_writer {
+            let original = occupancy
+                .as_ref()
+                .ok_or("native terminal writer lost its original watchdog owner")?
+                .original_deadline();
+            validate_terminal_writer_request(&request, writer, original)?;
+        }
         enter_namespaces(request.network, private_source)?;
         let loopback_source = if let Some(address) = ingress {
             if request.network != LinuxSandboxNetwork::Isolated {
@@ -1775,10 +2725,17 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request, stdio).map(|process| (process, loopback_source))
+        spawn_target(request, stdio, occupancy, terminal_writer)
+            .map(|process| (process, loopback_source))
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
+        crate::validate_subprocess_limits(request.target_limits.as_ref())?;
+        if request.target_limits.is_some_and(|limits| {
+            limits.max_stdout_bytes.is_some() || limits.max_stderr_bytes.is_some()
+        }) {
+            return Err("native target cannot own pipe-output retention limits".to_owned());
+        }
         if request.nested_sandbox && unsafe { libc::geteuid() } == 0 {
             return Err(
                 "nested sandbox requires an unprivileged launch identity, not node root".to_owned(),
@@ -2152,6 +3109,78 @@ mod imp {
             Ok(())
         };
         seal().unwrap_or_else(|error| fatal_private_source_transition(&error));
+        Ok(())
+    }
+
+    pub(super) fn validate_private_sources_request(
+        source: &LinuxSealedPrivateSourceFilesystem,
+        selections: &[LinuxPrivateSourceMount<'_>],
+        request: &LinuxSandboxRequest,
+    ) -> Result<(), String> {
+        validate_private_source_selections(selections, request.mounts.len())?;
+        validate_private_source_mount_topology(selections, request)?;
+        if request.overlay.is_some() {
+            return Err("private source held target cannot adopt an unqualified overlay".into());
+        }
+        // Reuse the existing exact common ancestor/view restrictions; do not
+        // invent a second mount-order policy or reject legitimate early parents.
+        fixed_parents::validate(request)?;
+        let root = source
+            .root
+            .try_clone_descriptor()
+            .map_err(|error| format!("inspect sealed source descriptor: {error}"))?;
+        let root_stat = mount_source_stat(root.as_raw_fd())?;
+        let expected_mount = mount_source_id(root.as_raw_fd())?;
+        let mut expected = Vec::with_capacity(selections.len());
+        for selection in selections {
+            let child = source
+                .root
+                .open_child_directory(selection.child)
+                .map_err(|error| format!("resolve exact sealed source child: {error}"))?
+                .ok_or("exact sealed source child is absent")?;
+            let descriptor = child
+                .try_clone_descriptor()
+                .map_err(|error| format!("inspect exact sealed source child: {error}"))?;
+            let stat = mount_source_stat(descriptor.as_raw_fd())?;
+            if stat.st_dev != root_stat.st_dev
+                || mount_source_id(descriptor.as_raw_fd())? != expected_mount
+                || stat.st_ino == root_stat.st_ino
+            {
+                return Err("selected source child crosses the sealed root mount".into());
+            }
+            expected.push((child, stat.st_ino, selection.destination));
+        }
+        let mut observed_selection = vec![false; expected.len()];
+        for mount in &request.mounts {
+            let fd = raw_fd(mount.source_fd)?;
+            let observed = mount_source_stat(fd)?;
+            if observed.st_dev != root_stat.st_dev {
+                continue;
+            }
+            if mount.access != LinuxSandboxMountAccess::ReadOnly
+                || mount_source_id(fd)? != expected_mount
+            {
+                return Err("private source mount is writable or crosses the sealed mount".into());
+            }
+            let index = expected
+                .iter()
+                .position(|(_, inode, destination)| {
+                    *inode == observed.st_ino && mount.destination.as_path() == *destination
+                })
+                .ok_or("private source mount is not an exact selected child and destination")?;
+            if observed_selection[index] {
+                return Err("private source mount duplicates a selected child".into());
+            }
+            observed_selection[index] = true;
+        }
+        if observed_selection.iter().any(|seen| !seen) {
+            return Err("held target did not select every sealed private source child".into());
+        }
+        for (descriptor, _) in &request.target_channels {
+            if mount_source_stat(raw_fd(*descriptor)?)?.st_dev == root_stat.st_dev {
+                return Err("private source cannot be exposed through a target channel".into());
+            }
+        }
         Ok(())
     }
 
@@ -2546,6 +3575,7 @@ mod imp {
             if !self
                 .root
                 .remove_empty_child_if_same(name, &self.mountpoint)
+                .map(|receipt| receipt.is_some())
                 .map_err(|error| format!("remove detached sealed mountpoint: {error:#}"))?
             {
                 return Err("detached sealed mountpoint is not empty".to_string());
@@ -2560,7 +3590,7 @@ mod imp {
     ) -> Result<crate::InheritedDescriptorAuthority, String> {
         use std::os::unix::fs::FileExt as _;
 
-        let lease = crate::retain_fork_sensitive_descriptors();
+        let lease = crate::try_retain_fork_sensitive_descriptors()?;
         if !mount_source_is_sealed(fd)? {
             return Err("private byte materialization requires a sealed source".to_string());
         }
@@ -3768,7 +4798,53 @@ mod imp {
     fn spawn_target(
         request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
+        mut occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
+        terminal_writer: Option<&crate::InheritedDescriptorAuthority>,
     ) -> Result<LinuxSandboxProcess, String> {
+        let terminal_scrub_descriptor = if let Some(writer) = terminal_writer {
+            let original = occupancy
+                .as_ref()
+                .ok_or("native terminal writer lost its original prefork owner")?
+                .original_deadline();
+            validate_terminal_writer_request(&request, writer, original)?;
+            Some(raw_fd(writer.inherited_descriptor()?)?)
+        } else {
+            None
+        };
+        // Reserve the exclusive fork interval before creating child control
+        // descriptors. Preserve only actual admitted/setup inputs; borrowed
+        // native lease descriptors may never become target capabilities.
+        let before_clock = std::time::Instant::now();
+        let remaining = occupancy.as_ref().map(|watchdog| watchdog.original_deadline().remaining())
+            .unwrap_or(std::time::Duration::from_secs(5));
+        let fork_deadline = before_clock.checked_add(remaining)
+            .ok_or("sandbox target fork deadline overflow")?;
+        let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(fork_deadline)?;
+        let mut preserved = request.target_channels.iter().map(|(source, _)| raw_fd(*source))
+            .chain(request.mounts.iter().map(|mount| raw_fd(mount.source_fd)))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if let Some(stdio) = stdio { preserved.extend(stdio.iter().map(std::os::fd::AsRawFd::as_raw_fd)); }
+        if let LinuxSandboxLifecycle::AwaitRelease { release_fd, release_keepalive_fd } = request.lifecycle {
+            preserved.insert(raw_fd(release_fd)?);
+            preserved.insert(raw_fd(release_keepalive_fd)?);
+        }
+        // This registered writer is disposed by the explicit first-child hook,
+        // whose consumed close is checked; avoid closing it twice.
+        if let Some(fd) = terminal_scrub_descriptor { preserved.insert(fd); }
+        let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
+        let mut child_preserved = preserved.clone();
+        if let Some(fd) = terminal_scrub_descriptor { child_preserved.remove(&fd); }
+        let child_barrier = fork_guard.prepare_child_descriptor_barrier(&child_preserved)?;
+        // The parent write end stays open until the fork has happened or
+        // failed. Every later end except observed readiness settles through
+        // this witness, after the process owner below has killed and reaped.
+        let witnessed = fork_guard
+            .witness_creation("sandbox target creation")
+            .map_err(|error| format!("create sandbox target creation witness: {error}"))?;
+        // Declared before the write end, so that on any early return the
+        // write end drops first and the custody's own settlement observes it.
+        let fork_custody = witnessed.0;
+        let fork_custody_witness = witnessed.1;
         let mut ready = [0; 2];
         syscall_zero(
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -3822,8 +4898,36 @@ mod imp {
         ready.copy_from_slice(&private_descriptors[..2]);
         launch_failure.copy_from_slice(&private_descriptors[2..4]);
         applied_launch.copy_from_slice(&private_descriptors[4..]);
+        let scrub = occupancy
+            .as_ref()
+            .map(|watchdog| watchdog.target_scrub_descriptors());
+        if let Some(descriptors) = scrub {
+            if request.target_channels.iter().any(|(source, _)| {
+                descriptors
+                    .iter()
+                    .any(|private| *private >= 0 && *source == *private as u32)
+            }) {
+                for descriptor in private_descriptors {
+                    close_fd(descriptor);
+                }
+                return Err("native target channel cannot adopt private watchdog custody".into());
+            }
+        }
+        if let Some(watchdog) = occupancy.as_mut() {
+            if let Err(error) = watchdog.require_original_window() {
+                for descriptor in private_descriptors {
+                    close_fd(descriptor);
+                }
+                return Err(error);
+            }
+            // A failed ACK is never evidence that this fork did not happen.
+            watchdog.mark_fork_intent();
+        }
         let pid = unsafe { libc::fork() };
         if pid < 0 {
+            if let Some(watchdog) = occupancy.as_mut() {
+                watchdog.prove_fork_failed();
+            }
             close_fd(ready[0]);
             close_fd(ready[1]);
             close_fd(launch_failure[0]);
@@ -3836,6 +4940,29 @@ mod imp {
             ));
         }
         if pid == 0 {
+            // First syscall after birth. The race before this syscall remains
+            // explicitly unqualified; no missing ACK is a prebirth receipt.
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+                unsafe { libc::_exit(125) };
+            }
+            for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
+            if let Some(descriptor) = terminal_scrub_descriptor {
+                // Immediately after the existing first PDEATHSIG syscall:
+                // the target must not retain the adapter's publication end.
+                if unsafe { libc::close(descriptor) } != 0 {
+                    unsafe { libc::_exit(125) };
+                }
+            }
+            if let Some(descriptors) = scrub {
+                for descriptor in descriptors {
+                    if descriptor >= 0 {
+                        unsafe { libc::close(descriptor) };
+                    }
+                }
+            }
+            // Only the actual fork==0 branch installs the fresh child owner,
+            // after snapshot/control disposal and before Rust setup uses it.
+            unsafe { child_barrier.install_in_actual_fork_child() };
             close_fd(ready[0]);
             close_fd(launch_failure[0]);
             close_fd(applied_launch[0]);
@@ -3852,35 +4979,90 @@ mod imp {
             }
             unsafe { libc::_exit(125) };
         }
+        // Readiness, not a dropped process owner or signal request, is the
+        // direct disposal proof. Every other end settles through the witness
+        // once `process` (declared later, dropped first) has killed and reaped.
+        drop(fork_custody_witness);
         close_fd(ready[1]);
         close_fd(launch_failure[1]);
         close_fd(applied_launch[1]);
-        let result = read_child_target_ready(ready[0]);
-        close_fd(ready[0]);
-        let mut mount_preparation = match result {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    libc::waitpid(pid, std::ptr::null_mut(), 0);
-                }
-                close_fd(launch_failure[0]);
-                close_fd(applied_launch[0]);
-                return Err(error);
-            }
-        };
-        mount_preparation.owned_child_pid = pid as u32;
-        Ok(LinuxSandboxProcess {
+        // Install the SAME actual fork custodian before any fallible handoff.
+        // Error paths retain birth uncertainty; Drop kills/reaps this child but
+        // cannot settle funding or cancel the original watchdog.
+        let ready_reader = unsafe { File::from_raw_fd(ready[0]) };
+        let mut process = LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
-            // SAFETY: the parent exclusively owns this surviving pipe end.
+            native_terminal_observation: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: Some(unsafe { File::from_raw_fd(launch_failure[0]) }),
-            // SAFETY: the parent exclusively owns this surviving pipe end.
             applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
             observed_applied_launch: None,
-            mount_preparation: Some(mount_preparation),
+            mount_preparation: None,
             termination_requested: false,
-        })
+        };
+        let mut mount_preparation = if let Some(watchdog) = occupancy.as_mut() {
+            // Transfer actual fork-owned pidfd BEFORE readiness: setup stalls
+            // stay inside original enforcement rather than a renewed timer.
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
+            if raw < 0 {
+                return Err(format!(
+                    "pin actual namespace birth: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let lifetime = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as RawFd) };
+            let witness = NativeNamespaceOccupancyAuthority {
+                lifetime: lifetime.try_clone().map_err(|error| error.to_string())?,
+                owned_fork_pid: pid as u32,
+            };
+            process.namespace_lifetime = Some(lifetime);
+            watchdog.bind_actual_fork(witness)?;
+            let receipt = read_child_target_ready_until(
+                ready_reader.as_raw_fd(),
+                watchdog.original_deadline(),
+            )?;
+            watchdog.require_original_window()?;
+            receipt
+        } else {
+            read_child_target_ready(ready_reader.as_raw_fd())?
+        };
+        // The child emitted readiness after the explicit close snapshot and
+        // its final setup checks. Only this observed boundary releases exclusion.
+        fork_custody.release_observed();
+        mount_preparation.owned_child_pid = pid as u32;
+        process.mount_preparation = Some(mount_preparation);
+        if let Some(watchdog) = occupancy.as_ref() {
+            use std::os::fd::AsFd as _;
+            if !matches!(
+                request.lifecycle,
+                LinuxSandboxLifecycle::AwaitRelease { .. }
+            ) {
+                return Err("native terminal context requires original held readiness".into());
+            }
+            let lifetime = process
+                .namespace_lifetime
+                .as_ref()
+                .ok_or("selected native readiness lost its original lifetime pin")?;
+            let identity = crate::process_control::capture_exact_process_identity_from_pidfd(
+                process.child_pid(),
+                None,
+                lifetime.as_fd(),
+            )?;
+            let held_mount = process.mount_preparation_receipt()?;
+            if held_mount.owned_child_pid != identity.target_pid {
+                return Err("native terminal context differs from exact held mount child".into());
+            }
+            watchdog.require_original_window()?;
+            process.native_terminal_observation = Some(NativeTerminalObservationState::Prepared(
+                NativeTerminalContext {
+                    identity,
+                    held_mount,
+                    original_deadline: watchdog.original_deadline(),
+                },
+            ));
+        }
+        Ok(process)
     }
 
     fn child_target_main(
@@ -4073,6 +5255,7 @@ mod imp {
             unsafe { libc::chdir(cwd.as_ptr()) },
             "enter sandbox target cwd",
         )?;
+        crate::exec::apply_target_subprocess_limits(request.target_limits.as_ref())?;
         if let Some((fd, mounts)) = applied_launch {
             write_applied_launch(fd, &executable, &arguments, &environment, &mounts)?;
         }
@@ -4638,6 +5821,7 @@ mod imp {
                     })?;
                 if !state
                     .remove_empty_child_if_same(&entry.name, &child)
+                    .map(|receipt| receipt.is_some())
                     .map_err(|error| format!("remove overlay destruction child: {error:#}"))?
                 {
                     return Err("overlay destruction child remained non-empty".to_string());
@@ -5282,6 +6466,19 @@ mod imp {
         }
     }
 
+    fn read_child_ready_until(
+        fd: RawFd,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let mut kind = [0_u8; 1];
+        read_exact_fd_until(fd, &mut kind, deadline)?;
+        match kind[0] {
+            CHILD_READY => Ok(()),
+            CHILD_ERROR => Err(read_child_error_until(fd, deadline)?),
+            _ => Err("sandbox child emitted an invalid readiness record".to_string()),
+        }
+    }
+
     fn read_child_target_ready(fd: RawFd) -> Result<LinuxSandboxMountPreparationReceipt, String> {
         read_child_target_ready_until(
             fd,
@@ -5818,6 +7015,192 @@ mod imp {
         use super::*;
 
         #[test]
+        fn piped_channels_keep_stdio_and_existing_authority_refusals() {
+            let first = crate::sealed_memfd(c"piped-first", b"first").unwrap();
+            let second = crate::sealed_memfd(c"piped-second", b"second").unwrap();
+            let a = first.inherited_descriptor().unwrap();
+            let b = second.inherited_descriptor().unwrap();
+            let mut request = super::super::tests::minimal_request();
+            for target in 0..3 {
+                request.target_channels = vec![(a, target)];
+                assert!(super::super::require_piped_target_channels(&request).is_err());
+                assert!(super::super::prepare_linux_sandbox_piped(request.clone()).is_err());
+            }
+            request.target_channels = vec![(a, 200), (b, 201)];
+            super::super::require_piped_target_channels(&request).unwrap();
+            validate_request(&request).unwrap();
+            for channels in [
+                vec![(a, 200), (b, 200)],
+                vec![(a, 201), (b, 200)],
+                vec![(a, 200), (a, 201)],
+                vec![(a, b), (b, 201)],
+            ] {
+                request.target_channels = channels;
+                assert!(validate_request(&request).is_err());
+            }
+            request.target_channels = vec![(a, 200)];
+            request.mounts.push(LinuxSandboxMount {
+                source_fd: a,
+                destination: "/source".into(),
+                access: LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            });
+            assert!(validate_request(&request).unwrap_err().contains("aliases"));
+            request.mounts.clear();
+            request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+                release_fd: a,
+                release_keepalive_fd: b,
+            };
+            assert!(validate_request(&request).unwrap_err().contains("alias"));
+        }
+
+        #[test]
+        fn piped_internal_coordinates_move_away_from_extra_targets_and_preserve_eof() {
+            use std::io::{Read as _, Write as _};
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            let mut descriptors = [-1; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let reserved = BTreeSet::from([0, 1, 2, descriptors[0], descriptors[1]]);
+            relocate_internal_descriptors(&mut descriptors, &reserved, "piped-test").unwrap();
+            assert!(descriptors.iter().all(|fd| !reserved.contains(fd)));
+            let mut reader = unsafe { File::from_raw_fd(descriptors[0]) };
+            let mut writer = unsafe { File::from_raw_fd(descriptors[1]) };
+            writer.write_all(b"exact-channel").unwrap();
+            drop(writer);
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"exact-channel");
+            assert!(
+                unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC != 0
+            );
+        }
+
+        #[test]
+        #[ignore = "native namespace component control; explicitly opt in on a supported host"]
+        fn piped_extra_descriptor_survives_with_three_owned_streams() {
+            use std::io::{Read as _, Write as _};
+            // Mechanical shell fixture only, not admitted Python/Tool evidence.
+            let channel = crate::sealed_memfd(c"piped-extra", b"extra-value\n").unwrap();
+            let sources = ["/bin", "/usr", "/lib", "/lib64"]
+                .into_iter()
+                .filter(|path| Path::new(path).exists())
+                .map(|path| {
+                    (
+                        PathBuf::from(path),
+                        crate::secure_fs::pin_canonical_mount_source(
+                            &std::fs::canonicalize(path).unwrap(),
+                        )
+                        .unwrap()
+                        .duplicate_at_or_above(64)
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut request = super::super::tests::minimal_request();
+            request.executable = "/bin/sh".into();
+            request.argv0 = "sh".into();
+            request.cwd = "/".into();
+            request.arguments = vec!["-c".into(),
+                "read extra <&8; read input; printf '%s:%s\\n' \"$extra\" \"$input\"; printf 'diagnostic\\n' >&2".into()];
+            request.target_channels = vec![(channel.inherited_descriptor().unwrap(), 8)];
+            request.mounts = sources
+                .iter()
+                .map(|(destination, source)| LinuxSandboxMount {
+                    source_fd: source.inherited_descriptor().unwrap(),
+                    destination: destination.clone(),
+                    access: LinuxSandboxMountAccess::ReadOnly,
+                    layer: 0,
+                })
+                .collect();
+            let expected =
+                LinuxSandboxMountPreparationCommitments::from_admitted_mounts(&request.mounts, &[])
+                    .unwrap();
+            let deadline = crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
+            let (mut held, mut pipes) = super::super::prepare_linux_sandbox_piped(request).unwrap();
+            let result = (|| -> Result<(), String> {
+                let observed = held.mount_preparation_receipt()?;
+                if observed.owned_child_pid != held.child_pid()
+                    || !observed.matches_commitments(&expected)
+                {
+                    return Err("piped-extra held mount identity changed".into());
+                }
+                held.release_once()?;
+                let mut streams = pipes
+                    .protocol_streams_until(deadline)
+                    .map_err(|e| e.to_string())?;
+                streams
+                    .input
+                    .write_all(b"stdin-value\n")
+                    .map_err(|e| e.to_string())?;
+                let mut output = Vec::new();
+                (&mut streams.output)
+                    .take(257)
+                    .read_to_end(&mut output)
+                    .map_err(|e| e.to_string())?;
+                let mut diagnostics = Vec::new();
+                (&mut streams.diagnostics)
+                    .take(257)
+                    .read_to_end(&mut diagnostics)
+                    .map_err(|e| e.to_string())?;
+                if output.len() > 256 || diagnostics.len() > 256 {
+                    return Err("piped-extra output overflow".into());
+                }
+                let mut eof = [0; 1];
+                if streams.output.read(&mut eof).map_err(|e| e.to_string())? != 0
+                    || streams
+                        .diagnostics
+                        .read(&mut eof)
+                        .map_err(|e| e.to_string())?
+                        != 0
+                {
+                    return Err("piped-extra streams did not reach clean EOF".into());
+                }
+                if output != b"extra-value:stdin-value\n" || diagnostics != b"diagnostic\n" {
+                    return Err("piped-extra output/frame/EOF mismatch".into());
+                }
+                loop {
+                    if let Some(exit) = held.try_observe_target_exit()? {
+                        if exit.exit() != LinuxSandboxExit::Code(0)
+                            || exit.launch_failure().is_some()
+                        {
+                            return Err("piped-extra target refused".into());
+                        }
+                        // PID-1 exit readiness is not merely a numeric exit:
+                        // into_termination transfers the exact namespace-death
+                        // witness after exclusive owned reap. EOF was separate.
+                        let termination = exit.into_termination();
+                        if held.child_pid() != 0 || termination.exit() != LinuxSandboxExit::Code(0)
+                        {
+                            return Err("piped-extra namespace settlement missing".into());
+                        }
+                        break;
+                    }
+                    if deadline.has_elapsed() {
+                        return Err("piped-extra original deadline expired".into());
+                    }
+                    std::thread::yield_now();
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let cleanup = held.terminate_namespace_for_export_until(deadline);
+                // Best-effort TEST terminal cleanup only: native owner Drop
+                // attempts signal/wait but may block or fail without proving
+                // reap/settlement. It is NOT a renewed service window or any
+                // conformance evidence; this test always fails afterward.
+                // Keep source/pipe owners alive through that actual Drop.
+                drop(held);
+                drop((pipes, sources, channel));
+                panic!(
+                    "piped-extra component control failed: {error}; bounded cleanup: {cleanup:?}"
+                );
+            }
+        }
+
+        #[test]
         fn target_ready_receipt_is_fixed_size_and_versioned() {
             fn parse(bytes: &[u8]) -> Result<LinuxSandboxMountPreparationReceipt, String> {
                 let mut pipe = [-1; 2];
@@ -5902,6 +7285,8 @@ mod imp {
                 LinuxSandboxProcess {
                     pid,
                     namespace_lifetime: None,
+                    native_terminal_observation: None,
+                    namespace_occupancy_watchdog: None,
                     launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
                     applied_launch: None,
                     observed_applied_launch: None,
@@ -5994,7 +7379,7 @@ mod imp {
                 ("", DescriptorKind::Directory),
             ] {
                 prepare_descriptor_mount_target(
-                    &destination.join(relative),
+                    &if relative.is_empty() { destination.clone() } else { destination.join(relative) },
                     kind,
                     Some(&destination),
                     &[],
@@ -7029,6 +8414,9 @@ mod imp {
             ExecFailure,
             PendingThenCleanup,
             Descendant,
+            OccupancyForkRefusal,
+            PreforkWatchdogExpiry,
+            PreforkWatchdogOwnerLoss,
         }
 
         #[test]
@@ -7042,6 +8430,28 @@ mod imp {
                 TargetObservationCase::ExecFailure,
                 TargetObservationCase::PendingThenCleanup,
                 TargetObservationCase::Descendant,
+            ] {
+                exercise_native_proc_with_observation(true, true, Some(case), false);
+            }
+        }
+
+        #[test]
+        #[ignore = "requires actual native namespaces and pidfd; capability refusal is not a pass"]
+        fn native_namespace_occupancy_refuses_workload_side_watchdog_fork() {
+            exercise_native_proc_with_observation(
+                true,
+                true,
+                Some(TargetObservationCase::OccupancyForkRefusal),
+                false,
+            );
+        }
+
+        #[test]
+        #[ignore = "requires actual native namespaces and pidfd; capability refusal is not a pass"]
+        fn native_prefork_watchdog_expiry_and_owner_loss_keep_actual_namespace_custody() {
+            for case in [
+                TargetObservationCase::PreforkWatchdogExpiry,
+                TargetObservationCase::PreforkWatchdogOwnerLoss,
             ] {
                 exercise_native_proc_with_observation(true, true, Some(case), false);
             }
@@ -7335,6 +8745,11 @@ mod imp {
                             }
                             TargetObservationCase::PendingThenCleanup => "observe-pending".into(),
                             TargetObservationCase::Descendant => "observe-descendant".into(),
+                            TargetObservationCase::OccupancyForkRefusal
+                            | TargetObservationCase::PreforkWatchdogExpiry
+                            | TargetObservationCase::PreforkWatchdogOwnerLoss => {
+                                "observe-pending".into()
+                            }
                         };
                         request
                             .environment
@@ -7380,6 +8795,7 @@ mod imp {
                                         std::ffi::OsStr::new("host-mutated"),
                                         b"ready",
                                         0o600,
+                                        crate::secure_fs::TEST_TEMP_PURPOSE,
                                     )
                                     .map_err(|error| format!("signal host mutation: {error}"))?
                                     .ok_or("host mutation signal already exists")?;
@@ -7435,7 +8851,29 @@ mod imp {
                         }
                         request.target_channels.clear();
                         let expected_launch = request.clone();
-                        let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
+                        let prefork_case = matches!(
+                            observation,
+                            Some(
+                                TargetObservationCase::PreforkWatchdogExpiry
+                                    | TargetObservationCase::PreforkWatchdogOwnerLoss
+                            )
+                        );
+                        let (mut process, mut pipes) = if prefork_case {
+                            let limit = crate::time::OccupancyLimit::new(
+                                crate::time::occupancy_now()?,
+                                5_000_000_000,
+                            )?;
+                            prepare_linux_sandbox_piped_with_original_namespace_occupancy(
+                                request,
+                                &limit,
+                                std::time::Duration::from_secs(1),
+                                crate::time::MonotonicDeadline::after(
+                                    std::time::Duration::from_secs(5),
+                                ),
+                            )?
+                        } else {
+                            prepare_linux_sandbox_piped(request)?
+                        };
                         let preparation = process.process.mount_preparation_receipt()?;
                         if preparation.schema != 1
                             || preparation.mount_count == 0
@@ -7473,6 +8911,101 @@ mod imp {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         if writer_ready()? {
                             return Err("held native target executed before release".into());
+                        }
+                        if prefork_case {
+                            if !process.namespace_occupancy_attempted
+                                || process.namespace_occupancy_watchdog.is_none()
+                                || process.release_once().is_ok()
+                                || writer_ready()?
+                            {
+                                return Err("prefork arming bypassed held qualification or lost original owner".into());
+                            }
+                            if matches!(
+                                observation,
+                                Some(TargetObservationCase::PreforkWatchdogOwnerLoss)
+                            ) {
+                                // Drop is owner loss, never cancellation; native custodian remains.
+                                drop(process.namespace_occupancy_watchdog.take());
+                            }
+                            let lifetime = process
+                                .process
+                                .namespace_lifetime
+                                .as_ref()
+                                .ok_or("actual native lifetime missing")?;
+                            let mut poll = libc::pollfd {
+                                fd: lifetime.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
+                            let deadline = crate::time::MonotonicDeadline::after(
+                                std::time::Duration::from_secs(6),
+                            );
+                            loop {
+                                let ready = unsafe { libc::poll(&mut poll, 1, 10) };
+                                if ready > 0 && poll.revents & libc::POLLIN != 0 {
+                                    break;
+                                }
+                                if ready < 0
+                                    && std::io::Error::last_os_error().raw_os_error()
+                                        != Some(libc::EINTR)
+                                {
+                                    return Err(
+                                        "observe actual watchdog target death failed".into()
+                                    );
+                                }
+                                if deadline.has_elapsed() {
+                                    return Err(
+                                        "original watcher did not kill actual held namespace"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            // Observed exact lifetime precedes this settlement operation:
+                            // a SIGKILL acknowledgment cannot make the control pass.
+                            let death = process.terminate_namespace_for_export(
+                                std::time::Duration::from_secs(1),
+                            )?;
+                            if death.exit() != LinuxSandboxExit::Signal(libc::SIGKILL)
+                                || writer_ready()?
+                            {
+                                return Err(
+                                    "watchdog expiry lacked exact held namespace retirement".into(),
+                                );
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
+                        }
+                        if matches!(
+                            observation,
+                            Some(TargetObservationCase::OccupancyForkRefusal)
+                        ) {
+                            let limit = crate::time::OccupancyLimit::new(
+                                crate::time::occupancy_now()?,
+                                10_000_000_000,
+                            )?;
+                            let error = process
+                                .prepare_namespace_occupancy(
+                                    &limit,
+                                    std::time::Duration::from_secs(1),
+                                )
+                                .err()
+                                .ok_or("watchdog fork inside workload namespace was accepted")?;
+                            if !error.contains("original outside namespace fork boundary")
+                                || process.namespace_occupancy_watchdog.is_some()
+                                || process.process.namespace_lifetime.is_none()
+                                || process.release_once().is_ok()
+                                || writer_ready()?
+                            {
+                                return Err("namespace fork refusal lost original held custody or permitted release".into());
+                            }
+                            let death = process.terminate_namespace_for_export(
+                                std::time::Duration::from_secs(5),
+                            )?;
+                            if death.exit() != LinuxSandboxExit::Signal(libc::SIGKILL) {
+                                return Err(
+                                    "refused native namespace lacked exact retirement".into()
+                                );
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
                         }
                         if !release_target {
                             // Exercise a valid but exhausted observation budget,
@@ -7626,7 +9159,10 @@ mod imp {
                                 }
                                 TargetObservationCase::ExecFailure => LinuxSandboxExit::Code(125),
                                 TargetObservationCase::Descendant => LinuxSandboxExit::Code(0),
-                                TargetObservationCase::PendingThenCleanup => unreachable!(),
+                                TargetObservationCase::PendingThenCleanup
+                                | TargetObservationCase::OccupancyForkRefusal
+                                | TargetObservationCase::PreforkWatchdogExpiry
+                                | TargetObservationCase::PreforkWatchdogOwnerLoss => unreachable!(),
                             };
                             if observed.exit() != expected
                                 || observed.launch_failure().is_some()
@@ -7721,6 +9257,7 @@ mod imp {
                                 std::ffi::OsStr::new("alias-error"),
                                 error.as_bytes(),
                                 0o600,
+                                crate::secure_fs::TEST_TEMP_PURPOSE,
                             );
                         }
                     }
@@ -7894,6 +9431,499 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_source_selections_require_bounded_request_cardinality() {
+        let selection = LinuxPrivateSourceMount {
+            child: std::ffi::OsStr::new("worker"),
+            destination: Path::new("/code/worker"),
+        };
+        assert!(validate_private_source_selections(&[], 1).is_err());
+        assert!(validate_private_source_selections(std::slice::from_ref(&selection), 0).is_err());
+        assert!(validate_private_source_selections(std::slice::from_ref(&selection), 1).is_ok());
+        let excessive: Vec<_> = (0..4097)
+            .map(|_| LinuxPrivateSourceMount {
+                child: selection.child,
+                destination: selection.destination,
+            })
+            .collect();
+        assert!(validate_private_source_selections(&excessive, 4097).is_err());
+        let names: Vec<_> = (0..4096).map(|index| format!("child-{index}")).collect();
+        let paths: Vec<_> = (0..4096)
+            .map(|index| PathBuf::from(format!("/code/child-{index}")))
+            .collect();
+        let maximum: Vec<_> = names
+            .iter()
+            .zip(&paths)
+            .map(|(name, path)| LinuxPrivateSourceMount {
+                child: std::ffi::OsStr::new(name),
+                destination: path,
+            })
+            .collect();
+        assert!(validate_private_source_selections(&maximum, 4096).is_ok());
+    }
+
+    #[test]
+    fn private_source_selections_refuse_non_immediate_names_and_noncanonical_destinations() {
+        for child in [
+            "",
+            ".",
+            "..",
+            "nested/child",
+            "child/",
+            "bad\nname",
+            "bad\0name",
+        ] {
+            assert!(
+                validate_private_source_selections(
+                    &[LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new(child),
+                        destination: Path::new("/code/worker"),
+                    }],
+                    1
+                )
+                .is_err(),
+                "{child:?}"
+            );
+        }
+        let long_child = "x".repeat(256);
+        assert!(
+            validate_private_source_selections(
+                &[LinuxPrivateSourceMount {
+                    child: std::ffi::OsStr::new(&long_child),
+                    destination: Path::new("/code/worker"),
+                }],
+                1
+            )
+            .is_err()
+        );
+        for destination in [
+            "",
+            "/",
+            "relative",
+            "/code/",
+            "/code//worker",
+            "/code/./worker",
+            "/code/../worker",
+            "/bad\npath",
+            "/bad\0path",
+        ] {
+            assert!(
+                validate_private_source_selections(
+                    &[LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("worker"),
+                        destination: Path::new(destination),
+                    }],
+                    1
+                )
+                .is_err(),
+                "{destination:?}"
+            );
+        }
+        let long_destination = format!("/{}", "x".repeat(4096));
+        assert!(
+            validate_private_source_selections(
+                &[LinuxPrivateSourceMount {
+                    child: std::ffi::OsStr::new("worker"),
+                    destination: Path::new(&long_destination),
+                }],
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn private_source_selections_refuse_duplicates_and_destination_ancestors() {
+        for (first, second, left, right) in [
+            ("worker", "worker", "/code/worker", "/code/other"),
+            ("worker", "gnu", "/code/worker", "/code/worker"),
+            ("worker", "gnu", "/code", "/code/gnu"),
+            ("worker", "gnu", "/code/worker", "/code"),
+        ] {
+            assert!(
+                validate_private_source_selections(
+                    &[
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new(first),
+                            destination: Path::new(left)
+                        },
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new(second),
+                            destination: Path::new(right)
+                        },
+                    ],
+                    2
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_private_source_selections(
+                &[
+                    LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("worker"),
+                        destination: Path::new("/code/worker")
+                    },
+                    LinuxPrivateSourceMount {
+                        child: std::ffi::OsStr::new("gnu"),
+                        destination: Path::new("/code/worker-sibling")
+                    },
+                ],
+                2
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn private_source_topology_refuses_all_descendant_mounts_and_filtered_views() {
+        let selected = [LinuxPrivateSourceMount {
+            child: std::ffi::OsStr::new("worker"),
+            destination: Path::new("/code/worker"),
+        }];
+        // Structural coordinates only, no descriptor authority or sealed owner.
+        let mut request = minimal_request();
+        request.mounts.push(LinuxSandboxMount {
+            source_fd: 0,
+            destination: "/code/worker".into(),
+            access: LinuxSandboxMountAccess::ReadOnly,
+            layer: 10,
+        });
+        validate_private_source_mount_topology(&selected, &request).unwrap();
+        for access in [
+            LinuxSandboxMountAccess::ReadOnly,
+            LinuxSandboxMountAccess::Writable,
+        ] {
+            for layer in [0, 10, 20] {
+                let mut injected = request.clone();
+                injected.mounts.push(LinuxSandboxMount {
+                    source_fd: 1,
+                    destination: "/code/worker/lib".into(),
+                    access,
+                    layer,
+                });
+                assert!(
+                    validate_private_source_mount_topology(&selected, &injected)
+                        .unwrap_err()
+                        .contains("descendant")
+                );
+                injected.mounts.reverse();
+                assert!(validate_private_source_mount_topology(&selected, &injected).is_err());
+            }
+        }
+        let mut duplicate = request.clone();
+        duplicate.mounts.push(request.mounts[0].clone());
+        assert!(validate_private_source_mount_topology(&selected, &duplicate).is_err());
+        for destination in ["/code/worker", "/code/worker/lib"] {
+            let mut filtered = request.clone();
+            filtered
+                .fixed_parent_views
+                .push(LinuxSandboxFixedParentView {
+                    destination: destination.into(),
+                    denied_paths: vec!["some/denied".into()],
+                    max_entries: 8,
+                    max_depth: 4,
+                });
+            assert!(
+                validate_private_source_mount_topology(&selected, &filtered)
+                    .unwrap_err()
+                    .contains("fixed-parent view")
+            );
+        }
+        let mut unrelated = request.clone();
+        unrelated.mounts.push(LinuxSandboxMount {
+            source_fd: 1,
+            destination: "/code/worker-sibling".into(),
+            access: LinuxSandboxMountAccess::Writable,
+            layer: 20,
+        });
+        validate_private_source_mount_topology(&selected, &unrelated).unwrap();
+        // Topology permits ancestor coordinates; existing descriptor-backed
+        // fixed-parent validator separately enforces their kind/order/denials.
+        unrelated.mounts.push(LinuxSandboxMount {
+            source_fd: 2,
+            destination: "/code".into(),
+            access: LinuxSandboxMountAccess::Writable,
+            layer: 0,
+        });
+        unrelated
+            .fixed_parent_views
+            .push(LinuxSandboxFixedParentView {
+                destination: "/code".into(),
+                denied_paths: vec!["unrelated/denied".into()],
+                max_entries: 8,
+                max_depth: 4,
+            });
+        validate_private_source_mount_topology(&selected, &unrelated).unwrap();
+    }
+
+    // Actual kernel private-root/seal and descriptor observations, never a fake
+    // sealed handle or occupancy owner. Every case uses a dedicated child.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires explicit allocation of the supported Linux private-source namespace floor"]
+    fn private_multisource_actual_sealed_children_require_exact_mount_bijection() {
+        for case in [
+            "positive",
+            "missing",
+            "unlisted",
+            "duplicate",
+            "writable",
+            "root",
+            "channel",
+            "wrong-destination",
+            "foreign-mount",
+            "foreign-descendant-ro",
+            "foreign-descendant-rw",
+            "foreign-duplicate",
+            "early-ancestor",
+            "equal-layer-ancestor",
+            "late-ancestor-ro",
+            "late-ancestor-rw",
+            "selected-fixed-view",
+            "descendant-fixed-view",
+            "early-ancestor-view",
+        ] {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                let result = std::panic::catch_unwind(|| {
+                    let former = crate::PinnedDirectory::open(Path::new("/tmp"))
+                        .unwrap()
+                        .unwrap();
+                    let former_fd = former.inherited_descriptor_authority().unwrap();
+                    let source = enter_linux_private_source_filesystem(LinuxPrivateSourceLimits {
+                        max_bytes: 1024 * 1024,
+                        max_inodes: 64,
+                    })
+                    .unwrap();
+                    let first = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("first"), 0o700)
+                        .unwrap();
+                    let second = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("second"), 0o700)
+                        .unwrap();
+                    let other = source
+                        .root()
+                        .create_child(std::ffi::OsStr::new("other"), 0o700)
+                        .unwrap();
+                    first
+                        .atomic_create_regular(
+                            std::ffi::OsStr::new("member"),
+                            b"actual private bytes",
+                            0o600,
+                            crate::secure_fs::TEST_TEMP_PURPOSE,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    if case == "foreign-mount" {
+                        let origin =
+                            std::ffi::CString::new(first.path().as_os_str().as_encoded_bytes())
+                                .unwrap();
+                        let alias =
+                            std::ffi::CString::new(other.path().as_os_str().as_encoded_bytes())
+                                .unwrap();
+                        assert_eq!(
+                            unsafe {
+                                libc::mount(
+                                    origin.as_ptr(),
+                                    alias.as_ptr(),
+                                    std::ptr::null(),
+                                    libc::MS_BIND,
+                                    std::ptr::null(),
+                                )
+                            },
+                            0
+                        );
+                    }
+                    let source = source.seal_read_only().unwrap();
+                    let first_fd = first.inherited_descriptor_authority().unwrap();
+                    let second_fd = second.inherited_descriptor_authority().unwrap();
+                    let other = source
+                        .root()
+                        .open_child_directory(std::ffi::OsStr::new("other"))
+                        .unwrap()
+                        .unwrap();
+                    let other_fd = other.inherited_descriptor_authority().unwrap();
+                    let root_fd = source.root().inherited_descriptor_authority().unwrap();
+                    let mut request = minimal_request();
+                    request.mounts = vec![
+                        LinuxSandboxMount {
+                            source_fd: first_fd.inherited_descriptor().unwrap(),
+                            destination: "/code/first".into(),
+                            access: LinuxSandboxMountAccess::ReadOnly,
+                            layer: 0,
+                        },
+                        LinuxSandboxMount {
+                            source_fd: second_fd.inherited_descriptor().unwrap(),
+                            destination: "/products/second".into(),
+                            access: LinuxSandboxMountAccess::ReadOnly,
+                            layer: 1,
+                        },
+                    ];
+                    let mut selections = vec![
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new("first"),
+                            destination: Path::new("/code/first"),
+                        },
+                        LinuxPrivateSourceMount {
+                            child: std::ffi::OsStr::new("second"),
+                            destination: Path::new("/products/second"),
+                        },
+                    ];
+                    let expected = match case {
+                        "positive" => None,
+                        "foreign-descendant-ro" | "foreign-descendant-rw" => {
+                            request.mounts.push(LinuxSandboxMount {
+                                source_fd: former_fd.inherited_descriptor().unwrap(),
+                                destination: "/code/first/injected".into(),
+                                access: if case.ends_with("rw") {
+                                    LinuxSandboxMountAccess::Writable
+                                } else {
+                                    LinuxSandboxMountAccess::ReadOnly
+                                },
+                                layer: 2,
+                            });
+                            Some("replaces a selected private source descendant")
+                        }
+                        "foreign-duplicate" => {
+                            request.mounts.push(LinuxSandboxMount {
+                                source_fd: former_fd.inherited_descriptor().unwrap(),
+                                destination: "/code/first".into(),
+                                access: LinuxSandboxMountAccess::ReadOnly,
+                                layer: 2,
+                            });
+                            Some("lacks one exact request mount")
+                        }
+                        "early-ancestor"
+                        | "equal-layer-ancestor"
+                        | "late-ancestor-ro"
+                        | "late-ancestor-rw"
+                        | "early-ancestor-view" => {
+                            // Input order deliberately puts ancestor LAST. The
+                            // actual common order is (layer,destination).
+                            request.mounts[0].layer =
+                                if case == "equal-layer-ancestor" { 0 } else { 1 };
+                            request.mounts.push(LinuxSandboxMount {
+                                source_fd: former_fd.inherited_descriptor().unwrap(),
+                                destination: "/code".into(),
+                                access: if case == "late-ancestor-ro" {
+                                    LinuxSandboxMountAccess::ReadOnly
+                                } else {
+                                    LinuxSandboxMountAccess::Writable
+                                },
+                                layer: if case.starts_with("late") { 2 } else { 0 },
+                            });
+                            if case == "early-ancestor-view" {
+                                request
+                                    .fixed_parent_views
+                                    .push(LinuxSandboxFixedParentView {
+                                        destination: "/code".into(),
+                                        denied_paths: vec!["unrelated/denied".into()],
+                                        max_entries: 8,
+                                        max_depth: 4,
+                                    });
+                            }
+                            if case.starts_with("late") {
+                                Some("ancestor must be a directory installed before")
+                            } else {
+                                None
+                            }
+                        }
+                        "selected-fixed-view" | "descendant-fixed-view" => {
+                            request
+                                .fixed_parent_views
+                                .push(LinuxSandboxFixedParentView {
+                                    destination: if case == "selected-fixed-view" {
+                                        "/code/first".into()
+                                    } else {
+                                        "/code/first/subtree".into()
+                                    },
+                                    denied_paths: vec!["unrelated/denied".into()],
+                                    max_entries: 8,
+                                    max_depth: 4,
+                                });
+                            Some("fixed-parent view replaces a selected private source subtree")
+                        }
+                        "missing" => {
+                            request.mounts[1].source_fd = former_fd.inherited_descriptor().unwrap();
+                            Some("did not select every")
+                        }
+                        "unlisted" => {
+                            request.mounts[1].source_fd = other_fd.inherited_descriptor().unwrap();
+                            Some("not an exact selected")
+                        }
+                        "duplicate" => {
+                            request.mounts[1] = request.mounts[0].clone();
+                            Some("lacks one exact request mount")
+                        }
+                        "writable" => {
+                            request.mounts[1].access = LinuxSandboxMountAccess::Writable;
+                            Some("writable or crosses")
+                        }
+                        "root" => {
+                            request.mounts[1].source_fd = root_fd.inherited_descriptor().unwrap();
+                            Some("not an exact selected")
+                        }
+                        "channel" => {
+                            request
+                                .target_channels
+                                .push((first_fd.inherited_descriptor().unwrap(), 8));
+                            Some("through a target channel")
+                        }
+                        "wrong-destination" => {
+                            request.mounts[1].destination = "/products/foreign".into();
+                            Some("lacks one exact request mount")
+                        }
+                        "foreign-mount" => {
+                            selections[1].child = std::ffi::OsStr::new("other");
+                            request.mounts[1].source_fd = other_fd.inherited_descriptor().unwrap();
+                            Some("crosses the sealed root mount")
+                        }
+                        _ => unreachable!(),
+                    };
+                    let checked =
+                        imp::validate_private_sources_request(&source, &selections, &request);
+                    if let Some(message) = expected {
+                        assert!(checked.unwrap_err().contains(message));
+                    } else {
+                        checked.unwrap();
+                        if case == "positive" {
+                            // Existing single-child helper remains compatible.
+                            request.mounts.truncate(1);
+                            imp::validate_private_source_request(
+                                &source,
+                                std::ffi::OsStr::new("first"),
+                                Path::new("/code/first"),
+                                &request,
+                            )
+                            .unwrap();
+                        }
+                    }
+                });
+                unsafe { libc::_exit(if result.is_ok() { 0 } else { 1 }) };
+            }
+            let mut status = 0;
+            loop {
+                let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if waited == pid {
+                    break;
+                }
+                assert_eq!(waited, -1);
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EINTR)
+                );
+            }
+            assert!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "{case}: {status}"
+            );
+        }
+    }
+
+    #[test]
     fn private_source_filesystem_requires_explicit_positive_limits() {
         for limits in [
             LinuxPrivateSourceLimits {
@@ -7950,6 +9980,8 @@ mod tests {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -7958,6 +9990,8 @@ mod tests {
             },
             release: None,
             release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
         };
         assert!(
             held.try_observe_target_exit()
@@ -8016,11 +10050,57 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn namespace_occupancy_refusal_poison_keeps_release_and_never_mints_lifetime() {
+        let mut held = HeldLinuxSandboxProcess {
+            process: LinuxSandboxProcess {
+                pid: 0,
+                namespace_lifetime: None,
+                native_terminal_observation: None,
+                namespace_occupancy_watchdog: None,
+                launch_failure: None,
+                applied_launch: None,
+                observed_applied_launch: None,
+                mount_preparation: None,
+                termination_requested: false,
+            },
+            release: Some(std::fs::File::open("/dev/null").unwrap()),
+            release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
+        };
+        let limit =
+            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 30_000_000_000)
+                .unwrap();
+        assert!(
+            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
+                .unwrap_err()
+                .contains("original live held PID-1 owner")
+        );
+        assert!(held.namespace_occupancy_attempted);
+        assert!(held.namespace_occupancy_watchdog.is_none());
+        assert!(held.release.is_some());
+        assert!(
+            held.release_once()
+                .unwrap_err()
+                .contains("bare release refused")
+        );
+        assert!(held.release.is_some());
+        assert!(
+            held.prepare_namespace_occupancy(&limit, std::time::Duration::from_secs(1))
+                .unwrap_err()
+                .contains("cannot replay")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn failed_release_never_authorizes_target_observation_or_retry() {
         let mut held = HeldLinuxSandboxProcess {
             process: LinuxSandboxProcess {
                 pid: 0,
                 namespace_lifetime: None,
+                native_terminal_observation: None,
+                namespace_occupancy_watchdog: None,
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
@@ -8030,6 +10110,8 @@ mod tests {
             // Deliberately wrong access mode: a failed private release write.
             release: Some(std::fs::File::open("/dev/null").unwrap()),
             release_succeeded: false,
+            namespace_occupancy_attempted: false,
+            namespace_occupancy_watchdog: None,
         };
         assert!(
             held.release_once()
@@ -8054,6 +10136,8 @@ mod tests {
         let mut process = LinuxSandboxProcess {
             pid: 0,
             namespace_lifetime: None,
+            native_terminal_observation: None,
+            namespace_occupancy_watchdog: None,
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
@@ -8190,6 +10274,46 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_terminal_request_rejects_actual_write_alias_and_target_destination() {
+        let mut held = crate::supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let deadline = crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
+        let writer = held.prepare_native_settlement_channel(deadline).unwrap();
+        let mut request = minimal_request();
+        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+            release_fd: held
+                .attachment_release_reader
+                .inherited_descriptor()
+                .unwrap(),
+            release_keepalive_fd: held
+                .attachment_release_keepalive_writer
+                .inherited_descriptor()
+                .unwrap(),
+        };
+        // Descriptor/request metadata only; no native process or proof fixture.
+        imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        request.target_channels = vec![(alias.inherited_descriptor().unwrap(), 0)];
+        let error = imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap_err();
+        assert!(error.contains("aliases"), "{error}");
+        request.target_channels = vec![(
+            held.writer.inherited_descriptor().unwrap(),
+            writer.inherited_descriptor().unwrap(),
+        )];
+        let error = imp::validate_terminal_writer_request(&request, &writer, deadline).unwrap_err();
+        assert!(
+            error.contains("target channel source or destination"),
+            "{error}"
+        );
+        assert!(writer.file_identity().is_ok());
+        assert!(alias.file_identity().is_ok());
+    }
+
     pub(super) fn minimal_request() -> LinuxSandboxRequest {
         LinuxSandboxRequest {
             executable: PathBuf::from("/bin/tool"),
@@ -8210,7 +10334,49 @@ mod tests {
             contain_process_group: true,
             nested_sandbox: false,
             aggregate_limits: None,
+            target_limits: None,
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_target_limits_refuse_invalid_or_pipe_limits_before_setup() {
+        let mut request = minimal_request();
+        request.target_limits = Some(crate::SubprocessLimits {
+            max_cpu_seconds: Some(0),
+            ..Default::default()
+        });
+        assert!(
+            launch_linux_sandbox(request)
+                .unwrap_err()
+                .contains("max_cpu_seconds must be positive")
+        );
+        let mut request = minimal_request();
+        request.target_limits = Some(crate::SubprocessLimits {
+            max_stdout_bytes: Some(32768),
+            ..Default::default()
+        });
+        assert!(
+            launch_linux_sandbox(request)
+                .unwrap_err()
+                .contains("native target cannot own pipe-output retention limits")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_adapter_occupancy_refuses_ordinary_run_before_any_fork() {
+        let limit =
+            crate::time::OccupancyLimit::new(crate::time::occupancy_now().unwrap(), 10_000_000_000)
+                .unwrap();
+        let error = launch_linux_sandbox_with_original_namespace_occupancy(
+            minimal_request(),
+            &limit,
+            crate::time::Duration::from_secs(1),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert!(error.contains("existing externally-held lifecycle"));
     }
 
     #[test]
@@ -8496,6 +10662,36 @@ mod tests {
             std::fs::remove_file(state_path.join("unexpected")).unwrap();
             destroy().unwrap();
             assert!(state.entries_no_follow().unwrap().is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod managed_mount_destination_tests {
+    use super::*;
+
+    #[test]
+    fn managed_namespace_preflight_includes_the_native_sealed_staging_surface() {
+        assert!(!linux_sandbox_mount_overlaps_managed_namespace(Path::new(
+            "/candidate-input"
+        )));
+        assert!(!linux_sandbox_mount_overlaps_managed_namespace(Path::new(
+            "/.lillux-sealed-staging-sibling"
+        )));
+        for destination in [
+            "/",
+            "/proc",
+            "/proc/custom",
+            "/dev/input",
+            "/sys/custom",
+            "/tmp/file",
+            "/.lillux-sealed-staging",
+            "/.lillux-sealed-staging/file",
+        ] {
+            assert!(
+                linux_sandbox_mount_overlaps_managed_namespace(Path::new(destination)),
+                "{destination}"
+            );
         }
     }
 }

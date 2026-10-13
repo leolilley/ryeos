@@ -522,6 +522,7 @@ impl CompiledResponseMode for CompiledEventStreamMode {
             workspace_lifeline: None,
             launch_timings: launch_timings.clone(),
             state: ctx.state,
+            publication: ctx.publication,
             webhook_dedupe: ctx.webhook_dedupe,
         };
 

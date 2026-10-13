@@ -126,8 +126,11 @@ Therefore the Render activation gate remains closed.
 - Allocation reconciliation without a retained provider ID is always pending.
   The adapter does not treat list absence or a GET 404 as proof of no
   occurrence.
-- Activation and activation reconciliation always return `supervisor_pending`;
-  even a successful proxy run is not authenticated supervisor `Ready`. The
+- The currently signed profile refuses first activation before reading the
+  guest package, captured network inputs, or credentials. An explicitly
+  selected one-shot profile can make one contact but still returns
+  `supervisor_pending`; reconciliation is observation-only and returns pending.
+  Even a successful proxy run is not authenticated supervisor `Ready`. The
   currently signed provider spec advertises no
   `supervisor_activation` lifecycle capability. RyeOS requires that capability
   at offline placement admission, before Sandbox allocation or other provider
@@ -158,15 +161,19 @@ Therefore the Render activation gate remains closed.
 `src/proxy_route.rs` now supplies a dormant fail-closed destination check for
 the CLI's example proxy routes. It accepts only the exact bound Sandbox ID and
 region under `<sandbox-id>.<region>.sandbox.onrender.com`, `PUT /files/upload`
-with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
+or `GET /files/download` with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
 returned origins, methods, queries, fragments, credentials, ports and alternate
 encodings before a future bearer token could be forwarded. This is local
 policy/test evidence, **not** evidence that Render always returns that shape or
 that a proxy operation has been safely implemented.
 It also constructs only the pinned CLI's exact API token-mint routes for the
 same Sandbox and owner: file upload/download with a validated path, or run
-stream. The constructor does not mint a token. A lost mint response must not
-cause a second mint or upload/run attempt under the same activation claim.
+stream. The constructor does not mint a token. The signed provider profile now
+fixes separate upload and download token routes in strict schema 5, and its
+relay-file operation remains `unsupported_pending`. A durable relay owner must
+authorize each transfer and reconcile ambiguous contact before that route is
+used. A lost mint response must not cause a second mint or upload/run attempt
+under the same activation claim.
 The same dormant boundary now parses a bounded connect response directly into
 a zeroizing bearer, rejects duplicates, unknown fields and trailing data,
 checks expiry and execution identity, and binds the returned method and URI to

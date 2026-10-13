@@ -799,7 +799,7 @@ mod tests {
     use super::*;
     use ryeos_external_execution_contract::{
         ExternalLifecycleAdapterDeclaration, ExternalProviderDeclaration,
-        LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_CONFIGURATION_PROTOCOL,
+        LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_DECLARATION_PROTOCOL,
     };
 
     #[test]
@@ -853,13 +853,14 @@ mod tests {
     fn external_provider(id: &str) -> ExternalProviderDeclaration {
         ExternalProviderDeclaration {
             id: id.to_string(),
-            protocol: PROVIDER_CONFIGURATION_PROTOCOL.to_string(),
+            protocol: PROVIDER_DECLARATION_PROTOCOL.to_string(),
             targets: vec!["x86_64-unknown-linux-gnu".to_string()],
             connector: "provider-connector".to_string(),
             connector_process_group:
                 ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
             configuration_adapter: "provider-configuration".to_string(),
             configuration_destination: "provider.json".to_string(),
+            qualification_request_binding_protocol: None,
         }
     }
 
@@ -1657,7 +1658,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v12
+    protocol: ryeos.isolation-adapter/v14
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: {}

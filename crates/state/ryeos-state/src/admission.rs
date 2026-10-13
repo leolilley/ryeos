@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn admit_root_writes_attestation_and_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
         let guard = db
             .pinned_authority()
             .unwrap()
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn admit_root_rejects_missing_subject() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
         let guard = db
             .pinned_authority()
             .unwrap()
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn admit_root_rejects_unsafe_policy_before_writing_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
         let guard = db
             .pinned_authority()
             .unwrap()
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn typed_attestation_publication_reuses_exact_evidence_and_refuses_conflict() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
         let guard = db
             .pinned_authority()
             .unwrap()

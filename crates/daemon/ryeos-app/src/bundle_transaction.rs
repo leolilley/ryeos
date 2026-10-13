@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use lillux::crypto::SigningKey;
+use ryeos_node_runtime::registry::{BundleRegistryMutationLock, BundleRegistryReadLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -82,27 +83,6 @@ pub struct BundleTransaction {
     _lock: lillux::ExclusiveFileLock,
 }
 
-/// Node-wide serialization for mutations of the installed bundle registry.
-///
-/// Every operation that can reconcile, re-plan, activate, register, or remove
-/// an installed bundle must acquire this lock before acquiring a bundle's
-/// per-name transaction lock. Keeping that order global -> per-name prevents
-/// deadlocks while making each prospective plan exact until its mutation is
-/// committed.
-pub struct BundleRegistryMutationLock {
-    app_root: PathBuf,
-    _lock: lillux::ExclusiveFileLock,
-}
-
-/// A stable read view of the installed bundle registry.
-///
-/// Read-side engine operations share this lock with one another. Bundle
-/// install/replace/remove paths take [`BundleRegistryMutationLock`], so a
-/// verified generation cannot change while any reader is using it.
-pub struct BundleRegistryReadLock {
-    _lock: lillux::SharedFileLock,
-}
-
 /// A per-name bundle transaction tied to a held node-wide registry lock.
 ///
 /// The borrow makes it impossible for normal callers to drop the registry lock
@@ -112,63 +92,14 @@ pub struct BundleMutationTransaction<'a> {
     _registry_lock: &'a BundleRegistryMutationLock,
 }
 
-impl BundleRegistryMutationLock {
-    pub fn acquire(app_root: &Path) -> Result<Self> {
-        let target = installed_bundles_directory(app_root);
-        let lock = lillux::ExclusiveFileLock::acquire(&target)?;
+impl<'a> BundleMutationTransaction<'a> {
+    /// Borrow the actual global registry owner through this transaction, keeping
+    /// the existing global-to-per-name lock order and journal implementation.
+    pub fn acquire(registry_lock: &'a BundleRegistryMutationLock, name: &str) -> Result<Self> {
         Ok(Self {
-            app_root: app_root.to_path_buf(),
-            _lock: lock,
+            transaction: BundleTransaction::acquire(registry_lock.app_root(), name)?,
+            _registry_lock: registry_lock,
         })
-    }
-
-    pub fn acquire_for_startup(app_root: &Path) -> Result<Self> {
-        let target = installed_bundles_directory(app_root);
-        let lock = lillux::ExclusiveFileLock::acquire_with_timeout(
-            &target,
-            std::time::Duration::from_secs(3),
-        )?;
-        Ok(Self {
-            app_root: app_root.to_path_buf(),
-            _lock: lock,
-        })
-    }
-
-    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
-        if self.app_root != app_root {
-            anyhow::bail!("bundle registry lock belongs to a different app root");
-        }
-        Ok(())
-    }
-
-    /// Acquire a bundle's per-name transaction lock after the node-wide lock.
-    pub fn acquire_bundle(&self, name: &str) -> Result<BundleMutationTransaction<'_>> {
-        Ok(BundleMutationTransaction {
-            transaction: BundleTransaction::acquire(&self.app_root, name)?,
-            _registry_lock: self,
-        })
-    }
-}
-
-impl BundleRegistryReadLock {
-    pub fn acquire(app_root: &Path) -> Result<Self> {
-        let target = installed_bundles_directory(app_root);
-        // The first read of an otherwise empty installed registry must establish
-        // the same coordination anchor used by future writers. Requiring a
-        // pre-existing anchor makes valid offline/disabled-isolation nodes fail
-        // before they can observe the empty generation, while proceeding
-        // unlocked would race the first bundle installation.
-        let lock = lillux::SharedFileLock::acquire(&target)?;
-        Ok(Self { _lock: lock })
-    }
-
-    pub fn acquire_for_composition(app_root: &Path) -> Result<Self> {
-        let target = installed_bundles_directory(app_root);
-        let lock = lillux::SharedFileLock::acquire_with_timeout(
-            &target,
-            std::time::Duration::from_secs(3),
-        )?;
-        Ok(Self { _lock: lock })
     }
 }
 
@@ -451,7 +382,7 @@ pub fn reconcile_all_bundle_transactions(
         );
     }
     for name in &diagnostics.pending {
-        registry_lock.acquire_bundle(name)?.reconcile(signing_key)?;
+        BundleMutationTransaction::acquire(&registry_lock, name)?.reconcile(signing_key)?;
     }
     Ok(diagnostics.pending)
 }

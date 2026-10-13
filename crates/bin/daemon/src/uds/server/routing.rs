@@ -7,7 +7,7 @@ use ryeos_app::state::AppState;
 #[cfg(test)]
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     let lifecycle = super::ready_lifecycle_response(state);
-    dispatch_with_state(request, Some(state), &lifecycle, None).await
+    dispatch_with_state(request, Some(state), None, &lifecycle, None).await
 }
 
 pub(super) async fn dispatch_dynamic(
@@ -17,7 +17,15 @@ pub(super) async fn dispatch_dynamic(
 ) -> RpcResponse {
     let lifecycle = state.lifecycle();
     let application = state.application();
-    let response = dispatch_with_state(request, application.as_deref(), &lifecycle, peer).await;
+    let app = application.as_ref().map(|publication| publication.app().as_ref());
+    let response = dispatch_with_state(
+        request,
+        app,
+        application.as_deref(),
+        &lifecycle,
+        peer,
+    )
+    .await;
     drop(application);
     response
 }
@@ -25,6 +33,7 @@ pub(super) async fn dispatch_dynamic(
 async fn dispatch_with_state(
     request: RpcRequest,
     state: Option<&AppState>,
+    publication: Option<&ryeos_executor::SelectedApplicationPublication>,
     lifecycle: &ryeos_node::LifecycleResponse,
     peer: Option<&super::AuthenticatedUnixPeer>,
 ) -> RpcResponse {
@@ -51,7 +60,14 @@ async fn dispatch_with_state(
                 match state {
                     Some(state) => rpc_result(
                         request.request_id,
-                        super::dispatch_runtime_method(other, &request.params, state, peer).await,
+                        super::dispatch_runtime_method_with_publication(
+                            other,
+                            &request.params,
+                            state,
+                            peer,
+                            publication,
+                        )
+                        .await,
                     ),
                     None => application_unavailable(request.request_id, lifecycle),
                 }

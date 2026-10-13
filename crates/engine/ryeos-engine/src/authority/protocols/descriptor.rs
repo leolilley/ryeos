@@ -158,6 +158,46 @@ impl PersistentSessionNetworkAuthority {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PersistentSessionStartupContractSelection {
+    pub source_root: String,
+    pub member: String,
+    pub sha256: String,
+}
+
+impl PersistentSessionStartupContractSelection {
+    /// Portable selection only; source/member and product authority belong to App.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.source_root.is_empty()
+            || matches!(self.source_root.as_str(), "." | "..")
+            || self.source_root.len() > 64
+            || !self
+                .source_root
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            || self.member.is_empty()
+            || self.member.len() > 1024
+            || self.member.split('/').any(|p| {
+                p.is_empty()
+                    || p == "."
+                    || p == ".."
+                    || !p
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            })
+            || self.sha256.len() != 64
+            || !self
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("startup contract requires a canonical source root/member/digest".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PersistentSessionProtocol {
     pub process_mode: PersistentSessionProcessMode,
     /// Explicit for every session. Admission validates the ownership pairing
@@ -169,6 +209,10 @@ pub struct PersistentSessionProtocol {
     /// resource-free exclusive protocols retain their existing identities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_cleanup_contract: Option<String>,
+    /// Explicit signed source-member selection, not a cleanup or startup proof.
+    /// Ordinary init-first products preserve their exact omission identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_contract: Option<PersistentSessionStartupContractSelection>,
     pub workspace_authority: PersistentSessionWorkspaceAuthority,
     pub network_authority: PersistentSessionNetworkAuthority,
     #[serde(default)]
@@ -330,6 +374,17 @@ pub fn validate_persistent_session_protocol(
 pub fn validate_session_resource_cleanup_contract(
     session: &PersistentSessionProtocol,
 ) -> Result<(), String> {
+    if let Some(selection) = &session.startup_contract {
+        selection.validate()?;
+        if session.cleanup_authority != PersistentSessionCleanupAuthority::TrustedProcessGroup
+            || session.process_mode != PersistentSessionProcessMode::PooledRequests
+        {
+            return Err(
+                "startup contract selection requires explicit trusted pooled cleanup ownership"
+                    .into(),
+            );
+        }
+    }
     if let Some(digest) = &session.resource_cleanup_contract {
         if session.cleanup_authority != PersistentSessionCleanupAuthority::TrustedProcessGroup
             || digest.len() != 64
@@ -355,6 +410,46 @@ pub fn validate_session_resource_cleanup_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_selector_is_canonical_optional_and_trusted_ownership_only() {
+        let selection = PersistentSessionStartupContractSelection {
+            source_root: "source".into(),
+            member: "startup-contract.json".into(),
+            sha256: "a".repeat(64),
+        };
+        selection.validate().unwrap();
+        for member in ["", "/absolute", "../parent", "a//b", "a/./b", "a\\b"] {
+            let mut altered = selection.clone();
+            altered.member = member.into();
+            assert!(altered.validate().is_err());
+        }
+        let mut unknown = serde_json::to_value(&selection).unwrap();
+        unknown["role"] = serde_json::json!("self-selected");
+        assert!(
+            serde_json::from_value::<PersistentSessionStartupContractSelection>(unknown).is_err()
+        );
+        let mut descriptor = persistent_protocol(
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        );
+        assert!(
+            serde_json::to_value(&descriptor).unwrap()["session"]
+                .get("startup_contract")
+                .is_none()
+        );
+        descriptor.session.as_mut().unwrap().startup_contract = Some(selection.clone());
+        assert!(validate_persistent_session_protocol(&descriptor).is_err());
+        let mut trusted = persistent_protocol(
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        );
+        trusted.session.as_mut().unwrap().startup_contract = Some(selection);
+        validate_persistent_session_protocol(&trusted).unwrap(); // Portable metadata, not signed source admission.
+        trusted.session.as_mut().unwrap().process_mode =
+            PersistentSessionProcessMode::ExclusiveSession;
+        assert!(validate_persistent_session_protocol(&trusted).is_err());
+    }
 
     #[test]
     fn qualification_callback_authority_is_explicit_and_identity_bearing() {
@@ -445,6 +540,7 @@ mod tests {
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,
+                startup_contract: None,
                 resource_cleanup_contract: (mode == PersistentSessionProcessMode::PooledRequests
                     && cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup)
                     .then(|| "a".repeat(64)),

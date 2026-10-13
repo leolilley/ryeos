@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QNoManagedRequirements",
+  "description": "Pinned configRequirements/read result; a nonempty managed policy refuses this finite qualification lane.",
+  "type": "object",
+  "properties": {
+    "requirements": {
+      "const": null
+    }
+  },
+  "required": [
+    "requirements"
+  ],
+  "additionalProperties": false
+}

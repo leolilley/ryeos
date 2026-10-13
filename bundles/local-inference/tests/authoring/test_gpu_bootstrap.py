@@ -169,6 +169,28 @@ class GpuBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already loaded"):
                 GPU.install_exact_library_resolver(self.root, self.layout["libc"], self.driver)
 
+    def test_worker_launch_requires_complete_lifecycle_and_distinct_channel(self):
+        source = self.root / "worker"
+        members = ("bootstrap.py", "runtime.py", "cleanup_channel.py", "bootstrap_support.py",
+                   "session.py", "compiler.py", "cpu_support.py", "model.py", "model_contract.py", "tokenizer.py",
+                   "model-profiles/qwen3-0.6b.json", "cuda_lifecycle/__init__.py")
+        for member in members:
+            path = source / member
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture only; never execute")
+        for name in ("home", "cache", "tmp"):
+            (self.root / name).mkdir()
+        argv, env = GPU.worker_launch(self.layout, source, self.driver, self.root,
+                                      session_fd=3, cleanup_fd=4)
+        self.assertEqual((env["JIT"], env["PROFILE"]), ("0", "0"))
+        self.assertEqual(env["RYEOS_RESOURCE_CLEANUP_FD"], "4")
+        self.assertEqual(argv[-1], str(source / "bootstrap.py"))
+        with self.assertRaises(ValueError):
+            GPU.worker_launch(self.layout, source, self.driver, self.root, session_fd=3, cleanup_fd=3)
+        (source / "cuda_lifecycle/__init__.py").unlink()
+        with self.assertRaises(FileNotFoundError):
+            GPU.worker_launch(self.layout, source, self.driver, self.root, session_fd=3, cleanup_fd=4)
+
 
 if __name__ == "__main__":
     unittest.main()

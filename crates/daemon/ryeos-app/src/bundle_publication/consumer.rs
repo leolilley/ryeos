@@ -3,6 +3,7 @@
 //! These operations deliberately produce immutable coordinates and plans. They
 //! neither write the installed bundle registry nor authorize activation.
 
+use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM};
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, bail};
@@ -17,10 +18,6 @@ use std::sync::Arc;
 use super::{
     BundleReleaseEvidenceProof, PublicationObjectReader, PublisherMaterializationProof,
     ReleasePolicyBinding, VerifiedBundleGeneration,
-    attestation::{
-        BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY,
-        BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM,
-    },
     verify_bundle_generation,
 };
 
@@ -126,13 +123,13 @@ pub struct CurrentConsumerPublicationPolicy {
 
 impl CurrentConsumerPublicationPolicy {
     pub fn from_verified_snapshot(
-        snapshot: &crate::node_policy::NodePolicySnapshot,
+        snapshot: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
         trust_store: &ryeos_engine::trust::TrustStore,
         namespace: &str,
         operator_fingerprint: &str,
     ) -> anyhow::Result<Self> {
         let policy = snapshot
-            .require::<crate::node_policy::sections::bundle_publication::BundlePublicationPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>(
         )?;
         policy.validate()?;
         let catalog = policy.require_catalog(namespace)?;

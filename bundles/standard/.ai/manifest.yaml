@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-18T02:33:26Z:28c549b9f3056ead7d5ca022044410f7854f387e880b953a17510ea36a8ae2cf:UBcCdiIWfHFwH5fYnayhvPQiLIg62YL8MW6NHcUYXK+tevcOeOzPSP7bgL5OQf9vCcibyiVRTxU3RI8pEuSTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-10T19:41:28Z:7b42c34d12585f15f9cd0800971485129076fb033390c333e6209d813cf3263c:qNrlYWI53QMOjMldwbqrKg7oH37+86dNLNhuKL7FhG/mh1DMJ+UGAGeALgYXEKh+URK5SWtDDAI7UnUzIaDVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: standard
 version: 0.5.0
-description: 'Workflow: directives, graphs, knowledge, model providers, scheduler, threads'
+description: 'Workflow: directives, graphs, knowledge, model providers, threads'
 provides_kinds:
 - client
 - directive

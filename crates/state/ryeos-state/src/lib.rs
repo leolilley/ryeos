@@ -7,10 +7,12 @@
 //! The crate does NOT own the signing key (daemon passes a [`Signer`] trait),
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub const STATE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("state");
+
 pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;
-pub mod bundle_projection;
 pub mod capability;
 pub mod chain;
 pub mod event_types;
@@ -26,6 +28,7 @@ pub mod object_closure;
 pub mod objects;
 pub mod operational;
 mod pending_publication;
+pub mod private_cas;
 pub mod project_discovery;
 pub mod project_materialization;
 pub mod project_observation;
@@ -42,6 +45,8 @@ pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod verify;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};
@@ -53,9 +58,6 @@ pub use bundle_outbox::{
     BundleOutboxMessage, claim_bundle_outbox_messages, enqueue_bundle_outbox_message,
     ensure_bundle_outbox_schema, get_bundle_outbox_message, mark_bundle_outbox_delivered,
     mark_bundle_outbox_failed,
-};
-pub use bundle_projection::{
-    BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use external_content::{
@@ -87,6 +89,8 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ClosedOriginalOperational, OriginalOperationalFailure, OriginalOperationalMutationAuthority,
+    PreparedReplayIndexReset,
     OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
     ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
     ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
@@ -113,12 +117,14 @@ pub use provider_call_observation::{
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
-    DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
+    DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, HeadOperation, PendingChainHeadTransition,
     PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
-    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
+    RecoveryStore, RetiredThreadHistoryDiscardMarker, StagedCasRootHashes, StagedCasRootLease,
+    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
+pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
     AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
@@ -128,7 +134,7 @@ pub use state_db::{
     AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
     AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,
     CommittedWrite, CreateChainWithEventSuccessorRequest, PendingRemoveHeadState,
-    PendingReplayReport, PinnedStateAuthority, ProjectionRecoveryObserver,
+    PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection, ProjectionRecoveryObserver,
     ProjectionRecoveryProgress, ProjectionRecoveryStage, ProjectionRepairRequest,
     ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector, StateDb,
 };

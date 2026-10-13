@@ -8,6 +8,9 @@
 #[cfg(test)]
 mod tests;
 
+mod project_file;
+pub use project_file::{PreparedExternalDirectProjectFile, prepare_external_direct_project_file};
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -108,6 +111,10 @@ pub(crate) fn retained_external_direct_endpoint(
     let plan = super::decode_retained_direct_plan(closure, artifact)?;
     plan.validate_endpoint_for_sealing()?;
     ensure!(
+        plan.subprocess_limits.is_none(),
+        "external direct native subprocess limits require admitted current guest support before provider contact"
+    );
+    ensure!(
         matches!(
             plan.endpoint_requirement,
             ExecutionEndpointRequirement::External { .. }
@@ -205,6 +212,7 @@ pub(crate) fn compile_external_direct_program(
     inputs: &ExternalGuestInputProjection,
     source: Option<&VerifiedAdmittedSourceRecords>,
     launch_owner: crate::runtime_db::LaunchOwner,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
 ) -> Result<CompiledExternalDirectProgram> {
     // The placement owner authenticates the retained capsule and born thread;
     // this join also prevents the evaluator source being selected from C.
@@ -215,7 +223,10 @@ pub(crate) fn compile_external_direct_program(
     );
     validate_external_direct_project_inputs(&capsule.project_authority, inputs)?;
     validate_direct_capsule_source(capsule, source)?;
-    let program = compile_external_direct_program_parts(
+    if let Some(proof) = project_file {
+        proof.require_capsule(capsule)?;
+    }
+    let program = compile_external_direct_program_parts_with_project_file(
         &capsule.execution_closure,
         &capsule.artifact_identity,
         protocol,
@@ -223,6 +234,7 @@ pub(crate) fn compile_external_direct_program(
         chain_root_id,
         inputs,
         source,
+        project_file,
     )?;
     Ok(CompiledExternalDirectProgram {
         program,
@@ -247,14 +259,19 @@ fn validate_direct_capsule_source(
 
 /// Derive input environment values using the same retained-plan/protocol owner
 /// as the final compiler. No host environment, live project or caller-authored
-/// search path enters this projection. This is not born-thread/contact proof.
+/// search path enters this projection. The workspace view is selected from
+/// the same exact plan; this is not born-thread/contact proof.
 pub fn external_direct_environment(
     capsule: &AdmittedLaunchCapsule,
     protocol: &VerifiedProtocol,
     thread_id: &str,
     chain_root_id: &str,
     source: Option<&VerifiedAdmittedSourceRecords>,
-) -> Result<(BTreeMap<String, String>, Vec<String>)> {
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<String>,
+    ryeos_external_execution_contract::GuestWorkspaceView,
+)> {
     capsule.validate()?;
     validate_external_direct_project_authority(&capsule.project_authority)?;
     validate_direct_capsule_source(capsule, source)?;
@@ -270,7 +287,112 @@ pub fn external_direct_environment(
         .get("PATH")
         .map(|path| path.split(':').map(str::to_owned).collect())
         .unwrap_or_default();
-    Ok((environment, search))
+    Ok((environment, search, direct_workspace_view(&plan)?))
+}
+
+/// Pure input facts for a projectless probe under its authenticated enclosing
+/// verifier root. The fixture later supplies bytes at /workspace, never a
+/// project identity or ProjectPath protocol injection.
+pub(crate) fn projectless_mechanism_environment(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    protocol: &VerifiedProtocol,
+    root_thread_id: &str,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<String>,
+    ryeos_external_execution_contract::GuestWorkspaceView,
+)> {
+    validate_external_direct_plan_semantics(plan, &protocol.descriptor)?;
+    ensure!(
+        protocol
+            .descriptor
+            .env_injections
+            .iter()
+            .all(|injection| { injection.source != EnvInjectionSource::ProjectPath }),
+        "projectless mechanism protocol requests a project path"
+    );
+    let spec = ordinary_direct_subprocess(plan)?;
+    ensure!(
+        spec.args.iter().all(|argument| !matches!(
+            argument,
+            PlanArgument::AdmittedExecutionProjectFile { .. }
+                | PlanArgument::AdmittedSourceMember { .. }
+        )),
+        "projectless mechanism plan requests unissued project or source member authority"
+    );
+    let environment = compile_direct_environment(
+        spec,
+        &protocol.descriptor,
+        root_thread_id,
+        root_thread_id,
+        source,
+    )?;
+    let search = environment
+        .get("PATH")
+        .map(|path| path.split(':').map(str::to_owned).collect())
+        .unwrap_or_default();
+    Ok((environment, search, direct_workspace_view(plan)?))
+}
+
+fn direct_workspace_view(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<ryeos_external_execution_contract::GuestWorkspaceView> {
+    use ryeos_external_execution_contract::GuestWorkspaceView;
+    match plan.filesystem_authority_ceiling {
+        IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+            Ok(GuestWorkspaceView::FullSnapshot)
+        }
+        IsolationFilesystemAuthorityCeiling::CapturedInputs => {
+            Ok(GuestWorkspaceView::CapturedInputs)
+        }
+        IsolationFilesystemAuthorityCeiling::NodePolicy => {
+            bail!("external direct workspace cannot inherit node filesystem authority")
+        }
+    }
+}
+
+fn direct_target_limits(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>> {
+    let target_limits = plan
+        .subprocess_limits
+        .filter(|limits| {
+            limits.max_open_files.is_some()
+                || limits.max_address_space_bytes.is_some()
+                || limits.max_cpu_seconds.is_some()
+                || limits.max_processes.is_some()
+                || limits.deny_process_creation
+        })
+        .map(
+            |limits| ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
+                max_open_files: limits.max_open_files,
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            },
+        );
+    if let Some(limits) = target_limits {
+        limits.validate()?;
+    }
+    Ok(target_limits)
+}
+
+pub(super) fn required_direct_feature_claims(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+) -> Result<Vec<&'static str>> {
+    use ryeos_external_execution_contract::{
+        CAPTURED_INPUTS_SUPPORT_CLAIM, GuestWorkspaceView, TARGET_LIMITS_SUPPORT_CLAIM,
+    };
+    let mut required = Vec::new();
+    if direct_workspace_view(plan)? == GuestWorkspaceView::CapturedInputs {
+        required.push(CAPTURED_INPUTS_SUPPORT_CLAIM);
+    }
+    if direct_target_limits(plan)?.is_some() {
+        required.push(TARGET_LIMITS_SUPPORT_CLAIM);
+    }
+    Ok(required)
 }
 
 /// Join the guest's C filesystem to the retained launch, independently of the
@@ -322,6 +444,32 @@ pub(super) fn validate_external_direct_plan(
 ) -> Result<()> {
     plan.validate_endpoint_for_sealing()?;
     ensure!(
+        plan.subprocess_limits.is_none(),
+        "external direct native subprocess limits require admitted current guest support before provider contact"
+    );
+    ensure!(
+        plan.filesystem_authority_ceiling == IsolationFilesystemAuthorityCeiling::CapturedExecution,
+        "external direct execution requires captured filesystem and isolated network ceilings"
+    );
+    validate_external_direct_plan_semantics(plan, protocol)
+}
+
+/// Validate the projection's finite mechanical meaning, independently of
+/// ordinary guest support admission. This grants no allocation, dispatch,
+/// qualification or fixture provenance. A mechanism preparation owner must
+/// authenticate its original root/purpose and actual fixture closure before
+/// using these semantics; ordinary callers retain the support gates above.
+pub(super) fn validate_external_direct_plan_semantics(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    protocol: &ryeos_engine::protocols::ProtocolDescriptor,
+) -> Result<()> {
+    plan.validate_endpoint_for_sealing()?;
+    if let Some(limits) = plan.subprocess_limits {
+        limits.validate()?;
+    }
+    direct_target_limits(plan)?;
+
+    ensure!(
         matches!(
             plan.endpoint_requirement,
             ExecutionEndpointRequirement::External { .. }
@@ -342,8 +490,11 @@ pub(super) fn validate_external_direct_plan(
         "external direct protocol requests unsupported controller authority"
     );
     ensure!(
-        plan.filesystem_authority_ceiling == IsolationFilesystemAuthorityCeiling::CapturedExecution
-            && plan.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated,
+        matches!(
+            plan.filesystem_authority_ceiling,
+            IsolationFilesystemAuthorityCeiling::CapturedExecution
+                | IsolationFilesystemAuthorityCeiling::CapturedInputs
+        ) && plan.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated,
         "external direct execution requires captured filesystem and isolated network ceilings"
     );
     ensure!(
@@ -411,12 +562,40 @@ fn retained_external_direct_plan(
     ryeos_engine::contracts::ExecutionPlan,
     ryeos_engine::protocols::ProtocolDescriptor,
 )> {
+    let (mut plan, retained) = retained_direct_plan_and_protocol(closure, artifact, protocol)?;
+    let AdmittedExecutionClosure::DirectItemExecutor {
+        admitted_project_root,
+        ..
+    } = closure
+    else {
+        unreachable!("retained direct plan checked above")
+    };
+    validate_external_direct_plan(&plan, &retained)?;
+    ensure!(
+        admitted_project_root.is_some(),
+        "external direct execution requires a retained project view"
+    );
+    super::relocate_admitted_direct_plan(
+        &mut plan,
+        admitted_project_root.as_deref(),
+        Some(Path::new("/workspace")),
+    )?;
+    Ok((plan, retained))
+}
+
+fn retained_direct_plan_and_protocol(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+) -> Result<(
+    ryeos_engine::contracts::ExecutionPlan,
+    ryeos_engine::protocols::ProtocolDescriptor,
+)> {
     closure.validate()?;
     artifact.validate()?;
-    let mut plan = super::decode_retained_direct_plan(closure, artifact)?;
+    let plan = super::decode_retained_direct_plan(closure, artifact)?;
     let AdmittedExecutionClosure::DirectItemExecutor {
         protocol_descriptor_document,
-        admitted_project_root,
         ..
     } = closure
     else {
@@ -447,19 +626,10 @@ fn retained_external_direct_plan(
         "external direct protocol interpretation changed its retained document"
     );
     ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &retained)?;
-    validate_external_direct_plan(&plan, &retained)?;
-    ensure!(
-        admitted_project_root.is_some(),
-        "external direct execution requires a retained project view"
-    );
-    super::relocate_admitted_direct_plan(
-        &mut plan,
-        admitted_project_root.as_deref(),
-        Some(Path::new("/workspace")),
-    )?;
     Ok((plan, retained))
 }
 
+#[cfg(test)]
 fn compile_external_direct_program_parts(
     closure: &AdmittedExecutionClosure,
     artifact: &AdmittedLaunchArtifactIdentity,
@@ -469,7 +639,105 @@ fn compile_external_direct_program_parts(
     inputs: &ExternalGuestInputProjection,
     source: Option<&VerifiedAdmittedSourceRecords>,
 ) -> Result<AdmittedExternalDirectProgram> {
+    compile_external_direct_program_parts_with_project_file(
+        closure,
+        artifact,
+        protocol,
+        thread_id,
+        chain_root_id,
+        inputs,
+        source,
+        None,
+    )
+}
+
+fn compile_external_direct_program_parts_with_project_file(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+    thread_id: &str,
+    chain_root_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
+) -> Result<AdmittedExternalDirectProgram> {
     let (plan, retained) = retained_external_direct_plan(closure, artifact, protocol)?;
+    compile_direct_program_from_plan(
+        &plan,
+        &retained,
+        closure,
+        artifact,
+        thread_id,
+        chain_root_id,
+        inputs,
+        source,
+        project_file,
+    )
+}
+
+/// Compile only program data for the original projectless mechanism owner.
+/// The caller must retain its sealed root, signed fixture and byte owners.
+pub(crate) fn compile_projectless_mechanism_parts(
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    protocol: &VerifiedProtocol,
+    root_thread_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+) -> Result<AdmittedExternalDirectProgram> {
+    let (plan, retained) = retained_direct_plan_and_protocol(closure, artifact, protocol)?;
+    ensure!(
+        matches!(
+            closure,
+            AdmittedExecutionClosure::DirectItemExecutor {
+                admitted_project_root: None,
+                ..
+            }
+        ),
+        "mechanism program cannot claim an execution project root"
+    );
+    validate_external_direct_plan_semantics(&plan, &retained)?;
+    ensure!(
+        retained
+            .env_injections
+            .iter()
+            .all(|injection| { injection.source != EnvInjectionSource::ProjectPath }),
+        "projectless mechanism protocol requests a project path"
+    );
+    let spec = ordinary_direct_subprocess(&plan)?;
+    ensure!(
+        spec.args.iter().all(|argument| !matches!(
+            argument,
+            PlanArgument::AdmittedExecutionProjectFile { .. }
+                | PlanArgument::AdmittedSourceMember { .. }
+        )),
+        "projectless mechanism plan requests unissued project or source member authority"
+    );
+    compile_direct_program_from_plan(
+        &plan,
+        &retained,
+        closure,
+        artifact,
+        root_thread_id,
+        root_thread_id,
+        inputs,
+        source,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_direct_program_from_plan(
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    retained: &ryeos_engine::protocols::ProtocolDescriptor,
+    closure: &AdmittedExecutionClosure,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    thread_id: &str,
+    chain_root_id: &str,
+    inputs: &ExternalGuestInputProjection,
+    source: Option<&VerifiedAdmittedSourceRecords>,
+    project_file: Option<&PreparedExternalDirectProjectFile>,
+) -> Result<AdmittedExternalDirectProgram> {
     let target = plan
         .target_requirement
         .as_ref()
@@ -489,6 +757,11 @@ fn compile_external_direct_program_parts(
         .context("external direct endpoint has not been sealed")?;
     let spec = ordinary_direct_subprocess(&plan)?;
     inputs.validate()?;
+    let project_file_destination = project_file::require_inputs(&plan, inputs, project_file)?;
+    ensure!(
+        inputs.workspace_view == direct_workspace_view(&plan)?,
+        "external direct workspace view differs from its retained plan ceiling"
+    );
     let source_mounts = inputs
         .inputs
         .iter()
@@ -551,6 +824,10 @@ fn compile_external_direct_program_parts(
                 .to_str()
                 .context("external direct source entry is not UTF-8")?
                 .to_owned()),
+            PlanArgument::AdmittedExecutionProjectFile { .. } => Ok(project_file_destination
+                .as_ref()
+                .context("external execution project file has no bound input")?
+                .clone()),
             PlanArgument::AdmittedSourceMember { .. } => {
                 bail!("external direct source members require an admitted guest binding")
             }
@@ -578,7 +855,17 @@ fn compile_external_direct_program_parts(
         .map(|value| value.materialize().map_err(anyhow::Error::msg))
         .transpose()?
         .unwrap_or_default();
+    let requested = plan.subprocess_limits;
+    let target_limits = direct_target_limits(&plan)?;
+    let stdout_max_bytes = requested
+        .and_then(|limits| limits.max_stdout_bytes)
+        .map_or(stdout_max_bytes, |limit| stdout_max_bytes.min(limit));
+    let stderr_max_bytes = requested
+        .and_then(|limits| limits.max_stderr_bytes)
+        .map_or(stderr_max_bytes, |limit| stderr_max_bytes.min(limit));
     let projection = ExternalDirectCommandProjection {
+        workspace_view: direct_workspace_view(&plan)?,
+        target_limits,
         argv0: AdmittedExternalDirectProgram::guest_executable_for_command(match closure {
             AdmittedExecutionClosure::DirectItemExecutor { command, .. } => command,
             _ => bail!("external direct projection lost its ordinary closure"),

@@ -116,7 +116,7 @@ pub async fn handle_exchange(
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-execution/channel-attach",
-    endpoint: "external_execution.channel_attach",
+    endpoint: "external-execution.channel-attach",
     availability: ServiceAvailability::DaemonOnly,
     // The occurrence verifier grants no general RyeOS scope, so this service
     // has no static capability requirement. The handler independently requires
@@ -133,7 +133,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 pub const EXCHANGE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-execution/channel-exchange",
-    endpoint: "external_execution.channel_exchange",
+    endpoint: "external-execution.channel-exchange",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| {

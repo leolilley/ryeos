@@ -17,6 +17,8 @@ pub mod planning;
 pub mod projection;
 pub mod reconcile;
 pub mod result_outcome;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 pub mod timer;
 pub mod types;
 
@@ -63,6 +65,13 @@ pub trait SchedulerContext: Send + Sync + 'static {
     /// Runtime gate that prevents dispatch while schedule/project deploy
     /// mutations are in progress.
     fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
+
+    /// Refuse dispatch while an in-process project schedule transaction has
+    /// unresolved partial state. Startup recovery must clear this condition
+    /// before the timer or recovered fires are released.
+    fn ensure_dispatch_available(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// The trust store for schedule signature verification.
     fn schedule_trust_store(&self) -> &TrustStore;

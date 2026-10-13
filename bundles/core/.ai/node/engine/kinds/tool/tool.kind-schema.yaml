@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-01T01:13:28Z:6606cd8663ae989298fde3b7bd9d6feabf0197db19dcc0bff3bfa06013f29097:d8an0t0tOVDzkkjVwv4VvxewNN2zqJN2tVMTTAwwuaLvQTKUySEvtdZsqYqaX2j0q8SMdCSFKuujzJzwcMGmBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-10T04:34:00Z:de2daf53bbe4a62b69305f89a4fb99b3a50e93bc872dbde076638fa18a9035f4:CdgW0kkMXLBIz83Jis2i5fDpyGzQnXPx5XzUfJtPzLFYbPCrvbckVRC50fh01d2VU38KjMpOlZZtDjOACEKqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -53,6 +53,8 @@ execution:
       max_requirements: 1
       max_resource_count: 1
       max_facts_per_requirement: 16
+  subprocess_limits:
+    path: [subprocess_limits]
   resource_authority_ceiling:
     path: [resource_authority]
     default: node_policy
@@ -174,6 +176,9 @@ composed_value_contract:
     execution_endpoint:
       type: single
       prim: mapping
+    subprocess_limits:
+      type: single
+      prim: mapping
     resource_authority:
       type: single
       prim: string
@@ -194,6 +199,7 @@ runtime:
   # claimed by a registered handler is a hard `UnknownRuntimeBlock`
   # error.
   ignored_keys:
+    - subprocess_limits
     - version
     - category
     - description

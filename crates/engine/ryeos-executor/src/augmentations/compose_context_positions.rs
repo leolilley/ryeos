@@ -658,6 +658,7 @@ pub async fn run(
         //        token revocation and failure-finalization below then run
         //        regardless, so a pre-spawn failure can no longer leak tokens
         //        or leave the child thread non-terminal.
+        let unsettled_cleanup = std::sync::atomic::AtomicBool::new(false);
         let spawn_outcome: Result<
         ryeos_engine::method_wire::MethodCallResult,
         LaunchAugmentationError,
@@ -845,6 +846,7 @@ pub async fn run(
                     target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
+                    verbatim_env_names: &[],
                 },
             )
             .map_err(|error| LaunchAugmentationError::Threads(format!("isolation: {error}")))?;
@@ -872,7 +874,13 @@ pub async fn run(
         })
         .await
         .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?
-        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}")))?;
+        .map_err(|e| {
+            // Classify before the typed failure is rendered to text.
+            if crate::execution::process_attachment::is_unsettled_launch_cleanup(&e) {
+                unsettled_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}"))
+        })?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {
@@ -923,6 +931,11 @@ pub async fn run(
 
         let batch_result = match spawn_outcome {
             Ok(br) => br,
+            // Unproved cleanup: keep the row non-terminal and the lifecycle
+            // owner armed so its drop stop or reconcile settles the child.
+            Err(e) if unsettled_cleanup.load(std::sync::atomic::Ordering::SeqCst) => {
+                return Err(e);
+            }
             Err(e) => {
                 match crate::dispatch::finalize_method_thread_if_needed(
                     state,
@@ -2389,12 +2402,19 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn lifecycle_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes. It stays
+    /// on the building thread.
+    pub(crate) fn lifecycle_test_state() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         let temp = tempfile::tempdir().expect("test tempdir");
-        let runtime_state_dir = temp.path().join(".ai/state");
-        let runtime_db_path = temp.path().join("runtime.sqlite3");
+        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(temp.path())
+            .join("runtime.sqlite3");
         let key_path = temp.path().join("identity/node-key.pem");
-        let config = ryeos_app::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().expect("test bind"),
             db_path: runtime_db_path.clone(),
             uds_path: temp.path().join("test.sock"),
@@ -2404,7 +2424,7 @@ pub(crate) mod tests {
             authorized_keys_dir: temp.path().join("auth"),
         };
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
+            ryeos_node_runtime::identity::NodeIdentity::create(&key_path).expect("test node identity");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -2414,17 +2434,8 @@ pub(crate) mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                temp.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                Arc::new(head_trust),
-            )
-            .expect("test state store"),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(temp.path(), signer, write_barrier.clone(), Arc::new(head_trust)).expect("test state store");
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -2463,8 +2474,7 @@ pub(crate) mod tests {
             routes: Vec::new(),
             commands: Vec::new(),
         };
-        let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2502,21 +2512,17 @@ pub(crate) mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 )]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
+            provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
             command_registry: Arc::new(
                 ryeos_runtime::CommandRegistry::from_records(&[], &Default::default())
                     .expect("test command registry"),
             ),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(
-                ryeos_scheduler::db::SchedulerDb::new_in_memory().expect("test scheduler db"),
-            ),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(
                 ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),
@@ -2533,8 +2539,9 @@ pub(crate) mod tests {
             ),
             scoped_producer_authorities: Arc::new(Default::default()),
             scoped_producer_processes: Arc::new(Default::default()),
+            qualification_workspace_custody: Arc::new(Default::default()),
         };
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[cfg(target_os = "linux")]
@@ -2573,10 +2580,13 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn bound_runtime_children_fixture() -> (tempfile::TempDir, ryeos_app::state::AppState)
-    {
+    pub(crate) fn bound_runtime_children_fixture() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         use ryeos_app::runtime_db::{RuntimeWorkspaceBinding, WorkspaceBinding, WorkspaceState};
-        let (temp, state) = lifecycle_test_state();
+        let (temp, store_owner, state) = lifecycle_test_state();
         let store = &state.state_store;
         let parent = "T-runtime-parent";
         store
@@ -2655,7 +2665,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[test]
@@ -2705,7 +2715,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cancellation_settles_attached_augmentation_child_while_blocking_wait_is_in_flight() {
-        let (temp, state) = lifecycle_test_state();
+        let (temp, _store_owner, state) = lifecycle_test_state();
         let thread_id = "T-augmentation-cancel-inflight";
         let descendant_pid_path = temp.path().join("augmentation-descendant.pid");
         let (worker_done_tx, worker_done_rx) = mpsc::channel();

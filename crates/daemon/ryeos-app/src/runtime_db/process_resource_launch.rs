@@ -165,47 +165,49 @@ impl RuntimeDb {
         &self,
         expected: &ProcessResourceReservationRecord,
     ) -> Result<TrustedResourceSpawnPermit> {
-        expected.validate()?;
-        if let Some(custody) = &expected.runtime_custody {
-            custody.require_retained()?;
-        }
-        if expected.daemon_generation_id != daemon_generation_id() {
-            bail!("trusted held-spawn intent belongs to another daemon generation");
-        }
-        let mut intent = expected.clone();
-        let ProcessResourceLaunchAuthority::TrustedProcessGroup {
-            host_lifetime,
-            phase,
-            ..
-        } = &mut intent.launch_authority
-        else {
-            bail!("trusted held spawn requires an explicitly trusted reservation");
-        };
-        if *phase != TrustedResourceLaunchPhase::Reserved
-            || *host_lifetime
-                != lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?
-        {
-            bail!("trusted held-spawn intent is not reserved in this host occurrence");
-        }
-        *phase = TrustedResourceLaunchPhase::SpawnIntent;
-        let before = lillux::canonical_json(&serde_json::to_value(expected)?)?;
-        let after = lillux::canonical_json(&serde_json::to_value(&intent)?)?;
-        let changed = self.conn.execute(
-            "UPDATE process_resource_reservation SET reservation=?4, updated_at_ms=?5
+        self.conn.with_sql(|conn| {
+            expected.validate()?;
+            if let Some(custody) = &expected.runtime_custody {
+                custody.require_retained()?;
+            }
+            if expected.daemon_generation_id != daemon_generation_id() {
+                bail!("trusted held-spawn intent belongs to another daemon generation");
+            }
+            let mut intent = expected.clone();
+            let ProcessResourceLaunchAuthority::TrustedProcessGroup {
+                host_lifetime,
+                phase,
+                ..
+            } = &mut intent.launch_authority
+            else {
+                bail!("trusted held spawn requires an explicitly trusted reservation");
+            };
+            if *phase != TrustedResourceLaunchPhase::Reserved
+                || *host_lifetime
+                    != lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?
+            {
+                bail!("trusted held-spawn intent is not reserved in this host occurrence");
+            }
+            *phase = TrustedResourceLaunchPhase::SpawnIntent;
+            let before = lillux::canonical_json(&serde_json::to_value(expected)?)?;
+            let after = lillux::canonical_json(&serde_json::to_value(&intent)?)?;
+            let changed = conn.execute(
+                "UPDATE process_resource_reservation SET reservation=?4, updated_at_ms=?5
               WHERE owner_kind=?1 AND owner_coordinate=?2 AND reservation=?3",
-            rusqlite::params![
-                expected.owner_kind,
-                expected.owner_coordinate,
-                before,
-                after,
-                i64::try_from(lillux::time::timestamp_millis())?
-            ],
-        )?;
-        if changed != 1 {
-            bail!("trusted held-spawn intent was not committed exactly once");
-        }
-        Ok(TrustedResourceSpawnPermit {
-            reservation: intent,
+                rusqlite::params![
+                    expected.owner_kind,
+                    expected.owner_coordinate,
+                    before,
+                    after,
+                    i64::try_from(lillux::time::timestamp_millis())?
+                ],
+            )?;
+            if changed != 1 {
+                bail!("trusted held-spawn intent was not committed exactly once");
+            }
+            Ok(TrustedResourceSpawnPermit {
+                reservation: intent,
+            })
         })
     }
 }

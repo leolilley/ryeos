@@ -94,7 +94,10 @@ impl GenerationRetirement<'_> {
         let name = OsStr::new(&self.construction.generation);
         if let Some(directory) = root.open_child_directory(name)? {
             directory.remove_contents_recursive()?;
-            if !root.remove_empty_child_if_same(name, &directory)? {
+            if !root
+                .remove_empty_child_if_same(name, &directory)
+                .map(|receipt| receipt.is_some())?
+            {
                 anyhow::bail!("materialization generation changed during retirement");
             }
         }
@@ -390,7 +393,10 @@ impl MaterializationCache {
             Err(error) => {
                 if !error.namespace_committed() && self.verify_complete(snapshot_hash).is_ok() {
                     staging.remove_contents_recursive()?;
-                    if !cache_root.remove_empty_child_if_same(staging_name, staging)? {
+                    if !cache_root
+                        .remove_empty_child_if_same(staging_name, staging)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         anyhow::bail!("materialization staging directory remained non-empty");
                     }
                     Ok(())
@@ -486,7 +492,7 @@ impl MaterializationCache {
         let bytes = canonical_completion_marker(completion)?.into_bytes();
         let name = OsStr::new(&completion.snapshot_hash);
         if markers
-            .atomic_create_regular(name, &bytes, 0o600)?
+            .atomic_create_regular(name, &bytes, 0o600, crate::EXECUTOR_TEMP_PURPOSE)?
             .is_none()
         {
             let existing = markers
@@ -1374,28 +1380,26 @@ fn verify_cached_file_metadata(
 pub(super) mod tests {
     use super::*;
 
+    /// The owner dereferences to the Store, closes it when dropped and stays
+    /// on the opening thread; `Arc` clones of its Store may cross threads.
     #[cfg(target_os = "linux")]
     pub(in crate::execution) fn open_custody_store(
         root: &Path,
-    ) -> ryeos_app::state_store::StateStore {
+    ) -> ryeos_app::test_support::TestStateStore {
         use std::sync::Arc;
         let key = root.join("test-node-key.pem");
         let identity = if key.exists() {
-            ryeos_app::identity::NodeIdentity::load(&key).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&key).unwrap()
         } else {
-            ryeos_app::identity::NodeIdentity::create(&key).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::create(&key).unwrap()
         };
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state = root.join(".ai/state");
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_owned(),
-            state.clone(),
-            state.join("runtime.sqlite3"),
+        ryeos_app::test_support::TestStateStore::open(
+            root,
             Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
                 &identity,
             )),
-            ryeos_app::write_barrier::WriteBarrier::new(),
             Arc::new(trust),
         )
         .unwrap()
@@ -1570,16 +1574,18 @@ pub(super) mod tests {
     fn source_retirement_refuses_a_different_pin_owner_namespace() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let store_a = open_custody_store(a.path());
-        let store_b = open_custody_store(b.path());
         let cache_a =
             MaterializationCache::source_closures(a.path().join(".ai/state/cache/source-closures"));
-        cache_a.pinned_root().unwrap(); // Empty A pins must not authorize B.
         let cache_b =
             MaterializationCache::source_closures(b.path().join(".ai/state/cache/source-closures"));
         let hash = snapshot_hash();
         write_regular(&cache_b.cache_dir(&hash).join("input"), b"B generation");
         let construction = cache_b.generation_build_lock(&hash).unwrap();
+        // One Store is live per process, so A's namespace is offered alone
+        // and closed before B's opens; the B generation and its build lock
+        // stay held across both attempts.
+        let store_a = open_custody_store(a.path());
+        cache_a.pinned_root().unwrap(); // Empty A pins must not authorize B.
         assert!(
             cache_b
                 .discard_generation_with(&hash, &construction, |operation| {
@@ -1587,7 +1593,9 @@ pub(super) mod tests {
                 })
                 .is_err()
         );
+        store_a.close().unwrap();
         assert!(cache_b.cache_dir(&hash).exists());
+        let store_b = open_custody_store(b.path());
         cache_b
             .discard_generation_with(&hash, &construction, |operation| {
                 super::super::source_closure::retire_source_generation(&store_b, operation)
@@ -1603,7 +1611,8 @@ pub(super) mod tests {
         use std::sync::{Arc, mpsc};
         use std::time::Duration;
         let root = tempfile::tempdir().unwrap();
-        let store = Arc::new(open_custody_store(root.path()));
+        let store_owner = open_custody_store(root.path());
+        let store = Arc::clone(store_owner.store());
         let cache = MaterializationCache::source_closures(root.path().join("source-cache"));
         let hash = snapshot_hash();
         write_regular(&cache.cache_dir(&hash).join("input"), b"idle generation");

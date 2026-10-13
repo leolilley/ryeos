@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T01:24:37Z:484a45898c683e6387517ecb7c6f455e0c4395e14770f53b79c95c6d59482811:p3oBFii2vUWqF8iKlGzBN+e8pS2mOKP5e68xPoY18++1cCtKGGvFTwYOC5oAGkgnt5SDFmEvG9kZiOjPBa9bDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-10T19:41:37Z:79d4b4d16a05724bab767367e9801155b1f8534188f8fad8161f4e385ea8b235:qbZGNyPMABboNw2Apxh+6rj8mHRHPmzrRlR/55Jfyjdp1BTV9hC/Q4T9ZTdeIDHKYkE3NXwxDqNmBV5ErEQICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -9,9 +9,11 @@ description: >
 
 # Scheduler
 
-The scheduler allows registering items (directives, tools, graphs) to
-execute on a recurring schedule. It provides full CRUD plus operational
-controls.
+The independently selected scheduling capability registers capsule-producing
+subprocess tools for one-shot or recurring execution. In-process services and
+method dispatch are not eligible dispatch targets. Selecting scheduling grants
+no execution authority; authenticated registration and each fire still require
+their exact capability grants.
 
 ## Scheduler Services
 
@@ -22,10 +24,13 @@ controls.
 | `scheduler/deregister` | `scheduler.deregister`| Remove a schedule              |
 | `scheduler/pause`      | `scheduler.pause`     | Pause a schedule               |
 | `scheduler/resume`     | `scheduler.resume`    | Resume a paused schedule       |
+| `scheduler/explain`     | `scheduler.explain`   | Explain schedule timing and policy |
 | `scheduler/show_fires` | `scheduler.show_fires`| Show fire history for a schedule |
 
-All scheduler services require the caller to hold the corresponding
-capability scope (e.g., `ryeos.execute.service.scheduler/register`).
+Mutating scheduler services declare the corresponding capability scope
+(e.g., `ryeos.execute.service.scheduler/register`). Inspection descriptors
+for list, explain and show_fires declare no additional required_caps; their
+authenticated caller and ownership filtering still follow the service contract.
 Ownership is enforced: only the schedule's creator (or an admin) can
 update, pause, resume, or deregister it.
 
@@ -37,6 +42,7 @@ ryeos scheduler list                # List all schedules
 ryeos scheduler deregister <id>     # Remove a schedule
 ryeos scheduler pause <id>          # Pause execution
 ryeos scheduler resume <id>         # Resume after pause
+ryeos scheduler explain <id>        # Inspect timing and policy
 ryeos scheduler show-fires <id>     # View fire history
 ```
 
@@ -61,12 +67,12 @@ Register a schedule by providing:
 Complete registration object:
 
 ```yaml
-schedule_id: hourly-report
-item_ref: graph:reports/hourly
+schedule_id: hourly-doctor
+item_ref: tool:ryeos/core/node/doctor
 schedule_type: cron
 expression: "0 0 * * * *"
 params:
-  format: summary
+  source: /path/to/project
 timezone: UTC
 misfire_policy: fire_once_now
 overlap_policy: skip
@@ -74,7 +80,8 @@ lateness_grace_secs: 60
 enabled: true
 project_root: /path/to/project
 capabilities:
-  - ryeos.execute.graph.reports/hourly
+  - ryeos.execute.tool.ryeos/core/node/doctor
+  - ryeos.read.project.live
 execution_policy:
   schema_version: 2
   ownership: daemon_owned
@@ -83,13 +90,10 @@ execution_policy:
   target:
     kind: here
   environment:
-    kind: project_overlay
-    include_operator_vault: true
-    name_policy:
-      kind: declared_required
+    kind: none
   project:
     kind: live_direct
-    access: read_write
+    access: read_only
     child_policy:
       kind: inherit
 ```
@@ -141,7 +145,15 @@ starting from the next scheduled time.
 
 ## Use Cases
 
-- **Periodic health checks** — run a diagnostic directive every hour
+- **Periodic health checks** — run the Core doctor subprocess Tool every hour
 - **Data sync** — execute a sync tool on a cron schedule
-- **Report generation** — generate daily/weekly reports via graph
-- **Cleanup** — run maintenance tasks on a schedule
+- **Report generation** — run an admitted reporting subprocess Tool
+- **Cleanup** — requires an eligible admitted subprocess target; the current
+  in-process maintenance/gc service cannot be dispatched by this capsule path
+
+Service and command descriptors are owned by the scheduling bundle. This
+reference remains with the existing Standard knowledge content owner; reading
+it is not a runtime dependency of scheduling. Source configuration and this
+example do not establish signed admission, filesystem confinement or a
+qualified operation. The source-only composition migration leaves generated
+bundle manifests pending rebuild and separately authorized signing.

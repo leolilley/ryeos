@@ -9,6 +9,7 @@ use crate::LocalLifecycleEnv;
 use crate::init_check::{InitDiagnostics, InitState, init_state};
 use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
 use crate::metadata::DaemonMetadata;
+use crate::native_capacity::CapacityAccountSummary;
 
 /// The daemon records its running marker immediately before publishing the
 /// startup control listener. Beyond this grace period, a live marker without a
@@ -22,11 +23,20 @@ pub enum LifecycleStatus {
     },
     Stopped {
         app_root: PathBuf,
+        /// The native-capacity account as the anchor on disk reports it:
+        /// epoch, remaining allowance and recovery attempts. `None` before
+        /// issuance or when the anchor could not be read.
+        capacity: Option<CapacityAccountSummary>,
+        /// Why `capacity` is `None` on an issued node: a torn or foreign
+        /// anchor is reported here, never repaired by a status probe.
+        capacity_error: Option<String>,
     },
     Running {
         metadata: DaemonMetadata,
         ready_at: String,
         startup: StartupSnapshot,
+        capacity: Option<CapacityAccountSummary>,
+        capacity_error: Option<String>,
     },
     Failed {
         metadata: DaemonMetadata,
@@ -71,6 +81,9 @@ fn failed_marker_status(
         started_at,
         exited_at,
         error,
+        launch_route: _,
+        latched_drain: _,
+        carrier_incarnation: _,
     } = marker
     else {
         return None;
@@ -152,15 +165,20 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                     unusable_control_paths.push((control_path.clone(), live_error.to_string()));
                 } else if let Some(connect_error) =
                     err.downcast_ref::<crate::control::ControlConnectError>()
-                    && !matches!(
+                {
+                    if let Some(reason) = unaddressable_control_path(control_path, connect_error.kind) {
+                        // No socket can be bound at this pathname, so nothing
+                        // is listening there: proof of absence, like NotFound.
+                        tracing::warn!("{reason}");
+                    } else if !matches!(
                         connect_error.kind,
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    )
-                {
-                    unusable_control_paths.push((
-                        control_path.clone(),
-                        format!("lifecycle ownership is uncertain because {connect_error}"),
-                    ));
+                    ) {
+                        unusable_control_paths.push((
+                            control_path.clone(),
+                            format!("lifecycle ownership is uncertain because {connect_error}"),
+                        ));
+                    }
                 }
                 continue;
             }
@@ -225,13 +243,18 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 startup: response.startup,
                 control_available: true,
             },
-            LifecycleWireState::Running => LifecycleStatus::Running {
-                metadata,
-                ready_at: response
-                    .ready_at
-                    .expect("validated running lifecycle response has ready_at"),
-                startup: response.startup,
-            },
+            LifecycleWireState::Running => {
+                let (capacity, capacity_error) = capacity_report(&config.app_root);
+                LifecycleStatus::Running {
+                    metadata,
+                    ready_at: response
+                        .ready_at
+                        .expect("validated running lifecycle response has ready_at"),
+                    startup: response.startup,
+                    capacity,
+                    capacity_error,
+                }
+            }
             LifecycleWireState::Failed => LifecycleStatus::Failed {
                 metadata,
                 startup: response.startup,
@@ -249,7 +272,7 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     if unusable_control_paths.is_empty() {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         let marker = crate::lifecycle_marker::read(&state_dir);
-        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
+        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at, .. }) =
             marker.clone()
             && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
         {
@@ -341,10 +364,72 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 },
             })
         }
-        None => Ok(LifecycleStatus::Stopped {
-            app_root: config.app_root.clone(),
-        }),
+        None => {
+            let (capacity, capacity_error) = capacity_report(&config.app_root);
+            Ok(LifecycleStatus::Stopped {
+                app_root: config.app_root.clone(),
+                capacity,
+                capacity_error,
+            })
+        }
     }
+}
+
+/// Read the capacity account for a status report. The read creates nothing
+/// and repairs nothing: an unreadable anchor becomes the error text so an
+/// exhausted or torn account is visible rather than silently absent.
+fn capacity_report(app_root: &std::path::Path) -> (Option<CapacityAccountSummary>, Option<String>) {
+    match crate::native_capacity::inspect_capacity_account(app_root) {
+        Ok(capacity) => (capacity, None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    }
+}
+
+/// Key/value rows describing the capacity account for a text status report.
+/// The JSON report carries the summary verbatim; this is the text shape only.
+pub fn capacity_status_rows(
+    capacity: Option<&CapacityAccountSummary>,
+    capacity_error: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if let Some(summary) = capacity {
+        let epoch = match summary.maximum_epochs {
+            Some(maximum) => format!("{} of {maximum}", summary.epoch),
+            None => summary.epoch.to_string(),
+        };
+        rows.push(("epoch", epoch));
+        rows.push(("incarnations remaining", summary.incarnations_remaining.to_string()));
+        rows.push((
+            "recovery attempts",
+            format!("{} of {}", summary.recovery_attempts_used, summary.recovery_attempts_maximum),
+        ));
+        rows.push(("last operation", summary.last_operation.clone()));
+    }
+    if let Some(error) = capacity_error {
+        rows.push(("capacity", format!("unreadable: {error}")));
+    }
+    rows
+}
+
+/// A connect refused with `InvalidInput` on a pathname longer than the
+/// platform's Unix socket address bound names a path no daemon could ever
+/// have bound. Returns the explanation to log; `None` for every other
+/// connect failure, which keeps its own classification.
+fn unaddressable_control_path(control_path: &std::path::Path, kind: std::io::ErrorKind) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    if kind != std::io::ErrorKind::InvalidInput
+        || lillux::local_ipc::local_endpoint_path_addressable(control_path)
+    {
+        return None;
+    }
+    Some(format!(
+        "lifecycle control path {} is {} bytes but a Unix socket pathname is limited to {} \
+         bytes on this platform; no listener can exist there, so the daemon is treated as \
+         stopped (shorten the app root to control it)",
+        control_path.display(),
+        control_path.as_os_str().as_bytes().len(),
+        lillux::local_ipc::max_local_endpoint_path_bytes()
+    ))
 }
 
 /// True only once the daemon's lifecycle response has passed the strict
@@ -391,6 +476,9 @@ mod tests {
                 started_at: "2026-09-10T01:02:03Z".to_owned(),
                 exited_at: "2026-09-10T01:02:04Z".to_owned(),
                 error: Some("failed to bind 127.0.0.1:7400".to_owned()),
+                launch_route: None,
+                latched_drain: None,
+                carrier_incarnation: None,
             },
         )
         .expect("startup failure marker must classify");
@@ -411,12 +499,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = ryeos_engine::roots::RuntimeRoot::new(tmp.path().to_path_buf()).state();
         std::fs::create_dir_all(&state).unwrap();
-        let started_at = crate::lifecycle_marker::record_running(&state);
+        let started_at = crate::lifecycle_marker::record_running(
+            &state,
+            crate::lifecycle_marker::LaunchRoute::Direct,
+        )
+        .unwrap();
         crate::lifecycle_marker::record_exit(
             &state,
             "startup_failed",
             &started_at,
             Some("load node bootstrap configuration: invalid field"),
+            crate::lifecycle_marker::LaunchRoute::Direct,
         );
 
         let status = retained_startup_failure(tmp.path()).expect("retained failure");
@@ -447,6 +540,82 @@ mod tests {
         assert!(matches!(status, LifecycleStatus::NotInitialized { .. }));
         assert!(!env.config().app_root.exists());
         assert!(!tmp.path().join("runtime").exists());
+    }
+
+    #[tokio::test]
+    async fn stopped_status_without_issuance_reports_no_capacity_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let before: Vec<_> = walkdir(&config.app_root);
+        let status = status(&env).await.unwrap();
+        let LifecycleStatus::Stopped { app_root, capacity, capacity_error } = status else {
+            panic!("expected stopped status, got: {status:?}")
+        };
+        assert_eq!(app_root, config.app_root);
+        assert!(capacity.is_none(), "no issuance means no account: {capacity:?}");
+        assert!(capacity_error.is_none(), "an un-issued root is not an error: {capacity_error:?}");
+        assert_eq!(walkdir(&config.app_root), before, "status must create no files");
+        assert!(!tmp.path().join("runtime").exists());
+    }
+
+    fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn capacity_rows_name_epoch_bound_and_error() {
+        let unbounded = crate::native_capacity::CapacityAccountSummary {
+            epoch: 3,
+            maximum_epochs: None,
+            sequence: 7,
+            outstanding_incarnation: false,
+            recovery_attempts_used: 5,
+            recovery_attempts_maximum: 32,
+            remaining: ryeos_node_runtime::node_policy::sections::native_capacity::NativeCapacityUnits {
+                storage_bytes: 0,
+                host_control_storage_bytes: 0,
+                allocator_steps: 0,
+                connection_tickets: 0,
+                cleanup_steps: 0,
+            },
+            incarnations_remaining: 11,
+            last_operation: "rollover_renewal".to_owned(),
+            renewal: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRenewalEnvelope {
+                at_orderly_rollover: true,
+                operator_reissue: true,
+                maximum_epochs: None,
+            },
+        };
+        let rows = capacity_status_rows(Some(&unbounded), None);
+        assert_eq!(rows[0], ("epoch", "3".to_owned()));
+        assert_eq!(rows[1], ("incarnations remaining", "11".to_owned()));
+        assert_eq!(rows[2], ("recovery attempts", "5 of 32".to_owned()));
+        assert_eq!(rows[3], ("last operation", "rollover_renewal".to_owned()));
+        assert_eq!(rows.len(), 4);
+
+        let bounded = crate::native_capacity::CapacityAccountSummary {
+            maximum_epochs: Some(8),
+            ..unbounded
+        };
+        let rows = capacity_status_rows(Some(&bounded), None);
+        assert_eq!(rows[0], ("epoch", "3 of 8".to_owned()));
+
+        let rows = capacity_status_rows(None, Some("foreign capacity anchor"));
+        assert_eq!(rows, vec![("capacity", "unreadable: foreign capacity anchor".to_owned())]);
     }
 
     #[tokio::test]
@@ -590,6 +759,45 @@ mod tests {
         assert!(
             matches!(status, LifecycleStatus::Stopped { .. }),
             "recycled marker pid should not classify as Starting, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn over_long_control_path_is_stopped_not_uncertain() {
+        // An app root deep enough that the control socket pathname exceeds
+        // the Unix socket address bound: connect refuses with InvalidInput
+        // before any peer is consulted. No daemon could have bound it, so
+        // this is proof of absence, not uncertain ownership.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut root = tmp.path().to_path_buf();
+        while root.as_os_str().len() <= lillux::local_ipc::max_local_endpoint_path_bytes() {
+            root.push("a-deliberately-long-directory-segment");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let env = test_env(&root);
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        assert!(!lillux::local_ipc::local_endpoint_path_addressable(&config.uds_path));
+        let reason =
+            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::InvalidInput)
+                .unwrap();
+        assert!(reason.contains("limited to"), "{reason}");
+        assert!(
+            unaddressable_control_path(&config.uds_path, std::io::ErrorKind::PermissionDenied)
+                .is_none()
+        );
+        assert!(
+            unaddressable_control_path(
+                tmp.path(),
+                std::io::ErrorKind::InvalidInput
+            )
+            .is_none()
+        );
+
+        let status = status(&env).await.unwrap();
+        assert!(
+            matches!(status, LifecycleStatus::Stopped { .. }),
+            "unbindable control path should be Stopped, got: {status:?}"
         );
     }
 

@@ -21,7 +21,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v5";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v6";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -82,6 +82,9 @@ pub struct QualificationLaunchPurpose {
     pub consumer_definitions: Option<ProductQualificationConsumerDefinitionIdentity>,
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
+    /// Invocation selectors authenticated before root birth, separate from signed policy.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub consumer_invocation: Option<ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -108,6 +111,10 @@ impl QualificationLaunchPurpose {
     ) -> Result<()> {
         self.validate()?;
         selection.validate_coordinate(coordinate)?;
+        self.consumer_invocation
+            .as_ref()
+            .context("remote consumer purpose has no sealed invocation")?
+            .require_coordinate(coordinate)?;
         if canonical_value_digest(&serde_json::to_value(self)?)?
             != coordinate.qualification_purpose_digest
             || canonical_value_digest(&serde_json::to_value(&self.subject)?)?
@@ -133,6 +140,24 @@ impl QualificationLaunchPurpose {
             bail!("consumer verifier differs from accepted signed source artifact");
         }
         Ok(())
+    }
+
+    /// Join the operation separately: it is intentionally absent from the
+    /// consumer coordinate. Structural agreement alone grants no contact.
+    pub fn require_consumer_invocation(
+        &self,
+        qualification_operation_id: &str,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        let invocation = self
+            .consumer_invocation
+            .as_ref()
+            .context("remote consumer purpose has no sealed invocation")?;
+        if invocation.qualification_operation_id != qualification_operation_id {
+            bail!("consumer operation differs from sealed invocation");
+        }
+        invocation.require_coordinate(coordinate)
     }
 
     pub fn execution_view(&self) -> Result<QualificationExecutionPurposeView<'_>> {
@@ -236,6 +261,22 @@ impl QualificationLaunchPurpose {
                 .and_then(|content| content.qualification_use.as_ref())
                 .context("remote qualification purpose has no admitted consumer use")?;
             qualified_use.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+            let invocation = self
+                .consumer_invocation
+                .as_ref()
+                .context("remote consumer purpose has no sealed invocation")?;
+            invocation.validate()?;
+            if !matches!(self.subject, QualificationSubject::CapturedProduct { .. }) {
+                bail!("remote consumer invocation requires a captured product");
+            }
+            if !self
+                .remote_verifier_sources
+                .contains_key(&invocation.scenario_id)
+            {
+                bail!("consumer invocation has no retained signed remote scenario");
+            }
+        } else if self.consumer_invocation.is_some() {
+            bail!("nonremote qualification purpose cannot carry a consumer invocation");
         }
         for (name, verifier) in &self.remote_verifier_sources {
             verifier.validate_for(&self.policy_source, name)?;
@@ -335,6 +376,25 @@ pub(crate) mod tests {
         );
         content.subject_manifest_hash = "9".repeat(64);
         assert!(content.validate().is_err());
+    }
+
+    #[test]
+    fn invocation_is_required_nullable_and_cannot_enable_a_nonremote_purpose() {
+        let purpose = super::super::products::qualification::tests::launch_purpose();
+        purpose.validate().unwrap();
+        let mut wire = serde_json::to_value(&purpose).unwrap();
+        assert!(wire["consumer_invocation"].is_null());
+        wire.as_object_mut().unwrap().remove("consumer_invocation");
+        assert!(serde_json::from_value::<QualificationLaunchPurpose>(wire).is_err());
+        let mut unexpected = purpose.clone();
+        unexpected.consumer_invocation = Some(ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+            scenario_id: "consumer".into(), qualification_operation_id: "a".repeat(64),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+        });
+        assert!(unexpected.validate().is_err());
+        let mut predecessor = purpose;
+        predecessor.schema = "ryeos.qualification_launch_purpose.v5".into();
+        assert!(predecessor.validate().is_err());
     }
 
     #[test]

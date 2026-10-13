@@ -20,7 +20,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use zeroize::Zeroizing;
 
 use ryeos_external_execution_contract::{
-    MAX_PROVIDER_CONFIGURATION_BYTES, ProviderConfigurationRequest, ProviderConnectorExecutable,
+    MAX_PROVIDER_CONFIGURATION_BYTES, ProviderConfigurationLaunchInput,
+    ProviderConfigurationRequest, ProviderConfigurationResponse, ProviderConnectorExecutable,
 };
 
 use ryeos_state::external_execution::connector::{
@@ -52,11 +53,40 @@ const RELAY_RETIREMENT_GRACE: Duration = Duration::from_secs(2);
 /// Moving the relay into the persistent-session lifelines retains the listener
 /// exactly as long as the local provider process can start or use it.
 pub struct PreparedExternalCandidateConnector {
+    configuration_observation: PreparedProviderConfigurationObservation,
     configuration_link: Option<lillux::EphemeralDescriptorFileLink>,
     descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     mount_targets: Vec<lillux::EmptyMountTargetReservation>,
     relay: ExternalConnectorRelayLifeline,
+}
+
+/// Exact sealed configuration input held by the existing connector owner.
+/// The constructor stays private: public adapter testimony alone cannot create
+/// an observation of the bytes delivered to this process occurrence.
+pub struct PreparedProviderConfigurationObservation {
+    placement_thread_id: String,
+    execution_binding_hash: String,
+    qualification_home_id: Option<String>,
+    input: ProviderConfigurationLaunchInput,
+}
+
+impl PreparedProviderConfigurationObservation {
+    pub(crate) fn require_for(
+        &self,
+        placement: &str,
+        execution_binding_hash: &str,
+        qualification_home_id: &str,
+    ) -> Result<&ProviderConfigurationLaunchInput> {
+        self.input.validate()?;
+        ensure!(
+            self.placement_thread_id == placement
+                && self.execution_binding_hash == execution_binding_hash
+                && self.qualification_home_id.as_deref() == Some(qualification_home_id),
+            "provider configuration input changed its original placement or binding"
+        );
+        Ok(&self.input)
+    }
 }
 
 impl PreparedExternalCandidateConnector {
@@ -67,6 +97,7 @@ impl PreparedExternalCandidateConnector {
         Vec<lillux::InheritedDescriptorAuthority>,
         Vec<Box<dyn Send + Sync>>,
         crate::persistent_session::PersistentSessionCleanupObserver,
+        PreparedProviderConfigurationObservation,
     ) {
         let retirement = Arc::new(ExternalConnectorRetirement {
             relay: self.relay,
@@ -81,7 +112,13 @@ impl PreparedExternalCandidateConnector {
                 RELAY_RETIREMENT_GRACE,
             ))
         });
-        (self.mounts, self.descriptors, lifelines, settlement)
+        (
+            self.mounts,
+            self.descriptors,
+            lifelines,
+            settlement,
+            self.configuration_observation,
+        )
     }
 }
 
@@ -204,7 +241,7 @@ fn connector_configuration(
     placement: &str,
     execution_binding_hash: &str,
     capability: &ExternalConnectorCapability,
-) -> Result<Zeroizing<String>> {
+) -> Result<ProviderConfigurationResponse> {
     ensure!(
         endpoint.is_absolute(),
         "external connector endpoint must be absolute"
@@ -260,6 +297,8 @@ fn connector_configuration(
         .bind_as_subprocess_executable_at_source(&mut process)
         .map_err(anyhow::Error::msg)?;
     let mut result = lillux::run(process);
+    let encoded = Zeroizing::new(std::mem::take(&mut result.stdout));
+    let diagnostics = Zeroizing::new(std::mem::take(&mut result.stderr));
     // The adapter reads an occurrence capability. Its diagnostics are private,
     // including parse errors that may quote request values.
     ensure!(
@@ -269,18 +308,18 @@ fn connector_configuration(
         result.timed_out,
         result.output_limit_exceeded.is_some(),
         result.launcher_refusal.is_some(),
-        if result.pid == 0 && result.stderr.starts_with("Failed to spawn:") {
-            result.stderr.as_str()
+        if result.pid == 0 && diagnostics.starts_with("Failed to spawn:") {
+            diagnostics.as_str()
         } else {
             "none"
         },
     );
-    let encoded = Zeroizing::new(std::mem::take(&mut result.stdout));
     ensure!(
         !encoded.is_empty() && encoded.len() <= MAX_PROVIDER_CONFIGURATION_BYTES,
         "external connector configuration exceeds its bound"
     );
-    Ok(encoded)
+    ProviderConfigurationResponse::decode(encoded.as_bytes())
+        .context("decode current bounded provider configuration response")
 }
 
 fn create_listener() -> Result<(
@@ -305,7 +344,7 @@ fn create_listener() -> Result<(
         listener_mount.mount_entry_kind()? == lillux::OpenMountEntryKind::UnixSocket,
         "external connector listener mount source is not a Unix socket"
     );
-    let guard = Arc::new(TempDirGuard::new_pinned(parent, name, root));
+    let guard = Arc::new(TempDirGuard::new_pinned(parent, name, Arc::new(root)));
     Ok((listener, listener_mount, guard))
 }
 
@@ -316,6 +355,30 @@ pub fn prepare_external_candidate_connector(
     placement: &str,
     state_root: &Path,
 ) -> Result<PreparedExternalCandidateConnector> {
+    prepare_connector(state, placement, state_root, None)
+}
+
+/// Q delivery borrows the original credential-home descriptor used by the
+/// held Worker, rather than reopening a separately supplied directory path.
+pub fn prepare_qualification_candidate_connector(
+    state: &AppState,
+    placement: &str,
+    credential_home: &lillux::PinnedDirectory,
+) -> Result<PreparedExternalCandidateConnector> {
+    prepare_connector(
+        state,
+        placement,
+        credential_home.path(),
+        Some(credential_home),
+    )
+}
+
+fn prepare_connector(
+    state: &AppState,
+    placement: &str,
+    state_root: &Path,
+    qualification_home: Option<&lillux::PinnedDirectory>,
+) -> Result<PreparedExternalCandidateConnector> {
     ensure!(
         state_root.is_absolute(),
         "external connector provider state root must be absolute"
@@ -324,6 +387,37 @@ pub fn prepare_external_candidate_connector(
         .state_store
         .external_allocation(placement)?
         .context("external connector has no retained allocation")?;
+    let qualification_home_id = if matches!(
+        &allocation.reservation.owner,
+        crate::runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(_)
+    ) {
+        let original_home = qualification_home
+            .context("Q connector requires the original held credential-home descriptor")?;
+        original_home.require_owner_private_directory()?;
+        original_home.ensure_path_binding()?;
+        let start = state
+            .state_store
+            .require_live_qualification_local_credential_custody(placement)?;
+        let custody = start
+            .credential_custody
+            .as_ref()
+            .context("Q connector lost credential custody")?;
+        let expected_home = crate::private_artifact_home::home_path(
+            &state.config.runtime_state_dir(),
+            &custody.home_id,
+        )?;
+        ensure!(
+            state_root == expected_home,
+            "Q connector configuration changed its admitted credential home"
+        );
+        Some(custody.home_id.clone())
+    } else {
+        ensure!(
+            qualification_home.is_none(),
+            "ordinary connector cannot borrow Q credential custody"
+        );
+        None
+    };
     let retained = state
         .state_store
         .retained_external_binding(&allocation.reservation.binding_hash)?
@@ -419,12 +513,42 @@ pub fn prepare_external_candidate_connector(
         )?;
         let configuration_handle = lillux::sealed_memfd(
             c"ryeos-external-connector-environments",
-            configuration.as_bytes(),
+            configuration.configuration().as_bytes(),
         )
         .map_err(anyhow::Error::msg)?;
-        let state_directory = lillux::PinnedDirectory::open(state_root)?
-            .context("external connector provider state root is missing")?;
+        let selected = contract.workload.session_artifacts()?;
+        let configuration_input = ProviderConfigurationLaunchInput {
+            schema: 1,
+            configuration_sha256: lillux::sha256_hex(configuration.configuration().as_bytes()),
+            configuration_bytes: u64::try_from(configuration.configuration().len())?,
+            command_environment: configuration.command_environment().clone(),
+            provider_declaration_id: selected.provider_declaration_id.to_owned(),
+            configuration_destination: selected.provider_configuration_destination.to_owned(),
+            configuration_adapter_artifact_hash: selected
+                .configuration_adapter_artifact_hash
+                .to_owned(),
+            configuration_adapter_artifact_bytes: selected.configuration_adapter_artifact_bytes,
+        };
+        configuration_input.validate()?;
+        let configuration_observation = PreparedProviderConfigurationObservation {
+            placement_thread_id: placement.to_owned(),
+            execution_binding_hash: channel.execution_binding_hash.clone(),
+            qualification_home_id,
+            input: configuration_input,
+        };
+        let ordinary_directory = if qualification_home.is_none() {
+            Some(
+                lillux::PinnedDirectory::open(state_root)?
+                    .context("external connector provider state root is missing")?,
+            )
+        } else {
+            None
+        };
+        let state_directory = qualification_home
+            .or(ordinary_directory.as_ref())
+            .context("external connector provider state directory is missing")?;
         state_directory.require_owner_private_directory()?;
+        state_directory.ensure_path_binding()?;
         let destination = &configuration_adapter
             .declaration()
             .configuration_destination;
@@ -477,6 +601,7 @@ pub fn prepare_external_candidate_connector(
         });
         let thread = thread.context("start external connector relay owner")?;
         Ok(PreparedExternalCandidateConnector {
+            configuration_observation,
             configuration_link,
             descriptors,
             mounts,
@@ -640,7 +765,40 @@ fn run_authenticated_connector(
             capability,
         )?;
         stage = "exact_process_identity";
-        let peer_identity = peer.exact_process_identity(None)?;
+        let allocation = state
+            .state_store
+            .external_allocation(placement)?
+            .context("external connector lost its retained allocation")?;
+        let peer_identity = if matches!(
+            allocation.reservation.owner,
+            crate::runtime_db::external_execution::ExternalAllocationOwner::QualificationCandidate(
+                _
+            )
+        ) {
+            let worker = state
+                .state_store
+                .qualification_worker_process(placement)?
+                .context("qualification connector has no attached local Worker")?;
+            ensure!(
+                worker.phase
+                    == crate::runtime_db::external_execution::QualificationWorkerProcessPhase::Attached
+                    && worker.channel_binding_digest
+                        == state.state_store.external_execution_channel(placement)?.digest()?,
+                "qualification connector changed its attached Worker or channel"
+            );
+            ensure!(
+                worker.process_identity.process_scope.is_none(),
+                "qualification connector requires its signed trusted process-group owner"
+            );
+            let group = u32::try_from(worker.process_identity.group_leader_pid)
+                .context("qualification connector Worker group is outside range")?;
+            // Lillux observes both the socket peer and group leader through
+            // pinned process descriptors. The connection transaction below
+            // rejoins their boot/group birth tuple to this retained Worker.
+            peer.exact_process_identity(Some(group))?
+        } else {
+            peer.exact_process_identity(None)?
+        };
         stage = "durable_connection";
         ensure!(
             state.state_store.connect_external_connector(
@@ -891,6 +1049,62 @@ fn is_disconnect(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_observation_refuses_other_occurrence_binding_or_credential_home() {
+        use ryeos_external_execution_contract::{
+            ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,
+        };
+        let observation = PreparedProviderConfigurationObservation {
+            placement_thread_id: format!("Q-{}", "a".repeat(64)),
+            execution_binding_hash: "b".repeat(64),
+            qualification_home_id: Some("original-home".into()),
+            input: ProviderConfigurationLaunchInput {
+                schema: 1,
+                configuration_sha256: "c".repeat(64),
+                configuration_bytes: 128,
+                command_environment: ProviderCommandEnvironmentProjection {
+                    environment_id: "external".into(),
+                    default_environment_id: "external".into(),
+                    include_local: false,
+                    transport: ProviderCommandEnvironmentTransport::CommandConnector,
+                },
+                provider_declaration_id: "provider".into(),
+                configuration_destination: "environments.toml".into(),
+                configuration_adapter_artifact_hash: "d".repeat(64),
+                configuration_adapter_artifact_bytes: 4096,
+            },
+        };
+        let placement = observation.placement_thread_id.clone();
+        let binding = observation.execution_binding_hash.clone();
+        observation
+            .require_for(&placement, &binding, "original-home")
+            .unwrap();
+        assert!(
+            observation
+                .require_for("other-placement", &binding, "original-home")
+                .is_err()
+        );
+        assert!(
+            observation
+                .require_for(&placement, &"e".repeat(64), "original-home")
+                .is_err()
+        );
+        assert!(
+            observation
+                .require_for(&placement, &binding, "replacement-home")
+                .is_err()
+        );
+        let ordinary = PreparedProviderConfigurationObservation {
+            qualification_home_id: None,
+            ..observation
+        };
+        assert!(
+            ordinary
+                .require_for(&placement, &binding, "original-home")
+                .is_err()
+        );
+    }
 
     fn relay_fixture(
         task: impl FnOnce() -> bool + Send + 'static,

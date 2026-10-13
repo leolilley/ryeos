@@ -31,18 +31,15 @@ pub struct ProcessScopeReadiness {
 }
 
 impl ProcessScopeReadiness {
+    /// `required` is the per-scope part of the node's declared capability
+    /// floor; a capability the policy does not name is not demanded here.
     pub(crate) fn classify(
         policy: IsolationProcessScopePolicy,
+        required: BTreeSet<lillux::ProcessScopeCapability>,
         trusted_process_group_sessions: bool,
         authority_digest: Option<String>,
         qualified_capabilities: BTreeSet<lillux::ProcessScopeCapability>,
     ) -> Self {
-        let required: BTreeSet<_> = [
-            lillux::ProcessScopeCapability::Quiescence,
-            lillux::ProcessScopeCapability::Termination,
-            lillux::ProcessScopeCapability::Recovery,
-        ]
-        .into();
         let (authority, ready, reason) = match (&policy, authority_digest.is_some()) {
             (IsolationProcessScopePolicy::Unconfigured {}, false) => (
                 ProcessScopeAuthorityStatus::Absent,
@@ -153,6 +150,11 @@ pub struct IsolationInspection {
     pub digest: Option<String>,
     pub backend: IsolationBackendInspection,
     pub process_scopes: IsolationProcessScopePolicy,
+    /// Signed capability floor this node must prove before it starts.
+    pub requires_capabilities: Vec<lillux::process_control::CapabilityRequirement>,
+    /// Signed executable names of inits trusted to exit with their only
+    /// child, which can make the node's exit end its container enclosure.
+    pub enclosure_inits: Vec<String>,
     /// Populated only after the retained provider's actual placement/barrier/
     /// termination probe succeeded, never from a list of implemented features.
     pub process_scope_capabilities: BTreeSet<lillux::ProcessScopeCapability>,
@@ -210,10 +212,19 @@ mod tests {
         .into()
     }
 
+    fn floor() -> BTreeSet<lillux::ProcessScopeCapability> {
+        [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+        ]
+        .into()
+    }
+
     #[test]
     fn protected_authority_does_not_override_unconfigured_policy() {
         let readiness = ProcessScopeReadiness::classify(
             IsolationProcessScopePolicy::Unconfigured {},
+            BTreeSet::new(),
             false,
             Some(format!("sha256:{}", "a".repeat(64))),
             BTreeSet::new(),
@@ -237,7 +248,7 @@ mod tests {
     #[test]
     fn required_policy_without_protected_authority_is_not_ready() {
         let readiness =
-            ProcessScopeReadiness::classify(required_policy(), false, None, BTreeSet::new());
+            ProcessScopeReadiness::classify(required_policy(), floor(), false, None, BTreeSet::new());
         assert_eq!(readiness.authority, ProcessScopeAuthorityStatus::Absent);
         assert!(!readiness.exclusive_session.ready);
         assert_eq!(
@@ -250,6 +261,7 @@ mod tests {
     fn required_policy_and_qualified_authority_are_ready() {
         let readiness = ProcessScopeReadiness::classify(
             required_policy(),
+            floor(),
             false,
             Some(format!("sha256:{}", "b".repeat(64))),
             complete_capabilities(),
@@ -263,9 +275,36 @@ mod tests {
     }
 
     #[test]
+    fn quiescence_is_demanded_only_when_the_floor_names_it() {
+        let without_freeze: BTreeSet<_> = [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+        ]
+        .into();
+        let digest = Some(format!("sha256:{}", "c".repeat(64)));
+        let ready = ProcessScopeReadiness::classify(
+            required_policy(),
+            floor(),
+            false,
+            digest.clone(),
+            without_freeze.clone(),
+        );
+        assert!(ready.exclusive_session.ready);
+        let mut with_freeze = floor();
+        with_freeze.insert(lillux::ProcessScopeCapability::Quiescence);
+        let refused =
+            ProcessScopeReadiness::classify(required_policy(), with_freeze, false, digest, without_freeze);
+        assert_eq!(
+            refused.exclusive_session.reason,
+            ProcessControlReadinessReason::RequiredCapabilitiesMissing
+        );
+    }
+
+    #[test]
     fn trusted_process_group_readiness_is_explicit_and_distinct() {
         let readiness = ProcessScopeReadiness::classify(
             IsolationProcessScopePolicy::Unconfigured {},
+            BTreeSet::new(),
             true,
             None,
             BTreeSet::new(),

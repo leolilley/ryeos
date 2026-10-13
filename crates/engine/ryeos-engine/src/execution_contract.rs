@@ -64,6 +64,12 @@ pub enum ExecutionEnvironmentPolicy {
         grant_id: String,
         name_policy: ExecutionEnvironmentNamePolicy,
     },
+    /// Values the executing node took from its own environment at startup,
+    /// restricted to the names its signed node policy declares. The required
+    /// names stay in the item's `required_secrets`.
+    ProviderEnvironment {
+        name_policy: ExecutionEnvironmentNamePolicy,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +433,9 @@ fn validate_environment_policy(
                 "delegated environment provider {provider:?} is not installed on this node"
             )
         }
+        ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+            validate_environment_name_policy(name_policy, &validate_names)
+        }
     }
 }
 
@@ -473,6 +482,29 @@ mod tests {
             serde_json::from_value::<ExecutionPolicy>(value).unwrap(),
             policy
         );
+    }
+
+    #[test]
+    fn provider_environment_policy_is_project_independent_and_canonical() {
+        let mut policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        policy.environment = ExecutionEnvironmentPolicy::ProviderEnvironment {
+            name_policy: ExecutionEnvironmentNamePolicy::Exact {
+                names: vec!["OPENAI_API_KEY".to_owned()],
+            },
+        };
+        policy.validate().unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["environment"]["kind"], "provider_environment");
+        assert_eq!(
+            serde_json::from_value::<ExecutionPolicy>(value).unwrap(),
+            policy
+        );
+        policy.environment = ExecutionEnvironmentPolicy::ProviderEnvironment {
+            name_policy: ExecutionEnvironmentNamePolicy::Exact {
+                names: vec!["Z_KEY".to_owned(), "A_KEY".to_owned()],
+            },
+        };
+        assert!(policy.validate().is_err());
     }
 
     #[test]

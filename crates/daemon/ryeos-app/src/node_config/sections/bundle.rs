@@ -6,8 +6,7 @@
 //! path: <absolute path to bundle root>
 //! ```
 
-use anyhow::{Context, bail};
-use serde::Deserialize;
+use anyhow::bail;
 use serde_json::Value;
 
 use crate::node_config::{
@@ -20,45 +19,6 @@ pub const SECTION_NAME: &str = "bundles";
 
 /// Section handler for `bundles` node-config items.
 pub struct BundleSection;
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawBundleRecord {
-    kind: String,
-    path: std::path::PathBuf,
-}
-
-impl BundleSection {
-    pub(crate) fn parse_bundle(
-        &self,
-        ctx: &NodeItemContext,
-        body: &Value,
-    ) -> anyhow::Result<BundleRecord> {
-        let raw: RawBundleRecord =
-            serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
-        if raw.kind != "node" {
-            bail!(
-                "bundle '{}' declares kind {:?}, expected kind 'node'",
-                ctx.id,
-                raw.kind
-            );
-        }
-
-        if !raw.path.is_absolute() {
-            bail!(
-                "bundle '{}' path must be absolute, got: {}",
-                ctx.id,
-                raw.path.display()
-            );
-        }
-
-        Ok(BundleRecord {
-            name: ctx.id.clone(),
-            path: raw.path,
-            source_file: std::path::PathBuf::new(),
-        })
-    }
-}
 
 impl CompiledNodeConfigItem for BundleRecord {
     fn section_name(&self) -> &'static str {
@@ -98,6 +58,6 @@ impl NodeConfigSection for BundleSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> anyhow::Result<Box<dyn CompiledNodeConfigItem>> {
-        Ok(Box::new(self.parse_bundle(ctx, body)?))
+        Ok(Box::new(ryeos_node_runtime::bundle_bootstrap::parse_bundle(ctx, body)?))
     }
 }

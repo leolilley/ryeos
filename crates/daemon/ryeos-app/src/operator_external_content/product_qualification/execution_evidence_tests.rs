@@ -7,6 +7,82 @@ use ryeos_engine::resolution::{KindComposedView, ResolutionStepName, ResolvedAnc
 use serde_json::json;
 
 #[test]
+fn q_issuance_joins_actual_bound_turn_instead_of_signed_template() {
+    use ryeos_external_execution_contract::qualification_request_binding::{
+        QualificationRequestBindingInput, QualificationRequestBindingOutput,
+    };
+    use ryeos_state::external_content::products::qualification::{
+        PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA,
+        ProductQualificationConsumerWorkerRequest,
+    };
+    use ryeos_state::external_execution::qualification_controller_canary::{
+        QControllerCanaryBinding, QControllerCanaryContract, QControllerCanaryEvidence,
+    };
+    // Inert commitment fixture, not a fabricated adapter invocation or file proof.
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: Some(QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1),
+        session_setup: json!({"provider_defined":"setup"}),
+        body: json!({"provider_defined":"template"}),
+    };
+    let input = QualificationRequestBindingInput {
+        schema: 1,
+        template: request.body.clone(),
+        controller_canary_path: "/private/controller-canary/canary".into(),
+    };
+    let output = QualificationRequestBindingOutput {
+        schema: 1,
+        input_digest: input.digest().unwrap(),
+        resolved_body: json!({"provider_defined":"actual bound turn"}),
+    };
+    let binding: QControllerCanaryBinding = serde_json::from_value(json!({
+        "schema":1,"controller_path":input.controller_canary_path,
+        "initial_file":{"directory_identity":{"containing_device":1,"inode":2},
+            "file_identity":{"containing_device":1,"inode":3},
+            "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+        "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
+        "configuration_adapter_artifact_bytes":1,
+        "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+        "template_request_digest":canonical_value_digest(&request.body).unwrap(),
+        "resolved_request_digest":canonical_value_digest(&output.resolved_body).unwrap(),
+        "resolved_body":output.resolved_body,
+    })).unwrap();
+    let evidence = QControllerCanaryEvidence {
+        schema: 1,
+        terminal_file: binding.initial_file.clone(),
+        binding,
+    };
+    let setup = canonical_value_digest(&request.session_setup).unwrap();
+    let template = canonical_value_digest(&request.body).unwrap();
+    let actual = &evidence.binding.resolved_request_digest;
+    require_qualification_worker_request(&request, &setup, actual, Some(&evidence)).unwrap();
+    assert!(
+        require_qualification_worker_request(&request, &setup, &template, Some(&evidence)).is_err()
+    );
+    assert!(require_qualification_worker_request(&request, &setup, actual, None).is_err());
+    assert!(
+        require_qualification_worker_request(&request, &template, actual, Some(&evidence)).is_err()
+    );
+    let mut changed = evidence.clone();
+    changed.terminal_file.content_sha256 = "f".repeat(64);
+    assert!(
+        require_qualification_worker_request(&request, &setup, actual, Some(&changed)).is_err()
+    );
+    request.body = json!({"provider_defined":"another template"});
+    assert!(
+        require_qualification_worker_request(&request, &setup, actual, Some(&evidence)).is_err()
+    );
+    request.controller_canary = None;
+    let literal = canonical_value_digest(&request.body).unwrap();
+    require_qualification_worker_request(&request, &setup, &literal, None).unwrap();
+    assert!(
+        require_qualification_worker_request(&request, &setup, &literal, Some(&evidence)).is_err()
+    );
+}
+
+#[test]
 fn zero_participant_qualification_requires_exact_subordinate_authority() {
     use ryeos_engine::protocol_vocabulary::CallbackChannel;
     use ryeos_engine::protocols::QualificationCallbackAuthority::{RemoteConsumer, ScopedProducer};

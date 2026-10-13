@@ -60,11 +60,10 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
         claims: vec!["command_probe".into()],
         probe_evidence: json!({}),
     };
-    assert!(
-        result
-            .validate_claims_for(&policy, &["command_probe".into()])
-            .is_err()
-    );
+    // Claim vocabulary does not pretend to authenticate execution.
+    result
+        .validate_claims_for(&policy, &["command_probe".into()])
+        .unwrap();
     let mut wrong_consumer = relationship_consumer.clone();
     wrong_consumer.declaration_id = "other-runtime".into();
     assert!(
@@ -106,6 +105,32 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
     assert!(policy.validate().is_err());
 }
 
+#[test]
+fn consumer_execution_requires_remote_consumer_proof() {
+    let mut evidence = evidence();
+    evidence.policy_source.policy.consumer_execution_context =
+        Some(ProductQualificationConsumerExecutionContext {
+            worker_ref: "worker:codex/external-hosted-authoring".into(),
+            product_declaration_id: "guest-runtime".into(),
+            environment_ref: "config:codex/environments/external-authoring".into(),
+            worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+            environment_binding: "environment".into(),
+        });
+    let error = validate_qualification_execution(
+        &evidence.policy_source,
+        &evidence.verifier,
+        &evidence.execution_proof,
+        &evidence.result,
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires a remote consumer attempt")
+    );
+}
+
 #[cfg(test)]
 fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
     let mut purpose = launch_purpose();
@@ -122,6 +147,7 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
         ProductQualificationProducerScenario {
             recipe_ref: "config:codex/direct-probe".into(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     purpose.producer_recipe_sources.insert(
@@ -254,6 +280,95 @@ fn consumer_runtime_identity_is_required_and_subject_bound() {
     content.runtime_realization.mount =
         content.worker_literals.iter().next().unwrap().mount.clone();
     assert!(overlapping.validate().is_err());
+}
+
+#[test]
+fn activated_launch_purpose_retains_exact_subject_runtime_realization() {
+    let purpose = consumer_launch_purpose_fixture();
+    let context = purpose
+        .policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .unwrap();
+    let mut subject = crate::external_content::qualification_purpose::tests::content_subject(
+        &purpose.subject_manifest_hash,
+    );
+    subject.consumer_ref = context.worker_ref.clone();
+    subject.realization = purpose
+        .consumer_content
+        .as_ref()
+        .unwrap()
+        .runtime_realization
+        .clone();
+    let mut captured_with_subject_literal = purpose.clone();
+    let content = captured_with_subject_literal
+        .consumer_content
+        .as_mut()
+        .unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(subject.realization.clone()))
+            .collect(),
+    )
+    .unwrap();
+    assert!(captured_with_subject_literal.validate().is_err());
+
+    let mut activated = purpose.clone();
+    activated.subject = QualificationSubject::ActivatedContent {
+        content: subject.clone(),
+    };
+    activated
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .declaration_authority = QualificationConsumerDeclarationAuthority::ActivatedContent {
+        activation_definition: ProductQualificationBundleDefinitionIdentity {
+            canonical_ref: "config:codex/runtime-activation".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+        },
+        declaration_id: context.product_declaration_id.clone(),
+        allowance:
+            crate::external_content::qualification_allowance::ContentQualificationAllowance {
+                activation_ref: "config:codex/runtime-activation".into(),
+                policy_ref: purpose.policy_source.canonical_ref.clone(),
+                required_claims: purpose.required_claims.clone(),
+            },
+    };
+    activated.validate().unwrap();
+
+    let mut missing_subject = activated.clone();
+    missing_subject
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .id = "other-runtime".into();
+    assert!(missing_subject.validate().is_err());
+    let mut swapped_subject = activated.clone();
+    swapped_subject
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .manifest_hash = "0".repeat(64);
+    assert!(swapped_subject.validate().is_err());
+    let content = activated.consumer_content.as_mut().unwrap();
+    content.worker_literals = ExternalContentRealizationSet::new(
+        content
+            .worker_literals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(subject.realization))
+            .collect(),
+    )
+    .unwrap();
+    assert!(activated.validate().is_err());
 }
 
 #[test]
@@ -517,6 +632,7 @@ pub(crate) fn launch_purpose() -> QualificationLaunchPurpose {
         },
         consumer_definitions: None,
         consumer_content: None,
+        consumer_invocation: None,
         producer_recipe_sources: BTreeMap::new(),
         remote_verifier_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
@@ -551,6 +667,7 @@ fn launch_purpose_pins_every_signed_producer_recipe_source() {
         ProductQualificationProducerScenario {
             recipe_ref: recipe_ref.clone(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     assert!(purpose.validate().is_err());
@@ -798,6 +915,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         ProductQualificationProducerScenario {
             recipe_ref: source.canonical_ref.clone(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     let scoped = ProductQualificationScopedAttemptProof {
@@ -815,9 +933,48 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         retirement_evidence_digest: "2".repeat(64),
         callback_method_surface_digest: "3".repeat(64),
     };
+    evidence.result.probe_evidence["scoped_attempt"] = json!({
+        "attempt_id": scoped.attempt_id,
+        "scenario_id": scoped.scenario_id,
+        "observation_object_hash": scoped.observation_object_hash,
+    });
+    evidence.verifier.result_digest = evidence.result.digest().unwrap();
     evidence.execution_proof.subordinate_attempt =
         Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof: scoped });
     evidence.validate().unwrap();
+
+    for field in ["attempt_id", "scenario_id", "observation_object_hash"] {
+        let mut changed = evidence.clone();
+        changed.result.probe_evidence["scoped_attempt"][field] = match field {
+            "attempt_id" => json!(format!("scoped-{}", "b".repeat(64))),
+            "scenario_id" => json!("other"),
+            _ => json!("4".repeat(64)),
+        };
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result scoped attempt differs from daemon execution proof"),
+            "changed result {field} must be rejected by the coordinate join"
+        );
+    }
+    let mut omitted = evidence.clone();
+    omitted
+        .result
+        .probe_evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("scoped_attempt");
+    omitted.verifier.result_digest = omitted.result.digest().unwrap();
+    assert!(
+        omitted
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("result scoped attempt differs from daemon execution proof")
+    );
 
     let mut wrong_scenario = evidence.clone();
     let Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof }) =
@@ -1001,6 +1158,7 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             policy,
         },
         consumer_content: None,
+        qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: None,
         execution_proof: execution_proof(&artifact_identity()),
         result,
@@ -1240,6 +1398,7 @@ fn finite_policy_and_compact_evidence_round_trip() {
     let wire = serde_json::to_value(&evidence).unwrap();
     assert!(wire["verifier_root_selections"].is_null());
     assert!(wire["consumer_content"].is_null());
+    assert!(wire["qualification_worker_transcript_manifest_hash"].is_null());
     assert_eq!(
         ProductQualificationEvidence::from_value(&wire).unwrap(),
         evidence
@@ -1256,6 +1415,15 @@ fn finite_policy_and_compact_evidence_round_trip() {
         .unwrap()
         .remove("consumer_content");
     assert!(ProductQualificationEvidence::from_value(&missing_consumer_content).is_err());
+    let mut missing_transcript = wire.clone();
+    missing_transcript
+        .as_object_mut()
+        .unwrap()
+        .remove("qualification_worker_transcript_manifest_hash");
+    assert!(ProductQualificationEvidence::from_value(&missing_transcript).is_err());
+    let mut unowned_transcript = evidence.clone();
+    unowned_transcript.qualification_worker_transcript_manifest_hash = Some("a".repeat(64));
+    assert!(unowned_transcript.validate().is_err());
     assert_eq!(
         ProductQualificationPolicy::from_value(&serde_json::to_value(policy()).unwrap()).unwrap(),
         policy()
@@ -1434,9 +1602,13 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
             .collect(),
     )
     .unwrap();
+    let mut requirement = crate::external_execution::admission::test_support::fixture_requirement();
+    requirement.runtime_product_declaration_id = content.runtime_realization.id.clone();
+    requirement.runtime_recipe.executable_relative_path =
+        content.runtime_member.relative_path.clone();
     let qualified_use = crate::external_execution::admission::ExternalCandidateQualificationUse {
         schema: crate::external_execution::admission::QUALIFICATION_CONTEXT_SCHEMA.into(),
-        requirement_digest: "1".repeat(64), profile_hash: content.worker_profile_hash.clone(),
+        requirement_digest: requirement.qualification_requirement_digest().unwrap(), profile_hash: content.worker_profile_hash.clone(),
         source_binding_hash: content.worker_source.binding_hash.clone(),
         source_content_manifest_hash: content.worker_source.content_manifest_hash.clone(),
         provider_executable_manifest_hash: "2".repeat(64),
@@ -1445,6 +1617,11 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     };
     purpose.policy_source.policy.verifier_parameters = qualified_use.parameters().unwrap();
     content.qualification_use = Some(qualified_use);
+    purpose.consumer_invocation = Some(ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+        scenario_id: "remote_codex".into(),
+        qualification_operation_id: "a".repeat(64),
+        prerequisite_measurement_attempt_id: "b".repeat(64),
+    });
     purpose.admitted_parameters_digest = purpose
         .policy_source
         .policy
@@ -1466,6 +1643,84 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         use_digest: canonical_value_digest(&serde_json::to_value(purpose.consumer_content.as_ref().unwrap().qualification_use.as_ref().unwrap()).unwrap()).unwrap(),
         prerequisite_measurement_attempt_id: "b".repeat(64), prerequisite_measurement_observation_digest: "c".repeat(64),
     };
+    purpose
+        .require_consumer_invocation(&"a".repeat(64), &coordinate)
+        .unwrap();
+    assert!(
+        purpose
+            .require_consumer_invocation(&"d".repeat(64), &coordinate)
+            .is_err()
+    );
+    let mut wrong_prerequisite = coordinate.clone();
+    wrong_prerequisite.prerequisite_measurement_attempt_id = "d".repeat(64);
+    assert!(
+        purpose
+            .require_consumer_invocation(&"a".repeat(64), &wrong_prerequisite)
+            .is_err()
+    );
+    assert!(
+        purpose
+            .validate_remote_consumer_coordinate(&wrong_prerequisite, &selection)
+            .is_err()
+    );
+    let mut missing_invocation = purpose.clone();
+    missing_invocation.consumer_invocation = None;
+    assert!(missing_invocation.validate().is_err());
+    let mut unknown_scenario = purpose.clone();
+    unknown_scenario
+        .consumer_invocation
+        .as_mut()
+        .unwrap()
+        .scenario_id = "absent".into();
+    assert!(unknown_scenario.validate().is_err());
+    let mut changed_operation = purpose.clone();
+    changed_operation
+        .consumer_invocation
+        .as_mut()
+        .unwrap()
+        .qualification_operation_id = "d".repeat(64);
+    changed_operation.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&purpose).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&changed_operation).unwrap()).unwrap()
+    );
+    assert_eq!(
+        purpose.admitted_parameters_digest,
+        changed_operation.admitted_parameters_digest
+    );
+    let record = crate::external_content::qualification_consumer_record::ConsumerInputRecord {
+        schema: 2,
+        purpose: purpose.clone(),
+        coordinate: coordinate.clone(),
+        selection: selection.clone(),
+        requirement,
+        scenario_input: json!({}),
+    };
+    let mut attempt = ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent {
+        schema: 2,
+        operation_id: String::new(),
+        qualification_operation_id: "a".repeat(64),
+        restored_occurrence_id: "fixture-occurrence".into(),
+        verifier_artifact_hash: selection.verifier_artifact_hash.clone(),
+        upload_sha256: "e".repeat(64), upload_bytes: 1,
+        purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64),
+        },
+        attempt_deadline_ms: 1000,
+    };
+    attempt.operation_id = attempt.derived_operation_id().unwrap();
+    record.validate_attempt(&attempt).unwrap();
+    attempt.qualification_operation_id = "d".repeat(64);
+    // A self-consistent attempt for another operation still cannot consume this sealed record.
+    attempt.operation_id = attempt.derived_operation_id().unwrap();
+    attempt.consumer_challenge_digest().unwrap();
+    assert!(
+        record
+            .validate_attempt(&attempt)
+            .unwrap_err()
+            .to_string()
+            .contains("sealed invocation")
+    );
     // Pure data joins do not prove a born root or prerequisite measurement.
     purpose
         .validate_remote_consumer_coordinate(&coordinate, &selection)
@@ -1536,14 +1791,14 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
     for schema in [
         "ryeos.product_qualification_evidence.v10",
         "ryeos.product_qualification_evidence.v12",
+        "ryeos.product_qualification_evidence.v13",
     ] {
         predecessor["schema"] = json!(schema);
         assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
     }
 }
 
-#[test]
-fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
+fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof {
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
         ConsumerRuntimeVerifierSelection, ConsumerVerifierAdapterObservation,
@@ -1616,6 +1871,7 @@ fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
     };
     let proof = ProductQualificationRemoteConsumerProof {
         launch_owner_digest: "b".repeat(64),
+        consumer_input_blob_hash: "c".repeat(64),
         intent,
         selection: ConsumerRuntimeVerifierSelection {
             scenario_source_digest: "5".repeat(64),
@@ -1627,6 +1883,24 @@ fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
         terminal_observation,
     };
     proof.validate_for(&root).unwrap();
+    proof
+}
+
+#[test]
+fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
+    let root = evidence().verifier;
+    let proof = remote_subordinate_proof_fixture();
+    let mut invalid_input = proof.clone();
+    invalid_input.consumer_input_blob_hash = "unretained".into();
+    assert!(invalid_input.validate_for(&root).is_err());
+    let mut missing_input = serde_json::to_value(&proof).unwrap();
+    missing_input
+        .as_object_mut()
+        .unwrap()
+        .remove("consumer_input_blob_hash");
+    assert!(
+        serde_json::from_value::<ProductQualificationRemoteConsumerProof>(missing_input).is_err()
+    );
     let mut other_root = root.clone();
     other_root.thread_id = "T-other".into();
     assert!(proof.validate_for(&other_root).is_err());
@@ -1653,6 +1927,7 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             binary_ref: "bin:fixtures/guest-verifier".into(),
             guest_target_triple: "x86_64-unknown-linux-musl".into(),
         }),
+        consumer_worker_request: None,
     };
     value
         .producer_scenarios
@@ -1746,6 +2021,247 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
 }
 
 #[test]
+fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source() {
+    let mut policy = policy();
+    let scenario = ProductQualificationProducerScenario {
+        recipe_ref: "config:fixtures/recipe".into(),
+        remote_verifier: Some(ProductQualificationRemoteVerifierSelection {
+            binary_ref: "bin:fixtures/guest-verifier".into(),
+            guest_target_triple: "x86_64-unknown-linux-musl".into(),
+        }),
+        consumer_worker_request: None,
+    };
+    let source = ProductProducerRecipeSourceIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        canonical_ref: scenario.recipe_ref.clone(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        recipe_digest: "d".repeat(64),
+    };
+    policy
+        .producer_scenarios
+        .insert("remote_codex".into(), scenario.clone());
+    policy.validate().unwrap();
+    let before_policy = canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap();
+    let before_source = scenario.remote_verifier_source_digest(&source).unwrap();
+
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
+        credential_profile_id: None,
+        fixture: None,
+        session_setup: json!({"task":"bounded session setup"}),
+        body: json!({"task":"bounded qualification turn"}),
+    };
+    policy
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request = Some(request.clone());
+    policy.validate().unwrap();
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&serde_json::to_value(&policy).unwrap()).unwrap(),
+        policy
+    );
+    assert_ne!(
+        before_policy,
+        canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap()
+    );
+    assert_eq!(
+        before_source,
+        policy.producer_scenarios["remote_codex"]
+            .remote_verifier_source_digest(&source)
+            .unwrap()
+    );
+
+    let mut changed = policy.clone();
+    changed
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request
+        .as_mut()
+        .unwrap()
+        .body = json!({"task":"different turn"});
+    changed.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&policy).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&changed).unwrap()).unwrap()
+    );
+    for body in [
+        json!(null),
+        json!([]),
+        json!("text"),
+        json!({"task":"x".repeat(8192)}),
+    ] {
+        let mut invalid = policy.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("remote_codex")
+            .unwrap()
+            .consumer_worker_request
+            .as_mut()
+            .unwrap()
+            .body = body;
+        assert!(invalid.validate().is_err());
+    }
+    let mut invalid = policy.clone();
+    invalid
+        .producer_scenarios
+        .get_mut("remote_codex")
+        .unwrap()
+        .consumer_worker_request
+        .as_mut()
+        .unwrap()
+        .schema = "ryeos.qualification_worker_request.v1".into();
+    assert!(invalid.validate().is_err());
+    let mut wire = serde_json::to_value(&policy).unwrap();
+    wire["producer_scenarios"]["remote_codex"]["consumer_worker_request"]["command"] =
+        json!("/bin/sh");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+    let mut predecessor = serde_json::to_value(policy).unwrap();
+    predecessor["schema"] = json!("ryeos.product_qualification_policy.v3");
+    assert!(ProductQualificationPolicy::from_value(&predecessor).is_err());
+}
+
+#[test]
+fn worker_request_requires_distinct_bounded_setup_and_turn_in_current_schema() {
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
+        credential_profile_id: None,
+        fixture: None,
+        session_setup: json!({"route_id":"session.start", "payload":{}}),
+        body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
+    };
+    request.validate().unwrap();
+    for field in ["session_setup", "body"] {
+        let mut wire = serde_json::to_value(&request).unwrap();
+        wire.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire).is_err());
+        for invalid in [json!(null), json!([]), json!("text")] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            wire[field] = invalid;
+            let decoded: ProductQualificationConsumerWorkerRequest =
+                serde_json::from_value(wire).unwrap();
+            assert!(decoded.validate().is_err());
+        }
+    }
+    let mut missing_profile = serde_json::to_value(&request).unwrap();
+    missing_profile
+        .as_object_mut()
+        .unwrap()
+        .remove("credential_profile_id");
+    assert!(
+        serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(missing_profile)
+            .is_err()
+    );
+    let mut selected = request.clone();
+    selected.credential_profile_id = Some("profile-one".into());
+    selected.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(&request).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(&selected).unwrap()).unwrap()
+    );
+    for profile in [
+        "".to_owned(),
+        " spaced ".into(),
+        "line\nbreak".into(),
+        "x".repeat(257),
+    ] {
+        selected.credential_profile_id = Some(profile);
+        assert!(selected.validate().is_err());
+    }
+    let mut immediate_predecessor = request.clone();
+    immediate_predecessor.schema = "ryeos.qualification_worker_request.v3".into();
+    assert!(immediate_predecessor.validate().is_err());
+    let mut same = request.clone();
+    same.session_setup = same.body.clone();
+    assert!(same.validate().is_err());
+    let mut combined = request.clone();
+    combined.session_setup = json!({"setup":"x".repeat(4096)});
+    combined.body = json!({"turn":"y".repeat(4096)});
+    bounded_object(&combined.session_setup, "setup").unwrap();
+    bounded_object(&combined.body, "turn").unwrap();
+    assert!(combined.validate().is_err());
+    let mut predecessor = request.clone();
+    predecessor.schema = "ryeos.qualification_worker_request.v1".into();
+    assert!(predecessor.validate().is_err());
+    let mut wire = serde_json::to_value(&request).unwrap();
+    wire["extra"] = json!(true);
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire).is_err());
+    let mut changed_setup = request.clone();
+    changed_setup.session_setup["payload"] = json!({"probe":"changed"});
+    changed_setup.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&serde_json::to_value(request).unwrap()).unwrap(),
+        canonical_value_digest(&serde_json::to_value(changed_setup).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn worker_fixture_requires_explicit_null_or_exact_current_signed_data() {
+    use ryeos_external_execution_contract::qualification_fixture::{
+        Q_FIXTURE_CONTRACT_SCHEMA, Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+    };
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        controller_canary: None,
+        credential_profile_id: None,
+        fixture: None,
+        session_setup: json!({"route_id":"session.start", "payload":{}}),
+        body: json!({"route_id":"turn.start", "payload":{"input":"probe"}}),
+    };
+    let none_wire = serde_json::to_value(&request).unwrap();
+    assert!(none_wire["fixture"].is_null());
+    let mut missing = none_wire.clone();
+    missing.as_object_mut().unwrap().remove("fixture");
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(missing).is_err());
+    request.fixture = Some(QFixtureContract {
+        schema: Q_FIXTURE_CONTRACT_SCHEMA,
+        mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+        leaf: "candidate.txt".into(),
+        initial_content_b64: String::new(),
+        initial_blob_hash: lillux::sha256_hex(b""),
+        max_bytes: 65536,
+    });
+    request.validate().unwrap();
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_ne!(
+        canonical_value_digest(&none_wire).unwrap(),
+        canonical_value_digest(&wire).unwrap()
+    );
+    assert_eq!(
+        serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(wire.clone()).unwrap(),
+        request
+    );
+    let mut changed = request.clone();
+    changed.fixture.as_mut().unwrap().leaf = "other.txt".into();
+    changed.validate().unwrap();
+    assert_ne!(
+        canonical_value_digest(&wire).unwrap(),
+        canonical_value_digest(&serde_json::to_value(changed).unwrap()).unwrap()
+    );
+    request.fixture.as_mut().unwrap().mount_destination = "/workspace".into();
+    assert!(request.validate().is_err());
+    for schema in [
+        "ryeos.qualification_worker_request.v1",
+        "ryeos.qualification_worker_request.v2",
+        "ryeos.qualification_worker_request.v3",
+    ] {
+        let mut old = none_wire.clone();
+        old["schema"] = json!(schema);
+        assert!(
+            serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(old)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
     let mut value = policy();
     value.producer_scenarios.insert(
@@ -1753,6 +2269,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
         ProductQualificationProducerScenario {
             recipe_ref: "config:fixtures/independent-runtime/native-codex-producer".into(),
             remote_verifier: None,
+            consumer_worker_request: None,
         },
     );
     assert!(value.validate().is_ok());
@@ -1770,6 +2287,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
                 remote_verifier: None,
+                consumer_worker_request: None,
             },
         );
         assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
@@ -1796,6 +2314,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             ProductQualificationProducerScenario {
                 recipe_ref: "config:fixtures/recipe".into(),
                 remote_verifier: None,
+                consumer_worker_request: None,
             },
         );
     }
@@ -1967,4 +2486,231 @@ fn qualification_expiry_remains_explicit_existing_attestation_authority() {
     ProductQualificationEvidence::from_attestation(&signed).unwrap();
     assert!(!signed.is_expired_at("2026-09-08T23:59:59Z").unwrap());
     assert!(signed.is_expired_at("2026-09-09T00:00:00Z").unwrap());
+}
+
+#[cfg(test)]
+fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
+    let mut evidence = evidence();
+    let purpose = consumer_launch_purpose_fixture();
+    evidence.policy_source.policy.consumer_execution_context =
+        purpose.policy_source.policy.consumer_execution_context;
+    evidence.consumer_content = purpose.consumer_content;
+    evidence
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_realization
+        .manifest_hash = evidence.result.subject_manifest_hash.clone();
+    evidence.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:fixtures/recipe".into(),
+            remote_verifier: Some(ProductQualificationRemoteVerifierSelection {
+                binary_ref: "bin:fixtures/guest-verifier".into(),
+                guest_target_triple: "x86_64-unknown-linux-musl".into(),
+            }),
+            consumer_worker_request: Some(ProductQualificationConsumerWorkerRequest {
+                schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+                controller_canary: None,
+                credential_profile_id: Some("fixture-profile".into()),
+                fixture: None,
+                session_setup: json!({"route":"session.start","body":{}}),
+                body: json!({"route":"turn.start","body":{"prompt":"bounded"}}),
+            }),
+        },
+    );
+    let remote = remote_subordinate_proof_fixture();
+    let hash = "8".repeat(64);
+    evidence.result.probe_evidence = json!({
+        "qualification_worker_transcript_manifest_hash": hash,
+        "remote_consumer_attempt": {
+            "operation_id": remote.intent.operation_id,
+            "evidence_sha256": remote.observation.evidence_sha256,
+            "termination_operation_id": remote.termination_intent.operation_id,
+            "terminal_observation_sha256": canonical_value_digest(&serde_json::to_value(&remote.terminal_observation).unwrap()).unwrap(),
+        },
+    });
+    evidence.qualification_worker_transcript_manifest_hash = Some(hash);
+    evidence.execution_proof.subordinate_attempt =
+        Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
+    evidence.verifier.result_digest = evidence.result.digest().unwrap();
+    evidence
+}
+
+#[test]
+fn consumer_evidence_requires_exact_q_reference_and_signed_remote_request() {
+    let valid = consumer_q_evidence_fixture();
+    valid.validate().unwrap();
+    let mut missing = valid.clone();
+    missing.qualification_worker_transcript_manifest_hash = None;
+    assert!(
+        missing
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no Q transcript")
+    );
+    for value in [
+        Value::Null,
+        json!(123),
+        json!("not-a-hash"),
+        json!("9".repeat(64)),
+    ] {
+        let mut changed = valid.clone();
+        changed.result.probe_evidence["qualification_worker_transcript_manifest_hash"] = value;
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(changed.validate().is_err());
+    }
+    let mut missing_result = valid.clone();
+    missing_result
+        .result
+        .probe_evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("qualification_worker_transcript_manifest_hash");
+    missing_result.verifier.result_digest = missing_result.result.digest().unwrap();
+    assert!(missing_result.validate().is_err());
+    let mut no_request = valid.clone();
+    no_request
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get_mut("native_codex")
+        .unwrap()
+        .consumer_worker_request = None;
+    assert!(
+        no_request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("no signed Worker request")
+    );
+    let mut no_remote = valid.clone();
+    no_remote.execution_proof.subordinate_attempt = None;
+    assert!(
+        no_remote
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a remote consumer attempt")
+    );
+    let mut swapped_remote = valid;
+    swapped_remote.result.probe_evidence["remote_consumer_attempt"]["evidence_sha256"] =
+        json!("9".repeat(64));
+    swapped_remote.verifier.result_digest = swapped_remote.result.digest().unwrap();
+    assert!(swapped_remote.validate().is_err());
+}
+
+#[test]
+fn nonconsumer_evidence_refuses_even_null_q_reference() {
+    for value in [Value::Null, json!("8".repeat(64))] {
+        let mut changed = evidence();
+        changed.result.probe_evidence["qualification_worker_transcript_manifest_hash"] = value;
+        changed.verifier.result_digest = changed.result.digest().unwrap();
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("no admitted consumer content")
+        );
+    }
+}
+
+#[test]
+fn worker_canary_selection_is_required_nullable_and_predecessor_refuses() {
+    let request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: None,
+        session_setup: json!({"route_id":"session.start","payload":{}}),
+        body: json!({"route_id":"turn.start","payload":{"input":[]}}),
+    };
+    request.validate().unwrap();
+    assert_eq!(
+        request.bound_controller_canary_body(None).unwrap(),
+        request.body
+    );
+    let mut value = serde_json::to_value(&request).unwrap();
+    assert!(value["controller_canary"].is_null());
+    value.as_object_mut().unwrap().remove("controller_canary");
+    assert!(serde_json::from_value::<ProductQualificationConsumerWorkerRequest>(value).is_err());
+    let mut previous = request;
+    previous.schema = "ryeos.qualification_worker_request.v4".into();
+    assert!(previous.validate().is_err());
+}
+
+#[test]
+fn bound_canary_preserves_distinct_stages_and_combined_original_request_bound() {
+    use crate::external_execution::qualification_controller_canary::{
+        QControllerCanaryBinding, QControllerCanaryContract,
+    };
+    use ryeos_external_execution_contract::qualification_request_binding::{
+        QualificationRequestBindingInput, QualificationRequestBindingOutput,
+    };
+    // Inert shape fixture only. This test cannot construct original custody or
+    // the daemon's nonserializable successful-adapter proof.
+    let make_binding = |template: &serde_json::Value, resolved: serde_json::Value| {
+        let input = QualificationRequestBindingInput {
+            schema: 1,
+            template: template.clone(),
+            controller_canary_path: "/private/controller-canary/canary".into(),
+        };
+        let output = QualificationRequestBindingOutput {
+            schema: 1,
+            input_digest: input.digest().unwrap(),
+            resolved_body: resolved,
+        };
+        serde_json::from_value::<QControllerCanaryBinding>(json!({
+            "schema":1,"controller_path":input.controller_canary_path,
+            "initial_file":{"directory_identity":{"containing_device":1,"inode":2},
+                "file_identity":{"containing_device":1,"inode":3},
+                "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+            "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
+            "configuration_adapter_artifact_bytes":1,
+            "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+            "template_request_digest":crate::objects::canonical_value_digest(template).unwrap(),
+            "resolved_request_digest":crate::objects::canonical_value_digest(&output.resolved_body).unwrap(),
+            "resolved_body":output.resolved_body,
+        })).unwrap()
+    };
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: Some(QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1),
+        session_setup: json!({"provider_defined":"setup"}),
+        body: json!({"provider_defined":"template"}),
+    };
+    let binding = make_binding(&request.body, json!({"provider_defined":"resolved"}));
+    assert_eq!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .unwrap(),
+        binding.resolved_body
+    );
+    assert!(request.bound_controller_canary_body(None).is_err());
+    request.session_setup = binding.resolved_body.clone();
+    request.validate().unwrap(); // Literal stages differ before adapter mapping.
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .is_err()
+    );
+    request.session_setup = json!({"provider_defined":"x".repeat(5000)});
+    let expanded = make_binding(&request.body, json!({"provider_defined":"y".repeat(4000)}));
+    request.validate().unwrap();
+    expanded.validate().unwrap(); // Each body fits; their original sum does not.
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&expanded))
+            .is_err()
+    );
+    request.controller_canary = None;
+    assert!(
+        request
+            .bound_controller_canary_body(Some(&binding))
+            .is_err()
+    );
 }

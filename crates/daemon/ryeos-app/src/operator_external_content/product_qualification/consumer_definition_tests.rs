@@ -21,7 +21,7 @@ use super::{
 #[test]
 fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
     let standard = ryeos_engine::test_support::standard_bundle_root();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
@@ -32,7 +32,7 @@ fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Re
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
@@ -317,10 +317,10 @@ product_qualification_policy:
 #[test]
 fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
-    state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
+    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
         vec![Arc::new(
-            crate::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
                 schema: 1,
                 max_roots: 256,
                 max_objects: 32_768,
@@ -394,7 +394,7 @@ workload_client: null
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v3
+  schema: ryeos.product_qualification_policy.v4
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
@@ -475,8 +475,8 @@ product_qualification_policy:
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         )
     })?;
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-    crate::identity::write_authorized_key_toml(
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -485,7 +485,7 @@ product_qualification_policy:
         "fixture",
         "2026-01-01T00:00:00Z",
         state.identity.signing_key(),
-        crate::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;
     let grant = crate::operator_authority::admitted_operator_authority_digest(
         &state,

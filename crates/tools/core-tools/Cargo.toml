@@ -9,6 +9,7 @@ name = "ryeos_core_tools"
 path = "src/lib.rs"
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,12 +36,11 @@ lillux = { workspace = true }
 
 ryeos-vault = { workspace = true }
 ryeos-bundle = { workspace = true }
-ryeos-app = { workspace = true }
 
 # A current-thread tokio runtime to block on the async `runtime.author_item`
 # callback from the sync `author-item` subcommand. Owns the features it uses
 # (`enable_all` needs the IO driver via `net`, plus `time`) rather than relying
-# on unification through ryeos-runtime / ryeos-app.
+# on unification through other workspace consumers.
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 
 [dev-dependencies]

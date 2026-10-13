@@ -61,6 +61,9 @@ pub enum IsolationProjectAuthority {
 pub enum IsolationFilesystemAuthorityCeiling {
     NodePolicy,
     CapturedExecution,
+    /// Preserve snapshot authority while exposing only separately admitted
+    /// inputs; the full project tree is not a target workspace view.
+    CapturedInputs,
 }
 
 impl IsolationFilesystemAuthorityCeiling {
@@ -70,7 +73,11 @@ impl IsolationFilesystemAuthorityCeiling {
     /// Once either requires captured content, no later launch layer may restore
     /// ambient host mounts by choosing `node_policy`.
     pub fn intersect(self, other: Self) -> Self {
-        if matches!(self, Self::CapturedExecution) || matches!(other, Self::CapturedExecution) {
+        if matches!(self, Self::CapturedInputs) || matches!(other, Self::CapturedInputs) {
+            Self::CapturedInputs
+        } else if matches!(self, Self::CapturedExecution)
+            || matches!(other, Self::CapturedExecution)
+        {
             Self::CapturedExecution
         } else {
             Self::NodePolicy
@@ -525,9 +532,61 @@ pub(crate) enum IsolationReadOnlyMountScope {
     StateOverlay,
     RuntimeConfiguration,
     RuntimeEndpoint,
+    OriginalProductManifest(OriginalProductManifestRole),
+}
+
+/// Finite data delivery roles; these do not grant product or code admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginalProductManifestRole {
+    Gnu,
+    Driver,
+}
+
+impl OriginalProductManifestRole {
+    pub fn destination(self) -> &'static Path {
+        Path::new(match self {
+            Self::Gnu => "/opt/ryeos-original-manifests/gnu.json",
+            Self::Driver => "/opt/ryeos-original-manifests/driver.json",
+        })
+    }
 }
 
 impl IsolationReadOnlyMountAuthority {
+    pub(crate) fn require_complete_original_manifest_pair(mounts: &[Self]) -> anyhow::Result<()> {
+        let roles: Vec<_> = mounts
+            .iter()
+            .filter_map(|mount| match mount.scope {
+                IsolationReadOnlyMountScope::OriginalProductManifest(role) => Some(role),
+                _ => None,
+            })
+            .collect();
+        anyhow::ensure!(
+            roles.is_empty() || (roles.len() == 2 && roles[0] != roles[1]),
+            "original product manifests require exactly two distinct roles"
+        );
+        Ok(())
+    }
+    /// Consume a clone of the original owner's sealed descriptor. A hash
+    /// argument verifies raw bytes, never issues signed-selection authority.
+    pub fn new_original_product_manifest(
+        role: OriginalProductManifestRole,
+        selected_raw_sha256: &str,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        source.require_write_sealed_regular()?;
+        let (bytes, _) = source.read_regular_file_stable_bounded(8 * 1024 * 1024)?;
+        anyhow::ensure!(!bytes.is_empty(), "original product manifest is empty");
+        anyhow::ensure!(
+            lillux::sha256_hex(&bytes) == selected_raw_sha256,
+            "original product manifest raw content differs from selected hash"
+        );
+        Ok(Self {
+            source_path: role.destination().to_path_buf(),
+            destination: role.destination().to_path_buf(),
+            source,
+            scope: IsolationReadOnlyMountScope::OriginalProductManifest(role),
+        })
+    }
     /// Configuration data only: seal the exact bounded regular-file bytes so
     /// even a later host-side mutation cannot alter this admitted delivery.
     pub fn new_runtime_configuration(
@@ -783,11 +842,147 @@ pub struct IsolationLaunchContext<'a> {
     pub target_channels: &'a [IsolationTargetChannelAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
+    /// Environment names delivered verbatim to the target. Their values are
+    /// never inspected for code-path rewriting and never echoed in refusals.
+    pub verbatim_env_names: &'a [String],
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_manifest_descriptor_refuses_mutable_file_and_configuration_cap_bypass() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("manifest.json"), b"{}").unwrap();
+        let root = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let source = root
+            .open_pinned_regular_descendant(Path::new("manifest.json"), false)
+            .unwrap()
+            .unwrap()
+            .into_inherited_descriptor_path()
+            .unwrap();
+        assert!(
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                OriginalProductManifestRole::Gnu,
+                &lillux::sha256_hex(b"{}"),
+                source,
+            )
+            .is_err()
+        );
+        let bytes = vec![b'x'; 64 * 1024 + 1];
+        assert!(
+            IsolationReadOnlyMountAuthority::new_runtime_configuration_bytes(
+                "/diagnostic".into(),
+                "/opt/control.json".into(),
+                &bytes,
+            )
+            .is_err()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                OriginalProductManifestRole::Gnu,
+                &lillux::sha256_hex(&bytes),
+                lillux::sealed_memfd(c"manifest-over-config-cap", &bytes).unwrap(),
+            )
+            .is_ok()
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_manifest_pair_refuses_missing_duplicate_and_extra_roles() {
+        let mount = |role| {
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                role,
+                &lillux::sha256_hex(b"{}"),
+                lillux::sealed_memfd(c"manifest-pair-control", b"{}").unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(
+            IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(&[]).is_ok()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(&[mount(
+                OriginalProductManifestRole::Gnu
+            )])
+            .is_err()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(&[
+                mount(OriginalProductManifestRole::Gnu),
+                mount(OriginalProductManifestRole::Gnu)
+            ])
+            .is_err()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(&[
+                mount(OriginalProductManifestRole::Driver),
+                mount(OriginalProductManifestRole::Gnu)
+            ])
+            .is_ok()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(&[
+                mount(OriginalProductManifestRole::Driver),
+                mount(OriginalProductManifestRole::Gnu),
+                mount(OriginalProductManifestRole::Driver)
+            ])
+            .is_err()
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_manifest_descriptor_refuses_substitution_and_empty_content() {
+        let bytes = b"{\"schema\":1}";
+        let descriptor = lillux::sealed_memfd(c"original-manifest-control", bytes).unwrap();
+        let delivered = IsolationReadOnlyMountAuthority::new_original_product_manifest(
+            OriginalProductManifestRole::Gnu,
+            &lillux::sha256_hex(bytes),
+            descriptor.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            delivered.destination(),
+            OriginalProductManifestRole::Gnu.destination()
+        );
+        assert_eq!(
+            delivered.source().inherited_descriptor().unwrap(),
+            descriptor.inherited_descriptor().unwrap()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                OriginalProductManifestRole::Driver,
+                &lillux::sha256_hex(b"substitution"),
+                descriptor,
+            )
+            .is_err()
+        );
+        assert!(
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                OriginalProductManifestRole::Gnu,
+                &lillux::sha256_hex(b""),
+                lillux::sealed_memfd(c"empty-manifest", b"").unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_manifest_descriptor_refuses_oversized_sealed_content() {
+        let bytes = vec![b'x'; 8 * 1024 * 1024 + 1];
+        assert!(
+            IsolationReadOnlyMountAuthority::new_original_product_manifest(
+                OriginalProductManifestRole::Driver,
+                &lillux::sha256_hex(&bytes),
+                lillux::sealed_memfd(c"oversized-manifest", &bytes).unwrap(),
+            )
+            .is_err()
+        );
+    }
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -927,6 +1122,7 @@ mod tests {
         let source = lillux::PinnedDirectory::open(source.path())
             .unwrap()
             .unwrap();
+        source.tighten_owner_private_directory().unwrap();
         let workspace = source.inherited_descriptor_authority().unwrap();
         let descendant = workspace
             .open_directory_descendant(Path::new("prepared/codex-home"))
@@ -972,12 +1168,17 @@ mod tests {
 
     #[test]
     fn filesystem_ceiling_intersection_cannot_restore_node_mounts() {
-        use IsolationFilesystemAuthorityCeiling::{CapturedExecution, NodePolicy};
+        use IsolationFilesystemAuthorityCeiling::{CapturedExecution, CapturedInputs, NodePolicy};
         for (parent, child, expected) in [
             (NodePolicy, NodePolicy, NodePolicy),
             (NodePolicy, CapturedExecution, CapturedExecution),
             (CapturedExecution, NodePolicy, CapturedExecution),
             (CapturedExecution, CapturedExecution, CapturedExecution),
+            (NodePolicy, CapturedInputs, CapturedInputs),
+            (CapturedInputs, NodePolicy, CapturedInputs),
+            (CapturedExecution, CapturedInputs, CapturedInputs),
+            (CapturedInputs, CapturedExecution, CapturedInputs),
+            (CapturedInputs, CapturedInputs, CapturedInputs),
         ] {
             assert_eq!(parent.intersect(child), expected);
             assert_eq!(

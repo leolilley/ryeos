@@ -111,38 +111,6 @@ config:
     Ok(())
 }
 
-/// Every persisted event across ALL threads: `(thread_id, event_type, payload)`
-/// ordered by chain sequence. Segment successors are distinct threads, so the
-/// whole run must be read across threads, not filtered to one.
-fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut stmt = match conn
-        .prepare("SELECT thread_id, event_type, payload FROM events ORDER BY chain_seq ASC")
-    {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map([], |row| {
-        let thread_id: String = row.get(0)?;
-        let event_type: String = row.get(1)?;
-        let payload_blob: Vec<u8> = row.get(2)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((thread_id, event_type, payload))
-    })
-    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-    .unwrap_or_default()
-}
-
 fn count_event(events: &[(String, String, Value)], event_type: &str) -> usize {
     events.iter().filter(|(_, ty, _)| ty == event_type).count()
 }
@@ -195,12 +163,13 @@ fn spawn_execute(
 }
 
 async fn poll_until_completed(
-    state_path: &Path,
     deadline: Instant,
     h: &mut DaemonHarness,
 ) -> Vec<(String, String, Value)> {
     loop {
-        let events = all_events(state_path);
+        // Segment successors are distinct threads, so the whole run is read
+        // across every chain this principal owns, not filtered to one thread.
+        let events = h.principal_events().await;
         if count_event(&events, "thread_completed") >= 1 {
             return events;
         }
@@ -238,8 +207,7 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
     let exec = spawn_execute(&h, project.path(), "graph:segment_chain");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let state_path = h.state_path.clone();
-    let events = poll_until_completed(&state_path, deadline, &mut h).await;
+    let events = poll_until_completed(deadline, &mut h).await;
     exec.abort();
 
     // The chain reached a clean terminal.
@@ -303,8 +271,7 @@ async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment
     let exec = spawn_execute(&h, project.path(), "graph:retry_segment");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let state_path = h.state_path.clone();
-    let events = poll_until_completed(&state_path, deadline, &mut h).await;
+    let events = poll_until_completed(deadline, &mut h).await;
     exec.abort();
 
     // The run terminated (the exhausted retry routed to the recover return node).

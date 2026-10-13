@@ -86,7 +86,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             ADMISSION_CLAIM_PROTOCOL_VERSION, req.protocol_version
         )));
     }
-    if ryeos_app::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
+    if ryeos_node_runtime::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
         return Err(HandlerError::BadRequest(
             "origin_site_id must use the canonical `site:<name>` form".to_string(),
         ));
@@ -125,7 +125,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
-    let configured_operator = ryeos_app::identity::NodeIdentity::load(
+    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
         &state.config.operator_signing_key_path,
     )
     .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
@@ -158,7 +158,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     let created_at = lillux::time::iso8601_now();
     let auth_dir = state.config.authorized_keys_dir.clone();
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &fingerprint,
         &key_b64,
@@ -174,8 +174,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     )
     .map_err(|e| {
         if matches!(
-            e.downcast_ref::<ryeos_app::identity::AuthorizedKeyCreateError>(),
-            Some(ryeos_app::identity::AuthorizedKeyCreateError::AlreadyExists)
+            e.downcast_ref::<ryeos_node_runtime::identity::AuthorizedKeyCreateError>(),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyCreateError::AlreadyExists)
         ) {
             HandlerError::Conflict(
                 "authorized-key fingerprint already exists; admission cannot replace or reclassify it"
@@ -231,7 +231,7 @@ fn consume_token_file(path: &Path) -> HandlerResult<()> {
 fn hosted_admission_token_ttl_secs(state: &AppState) -> HandlerResult<u64> {
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::hosted::HostedNodePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy>()
         .map_err(|error| HandlerError::Internal(format!("load hosted-node policy: {error:#}")))?;
     match (policy.admission_enabled, policy.admission_token_ttl_secs) {
         (true, Some(ttl_secs)) => Ok(ttl_secs),

@@ -37,233 +37,238 @@ impl std::error::Error for ProjectionEventConflict {}
     )
 )]
 pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::Result<()> {
-    event.validate()?;
+    db.with_sql(|connection| {
+        event.validate()?;
 
-    let payload =
-        serde_json::to_vec(&event.payload).context("failed to serialize event payload")?;
-    let canonical_event = lillux::canonical_json(&event.to_value())
-        .context("failed to canonicalize projected event")?;
-    let event_hash = lillux::sha256_hex(canonical_event.as_bytes());
-    let durability = event.durability.to_string();
+        let payload =
+            serde_json::to_vec(&event.payload).context("failed to serialize event payload")?;
+        let canonical_event = lillux::canonical_json(&event.to_value())
+            .context("failed to canonicalize projected event")?;
+        let event_hash = lillux::sha256_hex(canonical_event.as_bytes());
+        let durability = event.durability.to_string();
 
-    db.connection()
-        .execute(
-            "INSERT OR IGNORE INTO events (
-            event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
-            event_type, durability, ts, prev_chain_event_hash,
-            prev_thread_event_hash, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                &event_hash,
-                &event.chain_root_id,
-                event.chain_seq,
-                &event.thread_id,
-                event.thread_seq,
-                &event.event_type,
-                &durability,
-                &event.ts,
-                &event.prev_chain_event_hash,
-                &event.prev_thread_event_hash,
-                &payload,
-            ],
-        )
-        .context("failed to project event")?;
-
-    // INSERT OR IGNORE is used only for semantic idempotency. A uniqueness
-    // conflict at either the event hash or authoritative chain sequence must
-    // already be the exact same canonical event; otherwise derived rows and
-    // the projection cursor must not advance over a stale/forked base row.
-    let exact: bool = db
-        .connection()
-        .query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM events
-                WHERE event_hash = ?1
-                  AND chain_root_id = ?2
-                  AND chain_seq = ?3
-                  AND thread_id = ?4
-                  AND thread_seq = ?5
-                  AND event_type = ?6
-                  AND durability = ?7
-                  AND ts = ?8
-                  AND prev_chain_event_hash IS ?9
-                  AND prev_thread_event_hash IS ?10
-                  AND payload = ?11
-            )",
-            rusqlite::params![
-                &event_hash,
-                &event.chain_root_id,
-                event.chain_seq,
-                &event.thread_id,
-                event.thread_seq,
-                &event.event_type,
-                &durability,
-                &event.ts,
-                &event.prev_chain_event_hash,
-                &event.prev_thread_event_hash,
-                &payload,
-            ],
-            |row| row.get(0),
-        )
-        .context("verify idempotent projected event")?;
-    if !exact {
-        return Err(ProjectionEventConflict {
-            event_hash,
-            chain_root_id: event.chain_root_id.clone(),
-            chain_seq: event.chain_seq,
-        }
-        .into());
-    }
-
-    if let Some(operation_id) = event
-        .payload
-        .get("operation_id")
-        .and_then(|value| value.as_str())
-        && !operation_id.is_empty()
-        && operation_id.len() <= 128
-    {
-        db.connection()
+        connection
             .execute(
-                "INSERT INTO event_operation_index (
-                    event_hash, thread_id, event_type, operation_id, chain_seq
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(event_hash) DO UPDATE SET
-                    thread_id = excluded.thread_id,
-                    event_type = excluded.event_type,
-                    operation_id = excluded.operation_id,
-                    chain_seq = excluded.chain_seq",
+                "INSERT OR IGNORE INTO events (
+                event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
+                event_type, durability, ts, prev_chain_event_hash,
+                prev_thread_event_hash, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     &event_hash,
-                    &event.thread_id,
-                    &event.event_type,
-                    operation_id,
+                    &event.chain_root_id,
                     event.chain_seq,
+                    &event.thread_id,
+                    event.thread_seq,
+                    &event.event_type,
+                    &durability,
+                    &event.ts,
+                    &event.prev_chain_event_hash,
+                    &event.prev_thread_event_hash,
+                    &payload,
                 ],
             )
-            .context("project event operation identity")?;
-    }
+            .context("failed to project event")?;
 
-    // Derive artifact row from artifact_published events (CAS-truth derived)
-    if event.event_type == crate::event_types::ARTIFACT_PUBLISHED
-        && let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str())
-    {
-        let metadata = event.payload.get("metadata").cloned();
-        let metadata_blob = metadata
-            .map(|m| serde_json::to_vec(&m).context("failed to serialize metadata"))
-            .transpose()?;
-
-        db.connection()
-            .execute(
-                "INSERT INTO thread_artifacts (
-                    source_event_hash, chain_root_id, thread_id, kind, metadata, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(source_event_hash) DO UPDATE SET
-                    chain_root_id = excluded.chain_root_id,
-                    thread_id = excluded.thread_id,
-                    kind = excluded.kind,
-                    metadata = excluded.metadata,
-                    created_at = excluded.created_at",
+        // INSERT OR IGNORE is used only for semantic idempotency. A uniqueness
+        // conflict at either the event hash or authoritative chain sequence must
+        // already be the exact same canonical event; otherwise derived rows and
+        // the projection cursor must not advance over a stale/forked base row.
+        let exact: bool = connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM events
+                    WHERE event_hash = ?1
+                      AND chain_root_id = ?2
+                      AND chain_seq = ?3
+                      AND thread_id = ?4
+                      AND thread_seq = ?5
+                      AND event_type = ?6
+                      AND durability = ?7
+                      AND ts = ?8
+                      AND prev_chain_event_hash IS ?9
+                      AND prev_thread_event_hash IS ?10
+                      AND payload = ?11
+                )",
                 rusqlite::params![
                     &event_hash,
                     &event.chain_root_id,
+                    event.chain_seq,
                     &event.thread_id,
-                    artifact_type,
-                    metadata_blob,
+                    event.thread_seq,
+                    &event.event_type,
+                    &durability,
                     &event.ts,
+                    &event.prev_chain_event_hash,
+                    &event.prev_thread_event_hash,
+                    &payload,
                 ],
+                |row| row.get(0),
             )
-            .context("failed to project derived artifact")?;
-    }
+            .context("verify idempotent projected event")?;
+        if !exact {
+            return Err(ProjectionEventConflict {
+                event_hash,
+                chain_root_id: event.chain_root_id.clone(),
+                chain_seq: event.chain_seq,
+            }
+            .into());
+        }
 
-    if event.event_type == crate::event_types::THREAD_USAGE {
-        project_thread_usage_latest(db, event)?;
-    }
-
-    if event.event_type == crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 {
-        project_provider_attempt_budget_latest(db, event)?;
-    }
-
-    if event.event_type == crate::event_types::RESOURCE_BUDGET_TRANSITION_V1 {
-        project_resource_budget_latest(db, event)?;
-    }
-
-    if event.event_type == crate::event_types::PROJECT_OBSERVATION_RECORDED {
-        project_project_observation_once(db, event, &event_hash)?;
-    }
-
-    if event.event_type == crate::event_types::PROVIDER_CALL_OBSERVATION_RECORDED {
-        project_provider_call_observation_once(db, event, &event_hash)?;
-    }
-
-    if event.event_type == crate::event_types::THREAD_CREATED {
-        project_thread_usage_subject(db, event)?;
-    }
-
-    // Derive a dispatch thread-edge from a child_thread_spawned event. An
-    // inline-dispatched directive/sub-graph child is a FRESH ROOT with no
-    // upstream_thread_id, so the snapshot-derived edge above never links it; this
-    // event carries the only portable parent→child lineage. The canonical
-    // source-event hash is the semantic idempotency key, so replay reasserts
-    // the exact derived row instead of duplicating it. The emitting thread is
-    // the parent.
-    if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED
-        && let Some(child_id) = event
+        if let Some(operation_id) = event
             .payload
-            .get("child_thread_id")
-            .and_then(|v| v.as_str())
-    {
-        let spawn_reason = event
-            .payload
-            .get("spawn_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("dispatch");
-        db.connection()
-            .execute(
-                "INSERT INTO thread_edges (
-                        chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
-                        spawn_reason, source_event_hash, created_at
-                    ) VALUES (?, ?, ?, NULL, ?, ?, ?)
-                    ON CONFLICT(source_event_hash) DO UPDATE SET
+            .get("operation_id")
+            .and_then(|value| value.as_str())
+            && !operation_id.is_empty()
+            && operation_id.len() <= 128
+        {
+            connection
+                .execute(
+                    "INSERT INTO event_operation_index (
+                        event_hash, thread_id, event_type, operation_id, chain_seq
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(event_hash) DO UPDATE SET
+                        thread_id = excluded.thread_id,
+                        event_type = excluded.event_type,
+                        operation_id = excluded.operation_id,
+                        chain_seq = excluded.chain_seq",
+                    rusqlite::params![
+                        &event_hash,
+                        &event.thread_id,
+                        &event.event_type,
+                        operation_id,
+                        event.chain_seq,
+                    ],
+                )
+                .context("project event operation identity")?;
+        }
+
+        // Derive artifact row from artifact_published events (CAS-truth derived)
+        if event.event_type == crate::event_types::ARTIFACT_PUBLISHED
+            && let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str())
+        {
+            let metadata = event.payload.get("metadata").cloned();
+            let metadata_blob = metadata
+                .map(|m| serde_json::to_vec(&m).context("failed to serialize metadata"))
+                .transpose()?;
+
+            connection
+                .execute(
+                    "INSERT INTO thread_artifacts (
+                        source_event_hash, chain_root_id, thread_id, kind, metadata, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(source_event_hash) DO UPDATE SET
                         chain_root_id = excluded.chain_root_id,
-                        parent_thread_id = excluded.parent_thread_id,
-                        child_thread_id = excluded.child_thread_id,
-                        spawn_seq = excluded.spawn_seq,
-                        spawn_reason = excluded.spawn_reason,
+                        thread_id = excluded.thread_id,
+                        kind = excluded.kind,
+                        metadata = excluded.metadata,
                         created_at = excluded.created_at",
-                rusqlite::params![
-                    &event.chain_root_id,
-                    &event.thread_id,
-                    child_id,
-                    spawn_reason,
-                    &event_hash,
-                    &event.ts,
-                ],
-            )
-            .context("failed to project dispatch thread edge")?;
-    }
+                    rusqlite::params![
+                        &event_hash,
+                        &event.chain_root_id,
+                        &event.thread_id,
+                        artifact_type,
+                        metadata_blob,
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project derived artifact")?;
+        }
 
-    // Derive a facet row from a thread_facet_set event. Facets MUST originate in
-    // an event (not a bare table write) to survive a projection rebuild, which
-    // clears thread_facets and re-derives it from the event log. Upsert on
-    // (thread_id, key): the latest set wins.
-    if event.event_type == crate::event_types::THREAD_FACET_SET
-        && let (Some(key), Some(value)) = (
-            event.payload.get("key").and_then(|v| v.as_str()),
-            event.payload.get("value").and_then(|v| v.as_str()),
-        )
-    {
-        db.connection()
-            .execute(
-                "INSERT INTO thread_facets (thread_id, key, value, updated_at)
-                     VALUES (?, ?, ?, ?)
-                     ON CONFLICT(thread_id, key)
-                     DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
-            )
-            .context("failed to project thread facet")?;
-    }
+        if event.event_type == crate::event_types::THREAD_USAGE {
+            project_thread_usage_latest(db, event)?;
+        }
 
-    Ok(())
+        if event.event_type == crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 {
+            project_provider_attempt_budget_latest(db, event)?;
+        }
+
+        if event.event_type == crate::event_types::RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1 {
+            validate_resource_precontact_budget_event(event)?;
+        }
+
+        if event.event_type == crate::event_types::RESOURCE_BUDGET_TRANSITION_V1 {
+            project_resource_budget_latest(db, event)?;
+        }
+
+        if event.event_type == crate::event_types::PROJECT_OBSERVATION_RECORDED {
+            project_project_observation_once(db, event, &event_hash)?;
+        }
+
+        if event.event_type == crate::event_types::PROVIDER_CALL_OBSERVATION_RECORDED {
+            project_provider_call_observation_once(db, event, &event_hash)?;
+        }
+
+        if event.event_type == crate::event_types::THREAD_CREATED {
+            project_thread_usage_subject(db, event)?;
+        }
+
+        // Derive a dispatch thread-edge from a child_thread_spawned event. An
+        // inline-dispatched directive/sub-graph child is a FRESH ROOT with no
+        // upstream_thread_id, so the snapshot-derived edge above never links it; this
+        // event carries the only portable parent→child lineage. The canonical
+        // source-event hash is the semantic idempotency key, so replay reasserts
+        // the exact derived row instead of duplicating it. The emitting thread is
+        // the parent.
+        if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED
+            && let Some(child_id) = event
+                .payload
+                .get("child_thread_id")
+                .and_then(|v| v.as_str())
+        {
+            let spawn_reason = event
+                .payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("dispatch");
+            connection
+                .execute(
+                    "INSERT INTO thread_edges (
+                            chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
+                            spawn_reason, source_event_hash, created_at
+                        ) VALUES (?, ?, ?, NULL, ?, ?, ?)
+                        ON CONFLICT(source_event_hash) DO UPDATE SET
+                            chain_root_id = excluded.chain_root_id,
+                            parent_thread_id = excluded.parent_thread_id,
+                            child_thread_id = excluded.child_thread_id,
+                            spawn_seq = excluded.spawn_seq,
+                            spawn_reason = excluded.spawn_reason,
+                            created_at = excluded.created_at",
+                    rusqlite::params![
+                        &event.chain_root_id,
+                        &event.thread_id,
+                        child_id,
+                        spawn_reason,
+                        &event_hash,
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project dispatch thread edge")?;
+        }
+
+        // Derive a facet row from a thread_facet_set event. Facets MUST originate in
+        // an event (not a bare table write) to survive a projection rebuild, which
+        // clears thread_facets and re-derives it from the event log. Upsert on
+        // (thread_id, key): the latest set wins.
+        if event.event_type == crate::event_types::THREAD_FACET_SET
+            && let (Some(key), Some(value)) = (
+                event.payload.get("key").and_then(|v| v.as_str()),
+                event.payload.get("value").and_then(|v| v.as_str()),
+            )
+        {
+            connection
+                .execute(
+                    "INSERT INTO thread_facets (thread_id, key, value, updated_at)
+                         VALUES (?, ?, ?, ?)
+                         ON CONFLICT(thread_id, key)
+                         DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
+                )
+                .context("failed to project thread facet")?;
+        }
+
+        Ok(())
+    })
 }
 
 fn project_project_observation_once(
@@ -271,99 +276,100 @@ fn project_project_observation_once(
     event: &crate::ThreadEvent,
     event_hash: &str,
 ) -> anyhow::Result<()> {
-    let observation: crate::ProjectObservationRecordedPayload =
-        serde_json::from_value(event.payload.clone())
-            .context("invalid project_observation_recorded payload")?;
-    observation.validate_for_chain(&event.chain_root_id)?;
+    db.with_sql(|connection| {
+        let observation: crate::ProjectObservationRecordedPayload =
+            serde_json::from_value(event.payload.clone())
+                .context("invalid project_observation_recorded payload")?;
+        observation.validate_for_chain(&event.chain_root_id)?;
 
-    let existing: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-    )> = db
-        .connection()
-        .query_row(
-            "SELECT chain_root_id, thread_id, source_definition_ref,
+        let existing: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+        )> = connection
+            .query_row(
+                "SELECT chain_root_id, thread_id, source_definition_ref,
+                        source_effective_definition_digest, namespace, stable_id,
+                        payload_fingerprint, event_hash, chain_seq
+                 FROM project_observation_once
+                 WHERE observation_id = ?1",
+                [&observation.observation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("read project observation publication identity")?;
+        if let Some((
+            chain_root_id,
+            thread_id,
+            definition_ref,
+            effective_digest,
+            namespace,
+            stable_id,
+            payload_fingerprint,
+            projected_event_hash,
+            chain_seq,
+        )) = existing
+        {
+            let exact = chain_root_id == event.chain_root_id
+                && thread_id == event.thread_id
+                && definition_ref == observation.source_definition_ref
+                && effective_digest == observation.source_effective_definition_digest
+                && namespace == observation.namespace
+                && stable_id == observation.stable_id
+                && payload_fingerprint == observation.payload_fingerprint
+                && projected_event_hash == event_hash
+                && chain_seq == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
+            if !exact {
+                anyhow::bail!(
+                    "project observation ID {} contradicts its projected publication identity",
+                    observation.observation_id
+                );
+            }
+            return Ok(());
+        }
+
+        connection
+            .execute(
+                "INSERT INTO project_observation_once (
+                    observation_id, chain_root_id, thread_id, source_definition_ref,
                     source_effective_definition_digest, namespace, stable_id,
                     payload_fingerprint, event_hash, chain_seq
-             FROM project_observation_once
-             WHERE observation_id = ?1",
-            [&observation.observation_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                ))
-            },
-        )
-        .optional()
-        .context("read project observation publication identity")?;
-    if let Some((
-        chain_root_id,
-        thread_id,
-        definition_ref,
-        effective_digest,
-        namespace,
-        stable_id,
-        payload_fingerprint,
-        projected_event_hash,
-        chain_seq,
-    )) = existing
-    {
-        let exact = chain_root_id == event.chain_root_id
-            && thread_id == event.thread_id
-            && definition_ref == observation.source_definition_ref
-            && effective_digest == observation.source_effective_definition_digest
-            && namespace == observation.namespace
-            && stable_id == observation.stable_id
-            && payload_fingerprint == observation.payload_fingerprint
-            && projected_event_hash == event_hash
-            && chain_seq == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
-        if !exact {
-            anyhow::bail!(
-                "project observation ID {} contradicts its projected publication identity",
-                observation.observation_id
-            );
-        }
-        return Ok(());
-    }
-
-    db.connection()
-        .execute(
-            "INSERT INTO project_observation_once (
-                observation_id, chain_root_id, thread_id, source_definition_ref,
-                source_effective_definition_digest, namespace, stable_id,
-                payload_fingerprint, event_hash, chain_seq
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                &observation.observation_id,
-                &event.chain_root_id,
-                &event.thread_id,
-                &observation.source_definition_ref,
-                &observation.source_effective_definition_digest,
-                &observation.namespace,
-                &observation.stable_id,
-                &observation.payload_fingerprint,
-                event_hash,
-                i64::try_from(event.chain_seq)
-                    .context("project observation chain_seq exceeds i64")?,
-            ],
-        )
-        .context("project project-observation publication identity")?;
-    Ok(())
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    &observation.observation_id,
+                    &event.chain_root_id,
+                    &event.thread_id,
+                    &observation.source_definition_ref,
+                    &observation.source_effective_definition_digest,
+                    &observation.namespace,
+                    &observation.stable_id,
+                    &observation.payload_fingerprint,
+                    event_hash,
+                    i64::try_from(event.chain_seq)
+                        .context("project observation chain_seq exceeds i64")?,
+                ],
+            )
+            .context("project project-observation publication identity")?;
+        Ok(())
+    })
 }
 
 fn project_provider_call_observation_once(
@@ -371,203 +377,208 @@ fn project_provider_call_observation_once(
     event: &crate::ThreadEvent,
     event_hash: &str,
 ) -> anyhow::Result<()> {
-    let observation: crate::ProviderCallObservationRecordedPayload =
-        serde_json::from_value(event.payload.clone())
-            .context("invalid provider_call_observation_recorded payload")?;
-    observation.validate_for_subject(&event.chain_root_id, &event.thread_id)?;
-    let source = serde_json::to_value(observation.source)?
-        .as_str()
-        .expect("provider observation source serializes as a string")
-        .to_string();
-    let publication = serde_json::to_value(observation.publication)?
-        .as_str()
-        .expect("provider observation publication serializes as a string")
-        .to_string();
+    db.with_sql(|connection| {
+        let observation: crate::ProviderCallObservationRecordedPayload =
+            serde_json::from_value(event.payload.clone())
+                .context("invalid provider_call_observation_recorded payload")?;
+        observation.validate_for_subject(&event.chain_root_id, &event.thread_id)?;
+        let source = serde_json::to_value(observation.source)?
+            .as_str()
+            .expect("provider observation source serializes as a string")
+            .to_string();
+        let publication = serde_json::to_value(observation.publication)?
+            .as_str()
+            .expect("provider observation publication serializes as a string")
+            .to_string();
 
-    let existing: Option<(
-        String,
-        String,
-        i64,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-    )> = db
-        .connection()
-        .query_row(
-            "SELECT chain_root_id, thread_id, turn, attempt_number,
+        let existing: Option<(
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+        )> = connection
+            .query_row(
+                "SELECT chain_root_id, thread_id, turn, attempt_number,
+                        effect_coordinate_digest, source, answer_digest, record_hash,
+                        publication, event_hash, chain_seq
+                 FROM provider_call_observation_once
+                 WHERE observation_id = ?1",
+                [&observation.observation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("read provider-call observation publication identity")?;
+        if let Some(existing) = existing {
+            let exact = existing.0 == event.chain_root_id
+                && existing.1 == event.thread_id
+                && existing.2 == i64::from(observation.turn)
+                && existing.3 == i64::from(observation.attempt_number)
+                && existing.4 == observation.effect_coordinate_digest
+                && existing.5 == source
+                && existing.6 == observation.answer_digest
+                && existing.7 == observation.record_hash
+                && existing.8 == publication
+                && existing.9 == event_hash
+                && existing.10 == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
+            if !exact {
+                anyhow::bail!(
+                    "provider-call observation ID {} contradicts its projected publication identity",
+                    observation.observation_id
+                );
+            }
+            return Ok(());
+        }
+
+        connection
+            .execute(
+                "INSERT INTO provider_call_observation_once (
+                    observation_id, chain_root_id, thread_id, turn, attempt_number,
                     effect_coordinate_digest, source, answer_digest, record_hash,
                     publication, event_hash, chain_seq
-             FROM provider_call_observation_once
-             WHERE observation_id = ?1",
-            [&observation.observation_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                ))
-            },
-        )
-        .optional()
-        .context("read provider-call observation publication identity")?;
-    if let Some(existing) = existing {
-        let exact = existing.0 == event.chain_root_id
-            && existing.1 == event.thread_id
-            && existing.2 == i64::from(observation.turn)
-            && existing.3 == i64::from(observation.attempt_number)
-            && existing.4 == observation.effect_coordinate_digest
-            && existing.5 == source
-            && existing.6 == observation.answer_digest
-            && existing.7 == observation.record_hash
-            && existing.8 == publication
-            && existing.9 == event_hash
-            && existing.10 == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
-        if !exact {
-            anyhow::bail!(
-                "provider-call observation ID {} contradicts its projected publication identity",
-                observation.observation_id
-            );
-        }
-        return Ok(());
-    }
-
-    db.connection()
-        .execute(
-            "INSERT INTO provider_call_observation_once (
-                observation_id, chain_root_id, thread_id, turn, attempt_number,
-                effect_coordinate_digest, source, answer_digest, record_hash,
-                publication, event_hash, chain_seq
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![
-                &observation.observation_id,
-                &event.chain_root_id,
-                &event.thread_id,
-                i64::from(observation.turn),
-                i64::from(observation.attempt_number),
-                &observation.effect_coordinate_digest,
-                source,
-                &observation.answer_digest,
-                &observation.record_hash,
-                publication,
-                event_hash,
-                i64::try_from(event.chain_seq)
-                    .context("provider-call observation chain_seq exceeds i64")?,
-            ],
-        )
-        .context("project provider-call observation publication identity")?;
-    Ok(())
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    &observation.observation_id,
+                    &event.chain_root_id,
+                    &event.thread_id,
+                    i64::from(observation.turn),
+                    i64::from(observation.attempt_number),
+                    &observation.effect_coordinate_digest,
+                    source,
+                    &observation.answer_digest,
+                    &observation.record_hash,
+                    publication,
+                    event_hash,
+                    i64::try_from(event.chain_seq)
+                        .context("provider-call observation chain_seq exceeds i64")?,
+                ],
+            )
+            .context("project provider-call observation publication identity")?;
+        Ok(())
+    })
 }
 
 fn project_thread_usage_subject(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
 ) -> anyhow::Result<()> {
-    let Some(subject_value) = event.payload.get("usage_subject") else {
-        return Ok(());
-    };
+    db.with_sql(|connection| {
+        let Some(subject_value) = event.payload.get("usage_subject") else {
+            return Ok(());
+        };
 
-    let usage_subject: crate::UsageSubject = serde_json::from_value(subject_value.clone())
-        .context("failed to deserialize thread_created usage_subject")?;
-    usage_subject.validate()?;
-    let asserted_by = event
-        .payload
-        .get("usage_subject_asserted_by")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
+        let usage_subject: crate::UsageSubject = serde_json::from_value(subject_value.clone())
+            .context("failed to deserialize thread_created usage_subject")?;
+        usage_subject.validate()?;
+        let asserted_by = event
+            .payload
+            .get("usage_subject_asserted_by")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
 
-    db.connection()
-        .execute(
-            "INSERT INTO thread_usage_subjects (
-                chain_root_id, namespace, subject, asserted_by, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(chain_root_id) DO UPDATE SET
-                namespace = excluded.namespace,
-                subject = excluded.subject,
-                asserted_by = excluded.asserted_by,
-                created_at = excluded.created_at",
-            rusqlite::params![
-                &event.chain_root_id,
-                &usage_subject.namespace,
-                &usage_subject.subject,
-                asserted_by,
-                &event.ts,
-            ],
-        )
-        .context("failed to project thread_usage_subjects")?;
+        connection
+            .execute(
+                "INSERT INTO thread_usage_subjects (
+                    chain_root_id, namespace, subject, asserted_by, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chain_root_id) DO UPDATE SET
+                    namespace = excluded.namespace,
+                    subject = excluded.subject,
+                    asserted_by = excluded.asserted_by,
+                    created_at = excluded.created_at",
+                rusqlite::params![
+                    &event.chain_root_id,
+                    &usage_subject.namespace,
+                    &usage_subject.subject,
+                    asserted_by,
+                    &event.ts,
+                ],
+            )
+            .context("failed to project thread_usage_subjects")?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn project_thread_usage_latest(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
 ) -> anyhow::Result<()> {
-    let usage: crate::ThreadUsage =
-        serde_json::from_value(event.payload.clone()).context("invalid thread_usage payload")?;
-    usage.validate()?;
+    db.with_sql(|connection| {
+        let usage: crate::ThreadUsage =
+            serde_json::from_value(event.payload.clone()).context("invalid thread_usage payload")?;
+        usage.validate()?;
 
-    db.connection()
-        .execute(
-            "INSERT INTO thread_usage_latest (
-                thread_id, chain_root_id, chain_seq, thread_seq,
-                completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,
-                started_at, settled_at, last_settled_turn_seq, elapsed_ms,
-                provider_id, model, profile
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(thread_id) DO UPDATE SET
-                chain_root_id = excluded.chain_root_id,
-                chain_seq = excluded.chain_seq,
-                thread_seq = excluded.thread_seq,
-                completed_turns = excluded.completed_turns,
-                input_tokens = excluded.input_tokens,
-                output_tokens = excluded.output_tokens,
-                spend_usd = excluded.spend_usd,
-                spawns_used = excluded.spawns_used,
-                started_at = excluded.started_at,
-                settled_at = excluded.settled_at,
-                last_settled_turn_seq = excluded.last_settled_turn_seq,
-                elapsed_ms = excluded.elapsed_ms,
-                provider_id = excluded.provider_id,
-                model = excluded.model,
-                profile = excluded.profile
-            WHERE excluded.chain_seq > thread_usage_latest.chain_seq",
-            rusqlite::params![
-                &event.thread_id,
-                &event.chain_root_id,
-                u64_to_i64(event.chain_seq, "chain_seq")?,
-                u64_to_i64(event.thread_seq, "thread_seq")?,
-                i64::from(usage.completed_turns),
-                u64_to_i64(usage.input_tokens, "input_tokens")?,
-                u64_to_i64(usage.output_tokens, "output_tokens")?,
-                // Projection REAL column is display-only (the exact figure
-                // lives in the signed snapshot); one-way lossy render.
-                usage.spend_usd.display_usd_lossy(),
-                i64::from(usage.spawns_used),
-                usage.started_at,
-                usage.settled_at,
-                u64_to_i64(usage.last_settled_turn_seq, "last_settled_turn_seq")?,
-                u64_to_i64(usage.elapsed_ms, "elapsed_ms")?,
-                usage.provider_id,
-                usage.model,
-                usage.profile,
-            ],
-        )
-        .context("failed to project thread_usage_latest")?;
+        connection
+            .execute(
+                "INSERT INTO thread_usage_latest (
+                    thread_id, chain_root_id, chain_seq, thread_seq,
+                    completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,
+                    started_at, settled_at, last_settled_turn_seq, elapsed_ms,
+                    provider_id, model, profile
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    chain_root_id = excluded.chain_root_id,
+                    chain_seq = excluded.chain_seq,
+                    thread_seq = excluded.thread_seq,
+                    completed_turns = excluded.completed_turns,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    spend_usd = excluded.spend_usd,
+                    spawns_used = excluded.spawns_used,
+                    started_at = excluded.started_at,
+                    settled_at = excluded.settled_at,
+                    last_settled_turn_seq = excluded.last_settled_turn_seq,
+                    elapsed_ms = excluded.elapsed_ms,
+                    provider_id = excluded.provider_id,
+                    model = excluded.model,
+                    profile = excluded.profile
+                WHERE excluded.chain_seq > thread_usage_latest.chain_seq",
+                rusqlite::params![
+                    &event.thread_id,
+                    &event.chain_root_id,
+                    u64_to_i64(event.chain_seq, "chain_seq")?,
+                    u64_to_i64(event.thread_seq, "thread_seq")?,
+                    i64::from(usage.completed_turns),
+                    u64_to_i64(usage.input_tokens, "input_tokens")?,
+                    u64_to_i64(usage.output_tokens, "output_tokens")?,
+                    // Projection REAL column is display-only (the exact figure
+                    // lives in the signed snapshot); one-way lossy render.
+                    usage.spend_usd.display_usd_lossy(),
+                    i64::from(usage.spawns_used),
+                    usage.started_at,
+                    usage.settled_at,
+                    u64_to_i64(usage.last_settled_turn_seq, "last_settled_turn_seq")?,
+                    u64_to_i64(usage.elapsed_ms, "elapsed_ms")?,
+                    usage.provider_id,
+                    usage.model,
+                    usage.profile,
+                ],
+            )
+            .context("failed to project thread_usage_latest")?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn u64_to_i64(value: u64, field: &str) -> anyhow::Result<i64> {
@@ -583,494 +594,492 @@ fn project_provider_attempt_budget_latest(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
 ) -> anyhow::Result<()> {
-    let transition: ryeos_accounting::ProviderAttemptBudgetTransitionV1 =
-        serde_json::from_value(event.payload.clone())
-            .context("invalid provider_attempt_budget_transition_v1 payload")?;
-    transition
-        .validate()
-        .map_err(|error| anyhow::anyhow!("invalid budget transition payload: {error}"))?;
-    // The daemon outbox appends each transition to exactly the audit chain
-    // named inside the payload. Pinning that here means a byte-identical
-    // payload can never project from any OTHER chain — so the lost-ack
-    // replay tolerance below only ever absorbs same-chain duplicates.
-    if event.chain_root_id != transition.audit_chain_root_id {
-        anyhow::bail!(
-            "accounting transition {} appended to chain {} but declares audit chain {}",
-            transition.transition_id,
-            event.chain_root_id,
-            transition.audit_chain_root_id
-        );
-    }
-    let payload_fingerprint = lillux::sha256_hex(
-        lillux::canonical_json(&event.payload)
-            .context("canonicalize budget transition payload")?
-            .as_bytes(),
-    );
-    let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
-
-    // Persist the exact append-once identity before updating the lossy
-    // latest-state summary. Re-projecting the same chain event is
-    // idempotent, and a byte-identical payload re-appended at a later
-    // chain position (a lost-ack publisher retry) is benign — the first
-    // projected chain_seq stays authoritative. Reusing the transition ID
-    // or attempt/sequence coordinate with different content is an
-    // integrity failure.
-    let existing_identity: Option<(String, i64, String, i64)> = db
-        .connection()
-        .query_row(
-            "SELECT attempt_id, transition_sequence, payload_fingerprint, chain_seq
-             FROM provider_attempt_budget_transition_once
-             WHERE transition_id = ?1",
-            rusqlite::params![&transition.transition_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()
-        .context("read accounting transition publication identity")?;
-    if let Some((attempt_id, sequence, fingerprint, _chain_seq)) = existing_identity {
-        if attempt_id != transition.attempt_id
-            || sequence != i64::from(transition.transition_sequence)
-            || fingerprint != payload_fingerprint
-        {
+    db.with_sql(|connection| {
+        let transition: ryeos_accounting::ProviderAttemptBudgetTransitionV1 =
+            serde_json::from_value(event.payload.clone())
+                .context("invalid provider_attempt_budget_transition_v1 payload")?;
+        transition
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid budget transition payload: {error}"))?;
+        // The daemon outbox appends each transition to exactly the audit chain
+        // named inside the payload. Pinning that here means a byte-identical
+        // payload can never project from any OTHER chain — so the lost-ack
+        // replay tolerance below only ever absorbs same-chain duplicates.
+        if event.chain_root_id != transition.audit_chain_root_id {
             anyhow::bail!(
-                "accounting transition ID {} contradicts its projected publication identity",
-                transition.transition_id
+                "accounting transition {} appended to chain {} but declares audit chain {}",
+                transition.transition_id,
+                event.chain_root_id,
+                transition.audit_chain_root_id
             );
         }
-    } else {
-        let coordinate_identity: Option<(String, String)> = db
-            .connection()
+        let payload_fingerprint = lillux::sha256_hex(
+            lillux::canonical_json(&event.payload)
+                .context("canonicalize budget transition payload")?
+                .as_bytes(),
+        );
+        let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
+
+        // Persist the exact append-once identity before updating the lossy
+        // latest-state summary. Re-projecting the same chain event is
+        // idempotent, and a byte-identical payload re-appended at a later
+        // chain position (a lost-ack publisher retry) is benign — the first
+        // projected chain_seq stays authoritative. Reusing the transition ID
+        // or attempt/sequence coordinate with different content is an
+        // integrity failure.
+        let existing_identity: Option<(String, i64, String, i64)> = connection
             .query_row(
-                "SELECT transition_id, payload_fingerprint
+                "SELECT attempt_id, transition_sequence, payload_fingerprint, chain_seq
                  FROM provider_attempt_budget_transition_once
-                 WHERE attempt_id = ?1 AND transition_sequence = ?2",
-                rusqlite::params![
-                    &transition.attempt_id,
-                    i64::from(transition.transition_sequence)
-                ],
+                 WHERE transition_id = ?1",
+                rusqlite::params![&transition.transition_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .context("read accounting transition publication identity")?;
+        if let Some((attempt_id, sequence, fingerprint, _chain_seq)) = existing_identity {
+            if attempt_id != transition.attempt_id
+                || sequence != i64::from(transition.transition_sequence)
+                || fingerprint != payload_fingerprint
+            {
+                anyhow::bail!(
+                    "accounting transition ID {} contradicts its projected publication identity",
+                    transition.transition_id
+                );
+            }
+        } else {
+            let coordinate_identity: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT transition_id, payload_fingerprint
+                     FROM provider_attempt_budget_transition_once
+                     WHERE attempt_id = ?1 AND transition_sequence = ?2",
+                    rusqlite::params![
+                        &transition.attempt_id,
+                        i64::from(transition.transition_sequence)
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .context("read accounting transition coordinate identity")?;
+            if let Some((transition_id, fingerprint)) = coordinate_identity {
+                anyhow::bail!(
+                    "accounting transition coordinate {}/{} is already projected as ID {} \
+                     fingerprint {}, not ID {} fingerprint {}",
+                    transition.attempt_id,
+                    transition.transition_sequence,
+                    transition_id,
+                    fingerprint,
+                    transition.transition_id,
+                    payload_fingerprint
+                );
+            }
+            connection
+                .execute(
+                    "INSERT INTO provider_attempt_budget_transition_once (
+                        transition_id, attempt_id, transition_sequence,
+                        payload_fingerprint, chain_seq
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        &transition.transition_id,
+                        &transition.attempt_id,
+                        i64::from(transition.transition_sequence),
+                        &payload_fingerprint,
+                        incoming_chain_seq,
+                    ],
+                )
+                .context("project accounting transition publication identity")?;
+        }
+
+        let existing: Option<(i64, String)> = connection
+            .query_row(
+                "SELECT transition_sequence, transition FROM provider_attempt_budget_latest
+                 WHERE attempt_id = ?1",
+                rusqlite::params![&transition.attempt_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .context("read accounting transition coordinate identity")?;
-        if let Some((transition_id, fingerprint)) = coordinate_identity {
-            anyhow::bail!(
-                "accounting transition coordinate {}/{} is already projected as ID {} \
-                 fingerprint {}, not ID {} fingerprint {}",
-                transition.attempt_id,
-                transition.transition_sequence,
-                transition_id,
-                fingerprint,
-                transition.transition_id,
-                payload_fingerprint
-            );
-        }
-        db.connection()
-            .execute(
-                "INSERT INTO provider_attempt_budget_transition_once (
-                    transition_id, attempt_id, transition_sequence,
-                    payload_fingerprint, chain_seq
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    &transition.transition_id,
-                    &transition.attempt_id,
-                    i64::from(transition.transition_sequence),
-                    &payload_fingerprint,
-                    incoming_chain_seq,
-                ],
-            )
-            .context("project accounting transition publication identity")?;
-    }
-
-    let existing: Option<(i64, String)> = db
-        .connection()
-        .query_row(
-            "SELECT transition_sequence, transition FROM provider_attempt_budget_latest
-             WHERE attempt_id = ?1",
-            rusqlite::params![&transition.attempt_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .context("read existing provider attempt budget row")?;
-    if let Some((existing_sequence, existing_transition)) = existing {
-        let incoming_sequence = i64::from(transition.transition_sequence);
-        if incoming_sequence < existing_sequence {
-            return Ok(());
-        }
-        if incoming_sequence == existing_sequence {
-            if existing_transition != transition.transition.as_str() {
+            .context("read existing provider attempt budget row")?;
+        if let Some((existing_sequence, existing_transition)) = existing {
+            let incoming_sequence = i64::from(transition.transition_sequence);
+            if incoming_sequence < existing_sequence {
+                return Ok(());
+            }
+            if incoming_sequence == existing_sequence {
+                if existing_transition != transition.transition.as_str() {
+                    anyhow::bail!(
+                        "contradictory duplicate budget transition for attempt {} sequence {}: \
+                         projected `{existing_transition}`, incoming `{}`",
+                        transition.attempt_id,
+                        existing_sequence,
+                        transition.transition.as_str()
+                    );
+                }
+                return Ok(());
+            }
+            let previous = ryeos_accounting::AttemptBudgetState::parse(&existing_transition)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("projected budget row has unknown state `{existing_transition}`")
+                })?;
+            let legal = previous.may_transition_to(transition.transition)
+                || (transition.observation
+                    && previous == ryeos_accounting::AttemptBudgetState::ChargedReservedMaximum);
+            if !legal {
                 anyhow::bail!(
-                    "contradictory duplicate budget transition for attempt {} sequence {}: \
-                     projected `{existing_transition}`, incoming `{}`",
+                    "illegal budget transition regression for attempt {}: `{existing_transition}` \
+                     -> `{}`",
                     transition.attempt_id,
-                    existing_sequence,
                     transition.transition.as_str()
                 );
             }
-            return Ok(());
         }
-        let previous = ryeos_accounting::AttemptBudgetState::parse(&existing_transition)
-            .ok_or_else(|| {
-                anyhow::anyhow!("projected budget row has unknown state `{existing_transition}`")
-            })?;
-        let legal = previous.may_transition_to(transition.transition)
-            || (transition.observation
-                && previous == ryeos_accounting::AttemptBudgetState::ChargedReservedMaximum);
-        if !legal {
-            anyhow::bail!(
-                "illegal budget transition regression for attempt {}: `{existing_transition}` \
-                 -> `{}`",
-                transition.attempt_id,
-                transition.transition.as_str()
-            );
-        }
-    }
 
-    db.connection()
-        .execute(
-            "INSERT INTO provider_attempt_budget_latest (
-                attempt_id, transition_sequence, budget_authority_site_id, ledger_epoch,
-                execution_budget_id, root_chain_id, audit_chain_root_id, directive_budget_id,
-                thread_id, turn, attempt_number, transition, observation,
-                reserved_usd_nanos, budget_charge_usd_nanos, provider_actual_usd_nanos,
-                released_usd_nanos, charge_basis, reason, config_hash,
-                provider_id, model, profile, occurred_at_ms, chain_seq
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(attempt_id) DO UPDATE SET
-                transition_sequence = excluded.transition_sequence,
-                budget_authority_site_id = excluded.budget_authority_site_id,
-                ledger_epoch = excluded.ledger_epoch,
-                execution_budget_id = excluded.execution_budget_id,
-                root_chain_id = excluded.root_chain_id,
-                audit_chain_root_id = excluded.audit_chain_root_id,
-                directive_budget_id = excluded.directive_budget_id,
-                thread_id = excluded.thread_id,
-                turn = excluded.turn,
-                attempt_number = excluded.attempt_number,
-                transition = excluded.transition,
-                observation = excluded.observation,
-                reserved_usd_nanos = excluded.reserved_usd_nanos,
-                budget_charge_usd_nanos = excluded.budget_charge_usd_nanos,
-                provider_actual_usd_nanos = excluded.provider_actual_usd_nanos,
-                released_usd_nanos = excluded.released_usd_nanos,
-                charge_basis = excluded.charge_basis,
-                reason = excluded.reason,
-                config_hash = excluded.config_hash,
-                provider_id = excluded.provider_id,
-                model = excluded.model,
-                profile = excluded.profile,
-                occurred_at_ms = excluded.occurred_at_ms,
-                chain_seq = excluded.chain_seq",
-            rusqlite::params![
-                &transition.attempt_id,
-                i64::from(transition.transition_sequence),
-                &transition.budget_authority_site_id,
-                u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
-                &transition.execution_budget_id,
-                &transition.root_chain_id,
-                &transition.audit_chain_root_id,
-                &transition.directive_budget_id,
-                &transition.thread_id,
-                i64::from(transition.turn),
-                i64::from(transition.attempt_number),
-                transition.transition.as_str(),
-                i64::from(transition.observation),
-                transition.reserved_usd_nanos,
-                transition.budget_charge_usd_nanos,
-                transition.provider_actual_usd_nanos,
-                transition.released_usd_nanos,
-                transition.charge_basis.map(|basis| basis.as_str()),
-                transition.reason.map(|reason| reason.as_str()),
-                &transition.config_hash,
-                &transition.provider_id,
-                &transition.model,
-                &transition.profile,
-                transition.occurred_at_ms,
-                u64_to_i64(event.chain_seq, "chain_seq")?,
-            ],
-        )
-        .context("failed to project provider_attempt_budget_latest")?;
+        connection
+            .execute(
+                "INSERT INTO provider_attempt_budget_latest (
+                    attempt_id, transition_sequence, budget_authority_site_id, ledger_epoch,
+                    execution_budget_id, root_chain_id, audit_chain_root_id, directive_budget_id,
+                    thread_id, turn, attempt_number, transition, observation,
+                    reserved_usd_nanos, budget_charge_usd_nanos, provider_actual_usd_nanos,
+                    released_usd_nanos, charge_basis, reason, config_hash,
+                    provider_id, model, profile, occurred_at_ms, chain_seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    transition_sequence = excluded.transition_sequence,
+                    budget_authority_site_id = excluded.budget_authority_site_id,
+                    ledger_epoch = excluded.ledger_epoch,
+                    execution_budget_id = excluded.execution_budget_id,
+                    root_chain_id = excluded.root_chain_id,
+                    audit_chain_root_id = excluded.audit_chain_root_id,
+                    directive_budget_id = excluded.directive_budget_id,
+                    thread_id = excluded.thread_id,
+                    turn = excluded.turn,
+                    attempt_number = excluded.attempt_number,
+                    transition = excluded.transition,
+                    observation = excluded.observation,
+                    reserved_usd_nanos = excluded.reserved_usd_nanos,
+                    budget_charge_usd_nanos = excluded.budget_charge_usd_nanos,
+                    provider_actual_usd_nanos = excluded.provider_actual_usd_nanos,
+                    released_usd_nanos = excluded.released_usd_nanos,
+                    charge_basis = excluded.charge_basis,
+                    reason = excluded.reason,
+                    config_hash = excluded.config_hash,
+                    provider_id = excluded.provider_id,
+                    model = excluded.model,
+                    profile = excluded.profile,
+                    occurred_at_ms = excluded.occurred_at_ms,
+                    chain_seq = excluded.chain_seq",
+                rusqlite::params![
+                    &transition.attempt_id,
+                    i64::from(transition.transition_sequence),
+                    &transition.budget_authority_site_id,
+                    u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
+                    &transition.execution_budget_id,
+                    &transition.root_chain_id,
+                    &transition.audit_chain_root_id,
+                    &transition.directive_budget_id,
+                    &transition.thread_id,
+                    i64::from(transition.turn),
+                    i64::from(transition.attempt_number),
+                    transition.transition.as_str(),
+                    i64::from(transition.observation),
+                    transition.reserved_usd_nanos,
+                    transition.budget_charge_usd_nanos,
+                    transition.provider_actual_usd_nanos,
+                    transition.released_usd_nanos,
+                    transition.charge_basis.map(|basis| basis.as_str()),
+                    transition.reason.map(|reason| reason.as_str()),
+                    &transition.config_hash,
+                    &transition.provider_id,
+                    &transition.model,
+                    &transition.profile,
+                    transition.occurred_at_ms,
+                    u64_to_i64(event.chain_seq, "chain_seq")?,
+                ],
+            )
+            .context("failed to project provider_attempt_budget_latest")?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn project_resource_budget_latest(
     db: &ProjectionDb,
     event: &crate::ThreadEvent,
 ) -> anyhow::Result<()> {
-    let transition: ryeos_accounting::ResourceBudgetTransitionV1 =
-        serde_json::from_value(event.payload.clone())
-            .context("invalid resource_budget_transition_v1 payload")?;
-    transition
-        .validate()
-        .map_err(|error| anyhow::anyhow!("invalid resource budget transition: {error}"))?;
-    if event.chain_root_id != transition.audit_chain_root_id {
-        anyhow::bail!(
-            "resource transition {} appended to chain {} but declares audit chain {}",
-            transition.transition_id,
-            event.chain_root_id,
-            transition.audit_chain_root_id
-        );
-    }
-    let payload_fingerprint = lillux::sha256_hex(
-        lillux::canonical_json(&event.payload)
-            .context("canonicalize resource budget transition payload")?
-            .as_bytes(),
-    );
-    let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
-
-    let existing_identity: Option<(String, i64, String)> = db
-        .connection()
-        .query_row(
-            "SELECT operation_id, transition_sequence, payload_fingerprint
-             FROM resource_budget_transition_once WHERE transition_id=?1",
-            rusqlite::params![&transition.transition_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .context("read resource transition publication identity")?;
-    let identity_replayed = existing_identity.is_some();
-    if let Some((operation_id, sequence, fingerprint)) = existing_identity {
-        if operation_id != transition.operation_id
-            || sequence != i64::from(transition.transition_sequence)
-            || fingerprint != payload_fingerprint
-        {
+    db.with_sql(|connection| {
+        let transition: ryeos_accounting::ResourceBudgetTransitionV1 =
+            serde_json::from_value(event.payload.clone())
+                .context("invalid resource_budget_transition_v1 payload")?;
+        transition
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid resource budget transition: {error}"))?;
+        if event.chain_root_id != transition.audit_chain_root_id {
             anyhow::bail!(
-                "resource transition ID {} contradicts its projected publication identity",
-                transition.transition_id
+                "resource transition {} appended to chain {} but declares audit chain {}",
+                transition.transition_id,
+                event.chain_root_id,
+                transition.audit_chain_root_id
             );
         }
-    } else {
-        let coordinate: Option<(String, String)> = db
-            .connection()
+        let payload_fingerprint = lillux::sha256_hex(
+            lillux::canonical_json(&event.payload)
+                .context("canonicalize resource budget transition payload")?
+                .as_bytes(),
+        );
+        let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
+
+        let existing_identity: Option<(String, i64, String)> = connection
             .query_row(
-                "SELECT transition_id, payload_fingerprint
-                 FROM resource_budget_transition_once
-                 WHERE operation_id=?1 AND transition_sequence=?2",
-                rusqlite::params![
-                    &transition.operation_id,
-                    i64::from(transition.transition_sequence)
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT operation_id, transition_sequence, payload_fingerprint
+                 FROM resource_budget_transition_once WHERE transition_id=?1",
+                rusqlite::params![&transition.transition_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
-            .context("read resource transition coordinate identity")?;
-        if let Some((transition_id, fingerprint)) = coordinate {
-            anyhow::bail!(
-                "resource transition coordinate {}/{} is already projected as ID {} fingerprint {}, not ID {} fingerprint {}",
-                transition.operation_id,
-                transition.transition_sequence,
-                transition_id,
-                fingerprint,
-                transition.transition_id,
-                payload_fingerprint
-            );
-        }
-        db.connection()
-            .execute(
-                "INSERT INTO resource_budget_transition_once (
-                    transition_id, operation_id, transition_sequence,
-                    payload_fingerprint, chain_seq
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    &transition.transition_id,
-                    &transition.operation_id,
-                    i64::from(transition.transition_sequence),
-                    &payload_fingerprint,
-                    incoming_chain_seq,
-                ],
-            )
-            .context("project resource transition publication identity")?;
-    }
-
-    let existing: Option<(
-        i64,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-    )> = db
-        .connection()
-        .query_row(
-            "SELECT transition_sequence, transition, budget_authority_site_id, ledger_epoch,
-                    execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
-                    launch_generation, owner_incarnation, stable_resource_id, authority_digest,
-                    reserved_usd_nanos
-               FROM resource_budget_latest
-             WHERE operation_id=?1",
-            rusqlite::params![&transition.operation_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                ))
-            },
-        )
-        .optional()
-        .context("read resource budget latest row")?;
-    if let Some((
-        existing_sequence,
-        existing_state,
-        site,
-        epoch,
-        execution,
-        root,
-        audit_root,
-        thread,
-        generation,
-        owner,
-        resource,
-        authority,
-        reserved,
-    )) = existing
-    {
-        if site != transition.budget_authority_site_id
-            || epoch != u64_to_i64(transition.ledger_epoch, "ledger_epoch")?
-            || execution != transition.execution_budget_id
-            || root != transition.root_chain_id
-            || audit_root != transition.audit_chain_root_id
-            || thread != transition.thread_id
-            || generation != transition.launch_generation
-            || owner != transition.owner_incarnation
-            || resource != transition.stable_resource_id
-            || authority != transition.authority_digest.as_str()
-            || reserved != u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?
-        {
-            anyhow::bail!(
-                "resource operation {} changed immutable publication coordinates",
-                transition.operation_id
-            );
-        }
-        let incoming_sequence = i64::from(transition.transition_sequence);
-        if incoming_sequence < existing_sequence {
-            if identity_replayed {
-                return Ok(());
-            }
-            anyhow::bail!(
-                "resource operation {} published a new stale transition sequence {} behind {}",
-                transition.operation_id,
-                incoming_sequence,
-                existing_sequence
-            );
-        }
-        if incoming_sequence == existing_sequence {
-            if existing_state != transition.transition.as_str() {
+            .context("read resource transition publication identity")?;
+        let identity_replayed = existing_identity.is_some();
+        if let Some((operation_id, sequence, fingerprint)) = existing_identity {
+            if operation_id != transition.operation_id
+                || sequence != i64::from(transition.transition_sequence)
+                || fingerprint != payload_fingerprint
+            {
                 anyhow::bail!(
-                    "contradictory duplicate resource transition for operation {} sequence {}",
+                    "resource transition ID {} contradicts its projected publication identity",
+                    transition.transition_id
+                );
+            }
+        } else {
+            let coordinate: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT transition_id, payload_fingerprint
+                     FROM resource_budget_transition_once
+                     WHERE operation_id=?1 AND transition_sequence=?2",
+                    rusqlite::params![
+                        &transition.operation_id,
+                        i64::from(transition.transition_sequence)
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .context("read resource transition coordinate identity")?;
+            if let Some((transition_id, fingerprint)) = coordinate {
+                anyhow::bail!(
+                    "resource transition coordinate {}/{} is already projected as ID {} fingerprint {}, not ID {} fingerprint {}",
                     transition.operation_id,
+                    transition.transition_sequence,
+                    transition_id,
+                    fingerprint,
+                    transition.transition_id,
+                    payload_fingerprint
+                );
+            }
+            connection
+                .execute(
+                    "INSERT INTO resource_budget_transition_once (
+                        transition_id, operation_id, transition_sequence,
+                        payload_fingerprint, chain_seq
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        &transition.transition_id,
+                        &transition.operation_id,
+                        i64::from(transition.transition_sequence),
+                        &payload_fingerprint,
+                        incoming_chain_seq,
+                    ],
+                )
+                .context("project resource transition publication identity")?;
+        }
+
+        let existing: Option<(
+            i64,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+        )> = connection
+            .query_row(
+                "SELECT transition_sequence, transition, budget_authority_site_id, ledger_epoch,
+                        execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
+                        launch_generation, owner_incarnation, stable_resource_id, authority_digest,
+                        reserved_usd_nanos
+                   FROM resource_budget_latest
+                 WHERE operation_id=?1",
+                rusqlite::params![&transition.operation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("read resource budget latest row")?;
+        if let Some((
+            existing_sequence,
+            existing_state,
+            site,
+            epoch,
+            execution,
+            root,
+            audit_root,
+            thread,
+            generation,
+            owner,
+            resource,
+            authority,
+            reserved,
+        )) = existing
+        {
+            if site != transition.budget_authority_site_id
+                || epoch != u64_to_i64(transition.ledger_epoch, "ledger_epoch")?
+                || execution != transition.execution_budget_id
+                || root != transition.root_chain_id
+                || audit_root != transition.audit_chain_root_id
+                || thread != transition.thread_id
+                || generation != transition.launch_generation
+                || owner != transition.owner_incarnation
+                || resource != transition.stable_resource_id
+                || authority != transition.authority_digest.as_str()
+                || reserved != u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?
+            {
+                anyhow::bail!(
+                    "resource operation {} changed immutable publication coordinates",
+                    transition.operation_id
+                );
+            }
+            let incoming_sequence = i64::from(transition.transition_sequence);
+            if incoming_sequence < existing_sequence {
+                if identity_replayed {
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "resource operation {} published a new stale transition sequence {} behind {}",
+                    transition.operation_id,
+                    incoming_sequence,
                     existing_sequence
                 );
             }
-            return Ok(());
-        }
-        if incoming_sequence != existing_sequence + 1 {
+            if incoming_sequence == existing_sequence {
+                if existing_state != transition.transition.as_str() {
+                    anyhow::bail!(
+                        "contradictory duplicate resource transition for operation {} sequence {}",
+                        transition.operation_id,
+                        existing_sequence
+                    );
+                }
+                return Ok(());
+            }
+            if incoming_sequence != existing_sequence + 1 {
+                anyhow::bail!(
+                    "resource operation {} skipped transition sequence {} -> {}",
+                    transition.operation_id,
+                    existing_sequence,
+                    incoming_sequence
+                );
+            }
+            let previous =
+                ryeos_accounting::ResourceBudgetState::parse(&existing_state).ok_or_else(|| {
+                    anyhow::anyhow!("unknown projected resource state `{existing_state}`")
+                })?;
+            if !previous.may_transition_to(transition.transition) {
+                anyhow::bail!(
+                    "illegal resource budget transition for operation {}: `{}` -> `{}`",
+                    transition.operation_id,
+                    existing_state,
+                    transition.transition.as_str()
+                );
+            }
+        } else if transition.transition_sequence != 1
+            || !matches!(
+                transition.transition,
+                ryeos_accounting::ResourceBudgetState::Reserved
+                    | ryeos_accounting::ResourceBudgetState::ReservationDenied
+                    | ryeos_accounting::ResourceBudgetState::AdvisoryPending
+            )
+        {
             anyhow::bail!(
-                "resource operation {} skipped transition sequence {} -> {}",
-                transition.operation_id,
-                existing_sequence,
-                incoming_sequence
+                "resource operation {} must begin at sequence 1 with a reservation decision",
+                transition.operation_id
             );
         }
-        let previous =
-            ryeos_accounting::ResourceBudgetState::parse(&existing_state).ok_or_else(|| {
-                anyhow::anyhow!("unknown projected resource state `{existing_state}`")
-            })?;
-        if !previous.may_transition_to(transition.transition) {
-            anyhow::bail!(
-                "illegal resource budget transition for operation {}: `{}` -> `{}`",
-                transition.operation_id,
-                existing_state,
-                transition.transition.as_str()
-            );
-        }
-    } else if transition.transition_sequence != 1
-        || !matches!(
-            transition.transition,
-            ryeos_accounting::ResourceBudgetState::Reserved
-                | ryeos_accounting::ResourceBudgetState::ReservationDenied
-                | ryeos_accounting::ResourceBudgetState::AdvisoryPending
-        )
-    {
-        anyhow::bail!(
-            "resource operation {} must begin at sequence 1 with a reservation decision",
-            transition.operation_id
-        );
-    }
 
-    db.connection()
-        .execute(
-            "INSERT INTO resource_budget_latest (
-                operation_id, transition_sequence, budget_authority_site_id, ledger_epoch,
-                execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
-                launch_generation, owner_incarnation, stable_resource_id, authority_digest,
-                transition, reserved_usd_nanos, budget_charge_usd_nanos, usage_digest,
-                occurred_at_ms, chain_seq
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                       ?13, ?14, ?15, ?16, ?17, ?18)
-             ON CONFLICT(operation_id) DO UPDATE SET
-                transition_sequence=excluded.transition_sequence,
-                budget_authority_site_id=excluded.budget_authority_site_id,
-                ledger_epoch=excluded.ledger_epoch,
-                execution_budget_id=excluded.execution_budget_id,
-                root_chain_id=excluded.root_chain_id,
-                audit_chain_root_id=excluded.audit_chain_root_id,
-                thread_id=excluded.thread_id,
-                launch_generation=excluded.launch_generation,
-                owner_incarnation=excluded.owner_incarnation,
-                stable_resource_id=excluded.stable_resource_id,
-                authority_digest=excluded.authority_digest,
-                transition=excluded.transition,
-                reserved_usd_nanos=excluded.reserved_usd_nanos,
-                budget_charge_usd_nanos=excluded.budget_charge_usd_nanos,
-                usage_digest=excluded.usage_digest,
-                occurred_at_ms=excluded.occurred_at_ms,
-                chain_seq=excluded.chain_seq",
-            rusqlite::params![
-                &transition.operation_id,
-                i64::from(transition.transition_sequence),
-                &transition.budget_authority_site_id,
-                u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
-                &transition.execution_budget_id,
-                &transition.root_chain_id,
-                &transition.audit_chain_root_id,
-                &transition.thread_id,
-                &transition.launch_generation,
-                &transition.owner_incarnation,
-                &transition.stable_resource_id,
-                transition.authority_digest.as_str(),
-                transition.transition.as_str(),
-                u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?,
-                transition
-                    .budget_charge_usd_nanos
-                    .map(|value| u64_to_i64(value, "budget_charge_usd_nanos"))
-                    .transpose()?,
-                transition
-                    .usage_digest
-                    .as_ref()
-                    .map(|digest| digest.as_str()),
-                transition.occurred_at_ms,
-                incoming_chain_seq,
-            ],
-        )
-        .context("project resource_budget_latest")?;
-    Ok(())
+        connection
+            .execute(
+                "INSERT INTO resource_budget_latest (
+                    operation_id, transition_sequence, budget_authority_site_id, ledger_epoch,
+                    execution_budget_id, root_chain_id, audit_chain_root_id, thread_id,
+                    launch_generation, owner_incarnation, stable_resource_id, authority_digest,
+                    transition, reserved_usd_nanos, budget_charge_usd_nanos, usage_digest,
+                    occurred_at_ms, chain_seq
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                           ?13, ?14, ?15, ?16, ?17, ?18)
+                 ON CONFLICT(operation_id) DO UPDATE SET
+                    transition_sequence=excluded.transition_sequence,
+                    budget_authority_site_id=excluded.budget_authority_site_id,
+                    ledger_epoch=excluded.ledger_epoch,
+                    execution_budget_id=excluded.execution_budget_id,
+                    root_chain_id=excluded.root_chain_id,
+                    audit_chain_root_id=excluded.audit_chain_root_id,
+                    thread_id=excluded.thread_id,
+                    launch_generation=excluded.launch_generation,
+                    owner_incarnation=excluded.owner_incarnation,
+                    stable_resource_id=excluded.stable_resource_id,
+                    authority_digest=excluded.authority_digest,
+                    transition=excluded.transition,
+                    reserved_usd_nanos=excluded.reserved_usd_nanos,
+                    budget_charge_usd_nanos=excluded.budget_charge_usd_nanos,
+                    usage_digest=excluded.usage_digest,
+                    occurred_at_ms=excluded.occurred_at_ms,
+                    chain_seq=excluded.chain_seq",
+                rusqlite::params![
+                    &transition.operation_id,
+                    i64::from(transition.transition_sequence),
+                    &transition.budget_authority_site_id,
+                    u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
+                    &transition.execution_budget_id,
+                    &transition.root_chain_id,
+                    &transition.audit_chain_root_id,
+                    &transition.thread_id,
+                    &transition.launch_generation,
+                    &transition.owner_incarnation,
+                    &transition.stable_resource_id,
+                    transition.authority_digest.as_str(),
+                    transition.transition.as_str(),
+                    u64_to_i64(transition.reserved_usd_nanos, "reserved_usd_nanos")?,
+                    transition
+                        .budget_charge_usd_nanos
+                        .map(|value| u64_to_i64(value, "budget_charge_usd_nanos"))
+                        .transpose()?,
+                    transition
+                        .usage_digest
+                        .as_ref()
+                        .map(|digest| digest.as_str()),
+                    transition.occurred_at_ms,
+                    incoming_chain_seq,
+                ],
+            )
+            .context("project resource_budget_latest")?;
+        Ok(())
+    })
 }
 
 /// Project a thread edge (parent-child relationship).
@@ -1084,29 +1093,46 @@ pub fn project_thread_edge(
     spawn_seq: Option<i64>,
     spawn_reason: Option<&str>,
 ) -> anyhow::Result<()> {
-    tracing::trace!(
-        chain_root_id = %chain_root_id,
-        parent_thread_id = %parent_thread_id,
-        child_thread_id = %child_thread_id,
-        spawn_reason = spawn_reason.unwrap_or(""),
-        "project thread edge"
-    );
-    db.connection()
-        .execute(
-            "INSERT INTO thread_edges (
-            chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
-            spawn_reason, source_event_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?)",
-            rusqlite::params![
-                chain_root_id,
-                parent_thread_id,
-                child_thread_id,
-                spawn_seq,
-                spawn_reason,
-                lillux::time::iso8601_now(),
-            ],
-        )
-        .context("failed to project edge")?;
+    db.with_sql(|connection| {
+        tracing::trace!(
+            chain_root_id = %chain_root_id,
+            parent_thread_id = %parent_thread_id,
+            child_thread_id = %child_thread_id,
+            spawn_reason = spawn_reason.unwrap_or(""),
+            "project thread edge"
+        );
+        connection
+            .execute(
+                "INSERT INTO thread_edges (
+                chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
+                spawn_reason, source_event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                rusqlite::params![
+                    chain_root_id,
+                    parent_thread_id,
+                    child_thread_id,
+                    spawn_seq,
+                    spawn_reason,
+                    lillux::time::iso8601_now(),
+                ],
+            )
+            .context("failed to project edge")?;
 
+        Ok(())
+    })
+}
+
+/// Precontact audit stays in the existing indexed event stream. It cannot
+/// populate resource_budget_latest, whose V1 rows describe ACTUAL processes.
+fn validate_resource_precontact_budget_event(event: &crate::ThreadEvent) -> anyhow::Result<()> {
+    let transition: ryeos_accounting::ResourcePrecontactBudgetTransitionV1 =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid precontact resource budget audit")?;
+    transition.validate().map_err(anyhow::Error::msg)?;
+    if transition.audit_chain_root_id != event.chain_root_id
+        || transition.thread_id != event.thread_id
+    {
+        anyhow::bail!("precontact audit contradicts its original thread/chain");
+    }
     Ok(())
 }

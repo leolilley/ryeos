@@ -20,6 +20,8 @@ path = "src/bin/ryeos-bundle-publisher.rs"
 
 [features]
 default = []
+scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service", "ryeos-api/scheduling", "ryeos-node/scheduling", "ryeos-ui/scheduling"]
+model-provider-setup = ["ryeos-api/model-provider-setup"]
 # Propagate release-equivalent latency instrumentation and make the compiled
 # artifact profile observable through daemon build info.
 latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profiling"]
@@ -29,6 +31,7 @@ crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"
 handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 ryeos-runtime = { workspace = true }
 async-stream = { workspace = true }
@@ -39,6 +42,7 @@ directories = { workspace = true }
 form_urlencoded = { workspace = true }
 glob = { workspace = true }
 lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 rand = { workspace = true }
 rmp-serde = { workspace = true }
 ryeos-engine = { workspace = true }
@@ -46,7 +50,9 @@ ryeos-external-execution-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-node = { workspace = true }
 ryeos-state = { workspace = true }
-ryeos-scheduler = { workspace = true }
+ryeos-scheduler-contract = { workspace = true }
+ryeos-scheduler = { workspace = true, optional = true }
+ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-accounting = { workspace = true }
 ryeos-provider-contract = { workspace = true }
 ryeos-effect-contract = { workspace = true }
@@ -77,11 +83,13 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 url = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-node = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-scheduler = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
@@ -93,7 +101,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 ryeos-external-candidate-supervisor = { path = "../../tools/external-candidate-supervisor", features = ["test-support"] }
 ryeos-external-execution-contract = { workspace = true }
-ryeos-independent-runtime-verifier = { path = "../../tools/independent-runtime-verifier" }
+ryeos-codex-runtime-verifier = { path = "../../tools/codex-runtime-verifier" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-21T18:37:12Z:066335fed8304d419d07e692f1407b5085cfb82adc2a5a09903efd02b1b4c751:dFpluCUhpP/KbJwRGEpI6KKMui/xjCe4ixD45Rx0CXyzyjbt8/EYNCikHvmeA3nMpPgIwHlpk4rMEyILcyvXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-10T04:34:00Z:29e069958c4bf7c9ddc79a968ddb5b0e41b74d51697384f434d5f5e3dbbe8ba2:K5jZUX6s5eh9PtnV9FYu7YVVGv4WwuwWWtaTzyJ1PFrmzkJwOuEq/jou/Uukf3XtWLyHK9IVu14/kYzdoVDsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.2.0"
+version: "1.3.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -32,9 +32,11 @@ execution:
         - protocol:ryeos/core/persistent_session
         - protocol:ryeos/core/structured_session
         - protocol:ryeos/core/trusted_structured_session
+        - protocol:local-inference/gnu_cuda_persistent_session
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
   target:
+    request_format: ryeos.execution_target.v1
     path: [supported_target]
     required: true
     limits:

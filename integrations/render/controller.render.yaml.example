@@ -1,5 +1,9 @@
 # Exact v0.5.102 hosted-workflow image, verified by the release workflow.
 # The controller keeps its operator identity and runtime journal on /data.
+# Render restarts a web service after every exit and has no restart-policy
+# field, which is the always-restart behaviour the node needs: it exits 75 at
+# each service-window rollover and expects to start again. A start refused by
+# a recorded restart inhibition is paced by the image entrypoint.
 services:
   - type: web
     name: ryeos-farm-controller

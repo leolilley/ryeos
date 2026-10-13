@@ -16,15 +16,18 @@ mod execution_endpoint;
 mod execution_plan;
 mod execution_target;
 mod runtime_decorations;
+mod secret_env;
+mod subprocess_limits;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
-    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
-    PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
-    SubjectResolutionAuthority,
+    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanExecutionProjectFileInput,
+    PlanNode, PlanNodeId, PlanRuntimeBinarySelection, PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority,
+    PlanVerifiedCommand, SubjectResolutionAuthority,
 };
 pub use execution_target::{
+    CurrentExecutionTargetRequest,
     ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
     ExecutionResourceAuthorityCeiling, ExecutionResourceEnforcement, ExecutionResourceFactValue,
     ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetLimits,
@@ -35,6 +38,8 @@ pub use execution_target::{
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
 };
+pub use secret_env::DeliveredSecretEnv;
+pub use subprocess_limits::ExecutionSubprocessLimits;
 
 // ── Wiring contract: ValueShape ──────────────────────────────────────
 
@@ -3423,3 +3428,5 @@ pub struct EventEnvelope {
     pub timestamp: String,
     pub sequence: i64,
 }
+
+pub(crate) use execution_target::project_current_target_data;

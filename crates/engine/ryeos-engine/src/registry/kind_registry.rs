@@ -1052,9 +1052,26 @@ pub struct FilesystemAuthorityCeilingDecl {
     pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
+/// Kind-owned path to signed native subprocess restrictions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubprocessLimitsDecl {
+    pub path: Vec<String>,
+}
+
 /// Kind-owned location of a signed process target. Direct subprocesses and
 /// persistent workers use this one projection; session protocols retain only
 /// framing and lifecycle semantics.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ExecutionTargetRequestFormat {
+    #[serde(rename = "ryeos.execution_target.v1")]
+    CurrentV1,
+}
+fn deserialize_present_request_format<'de, D: serde::Deserializer<'de>>(d: D)
+    -> Result<Option<ExecutionTargetRequestFormat>, D::Error> {
+    <ExecutionTargetRequestFormat as serde::Deserialize>::deserialize(d).map(Some)
+}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionTargetDecl {
@@ -1062,6 +1079,8 @@ pub struct ExecutionTargetDecl {
     #[serde(default)]
     pub required: bool,
     pub limits: crate::contracts::ExecutionTargetLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_present_request_format")]
+    pub request_format: Option<ExecutionTargetRequestFormat>,
 }
 
 /// Kind-owned location of signed process placement. The only omission default
@@ -1239,6 +1258,8 @@ pub struct ExecutionSchema {
     pub endpoint: Option<ExecutionEndpointDecl>,
     #[serde(default)]
     pub resource_authority_ceiling: Option<ResourceAuthorityCeilingDecl>,
+    #[serde(default)]
+    pub subprocess_limits: Option<SubprocessLimitsDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -1262,6 +1283,34 @@ pub struct ExecutionSchema {
 }
 
 impl ExecutionSchema {
+    pub fn project_subprocess_limits(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<crate::contracts::ExecutionSubprocessLimits>, EngineError> {
+        let Some(declaration) = &self.subprocess_limits else {
+            return Ok(None);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(None);
+            };
+            value = next;
+        }
+        let limits: crate::contracts::ExecutionSubprocessLimits =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed subprocess limits: {error}"),
+                }
+            })?;
+        limits
+            .validate()
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: error.to_string(),
+            })?;
+        Ok(Some(limits))
+    }
+
     pub fn project_endpoint_requirement(
         &self,
         composed: &Value,
@@ -1316,12 +1365,21 @@ impl ExecutionSchema {
         })
     }
 
-    pub fn project_target_requirement(
+    pub fn project_target_requirement(&self, composed: &Value)
+        -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
+        let (ordinary, current) = self.project_target_data(composed)?;
+        if current.is_some() {
+            return Err(EngineError::SchemaLoaderError { reason: "ordinary projection cannot discard current target request".into() });
+        }
+        Ok(ordinary)
+    }
+
+    pub fn project_target_data(
         &self,
         composed: &Value,
-    ) -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
+    ) -> Result<(Option<crate::contracts::ExecutionTargetRequirement>, Option<crate::contracts::CurrentExecutionTargetRequest>), EngineError> {
         let Some(declaration) = self.target.as_ref() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let mut value = composed;
         for segment in &declaration.path {
@@ -1334,21 +1392,23 @@ impl ExecutionSchema {
                         ),
                     });
                 }
-                return Ok(None);
+                return Ok((None, None));
             };
             value = next;
         }
-        let target =
-            serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(value.clone())
-                .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!("invalid signed execution target: {error}"),
-            })?;
+        let (target, current) = if declaration.request_format.is_some() {
+            crate::contracts::project_current_target_data(value)
+                .map_err(|error| EngineError::SchemaLoaderError { reason: format!("invalid signed current target: {error}") })?
+        } else {
+            (serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError { reason: format!("invalid signed execution target: {error}") })?, None)
+        };
         target
             .validate_against_limits(declaration.limits)
             .map_err(|error| EngineError::SchemaLoaderError {
                 reason: format!("invalid signed execution target: {error}"),
             })?;
-        Ok(Some(target))
+        Ok((Some(target), current))
     }
 
     pub fn project_filesystem_authority_ceiling(
@@ -2249,6 +2309,11 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     };
     validate_inventory_policy(&inventory_policy, display)?;
 
+    if execution.as_ref().and_then(|e| e.target.as_ref())
+        .is_some_and(|t| t.request_format.is_some())
+        && resolution.iter().any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. })) {
+        return Err(EngineError::SchemaLoaderError { reason: format!("{display}: current target request refuses inherited kind resolution") });
+    }
     Ok(KindSchema {
         directory,
         excluded_directories,
@@ -2793,6 +2858,7 @@ fn parse_execution_schema(
         "target",
         "endpoint",
         "resource_authority_ceiling",
+        "subprocess_limits",
         "method_dispatch",
         "methods",
         "augmentation_methods",
@@ -3117,6 +3183,28 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let subprocess_limits = match execution_value.get("subprocess_limits") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<SubprocessLimitsDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.subprocess_limits: {error}"),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.subprocess_limits.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
     let target = match execution_value.get("target") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<ExecutionTargetDecl>(value.clone())
@@ -3408,6 +3496,7 @@ fn parse_execution_schema(
         target,
         endpoint,
         resource_authority_ceiling,
+        subprocess_limits,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -4934,13 +5023,43 @@ execution:
     }
 
     #[test]
+    fn subprocess_limits_follow_only_the_signed_kind_path() {
+        let execution = parse_exec("execution:\n  subprocess_limits:\n    path: [restrictions]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+        let authored = serde_json::json!({"restrictions": {
+            "max_cpu_seconds":3, "deny_process_creation":true,
+            "max_stdout_bytes":32768, "max_stderr_bytes":8192
+        }});
+        assert_eq!(
+            execution
+                .project_subprocess_limits(&authored)
+                .unwrap()
+                .unwrap()
+                .max_cpu_seconds,
+            Some(3)
+        );
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({"restrictions": null}))
+                .is_err()
+        );
+        assert!(parse_exec("execution:\n  subprocess_limits:\n    path: []\n  delegate:\n    via: runtime_registry\n").is_err());
+    }
+
+    #[test]
     fn filesystem_projection_uses_only_signed_defaults_and_closed_values() {
         use crate::isolation::IsolationFilesystemAuthorityCeiling::{
-            CapturedExecution, NodePolicy,
+            CapturedExecution, CapturedInputs, NodePolicy,
         };
         for (default, expected) in [
             ("node_policy", NodePolicy),
             ("captured_execution", CapturedExecution),
+            ("captured_inputs", CapturedInputs),
         ] {
             let yaml = format!(
                 "execution:\n  filesystem_authority_ceiling:\n    path: [filesystem_authority]\n    default: {default}\n  delegate:\n    via: runtime_registry\n"
@@ -4959,6 +5078,14 @@ execution:
                     }))
                     .unwrap(),
                 CapturedExecution
+            );
+            assert_eq!(
+                execution
+                    .project_filesystem_authority_ceiling(&serde_json::json!({
+                        "filesystem_authority": "captured_inputs"
+                    }))
+                    .unwrap(),
+                CapturedInputs
             );
             for invalid in [
                 serde_json::json!("host"),
@@ -6628,5 +6755,24 @@ metadata:
         ])
         .unwrap_err();
         assert!(incompatible.to_string().contains("incompatible"));
+    }
+}
+
+#[cfg(test)]
+mod current_target_declaration_controls {
+    use super::*;
+    #[test]
+    fn request_format_absence_null_unknown_and_exact_current_are_distinct() {
+        let ordinary = serde_json::json!({"path":["supported_target"],"required":true,
+            "limits":{"max_requirements":1,"max_resource_count":1,"max_facts_per_requirement":16}});
+        let decl: ExecutionTargetDecl = serde_json::from_value(ordinary.clone()).unwrap();
+        assert!(decl.request_format.is_none());
+        assert_eq!(serde_json::to_value(decl).unwrap(), ordinary);
+        for format in [Value::Null, Value::String("unknown".into()), serde_json::json!({})] {
+            let mut bad = ordinary.clone(); bad["request_format"] = format;
+            assert!(serde_json::from_value::<ExecutionTargetDecl>(bad).is_err());
+        }
+        let mut current = ordinary; current["request_format"] = Value::String("ryeos.execution_target.v1".into());
+        assert!(serde_json::from_value::<ExecutionTargetDecl>(current).unwrap().request_format.is_some());
     }
 }

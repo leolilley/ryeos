@@ -169,6 +169,7 @@ fn plant_python_echo_tool(root: &Path, rel: &str, signer: &SigningKey) -> anyhow
 #   category: "{dir_relative}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "P3b echo tool — prints its single arg back"
 
 import json
@@ -236,18 +237,16 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                 let stderr = h.drain_stderr_nonblocking().await;
                 // Probe state dir for runtime exit + thread events
                 let state = h.state_path.clone();
-                let projection = common::selected_projection_path(&state).ok();
-                let projection_dump = if projection.as_ref().is_some_and(|path| path.exists()) {
-                    let projection = projection.as_ref().expect("checked selected projection");
-                    match ryeos_state::projection::ProjectionDb::open(projection) {
-                        Ok(db) => format!(
-                            "threads = {:#?}",
-                            ryeos_state::queries::list_threads(&db, 10).ok()
-                        ),
-                        Err(e) => format!("projection open error: {e}"),
-                    }
-                } else {
-                    "no selected projection generation".into()
+                // Ask the daemon, bounded, rather than opening its projection.
+                let projection_dump = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    h.list_threads(10),
+                )
+                .await
+                {
+                    Ok(Ok(threads)) => format!("threads = {threads:#?}"),
+                    Ok(Err(error)) => format!("threads/list error: {error:#}"),
+                    Err(_) => "threads/list timed out".into(),
                 };
                 panic!(
                     "POST /execute timed out after 30s — directive-runtime hung.\n\
@@ -352,26 +351,17 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         "expected 200 from successful spawn; got {status}: {body:#}"
     );
 
-    // Open the projection DB and confirm the thread row carries the
-    // SUBJECT identity (`directive_run` / `directive:p3b3/subject`),
-    // not the executor runtime's identity.
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Confirm, through `service:threads/list`, that the thread row carries
+    // the SUBJECT identity (`directive_run` / `directive:p3b3/subject`), not
+    // the executor runtime's identity. The test principal requested it.
+    let mut threads = Vec::new();
     for _ in 0..40 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads.iter().any(|t| t.item_ref == "directive:p3b3/subject") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject = threads
         .iter()
@@ -392,10 +382,17 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         subject.item_ref, "directive:p3b3/subject",
         "thread.item_ref must echo the user-typed directive ref; got: {subject:#?}"
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
     assert!(
-        subject.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the native runtime executor; got: {:?}",
-        subject.executor_ref
+        executor_ref
     );
 
     let runtime_rows: Vec<_> = threads
@@ -642,27 +639,25 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
 // only prove the successor ROW is created; this e2e exercises the actual
 // successor spawn + run.
 
-/// Poll the projection for the first thread matching `pred`, optionally waiting
-/// until it reaches a terminal status. Returns `None` if it never appears.
+/// Poll `service:threads/list` for the first thread matching `pred`,
+/// optionally waiting until it reaches a terminal status. Returns `None` if it
+/// never appears. The test principal requests every thread these tests poll
+/// for, so the principal filter hides none of them.
 async fn poll_thread(
-    projection_path: &Path,
-    pred: impl Fn(&ryeos_state::queries::ThreadRow) -> bool,
+    h: &DaemonHarness,
+    pred: impl Fn(&common::ListedThread) -> bool,
     require_terminal: bool,
-) -> Option<ryeos_state::queries::ThreadRow> {
+) -> Option<common::ListedThread> {
     for _ in 0..120 {
-        if projection_path.exists() {
-            let database = ryeos_state::projection::ProjectionDb::open(projection_path);
-            if let Ok(db) = database
-                && let Ok(threads) = ryeos_state::queries::list_threads(&db, 200)
-                && let Some(t) = threads.into_iter().find(|t| pred(t))
-            {
-                let terminal = matches!(
-                    t.status.as_str(),
-                    "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-                );
-                if !require_terminal || terminal {
-                    return Some(t);
-                }
+        if let Ok(threads) = h.list_threads(200).await
+            && let Some(t) = threads.into_iter().find(|t| pred(t))
+        {
+            let terminal = matches!(
+                t.status.as_str(),
+                "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+            );
+            if !require_terminal || terminal {
+                return Some(t);
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -721,10 +716,8 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     );
 
     // The settled directive thread (no upstream).
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     let first = poll_thread(
-        &projection_path,
+        &h,
         |t| t.item_ref == "directive:cont/dir" && t.upstream_thread_id.is_none(),
         true,
     )
@@ -763,7 +756,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
 
     // The pin: the successor must actually launch and reach `completed` — its
     // runtime launch identity reconstructed from the captured resume context.
-    let successor = poll_thread(&projection_path, |t| t.thread_id == successor_id, true)
+    let successor = poll_thread(&h, |t| t.thread_id == successor_id, true)
         .await
         .unwrap_or_else(|| panic!("successor {successor_id} never reached a terminal status"));
     assert_eq!(
@@ -1098,6 +1091,7 @@ fn plant_sleepy_marker_tool(
 #   category: "{name}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "concurrency e2e marker tool {index}"
 
 import json

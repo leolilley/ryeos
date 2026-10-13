@@ -1,0 +1,27 @@
+[package]
+name = "ryeos-scheduler-service"
+version = "0.1.0"
+edition = "2024"
+description = "Selected scheduler service ownership and App lifecycle adapters"
+license.workspace = true
+
+[dependencies]
+ryeos-node-runtime = { workspace = true }
+anyhow = { workspace = true }
+lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
+ryeos-app = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-executor = { workspace = true }
+ryeos-scheduler = { workspace = true }
+ryeos-scheduler-contract = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+ryeos-app = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }

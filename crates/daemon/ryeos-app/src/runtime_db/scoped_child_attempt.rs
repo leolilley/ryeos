@@ -444,41 +444,41 @@ impl RuntimeDb {
         owner: &LaunchOwner,
         operation: &ScopedChildInputOperation,
     ) -> Result<bool> {
-        require_hex_digest("scoped child input payload", &operation.payload_digest)?;
-        let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
-        let retained_owner: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT launch_owner FROM scoped_child_attempt WHERE attempt_id=?1",
-                [attempt_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if retained_owner.as_deref() != Some(encoded_owner.as_str()) {
-            bail!("scoped child input acknowledgement has no exact attempt owner");
-        }
-        let retained: Option<(String, String, u32, String)> = self
-            .conn
-            .query_row(
-                "SELECT kind, payload_digest, byte_count, phase
+        self.conn.with_sql(|conn| {
+            require_hex_digest("scoped child input payload", &operation.payload_digest)?;
+            let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
+            let retained_owner: Option<String> = conn
+                .query_row(
+                    "SELECT launch_owner FROM scoped_child_attempt WHERE attempt_id=?1",
+                    [attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if retained_owner.as_deref() != Some(encoded_owner.as_str()) {
+                bail!("scoped child input acknowledgement has no exact attempt owner");
+            }
+            let retained: Option<(String, String, u32, String)> = conn
+                .query_row(
+                    "SELECT kind, payload_digest, byte_count, phase
                  FROM scoped_child_input_operation WHERE attempt_id=?1 AND sequence=?2",
-                params![attempt_id, operation.sequence],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let Some((kind, digest, byte_count, phase)) = retained else {
-            return Ok(false);
-        };
-        if kind != operation.kind.as_str()
-            || digest != operation.payload_digest
-            || byte_count != operation.byte_count
-        {
-            bail!("scoped child input acknowledgement differs from retained operation");
-        }
-        if phase != "delivered" {
-            bail!("scoped child input acknowledgement is contact-uncertain");
-        }
-        Ok(true)
+                    params![attempt_id, operation.sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((kind, digest, byte_count, phase)) = retained else {
+                return Ok(false);
+            };
+            if kind != operation.kind.as_str()
+                || digest != operation.payload_digest
+                || byte_count != operation.byte_count
+            {
+                bail!("scoped child input acknowledgement differs from retained operation");
+            }
+            if phase != "delivered" {
+                bail!("scoped child input acknowledgement is contact-uncertain");
+            }
+            Ok(true)
+        })
     }
 
     /// Refuse interactive natural observation until the exact owner has a
@@ -489,48 +489,49 @@ impl RuntimeDb {
         attempt_id: &str,
         owner: &LaunchOwner,
     ) -> Result<()> {
-        let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
-        let retained: Option<(String, String)> = self
-            .conn
-            .query_row(
-                "SELECT launch_owner, phase FROM scoped_child_attempt WHERE attempt_id=?1",
-                [attempt_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((retained_owner, attempt_phase)) = retained else {
-            bail!("scoped child input attempt is absent before observation");
-        };
-        if retained_owner != encoded_owner || attempt_phase != "release_permitted" {
-            bail!("scoped child input owner or phase differs before observation");
-        }
-        let mut statement = self.conn.prepare(
-            "SELECT sequence, kind, phase FROM scoped_child_input_operation
+        self.conn.with_sql(|conn| {
+            let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
+            let retained: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT launch_owner, phase FROM scoped_child_attempt WHERE attempt_id=?1",
+                    [attempt_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((retained_owner, attempt_phase)) = retained else {
+                bail!("scoped child input attempt is absent before observation");
+            };
+            if retained_owner != encoded_owner || attempt_phase != "release_permitted" {
+                bail!("scoped child input owner or phase differs before observation");
+            }
+            let mut statement = conn.prepare(
+                "SELECT sequence, kind, phase FROM scoped_child_input_operation
              WHERE attempt_id=?1 ORDER BY sequence",
-        )?;
-        let mut rows = statement.query([attempt_id])?;
-        let mut expected = 0_u32;
-        let mut last_was_close = false;
-        while let Some(row) = rows.next()? {
-            let sequence: u32 = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let phase: String = row.get(2)?;
-            if sequence != expected || phase != "delivered" || last_was_close {
-                bail!("scoped child input is incomplete or out of order");
+            )?;
+            let mut rows = statement.query([attempt_id])?;
+            let mut expected = 0_u32;
+            let mut last_was_close = false;
+            while let Some(row) = rows.next()? {
+                let sequence: u32 = row.get(0)?;
+                let kind: String = row.get(1)?;
+                let phase: String = row.get(2)?;
+                if sequence != expected || phase != "delivered" || last_was_close {
+                    bail!("scoped child input is incomplete or out of order");
+                }
+                expected = expected
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("scoped child input sequence exhausted"))?;
+                if kind == "close" {
+                    last_was_close = true;
+                } else if kind != "write" {
+                    bail!("scoped child input has invalid operation kind");
+                }
             }
-            expected = expected
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("scoped child input sequence exhausted"))?;
-            if kind == "close" {
-                last_was_close = true;
-            } else if kind != "write" {
-                bail!("scoped child input has invalid operation kind");
+            if !last_was_close {
+                bail!("scoped child input has no delivered close");
             }
-        }
-        if !last_was_close {
-            bail!("scoped child input has no delivered close");
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Reserve one exact ordered input operation before any channel write or
@@ -543,126 +544,128 @@ impl RuntimeDb {
         operation: &ScopedChildInputOperation,
         source: &ryeos_state::external_content::products::producer_recipe::ProducerStdinSource,
     ) -> Result<ScopedChildInputReservation> {
-        use ryeos_state::external_content::products::producer_recipe::ProducerStdinSource;
+        self.conn.with_sql(|conn| {
+            use ryeos_state::external_content::products::producer_recipe::ProducerStdinSource;
 
-        let ProducerStdinSource::InteractiveVerifierChannel {
-            maximum_frame_bytes,
-            maximum_total_bytes,
-            maximum_frames,
-        } = source
-        else {
-            bail!("scoped child input requires signed interactive authority");
-        };
-        require_hex_digest("scoped child input payload", &operation.payload_digest)?;
-        if owner.daemon_generation_id != daemon_generation_id()
-            || operation.sequence > *maximum_frames
-            || (operation.kind == ScopedChildInputKind::Write
-                && (operation.byte_count == 0
-                    || operation.byte_count > *maximum_frame_bytes
-                    || operation.sequence >= *maximum_frames))
-            || (operation.kind == ScopedChildInputKind::Close
-                && (operation.byte_count != 0
-                    || operation.payload_digest != lillux::sha256_hex(b"")))
-        {
-            bail!("scoped child input exceeds signed bounds or current owner");
-        }
-        let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
-        let tx = self.conn.unchecked_transaction()?;
-        let admitted: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT launch_owner, phase, owner_thread_id FROM scoped_child_attempt WHERE attempt_id=?1",
-                [attempt_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let Some((retained_owner, phase, thread_id)) = admitted else {
-            bail!("scoped child input attempt is absent");
-        };
-        if retained_owner != encoded_owner || thread_id != owner.thread_id {
-            bail!("scoped child input owner differs from retained attempt");
-        }
-        let mut statement = tx.prepare(
-            "SELECT sequence, kind, payload_digest, byte_count, phase
+            let ProducerStdinSource::InteractiveVerifierChannel {
+                maximum_frame_bytes,
+                maximum_total_bytes,
+                maximum_frames,
+            } = source
+            else {
+                bail!("scoped child input requires signed interactive authority");
+            };
+            require_hex_digest("scoped child input payload", &operation.payload_digest)?;
+            if owner.daemon_generation_id != daemon_generation_id()
+                || operation.sequence > *maximum_frames
+                || (operation.kind == ScopedChildInputKind::Write
+                    && (operation.byte_count == 0
+                        || operation.byte_count > *maximum_frame_bytes
+                        || operation.sequence >= *maximum_frames))
+                || (operation.kind == ScopedChildInputKind::Close
+                    && (operation.byte_count != 0
+                        || operation.payload_digest != lillux::sha256_hex(b"")))
+            {
+                bail!("scoped child input exceeds signed bounds or current owner");
+            }
+            let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
+            let tx = conn.unchecked_transaction()?;
+            let admitted: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT launch_owner, phase, owner_thread_id FROM scoped_child_attempt WHERE attempt_id=?1",
+                    [attempt_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((retained_owner, phase, thread_id)) = admitted else {
+                bail!("scoped child input attempt is absent");
+            };
+            if retained_owner != encoded_owner || thread_id != owner.thread_id {
+                bail!("scoped child input owner differs from retained attempt");
+            }
+            let mut statement = tx.prepare(
+                "SELECT sequence, kind, payload_digest, byte_count, phase
              FROM scoped_child_input_operation WHERE attempt_id=?1 ORDER BY sequence",
-        )?;
-        let mut rows = statement.query([attempt_id])?;
-        let mut next_sequence = 0_u32;
-        let mut total_bytes = 0_u64;
-        let mut pending = false;
-        let mut closed = false;
-        while let Some(row) = rows.next()? {
-            let sequence: u32 = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let digest: String = row.get(2)?;
-            let byte_count: u32 = row.get(3)?;
-            let retained_phase: String = row.get(4)?;
-            if sequence != next_sequence {
-                bail!("scoped child input journal is not contiguous");
-            }
-            next_sequence = next_sequence
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("scoped child input sequence exhausted"))?;
-            if kind == "write" {
-                total_bytes = total_bytes
-                    .checked_add(u64::from(byte_count))
-                    .ok_or_else(|| anyhow!("scoped child input total overflowed"))?;
-            } else if kind == "close" {
-                closed = true;
-            } else {
-                bail!("scoped child input journal has invalid operation kind");
-            }
-            if retained_phase == "reserved" {
-                pending = true;
-            } else if retained_phase != "delivered" {
-                bail!("scoped child input journal has invalid phase");
-            }
-            if sequence == operation.sequence {
-                if kind != operation.kind.as_str()
-                    || digest != operation.payload_digest
-                    || byte_count != operation.byte_count
-                {
-                    bail!("scoped child input replay differs from retained operation");
+            )?;
+            let mut rows = statement.query([attempt_id])?;
+            let mut next_sequence = 0_u32;
+            let mut total_bytes = 0_u64;
+            let mut pending = false;
+            let mut closed = false;
+            while let Some(row) = rows.next()? {
+                let sequence: u32 = row.get(0)?;
+                let kind: String = row.get(1)?;
+                let digest: String = row.get(2)?;
+                let byte_count: u32 = row.get(3)?;
+                let retained_phase: String = row.get(4)?;
+                if sequence != next_sequence {
+                    bail!("scoped child input journal is not contiguous");
                 }
-                if retained_phase == "delivered" {
-                    return Ok(ScopedChildInputReservation::AlreadyDelivered);
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("scoped child input sequence exhausted"))?;
+                if kind == "write" {
+                    total_bytes = total_bytes
+                        .checked_add(u64::from(byte_count))
+                        .ok_or_else(|| anyhow!("scoped child input total overflowed"))?;
+                } else if kind == "close" {
+                    closed = true;
+                } else {
+                    bail!("scoped child input journal has invalid operation kind");
                 }
-                bail!("scoped child input delivery is uncertain");
+                if retained_phase == "reserved" {
+                    pending = true;
+                } else if retained_phase != "delivered" {
+                    bail!("scoped child input journal has invalid phase");
+                }
+                if sequence == operation.sequence {
+                    if kind != operation.kind.as_str()
+                        || digest != operation.payload_digest
+                        || byte_count != operation.byte_count
+                    {
+                        bail!("scoped child input replay differs from retained operation");
+                    }
+                    if retained_phase == "delivered" {
+                        return Ok(ScopedChildInputReservation::AlreadyDelivered);
+                    }
+                    bail!("scoped child input delivery is uncertain");
+                }
             }
-        }
-        drop(rows);
-        drop(statement);
-        if phase != "release_permitted" || pending || closed || operation.sequence != next_sequence
-        {
-            bail!("scoped child input is not the next live operation");
-        }
-        if operation.kind == ScopedChildInputKind::Write
-            && total_bytes
-                .checked_add(u64::from(operation.byte_count))
-                .is_none_or(|sum| sum > *maximum_total_bytes)
-        {
-            bail!("scoped child input exceeds signed total bytes");
-        }
-        let owner_live: bool = tx.query_row(
-            "SELECT EXISTS(
+            drop(rows);
+            drop(statement);
+            if phase != "release_permitted" || pending || closed || operation.sequence != next_sequence
+            {
+                bail!("scoped child input is not the next live operation");
+            }
+            if operation.kind == ScopedChildInputKind::Write
+                && total_bytes
+                    .checked_add(u64::from(operation.byte_count))
+                    .is_none_or(|sum| sum > *maximum_total_bytes)
+            {
+                bail!("scoped child input exceeds signed total bytes");
+            }
+            let owner_live: bool = tx.query_row(
+                "SELECT EXISTS(
                 SELECT 1 FROM thread_runtime r JOIN thread_launch_claim c ON c.thread_id=r.thread_id
                  WHERE r.thread_id=?1 AND r.stop_requested_at_ms IS NULL
                    AND c.claimed_by=?2 AND c.claim_id=?3)",
-            params![owner.thread_id, encoded_owner, owner.unpredictable_nonce],
-            |row| row.get(0),
-        )?;
-        if !owner_live {
-            bail!("scoped child input root has stopped or lost its launch claim");
-        }
-        let now = lillux::time::timestamp_millis();
-        tx.execute(
-            "INSERT INTO scoped_child_input_operation
+                params![owner.thread_id, encoded_owner, owner.unpredictable_nonce],
+                |row| row.get(0),
+            )?;
+            if !owner_live {
+                bail!("scoped child input root has stopped or lost its launch claim");
+            }
+            let now = lillux::time::timestamp_millis();
+            tx.execute(
+                "INSERT INTO scoped_child_input_operation
              (attempt_id, sequence, kind, payload_digest, byte_count, phase, created_at_ms, updated_at_ms)
              VALUES (?1,?2,?3,?4,?5,'reserved',?6,?6)",
-            params![attempt_id, operation.sequence, operation.kind.as_str(),
-                operation.payload_digest, operation.byte_count, now],
-        )?;
-        tx.commit()?;
-        Ok(ScopedChildInputReservation::Reserved)
+                params![attempt_id, operation.sequence, operation.kind.as_str(),
+                    operation.payload_digest, operation.byte_count, now],
+            )?;
+            tx.commit()?;
+            Ok(ScopedChildInputReservation::Reserved)
+        })
     }
 
     /// Record only a completed local Lillux write/close. This does not claim
@@ -674,13 +677,14 @@ impl RuntimeDb {
         owner: &LaunchOwner,
         operation: &ScopedChildInputOperation,
     ) -> Result<()> {
-        require_hex_digest("scoped child input payload", &operation.payload_digest)?;
-        if owner.daemon_generation_id != daemon_generation_id() {
-            bail!("scoped child input completion names another daemon generation");
-        }
-        let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_input_operation SET phase='delivered', updated_at_ms=?6
+        self.conn.with_sql(|conn| {
+            require_hex_digest("scoped child input payload", &operation.payload_digest)?;
+            if owner.daemon_generation_id != daemon_generation_id() {
+                bail!("scoped child input completion names another daemon generation");
+            }
+            let encoded_owner = lillux::canonical_json(&serde_json::to_value(owner)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_input_operation SET phase='delivered', updated_at_ms=?6
              WHERE attempt_id=?1 AND sequence=?2 AND kind=?3 AND payload_digest=?4
                AND byte_count=?5 AND phase='reserved'
                AND EXISTS (
@@ -690,74 +694,77 @@ impl RuntimeDb {
                    WHERE a.attempt_id=?1 AND a.launch_owner=?7
                      AND r.stop_requested_at_ms IS NULL
                      AND c.claimed_by=?7 AND c.claim_id=?8)",
-            params![
-                attempt_id,
-                operation.sequence,
-                operation.kind.as_str(),
-                operation.payload_digest,
-                operation.byte_count,
-                lillux::time::timestamp_millis(),
-                encoded_owner,
-                owner.unpredictable_nonce
-            ],
-        )?;
-        if changed != 1 {
-            bail!("scoped child input completion lost its exact live pending authority");
-        }
-        Ok(())
+                params![
+                    attempt_id,
+                    operation.sequence,
+                    operation.kind.as_str(),
+                    operation.payload_digest,
+                    operation.byte_count,
+                    lillux::time::timestamp_millis(),
+                    encoded_owner,
+                    owner.unpredictable_nonce
+                ],
+            )?;
+            if changed != 1 {
+                bail!("scoped child input completion lost its exact live pending authority");
+            }
+            Ok(())
+        })
     }
 
     /// Commit the attempt before asking Lillux to allocate a scope. A repeated
     /// request, including an exact repeat after lost ACK, never authorizes a
     /// second allocation or launch.
     pub fn reserve_scoped_child_attempt(&self, initial: &NewScopedChildAttempt) -> Result<()> {
-        initial.validate()?;
-        if initial.owner.daemon_generation_id != daemon_generation_id() {
-            bail!("scoped child attempt names another daemon generation");
-        }
-        let owner = lillux::canonical_json(&serde_json::to_value(&initial.owner)?)?;
-        let allocation = lillux::canonical_json(&serde_json::to_value(&initial.scope_allocation)?)?;
-        let now = lillux::time::timestamp_millis();
-        let lifetime = initial
-            .scope_allocation
-            .host_lifetime()
-            .map_err(anyhow::Error::msg)?;
-        let tx = self.conn.unchecked_transaction()?;
-        // A retained child pins the exact host occurrence. The fence is not
-        // allowed to disappear or move while that attempt remains unsettled,
-        // even if a later caller presents an otherwise valid launch claim.
-        validate_unsettled_scoped_child_lifetime(&tx)?;
-        if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-            if incumbent != lifetime {
-                if !incumbent.has_ended().map_err(anyhow::Error::msg)?
-                    || self.unsettled_process_scope_count(None)? != 0
-                {
-                    bail!("scoped child reservation crosses an unsettled host-lifetime fence");
+        self.conn.with_sql(|conn| {
+            initial.validate()?;
+            if initial.owner.daemon_generation_id != daemon_generation_id() {
+                bail!("scoped child attempt names another daemon generation");
+            }
+            let owner = lillux::canonical_json(&serde_json::to_value(&initial.owner)?)?;
+            let allocation = lillux::canonical_json(&serde_json::to_value(&initial.scope_allocation)?)?;
+            let now = lillux::time::timestamp_millis();
+            let lifetime = initial
+                .scope_allocation
+                .host_lifetime()
+                .map_err(anyhow::Error::msg)?;
+            let tx = conn.unchecked_transaction()?;
+            // A retained child pins the exact host occurrence. The fence is not
+            // allowed to disappear or move while that attempt remains unsettled,
+            // even if a later caller presents an otherwise valid launch claim.
+            validate_unsettled_scoped_child_lifetime(&tx)?;
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
+                if incumbent != lifetime {
+                    if !incumbent.has_ended().map_err(anyhow::Error::msg)?
+                        || self.unsettled_process_scope_count(None)? != 0
+                    {
+                        bail!("scoped child reservation crosses an unsettled host-lifetime fence");
+                    }
                 }
             }
-        }
-        let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
-        tx.execute(
-            "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
-            [&encoded_lifetime],
-        )?;
-        let changed = tx.execute(
-            "INSERT INTO scoped_child_attempt
+            let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
+            tx.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
+                [&encoded_lifetime],
+            )?;
+            let changed = tx.execute(
+                "INSERT INTO scoped_child_attempt
              (attempt_id, owner_thread_id, launch_owner, recipe_digest, recipe_generation,
               scenario_digest, scope_allocation, phase, created_at_ms, updated_at_ms)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8, ?8
              WHERE EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?2 AND stop_requested_at_ms IS NULL)
                AND EXISTS (SELECT 1 FROM thread_launch_claim
                             WHERE thread_id=?2 AND claimed_by=?3 AND claim_id=?9)",
-            params![initial.attempt_id, initial.owner.thread_id, owner, initial.recipe_digest,
-                initial.recipe_generation, initial.scenario_digest, allocation, now,
-                initial.owner.unpredictable_nonce],
-        )?;
-        if changed != 1 {
-            bail!("scoped child attempt lacks its exact admitted launch owner");
-        }
-        tx.commit()?;
-        Ok(())
+                params![initial.attempt_id, initial.owner.thread_id, owner, initial.recipe_digest,
+                    initial.recipe_generation, initial.scenario_digest, allocation, now,
+                    initial.owner.unpredictable_nonce],
+            )?;
+            if changed != 1 {
+                bail!("scoped child attempt lacks its exact admitted launch owner");
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// One-shot binding of the exact allocated scope. Restart does not retry
@@ -767,28 +774,30 @@ impl RuntimeDb {
         attempt_id: &str,
         recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::Reserved
-            || record.initial.owner.daemon_generation_id != daemon_generation_id()
-            || !recovery.matches_allocation(&record.initial.scope_allocation)
-        {
-            bail!("scoped child binding lost its original unbound allocation");
-        }
-        let encoded = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
-        let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET scope_recovery=?2, phase='scope_bound', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::Reserved
+                || record.initial.owner.daemon_generation_id != daemon_generation_id()
+                || !recovery.matches_allocation(&record.initial.scope_allocation)
+            {
+                bail!("scoped child binding lost its original unbound allocation");
+            }
+            let encoded = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+            let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET scope_recovery=?2, phase='scope_bound', updated_at_ms=?3
              WHERE attempt_id=?1 AND phase='reserved' AND scope_recovery IS NULL AND process_identity IS NULL
                AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?4 AND claimed_by=?5)
                AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?4 AND stop_requested_at_ms IS NULL)",
-            params![attempt_id, encoded, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
-        )?;
-        if changed != 1 {
-            bail!("scoped child scope binding lost its one-shot CAS");
-        }
-        Ok(())
+                params![attempt_id, encoded, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
+            )?;
+            if changed != 1 {
+                bail!("scoped child scope binding lost its one-shot CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Attach a held process before target release. The process's own scoped
@@ -799,36 +808,38 @@ impl RuntimeDb {
         identity: &ExecutionProcessIdentity,
         mount_evidence: &ScopedChildMountPreparationEvidence,
     ) -> Result<()> {
-        validate_execution_process_identity_shape(identity)?;
-        mount_evidence.validate_for(identity)?;
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::ScopeBound
-            || record.initial.owner.daemon_generation_id != daemon_generation_id()
-            || identity.process_scope.as_ref() != record.scope_recovery.as_ref()
-        {
-            bail!("held scoped child identity contradicts its bound scope");
-        }
-        let encoded = lillux::canonical_json(&serde_json::to_value(identity)?)?;
-        let encoded_mount = lillux::canonical_json(&serde_json::to_value(mount_evidence)?)?;
-        let recovery = lillux::canonical_json(&serde_json::to_value(
-            record.scope_recovery.as_ref().unwrap(),
-        )?)?;
-        let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET process_identity=?3, mount_preparation_evidence=?4,
+        self.conn.with_sql(|conn| {
+            validate_execution_process_identity_shape(identity)?;
+            mount_evidence.validate_for(identity)?;
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::ScopeBound
+                || record.initial.owner.daemon_generation_id != daemon_generation_id()
+                || identity.process_scope.as_ref() != record.scope_recovery.as_ref()
+            {
+                bail!("held scoped child identity contradicts its bound scope");
+            }
+            let encoded = lillux::canonical_json(&serde_json::to_value(identity)?)?;
+            let encoded_mount = lillux::canonical_json(&serde_json::to_value(mount_evidence)?)?;
+            let recovery = lillux::canonical_json(&serde_json::to_value(
+                record.scope_recovery.as_ref().unwrap(),
+            )?)?;
+            let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET process_identity=?3, mount_preparation_evidence=?4,
                     phase='process_attached', updated_at_ms=?5
              WHERE attempt_id=?1 AND phase='scope_bound' AND scope_recovery=?2
                AND process_identity IS NULL AND mount_preparation_evidence IS NULL
                AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?6 AND claimed_by=?7)
                AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?6 AND stop_requested_at_ms IS NULL)",
-            params![attempt_id, recovery, encoded, encoded_mount, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
-        )?;
-        if changed != 1 {
-            bail!("held scoped child attachment lost its one-shot CAS");
-        }
-        Ok(())
+                params![attempt_id, recovery, encoded, encoded_mount, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
+            )?;
+            if changed != 1 {
+                bail!("held scoped child attachment lost its one-shot CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Irreversible pre-release cut. Once committed, recovery must assume the
@@ -838,28 +849,30 @@ impl RuntimeDb {
         attempt_id: &str,
         identity: &ExecutionProcessIdentity,
     ) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::ProcessAttached
-            || record.initial.owner.daemon_generation_id != daemon_generation_id()
-            || record.process_identity.as_ref() != Some(identity)
-        {
-            bail!("scoped child release lost its exact held process");
-        }
-        let encoded = lillux::canonical_json(&serde_json::to_value(identity)?)?;
-        let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET phase='release_permitted', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::ProcessAttached
+                || record.initial.owner.daemon_generation_id != daemon_generation_id()
+                || record.process_identity.as_ref() != Some(identity)
+            {
+                bail!("scoped child release lost its exact held process");
+            }
+            let encoded = lillux::canonical_json(&serde_json::to_value(identity)?)?;
+            let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET phase='release_permitted', updated_at_ms=?3
              WHERE attempt_id=?1 AND phase='process_attached' AND process_identity=?2
                AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?4 AND claimed_by=?5)
                AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?4 AND stop_requested_at_ms IS NULL)",
-            params![attempt_id, encoded, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
-        )?;
-        if changed != 1 {
-            bail!("scoped child release permission was already consumed");
-        }
-        Ok(())
+                params![attempt_id, encoded, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
+            )?;
+            if changed != 1 {
+                bail!("scoped child release permission was already consumed");
+            }
+            Ok(())
+        })
     }
 
     /// Persist daemon-observed natural emptiness before the verifier signs its
@@ -871,51 +884,53 @@ impl RuntimeDb {
         receipt: &ScopedChildNaturalEmptyReceipt,
         observation_object_hash: &str,
     ) -> Result<()> {
-        require_hex_digest("scoped child observation object", observation_object_hash)?;
-        let attempt_id = &receipt.attempt_id;
-        let recovery = &receipt.recovery;
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::ReleasePermitted
-            || record.initial.owner.daemon_generation_id != daemon_generation_id()
-            || record.scope_recovery.as_ref() != Some(recovery)
-            || record.process_identity.as_ref() != Some(&receipt.process_identity)
-            || record.initial.owner != receipt.owner
-            || record.initial.recipe_digest != receipt.recipe_digest
-            || record.initial.recipe_generation != receipt.recipe_generation
-            || record.initial.scenario_digest != receipt.scenario_digest
-        {
-            bail!("natural scope-empty observation lacks exact released producer scope");
-        }
-        // This is a fresh observation of the retained exact scope, not an
-        // inference from receipt fields or a caller-supplied digest.
-        // The potentially blocking wait ran before taking StateStore's global
-        // mutex. At this CAS, make a fresh bounded kernel observation instead
-        // of blocking unrelated thread reads for the full control timeout.
-        if !recovery
-            .is_empty(std::time::Duration::from_millis(100))
-            .map_err(anyhow::Error::msg)?
-        {
-            bail!("scoped child is no longer empty at natural receipt commit");
-        }
-        let receipt_digest = receipt.digest()?;
-        let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
-        let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET natural_empty_receipt_digest=?3, observation_object_hash=?4,
+        self.conn.with_sql(|conn| {
+            require_hex_digest("scoped child observation object", observation_object_hash)?;
+            let attempt_id = &receipt.attempt_id;
+            let recovery = &receipt.recovery;
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::ReleasePermitted
+                || record.initial.owner.daemon_generation_id != daemon_generation_id()
+                || record.scope_recovery.as_ref() != Some(recovery)
+                || record.process_identity.as_ref() != Some(&receipt.process_identity)
+                || record.initial.owner != receipt.owner
+                || record.initial.recipe_digest != receipt.recipe_digest
+                || record.initial.recipe_generation != receipt.recipe_generation
+                || record.initial.scenario_digest != receipt.scenario_digest
+            {
+                bail!("natural scope-empty observation lacks exact released producer scope");
+            }
+            // This is a fresh observation of the retained exact scope, not an
+            // inference from receipt fields or a caller-supplied digest.
+            // The potentially blocking wait ran before taking StateStore's global
+            // mutex. At this CAS, make a fresh bounded kernel observation instead
+            // of blocking unrelated thread reads for the full control timeout.
+            if !recovery
+                .is_empty(std::time::Duration::from_millis(100))
+                .map_err(anyhow::Error::msg)?
+            {
+                bail!("scoped child is no longer empty at natural receipt commit");
+            }
+            let receipt_digest = receipt.digest()?;
+            let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+            let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET natural_empty_receipt_digest=?3, observation_object_hash=?4,
                     phase='natural_scope_empty', updated_at_ms=?5
              WHERE attempt_id=?1 AND phase='release_permitted' AND scope_recovery=?2
                AND natural_empty_receipt_digest IS NULL AND observation_object_hash IS NULL
                AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?6 AND claimed_by=?7)
                AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?6 AND stop_requested_at_ms IS NULL)",
-            params![attempt_id, encoded_recovery, receipt_digest, observation_object_hash,
-                lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
-        )?;
-        if changed != 1 {
-            bail!("natural scope-empty observation lost its one-shot CAS");
-        }
-        Ok(())
+                params![attempt_id, encoded_recovery, receipt_digest, observation_object_hash,
+                    lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
+            )?;
+            if changed != 1 {
+                bail!("natural scope-empty observation lost its one-shot CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Exact verifier-requested abort of a released attempt. Unlike generic
@@ -926,22 +941,24 @@ impl RuntimeDb {
         attempt_id: &str,
         recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET phase='bound_retirement_pending', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET phase='bound_retirement_pending', updated_at_ms=?3
              WHERE attempt_id=?1 AND phase='release_permitted' AND scope_recovery=?2
                AND natural_empty_receipt_digest IS NULL AND observation_object_hash IS NULL
                AND retirement_evidence_digest IS NULL",
-            params![
-                attempt_id,
-                encoded_recovery,
-                lillux::time::timestamp_millis()
-            ],
-        )?;
-        if changed != 1 {
-            bail!("scoped abort lost its exact released-attempt retirement CAS");
-        }
-        Ok(())
+                params![
+                    attempt_id,
+                    encoded_recovery,
+                    lillux::time::timestamp_millis()
+                ],
+            )?;
+            if changed != 1 {
+                bail!("scoped abort lost its exact released-attempt retirement CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Irreversibly fence attachment and release before retiring the bound
@@ -951,35 +968,37 @@ impl RuntimeDb {
         attempt_id: &str,
         recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if !matches!(
-            record.phase,
-            ScopedChildPhase::ScopeBound
-                | ScopedChildPhase::ProcessAttached
-                | ScopedChildPhase::ReleasePermitted
-                | ScopedChildPhase::NaturalScopeEmpty
-        ) || record.scope_recovery.as_ref() != Some(recovery)
-        {
-            bail!("scoped child retirement lacks its exact unsettled scope");
-        }
-        let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET phase='bound_retirement_pending', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if !matches!(
+                record.phase,
+                ScopedChildPhase::ScopeBound
+                    | ScopedChildPhase::ProcessAttached
+                    | ScopedChildPhase::ReleasePermitted
+                    | ScopedChildPhase::NaturalScopeEmpty
+            ) || record.scope_recovery.as_ref() != Some(recovery)
+            {
+                bail!("scoped child retirement lacks its exact unsettled scope");
+            }
+            let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET phase='bound_retirement_pending', updated_at_ms=?3
              WHERE attempt_id=?1 AND scope_recovery=?2 AND phase=?4 AND retirement_evidence_digest IS NULL",
-            params![attempt_id, encoded_recovery, lillux::time::timestamp_millis(), match record.phase {
-                ScopedChildPhase::ScopeBound => "scope_bound",
-                ScopedChildPhase::ProcessAttached => "process_attached",
-                ScopedChildPhase::ReleasePermitted => "release_permitted",
-                ScopedChildPhase::NaturalScopeEmpty => "natural_scope_empty",
-                _ => unreachable!(),
-            }],
-        )?;
-        if changed != 1 {
-            bail!("scoped child retirement claim lost its one-shot CAS");
-        }
-        Ok(())
+                params![attempt_id, encoded_recovery, lillux::time::timestamp_millis(), match record.phase {
+                    ScopedChildPhase::ScopeBound => "scope_bound",
+                    ScopedChildPhase::ProcessAttached => "process_attached",
+                    ScopedChildPhase::ReleasePermitted => "release_permitted",
+                    ScopedChildPhase::NaturalScopeEmpty => "natural_scope_empty",
+                    _ => unreachable!(),
+                }],
+            )?;
+            if changed != 1 {
+                bail!("scoped child retirement claim lost its one-shot CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Persist a successful exact Lillux termination/empty observation before
@@ -991,37 +1010,39 @@ impl RuntimeDb {
         attempt_id: &str,
         recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::BoundRetirementPending
-            || record.scope_recovery.as_ref() != Some(recovery)
-        {
-            bail!("scoped child death proof lacks its exact pending scope");
-        }
-        let operation = lillux::canonical_json(&serde_json::json!({
-            "kind": "lillux_scoped_child_terminate_and_wait_v1",
-            "attempt_id": attempt_id,
-            "recovery": recovery,
-        }))?;
-        let evidence_digest = lillux::sha256_hex(operation.as_bytes());
-        let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::BoundRetirementPending
+                || record.scope_recovery.as_ref() != Some(recovery)
+            {
+                bail!("scoped child death proof lacks its exact pending scope");
+            }
+            let operation = lillux::canonical_json(&serde_json::json!({
+                "kind": "lillux_scoped_child_terminate_and_wait_v1",
+                "attempt_id": attempt_id,
+                "recovery": recovery,
+            }))?;
+            let evidence_digest = lillux::sha256_hex(operation.as_bytes());
+            let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt
                 SET recovery_death_evidence_digest=?3, phase='bound_death_proven', updated_at_ms=?4
               WHERE attempt_id=?1 AND phase='bound_retirement_pending' AND scope_recovery=?2
                 AND recovery_death_evidence_digest IS NULL AND retirement_evidence_digest IS NULL",
-            params![
-                attempt_id,
-                encoded_recovery,
-                evidence_digest,
-                lillux::time::timestamp_millis()
-            ],
-        )?;
-        if changed != 1 {
-            bail!("scoped child death proof lost its one-shot CAS");
-        }
-        Ok(())
+                params![
+                    attempt_id,
+                    encoded_recovery,
+                    evidence_digest,
+                    lillux::time::timestamp_millis()
+                ],
+            )?;
+            if changed != 1 {
+                bail!("scoped child death proof lost its one-shot CAS");
+            }
+            Ok(())
+        })
     }
 
     /// Commit retirement after StateStore completed Lillux's exact
@@ -1032,108 +1053,114 @@ impl RuntimeDb {
         attempt_id: &str,
         recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::BoundDeathProven
-            || record.recovery_death_evidence_digest.is_none()
-        {
-            bail!("bound scoped child lacks durable death proof");
-        }
-        if record.scope_recovery.as_ref() != Some(recovery) {
-            bail!("bound retirement changed its exact recovery scope");
-        }
-        let operation = lillux::canonical_json(&serde_json::json!({
-            "kind": "lillux_retire_after_settlement", "attempt_id": attempt_id,
-            "recovery": recovery,
-        }))?;
-        let evidence_digest = lillux::sha256_hex(operation.as_bytes());
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE scoped_child_attempt SET retirement_evidence_digest=?2, phase='retired', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::BoundDeathProven
+                || record.recovery_death_evidence_digest.is_none()
+            {
+                bail!("bound scoped child lacks durable death proof");
+            }
+            if record.scope_recovery.as_ref() != Some(recovery) {
+                bail!("bound retirement changed its exact recovery scope");
+            }
+            let operation = lillux::canonical_json(&serde_json::json!({
+                "kind": "lillux_retire_after_settlement", "attempt_id": attempt_id,
+                "recovery": recovery,
+            }))?;
+            let evidence_digest = lillux::sha256_hex(operation.as_bytes());
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE scoped_child_attempt SET retirement_evidence_digest=?2, phase='retired', updated_at_ms=?3
              WHERE attempt_id=?1 AND phase='bound_death_proven'
                AND recovery_death_evidence_digest IS NOT NULL AND retirement_evidence_digest IS NULL",
-            params![attempt_id, evidence_digest, lillux::time::timestamp_millis()],
-        )?;
-        if changed != 1 {
-            bail!("bound scoped child retirement lost its one-shot CAS");
-        }
-        if self.unsettled_process_scope_count(None)? == 0 {
-            tx.execute(
-                "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
-                [],
+                params![attempt_id, evidence_digest, lillux::time::timestamp_millis()],
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            if changed != 1 {
+                bail!("bound scoped child retirement lost its one-shot CAS");
+            }
+            if self.unsettled_process_scope_count(None)? == 0 {
+                tx.execute(
+                    "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
+                    [],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Fence the old creator before checking the unbound allocation. A live
     /// launch claim must first be cleared by its existing daemon lifecycle;
     /// this journal does not terminate or supersede that creator.
     pub fn claim_unbound_scoped_child_discard(&self, attempt_id: &str) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::Reserved {
-            bail!("unbound scoped child discard lacks its exact reservation");
-        }
-        let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET phase='unbound_discard_pending', updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::Reserved {
+                bail!("unbound scoped child discard lacks its exact reservation");
+            }
+            let changed = conn.execute(
+                "UPDATE scoped_child_attempt SET phase='unbound_discard_pending', updated_at_ms=?2
              WHERE attempt_id=?1 AND phase='reserved' AND scope_recovery IS NULL
                AND process_identity IS NULL AND retirement_evidence_digest IS NULL
                AND NOT EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?3)",
-            params![
-                attempt_id,
-                lillux::time::timestamp_millis(),
-                record.initial.owner.thread_id
-            ],
-        )?;
-        if changed != 1 {
-            bail!("unbound scoped child discard requires the old creator to be fenced");
-        }
-        Ok(())
+                params![
+                    attempt_id,
+                    lillux::time::timestamp_millis(),
+                    record.initial.owner.thread_id
+                ],
+            )?;
+            if changed != 1 {
+                bail!("unbound scoped child discard requires the old creator to be fenced");
+            }
+            Ok(())
+        })
     }
 
     /// Reconcile the exact unbound slot using Lillux itself. A failed or
     /// interrupted discard leaves the pending row for retry, never for launch.
     pub fn complete_unbound_scoped_child_discard(&self, attempt_id: &str) -> Result<()> {
-        let record = self
-            .get_scoped_child_attempt(attempt_id)?
-            .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
-        if record.phase != ScopedChildPhase::UnboundDiscardPending {
-            bail!("unbound scoped child allocation is not pending discard");
-        }
-        record
-            .initial
-            .scope_allocation
-            .discard_unlaunched()
-            .map_err(anyhow::Error::msg)?;
-        let operation = lillux::canonical_json(&serde_json::json!({
-            "kind": "lillux_discard_unlaunched",
-            "attempt_id": attempt_id,
-            "allocation": record.initial.scope_allocation,
-        }))?;
-        let evidence_digest = lillux::sha256_hex(operation.as_bytes());
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE scoped_child_attempt SET retirement_evidence_digest=?2, phase='retired', updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let record = self
+                .get_scoped_child_attempt(attempt_id)?
+                .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
+            if record.phase != ScopedChildPhase::UnboundDiscardPending {
+                bail!("unbound scoped child allocation is not pending discard");
+            }
+            record
+                .initial
+                .scope_allocation
+                .discard_unlaunched()
+                .map_err(anyhow::Error::msg)?;
+            let operation = lillux::canonical_json(&serde_json::json!({
+                "kind": "lillux_discard_unlaunched",
+                "attempt_id": attempt_id,
+                "allocation": record.initial.scope_allocation,
+            }))?;
+            let evidence_digest = lillux::sha256_hex(operation.as_bytes());
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE scoped_child_attempt SET retirement_evidence_digest=?2, phase='retired', updated_at_ms=?3
              WHERE attempt_id=?1 AND phase='unbound_discard_pending'
                AND scope_recovery IS NULL AND process_identity IS NULL
                AND retirement_evidence_digest IS NULL",
-            params![attempt_id, evidence_digest, lillux::time::timestamp_millis()],
-        )?;
-        if changed != 1 {
-            bail!("unbound scoped child discard lost its one-shot CAS");
-        }
-        if self.unsettled_process_scope_count(None)? == 0 {
-            tx.execute(
-                "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
-                [],
+                params![attempt_id, evidence_digest, lillux::time::timestamp_millis()],
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            if changed != 1 {
+                bail!("unbound scoped child discard lost its one-shot CAS");
+            }
+            if self.unsettled_process_scope_count(None)? == 0 {
+                tx.execute(
+                    "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
+                    [],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Point lookup is recovery evidence, never executable launch authority.
@@ -1141,7 +1168,9 @@ impl RuntimeDb {
         &self,
         attempt_id: &str,
     ) -> Result<Option<ScopedChildAttemptRecord>> {
-        read_scoped_child_attempt(&self.conn, attempt_id)
+        self.conn.with_sql(|conn| {
+            read_scoped_child_attempt(&conn, attempt_id)
+        })
     }
 
     /// Exact root-owner point lookup for lost START acknowledgements. The
@@ -1150,54 +1179,61 @@ impl RuntimeDb {
         &self,
         owner: &LaunchOwner,
     ) -> Result<Option<ScopedChildAttemptRecord>> {
-        let encoded = lillux::canonical_json(&serde_json::to_value(owner)?)?;
-        let attempt_id: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT attempt_id FROM scoped_child_attempt WHERE owner_thread_id=?1 AND launch_owner=?2",
-                params![owner.thread_id, encoded],
-                |row| row.get(0),
-            )
-            .optional()?;
-        attempt_id
-            .as_deref()
-            .map(|id| read_scoped_child_attempt(&self.conn, id))
-            .transpose()
-            .map(|record| record.flatten())
+        self.conn.with_sql(|conn| {
+            let encoded = lillux::canonical_json(&serde_json::to_value(owner)?)?;
+            let attempt_id: Option<String> = conn
+                .query_row(
+                    "SELECT attempt_id FROM scoped_child_attempt WHERE owner_thread_id=?1 AND launch_owner=?2",
+                    params![owner.thread_id, encoded],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            attempt_id
+                .as_deref()
+                .map(|id| read_scoped_child_attempt(&conn, id))
+                .transpose()
+                .map(|record| record.flatten())
+        })
     }
 
     pub fn unsettled_scoped_child_attempt_ids(&self) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare("SELECT attempt_id FROM scoped_child_attempt WHERE phase!='retired' ORDER BY created_at_ms, attempt_id")?;
-        let ids = statement
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(ids)
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare("SELECT attempt_id FROM scoped_child_attempt WHERE phase!='retired' ORDER BY created_at_ms, attempt_id")?;
+            let ids = statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
     }
 
     pub fn has_unsettled_scoped_child_for_thread(&self, thread_id: &str) -> Result<bool> {
-        let found: i64 = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM scoped_child_attempt
+        self.conn.with_sql(|conn| {
+            let found: i64 = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scoped_child_attempt
              WHERE owner_thread_id=?1 AND phase!='retired')",
-            [thread_id],
-            |row| row.get(0),
-        )?;
-        Ok(found != 0)
+                [thread_id],
+                |row| row.get(0),
+            )?;
+            Ok(found != 0)
+        })
     }
 
     /// Retain exact observed-result CAS objects through scope retirement and
     /// thread history pruning. A durable pointer must never be swept first.
     pub fn scoped_child_observation_cas_roots(&self) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare(
-            "SELECT observation_object_hash FROM scoped_child_attempt
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT observation_object_hash FROM scoped_child_attempt
              WHERE observation_object_hash IS NOT NULL ORDER BY attempt_id",
-        )?;
-        let roots = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for root in &roots {
-            require_hex_digest("scoped child observation CAS root", root)?;
-        }
-        Ok(roots)
+            )?;
+            let roots = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for root in &roots {
+                require_hex_digest("scoped child observation CAS root", root)?;
+            }
+            Ok(roots)
+        })
     }
 }
 
@@ -1457,7 +1493,7 @@ mod tests {
         ExecutionProcessIdentity,
     ) {
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
@@ -1469,7 +1505,7 @@ mod tests {
         }))
         .unwrap();
         let mut planned = serde_json::to_value(&recovery).unwrap();
-        planned["version"] = 2.into();
+        planned["version"] = 3.into();
         planned["backend"]
             .as_object_mut()
             .unwrap()
@@ -1511,11 +1547,11 @@ mod tests {
         db.insert_thread_runtime(&owner.thread_id, &owner.thread_id)
             .unwrap();
         let encoded = lillux::canonical_json(&serde_json::to_value(owner).unwrap()).unwrap();
-        db.conn.execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO thread_launch_claim(thread_id,claim_id,claimed_at_ms,lease_expires_at_ms,claimed_by,rearm_resume_budget_if_stale)
              VALUES (?1,?2,1,9223372036854775807,?3,0)",
             params![owner.thread_id, owner.unpredictable_nonce, encoded],
-        ).unwrap();
+        )?)).unwrap();
     }
 
     fn mount_evidence(identity: &ExecutionProcessIdentity) -> ScopedChildMountPreparationEvidence {
@@ -1626,7 +1662,7 @@ mod tests {
 
     #[test]
     fn duplicate_changed_and_wrong_owner_never_reopen_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         assert!(db.reserve_scoped_child_attempt(&initial).is_err());
         seed_owner(&db, &initial.owner);
@@ -1716,7 +1752,7 @@ mod tests {
     fn scoped_input_pending_blocks_later_contact_and_delivered_replays_exactly() {
         use ryeos_state::external_content::products::producer_recipe::ProducerStdinSource;
 
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -1969,7 +2005,7 @@ mod tests {
             byte_count: 4,
         };
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -1990,7 +2026,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -2016,7 +2052,7 @@ mod tests {
         db.complete_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
             .unwrap();
         drop(db);
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -2037,11 +2073,10 @@ mod tests {
             .unwrap(),
             ScopedChildInputReservation::Reserved
         );
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE thread_runtime SET stop_requested_at_ms=1 WHERE thread_id=?1",
                 [&initial.owner.thread_id],
-            )
+            )?))
             .unwrap();
         assert!(
             db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
@@ -2072,7 +2107,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2086,7 +2121,7 @@ mod tests {
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .get_scoped_child_attempt(&initial.attempt_id)
             .unwrap()
@@ -2136,7 +2171,7 @@ mod tests {
 
     #[test]
     fn exact_abort_retirement_fences_later_natural_observation() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2181,7 +2216,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2217,7 +2252,7 @@ mod tests {
             db.record_bound_scoped_child_death(&initial.attempt_id, &recovery)
                 .unwrap();
         }
-        let db = RuntimeDb::open_existing_current(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         let retained = db
             .get_scoped_child_attempt(&initial.attempt_id)
             .unwrap()
@@ -2248,7 +2283,7 @@ mod tests {
 
     #[test]
     fn natural_empty_is_distinct_from_cleanup_and_bound_to_exact_scope() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, identity) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
@@ -2356,20 +2391,19 @@ mod tests {
 
     #[test]
     fn unbound_attempt_requires_exact_discard_and_retires_without_process_claim() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, recovery, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
-        assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_some());
+        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
         assert!(
             db.claim_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
         );
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
                 [&initial.owner.thread_id],
-            )
+            )?))
             .unwrap();
         db.claim_unbound_scoped_child_discard(&initial.attempt_id)
             .unwrap();
@@ -2402,7 +2436,7 @@ mod tests {
             db.complete_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
         );
-        assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
     }
 
     #[test]
@@ -2411,12 +2445,12 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, _, _) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
-            db.conn.execute("UPDATE scoped_child_attempt SET recipe_digest='not-a-digest' WHERE attempt_id=?1", [&initial.attempt_id]).unwrap();
+            db.conn.with_sql(|connection| Ok(connection.execute("UPDATE scoped_child_attempt SET recipe_digest='not-a-digest' WHERE attempt_id=?1", [&initial.attempt_id])?)).unwrap();
         }
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2425,7 +2459,7 @@ mod tests {
         let path = temp.path().join("runtime.sqlite3");
         let (initial, recovery, identity) = fixture();
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2439,12 +2473,12 @@ mod tests {
             let mut tampered = mount_evidence(&identity);
             tampered.observed.destination_access_sha256[0] ^= 1;
             let encoded = lillux::canonical_json(&serde_json::to_value(tampered).unwrap()).unwrap();
-            db.conn.execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
                 params![initial.attempt_id, encoded],
-            ).unwrap();
+            )?)).unwrap();
         }
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2464,7 +2498,7 @@ mod tests {
             "b".repeat(64),
         );
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2474,7 +2508,7 @@ mod tests {
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
         }
-        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             reopened
                 .get_scoped_child_attempt(&initial.attempt_id)
@@ -2485,7 +2519,6 @@ mod tests {
         );
         drop(reopened);
 
-        let conn = rusqlite::Connection::open(&path).unwrap();
         // Reopening validates the retained row's shape, not the signed
         // recipe. The live pre-contact path already checked these hashes
         // against signed bytes; that authority cannot be reconstructed from
@@ -2496,22 +2529,24 @@ mod tests {
             "A".repeat(64),
         );
         let encoded = lillux::canonical_json(&serde_json::to_value(noncanonical).unwrap()).unwrap();
-        conn.execute(
-            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
-            params![initial.attempt_id, encoded],
-        )
-        .unwrap();
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, encoded],
+            )?)
+        });
+        crate::runtime_db::test_native::live_open_refusal(&path);
 
         let mut legacy = evidence;
         legacy.schema = 1;
         let encoded = lillux::canonical_json(&serde_json::to_value(legacy).unwrap()).unwrap();
-        conn.execute(
-            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
-            params![initial.attempt_id, encoded],
-        )
-        .unwrap();
-        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, encoded],
+            )?)
+        });
+        crate::runtime_db::test_native::live_open_refusal(&path);
     }
 
     #[test]
@@ -2521,7 +2556,7 @@ mod tests {
         let (initial, recovery, identity) = fixture();
         let former_bytes;
         {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
@@ -2539,33 +2574,33 @@ mod tests {
                 .unwrap()
                 .remove("prepared_directory_sources");
             former_bytes = lillux::canonical_json(&former).unwrap();
-            db.conn.execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
                 params![initial.attempt_id, former_bytes],
-            ).unwrap();
-            db.conn
-                .pragma_update(
+            )?)).unwrap();
+            db.conn.with_sql(|connection| Ok(connection.pragma_update(
                     None,
                     "application_id",
                     RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-                )
+                )?))
                 .unwrap();
         }
-        let error = RuntimeDb::open_existing_current(&path).err().unwrap();
-        let message = format!("{error:#}");
+        let message = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             message.contains("explicit no-backcompat reset"),
             "{message}"
         );
-        assert!(message.contains("stored schema_epoch=70"), "{message}");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let retained: String = conn
-            .query_row(
+        assert!(
+            message.contains(&format!("stored schema_epoch={}", RUNTIME_OPERATOR_SCHEMA_EPOCH - 1)),
+            "{message}"
+        );
+        let retained: String = crate::runtime_db::test_native::read_existing(&path, |conn| {
+            Ok(conn.query_row(
                 "SELECT mount_preparation_evidence FROM scoped_child_attempt WHERE attempt_id=?1",
                 [&initial.attempt_id],
                 |row| row.get(0),
-            )
-            .unwrap();
+            )?)
+        });
         assert_eq!(retained, former_bytes);
     }
 
@@ -2576,7 +2611,7 @@ mod tests {
             let path = temp.path().join("runtime.sqlite3");
             let (initial, _, _) = fixture();
             {
-                let db = RuntimeDb::open(&path).unwrap();
+                let db = crate::runtime_db::test_native::TestRuntime::open(&path);
                 seed_owner(&db, &initial.owner);
                 db.reserve_scoped_child_attempt(&initial).unwrap();
                 let replacement = corrupt_fence.map(|_| {
@@ -2586,11 +2621,10 @@ mod tests {
                     lifetime["backend"]["boot_id"] = "11111111-1111-4111-8111-111111111111".into();
                     lillux::canonical_json(&lifetime).unwrap()
                 });
-                db.conn
-                    .execute(
+                db.conn.with_sql(|connection| Ok(connection.execute(
                         "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
                         [replacement],
-                    )
+                    )?))
                     .unwrap();
                 let mut second = initial.clone();
                 second.attempt_id = "producer-two".into();
@@ -2602,39 +2636,37 @@ mod tests {
                 seed_owner(&db, &second.owner);
                 assert!(db.reserve_scoped_child_attempt(&second).is_err());
             }
-            assert!(RuntimeDb::open_existing_current(&path).is_err());
+            crate::runtime_db::test_native::live_open_refusal(&path);
         }
     }
 
     #[test]
     fn unbound_retirement_cannot_carry_natural_empty_claim() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (initial, _, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
                 [&initial.owner.thread_id],
-            )
+            )?))
             .unwrap();
         db.claim_unbound_scoped_child_discard(&initial.attempt_id)
             .unwrap();
         db.complete_unbound_scoped_child_discard(&initial.attempt_id)
             .unwrap();
         assert!(
-            db.conn
-                .execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                     "UPDATE scoped_child_attempt SET natural_empty_receipt_digest=?2 WHERE attempt_id=?1",
                     params![initial.attempt_id, "a".repeat(64)],
-                )
+                )?))
                 .is_err()
         );
     }
 
     #[test]
     fn retiring_one_scoped_child_preserves_shared_host_lifetime_fence() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first, _, _) = fixture();
         let mut second = first.clone();
         second.attempt_id = "producer-two".to_owned();
@@ -2647,34 +2679,32 @@ mod tests {
         seed_owner(&db, &second.owner);
         db.reserve_scoped_child_attempt(&first).unwrap();
         db.reserve_scoped_child_attempt(&second).unwrap();
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
                 [&first.owner.thread_id],
-            )
+            )?))
             .unwrap();
         db.claim_unbound_scoped_child_discard(&first.attempt_id)
             .unwrap();
         db.complete_unbound_scoped_child_discard(&first.attempt_id)
             .unwrap();
-        assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_some());
+        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
-        db.conn
-            .execute(
+        db.conn.with_sql(|connection| Ok(connection.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id=?1",
                 [&second.owner.thread_id],
-            )
+            )?))
             .unwrap();
         db.claim_unbound_scoped_child_discard(&second.attempt_id)
             .unwrap();
         db.complete_unbound_scoped_child_discard(&second.attempt_id)
             .unwrap();
-        assert!(read_scope_lifetime_fence(&db.conn).unwrap().is_none());
+        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
     }
 
     #[test]
     fn ended_old_lifetime_cannot_be_replaced_while_attempt_is_unsettled() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first, _, _) = fixture();
         seed_owner(&db, &first.owner);
         db.reserve_scoped_child_attempt(&first).unwrap();

@@ -31,6 +31,7 @@ pub struct HttpError {
     contact: ContactState,
     kind: io::ErrorKind,
     message: &'static str,
+    response_refused: bool,
 }
 
 impl HttpError {
@@ -39,6 +40,7 @@ impl HttpError {
             contact: ContactState::NoRequestSent,
             kind,
             message,
+            response_refused: false,
         }
     }
 
@@ -47,6 +49,20 @@ impl HttpError {
             contact: ContactState::RequestMayHaveBeenSent,
             kind,
             message,
+            response_refused: false,
+        }
+    }
+
+    /// A response was received and this transport refused it: its status,
+    /// framing, header or body bounds, or its parse. The request was sent, so
+    /// the peer's commit stays unknown, but repeating the same exchange
+    /// against the same peer cannot cure the refusal.
+    pub(crate) fn refused(message: &'static str) -> Self {
+        Self {
+            contact: ContactState::RequestMayHaveBeenSent,
+            kind: io::ErrorKind::InvalidData,
+            message,
+            response_refused: true,
         }
     }
 
@@ -59,6 +75,13 @@ impl HttpError {
     pub fn kind(&self) -> io::ErrorKind {
         self.kind
     }
+
+    /// Whether a received response was refused by this transport. Every
+    /// other failure, including request-side and TLS-record failures that
+    /// share the `InvalidData` kind, reports false.
+    pub fn response_refused(&self) -> bool {
+        self.response_refused
+    }
 }
 
 impl std::fmt::Display for HttpError {
@@ -68,6 +91,37 @@ impl std::fmt::Display for HttpError {
 }
 
 impl std::error::Error for HttpError {}
+
+/// The error payload a [`ResponseBody`] read carries when this transport
+/// refuses the received body: its framing or a decoded, wire or framing
+/// bound. Detect it with [`is_response_refusal`]; any other read failure,
+/// including a TLS-record failure of kind `InvalidData`, is not a refusal.
+#[derive(Debug)]
+pub struct ResponseRefusal {
+    message: &'static str,
+}
+
+impl ResponseRefusal {
+    pub(crate) fn io(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, Self { message })
+    }
+}
+
+impl std::fmt::Display for ResponseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ResponseRefusal {}
+
+/// Whether a response body read failed because this transport refused the
+/// received body rather than because the stream failed.
+pub fn is_response_refusal(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<ResponseRefusal>())
+}
 
 /// Immutable operation deadlines and the per-I/O idle bound.
 #[derive(Clone, Copy, Debug)]

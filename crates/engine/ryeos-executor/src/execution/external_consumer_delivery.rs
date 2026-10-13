@@ -14,6 +14,7 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORATION_VERIFIER_BYTES,
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingEntry;
+use ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord;
 use ryeos_state::objects::ExternalContentRealizationSet;
 
 /// No caller-selected filenames, modes, executables or supplementary entries.
@@ -22,10 +23,11 @@ use ryeos_state::objects::ExternalContentRealizationSet;
 pub fn prepare_retained_consumer_archive(
     state: &ryeos_app::state::AppState,
     prepared: &PreparedRetainedConsumerVerifier,
-    record: &[u8],
+    input: &ConsumerInputRecord,
     parent: &lillux::PinnedDirectory,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<PreparedConsumerArchive> {
+    let record = input.canonical_bytes()?;
     ensure!(
         !record.is_empty() && record.len() <= MAX_CONSUMER_INPUT_RECORD_BYTES,
         "consumer record exceeds its closed transport allowance"
@@ -37,6 +39,13 @@ pub fn prepare_retained_consumer_archive(
     prepared
         .purpose()
         .validate_remote_consumer_coordinate(prepared.coordinate(), prepared.selection())?;
+    ensure!(
+        input.purpose == *prepared.purpose()
+            && input.coordinate == *prepared.coordinate()
+            && input.selection == *prepared.selection()
+            && input.requirement == *prepared.requirement(),
+        "consumer delivery input differs from its authenticated retained authority"
+    );
     let source = prepared
         .purpose()
         .remote_verifier_sources
@@ -101,14 +110,14 @@ pub fn prepare_retained_consumer_archive(
         }
     }
     let record_authority =
-        lillux::sealed_memfd(c"consumer-verifier-record", record).map_err(anyhow::Error::msg)?;
+        lillux::sealed_memfd(c"consumer-verifier-record", &record).map_err(anyhow::Error::msg)?;
     let records = ConsumerProductInventory {
         entries: vec![
             GuestStagingEntry::RegularFile {
                 path: CONSUMER_INPUT_RECORD_NAME.into(),
                 mode: 0o400,
                 bytes: record.len() as u64,
-                sha256: lillux::sha256_hex(record),
+                sha256: lillux::sha256_hex(&record),
             },
             GuestStagingEntry::RegularFile {
                 path: CONSUMER_VERIFIER_REMOTE_NAME.into(),
@@ -132,6 +141,7 @@ pub fn prepare_retained_consumer_archive(
         deadline,
     )?;
     archive.require_verifier_selection(prepared.selection())?;
+    archive.require_consumer_input_record(input)?;
     Ok(archive)
 }
 

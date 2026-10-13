@@ -163,16 +163,15 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
-    let project_path = project_access
-        .as_ref()
-        .map(|access| access.path().to_path_buf());
     let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;
 
+    let schedules = load_schedule_summary(&state).await;
     let projection = build_dimension_projection(
         &state,
+        schedules,
         &session,
         &attachment,
-        project_path.as_ref(),
+        project_access.as_ref(),
         project_identity.as_ref(),
     )?;
 
@@ -181,9 +180,10 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
 fn build_dimension_projection(
     state: &AppState,
+    schedules: (usize, usize),
     session: &crate::browser_session::BrowserSession,
     attachment: &crate::browser_session::AdmittedBindingAttachment,
-    project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     project_identity: Option<&PathBuf>,
 ) -> Result<RyeOsDimensionProjection> {
     // ── Identity ──
@@ -206,7 +206,9 @@ fn build_dimension_projection(
     });
 
     // ── Spaces (from resolution roots) ──
-    let roots = state.engine.resolution_roots(project_path.cloned());
+    let roots = state
+        .engine
+        .resolution_roots(project_access.map(|access| access.path().to_path_buf()));
     let spaces: Vec<SpaceSummary> = roots
         .ordered
         .iter()
@@ -280,13 +282,13 @@ fn build_dimension_projection(
     });
 
     // ── Remotes (configured only, no probes) ──
-    let remotes = load_remotes(state, project_path);
+    let remotes = load_remotes(state, project_access);
 
     // ── Threads ──
     let active_threads = state.state_store.active_thread_count().unwrap_or(0);
 
     // ── Schedules ──
-    let (total_schedules, enabled_schedules) = load_schedule_summary(state);
+    let (total_schedules, enabled_schedules) = schedules;
 
     // ── GC ──
     let gc = load_gc_summary(state);
@@ -326,18 +328,16 @@ fn build_dimension_projection(
 
 // ── Data-loading helpers ────────────────────────────────────────────
 
-/// Load configured remotes without probing. Returns empty on error.
-fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteSummary> {
-    // Import remote config loading from ryeos-api's remote module.
-    // We can't directly depend on ryeos-api's remote module from ryeos-ui,
-    // so we load remotes using the layered config function exposed via
-    // the AppState's app_root.
-    let project = project_path.map(|p| p.as_path());
-    let app_root = &state.config.app_root;
-
-    // Try to load remotes — the config module is in ryeos-api which we
-    // depend on transitively. Use the public config loading function.
-    match ryeos_api::remote::config::load_remotes_layered(app_root, project) {
+/// Load configured remotes without probing. Returns empty on error. The
+/// project layer is read only through the retained project directory.
+fn load_remotes(
+    state: &AppState,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) -> Vec<RemoteSummary> {
+    match ryeos_api::remote::config::load_remotes_layered_under_project_authority(
+        &state.config.app_root,
+        project_access.map(crate::seat_auth::RetainedProjectAccess::directory),
+    ) {
         Ok(remotes_map) => {
             let mut entries: Vec<RemoteSummary> = remotes_map
                 .values()
@@ -355,8 +355,23 @@ fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteS
 }
 
 /// Load schedule summary counts. Returns (total, enabled).
-fn load_schedule_summary(state: &AppState) -> (usize, usize) {
-    match state.scheduler_db.list_specs_filtered(false, None, None) {
+#[cfg(not(feature = "scheduling"))]
+async fn load_schedule_summary(_state: &AppState) -> (usize, usize) {
+    (0, 0)
+}
+
+#[cfg(feature = "scheduling")]
+async fn load_schedule_summary(state: &AppState) -> (usize, usize) {
+    let Some(scheduler) = state
+        .extensions
+        .get::<ryeos_scheduler_service::SchedulerService>()
+    else {
+        return (0, 0);
+    };
+    let Ok(_read_guard) = scheduler.acquire_read().await else {
+        return (0, 0);
+    };
+    match scheduler.scheduler_db().list_specs_filtered(false, None, None) {
         Ok(specs) => {
             let total = specs.len();
             let enabled = specs.iter().filter(|s| s.enabled).count();

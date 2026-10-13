@@ -364,7 +364,7 @@ fn materialize_project_relative_file(
     if existing.is_some() && !replace {
         anyhow::bail!("attachment destination already exists: {relative_path}");
     }
-    directory.atomic_write_if_same(name, existing.as_ref(), bytes, 0o600)
+    directory.atomic_write_if_same(name, existing.as_ref(), bytes, 0o600, crate::APP_TEMP_PURPOSE)
 }
 
 impl From<BundleEventAppendResult> for BundleEventAppendResponse {

@@ -361,13 +361,13 @@ mod tests {
     }
 
     impl MockContext {
-        fn new() -> Self {
+        fn new(db: Arc<crate::db::SchedulerDb>) -> Self {
             let app_root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("state"))
                 .unwrap();
             Self {
                 app_root,
-                db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
+                db,
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
                 statuses: Mutex::new(HashMap::new()),
@@ -438,7 +438,8 @@ mod tests {
 
     #[tokio::test]
     async fn recover_completed_fire_uses_result_failed_outcome() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         let thread_id = crate::types::thread_id_from_fire("sched@1000");
         let fire = FireRecord {
             fire_id: "sched@1000".to_string(),
@@ -483,7 +484,8 @@ mod tests {
 
     #[tokio::test]
     async fn current_projection_startup_does_not_replay_fire_jsonl() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         ctx.db.begin_fire_projection_rebuild().unwrap();
         ctx.db.finish_fire_projection_rebuild().unwrap();
 

@@ -2,6 +2,8 @@ pub mod atomic_fs;
 pub mod cas;
 pub mod character_device;
 pub mod crypto;
+pub mod custody;
+pub mod environment;
 pub mod exec;
 pub mod guest_account;
 pub mod host_service;
@@ -20,6 +22,7 @@ pub mod secure_fs;
 pub mod signature;
 pub mod subordinate_process;
 pub mod task;
+pub mod test_hooks;
 pub mod time;
 pub mod vault;
 
@@ -41,14 +44,21 @@ pub use exec::{
     configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
     inherited_descriptor_coordinate, inherited_descriptor_path_for, inherited_duplex_channel_pair,
     protect_descriptor_from_exec, replace_current_process, sealed_executable_memfd,
-    sealed_executable_memfd_from_reader, sealed_memfd, supervised_launcher_attachment_status_pipe,
-    supervised_launcher_status_pipe, validate_subprocess_limits,
+    sealed_executable_memfd_from_reader, sealed_memfd, sealed_normalized_data_memfd,
+    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    validate_subprocess_limits,
 };
 pub use exec::{
     inherited_executable_path, take_inherited_descriptor_authority,
     take_inherited_descriptor_authority_from_env,
 };
-pub use exec::{retain_fork_sensitive_descriptors, retain_fork_sensitive_descriptors_until};
+pub use exec::{
+    ForkSensitiveDescriptorLeaseRefused, current_thread_retains_fork_sensitive_descriptors,
+    fork_exclusions_held_until_exit, in_forked_child, retain_fork_sensitive_descriptors_until,
+    try_retain_fork_sensitive_descriptors,
+};
+pub use custody::{AbandonedCustodyReport, abandon, abandoned_custody, relinquish_in_foreign_process};
+pub use environment::take_environment_values;
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
 };
@@ -60,7 +70,8 @@ pub use atomic_fs::{
 };
 pub use cas::{
     CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
-    atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path, valid_hash,
+    atomic_write_batch_in_pinned_root, canonical_json, canonical_json_bounded,
+    canonical_json_bytes_bounded, sha256_hex, shard_path, valid_hash,
 };
 pub use guest_account::GuestRuntimeAccount;
 pub use host_service::{
@@ -74,10 +85,11 @@ pub use local_ipc::{
     authenticated_unix_peer_from_stream,
 };
 pub use locks::{
-    ExactExclusiveFileLock, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
+    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExactLockHeld, ExclusiveFileLock, SharedFileLock,
+    with_exclusive_file_lock,
 };
 pub use process_control::{
-    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,
+    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress,
     ProcessHostLifetime, ProcessScope, ProcessScopeAllocation, ProcessScopeCapability,
     ProcessScopeConfiguration, ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
     ProcessScopeResourceLimits, QuiescedProcessScope, ResourceLimitedProcessScope,
@@ -91,10 +103,10 @@ pub use process_control::{
 };
 pub use secure_fs::{EmptyMountTargetReservation, EphemeralDescriptorFileLink};
 pub use subordinate_process::{
-    PinnedSubordinateProcessRequest, SubordinateDiagnosticDrain, SubordinateDiagnosticDrainEnd,
-    SubordinateProcess, SubordinateProcessDiagnostics, SubordinateProcessError,
-    SubordinateProcessExit, SubordinateProcessInput, SubordinateProcessOutput,
-    SubordinateProcessRequest,
+    PinnedSubordinateProcessRequest, RootTerminalSubordinateFailure, SubordinateDiagnosticDrain,
+    SubordinateDiagnosticDrainEnd, SubordinateProcess, SubordinateProcessDiagnostics,
+    SubordinateProcessError, SubordinateProcessExit, SubordinateProcessInput,
+    SubordinateProcessOutput, SubordinateProcessRequest,
 };
 
 #[cfg(target_os = "linux")]
@@ -104,10 +116,23 @@ pub use exec::{
     ReceivedDescriptorAuthority, ReceivedDescriptorTransfer, inherited_descriptor_transfer_pair,
     take_inherited_descriptor_transfer_sender,
 };
+#[cfg(unix)]
+pub use secure_fs::PATH_MAX_BYTES;
+#[cfg(target_os = "linux")]
 pub use secure_fs::{
-    CapturedRegularFile, DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree,
-    OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation, PinnedDirectory,
-    PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
+    MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
+    PrefixWalkBudget, PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkEntry,
+    PrefixWalkExhaustion,
+};
+pub use secure_fs::{
+    SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
+    parse_secure_temp_name,
+};
+pub use secure_fs::{
+    AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
+    ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
+    NoFollowDirectoryTree, OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation,
+    PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
     PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, PinnedRegularFileIdentity,
     ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
     collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,
@@ -116,7 +141,9 @@ pub use secure_fs::{
     ensure_open_regular_file_unchanged, inspect_optional_entry_no_follow,
     matches_pinned_regular_file_identity, matches_regular_file_identity,
     normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
-    open_mount_entry_kind, open_pinned_regular_file_no_follow, pin_canonical_mount_source,
+    open_mount_entry_kind, open_pinned_regular_file_no_follow, path_owner_ids,
+    path_pin_open_regular_file,
+    pin_canonical_mount_source,
     pinned_regular_file_identity, protected_system_write_roots, read_open_regular_file_bounded,
     read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
     read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
@@ -133,14 +160,16 @@ pub use sandbox::{
     LinuxSandboxAppliedLaunchTarget, LinuxSandboxCharacterDevice, LinuxSandboxExit,
     LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount,
     LinuxSandboxMountAccess, LinuxSandboxMountPreparationCommitments,
-    LinuxSandboxMountPreparationReceipt, LinuxSandboxNetwork, LinuxSandboxOverlay,
-    LinuxSandboxOverlayDescendantMount, LinuxSandboxProcFilesystem, LinuxSandboxProcess,
-    LinuxSandboxRequest, LinuxSandboxTermination, create_linux_overlay_template,
-    exit_with_linux_sandbox_status, inspect_linux_sandbox, launch_linux_sandbox,
-    launch_linux_sandbox_with_loopback_ingress, linux_sandbox_mount_overlaps_managed_namespace,
-    operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
+    LinuxSandboxMountPreparationReceipt, LinuxSandboxNativeTerminalObservation,
+    LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
+    LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest, LinuxSandboxTermination,
+    create_linux_overlay_template, exit_with_linux_sandbox_status, inspect_linux_sandbox,
+    launch_linux_sandbox, launch_linux_sandbox_with_loopback_ingress,
+    linux_sandbox_mount_overlaps_managed_namespace, operate_linux_overlay_workspace,
+    MAX_CURRENT_EXECUTABLE_BYTES, current_executable_digest, read_sealed_inherited_descriptor,
     read_sealed_inherited_descriptor_from_env, validate_connected_unix_stream_descriptor,
-    validate_current_executable_descriptor, write_inherited_descriptor,
+    validate_current_executable_descriptor,
+    write_inherited_descriptor,
 };
 
 pub use identity::envelope::{
@@ -181,6 +210,15 @@ pub fn spawn_awaiting_attachment(
     request: SubprocessRequest,
 ) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
     exec::lib_spawn_awaiting_attachment(request)
+}
+
+/// Carry the original process-local expiry through the existing held spawn.
+/// This is no admission, cleanup or funding authority.
+pub fn spawn_awaiting_attachment_until(
+    request: SubprocessRequest,
+    deadline: time::MonotonicDeadline,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    exec::lib_spawn_awaiting_attachment_until(request, deadline)
 }
 
 pub fn run_inherited_stdio(request: SubprocessRequest) -> SubprocessResult {

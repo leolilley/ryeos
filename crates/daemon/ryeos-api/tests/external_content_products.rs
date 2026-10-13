@@ -13,11 +13,11 @@ use ryeos_api::handlers::{
     external_content_import, external_content_products, product_qualification_launch,
 };
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
-use ryeos_app::node_policy::sections::external_content::{
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
-use ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use ryeos_app::operator_external_content::products::ProductRequest;
 use ryeos_app::operator_external_content::{ImportRequest, RetainedProductImportRequest};
 use ryeos_app::state::AppState;
@@ -36,12 +36,15 @@ const TERMINAL: &str = "T-00000000-0000-0000-0000-000000000002";
 const PRODUCT_BYTES: &[u8] = b"exact input";
 const REMOTE_ORIGIN: &str = "site:product-source";
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    _directory: tempfile::TempDir,
     state: Arc<AppState>,
     context: HandlerContext,
     evidence: ProductCaptureEvidence,
     witness_hash: String,
+    _store_owner: ryeos_app::test_support::TestStateStore,
+    _directory: tempfile::TempDir,
 }
 
 fn fixture(large_tier: bool, import_ceiling: u64, publish: bool) -> Fixture {
@@ -54,14 +57,14 @@ fn fixture_with_remote_owner(
     publish: bool,
     remote_owner: bool,
 ) -> Fixture {
-    let (directory, mut state) = test_state::build_test_state();
+    let (directory, store_owner, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
@@ -97,7 +100,7 @@ fn fixture_with_remote_owner(
         "ryeos.execute.service.external-content/launch-product-qualification".to_owned(),
         "ryeos.execute.service.external-content/launch-content-qualification".to_owned(),
     ];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -241,11 +244,12 @@ fn fixture_with_remote_owner(
     };
     drop(guard);
     Fixture {
-        _directory: directory,
         state: Arc::new(state),
         context,
         evidence,
         witness_hash,
+        _store_owner: store_owner,
+        _directory: directory,
     }
 }
 
@@ -538,11 +542,14 @@ async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_r
     let fixture = fixture(false, 4096, true);
     let launch_id = format!("L-{}", "a".repeat(32));
     let request = product_qualification_launch::Request {
+        consumer_invocation: None,
         launch_id: launch_id.clone(),
         witness_hash: fixture.witness_hash.clone(),
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         relationship_name: "missing_qualification_relationship".to_owned(),
+        project_context: None,
+        auxiliary_product_selections: Vec::new(),
     };
     let first = product_qualification_launch::handle(
         request.clone(),
@@ -696,7 +703,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     let fixture = fixture_with_remote_owner(false, 4096, true, true);
     let operator =
         NodeIdentity::load(&fixture._directory.path().join("source-operator.pem")).unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &fixture.state.config.authorized_keys_dir,
         &fixture.state.identity,
@@ -760,7 +767,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         )
     };
     read().unwrap();
-    let (grant_path, _, _) = ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    let (grant_path, _, _) = ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &fixture.state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),

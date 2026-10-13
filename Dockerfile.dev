@@ -35,6 +35,7 @@ COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 # Already-published bundles (CAS rebuilt by populate-bundles.sh).
 COPY bundles/.ai         /opt/ryeos/.ai
 COPY bundles/core        /opt/ryeos/core
+COPY bundles/scheduling /opt/ryeos/scheduling
 COPY bundles/central-auth /opt/ryeos/central-auth
 COPY bundles/standard    /opt/ryeos/standard
 COPY bundles/web         /opt/ryeos/web

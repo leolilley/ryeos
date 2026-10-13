@@ -432,24 +432,13 @@ pub async fn handle_open(
     }
 
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
-    let project_root = match project_access.as_ref() {
-        Some(access) => access.path().to_path_buf(),
-        None => state.config.app_root.clone(),
-    };
-    let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
-        &state.engine,
-        state
-            .node_history_policy()
-            .map_err(|error| HandlerError::Internal(error.to_string()))?,
+    let root_admission = admit_seat_root(
+        &state,
         &surface_ref,
-        &project_root,
+        project_access.as_ref(),
         &owner,
         session.granted_caps.clone(),
-        state.threads.site_id(),
-        state.threads.site_id(),
-        SEAT_KIND.to_string(),
-    )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    )?;
 
     // Linearize the durable seat creation after all descriptor-rooted
     // preparation. A concurrent revocation either wins here or happens after
@@ -494,6 +483,48 @@ pub async fn handle_open(
         "producer_incarnation": producer_incarnation,
         "next_engine_seq": next_engine_seq.to_string(),
     }))
+}
+
+/// Admit the root of a seat presenting `surface_ref`. A seat bound to a
+/// project is admitted only through the project's retained directory: the
+/// project is never re-walked by name, so a directory substituted at the
+/// project's path after attachment cannot redirect admission. A seat without
+/// a project is admitted against the app root.
+pub fn admit_seat_root(
+    state: &AppState,
+    surface_ref: &str,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+    owner: &str,
+    granted_caps: Vec<String>,
+) -> Result<ryeos_app::thread_lifecycle::NonExecutionRootAdmission, HandlerError> {
+    let node_history_policy = state
+        .node_history_policy()
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let request = ryeos_app::thread_lifecycle::NonExecutionRootRequest {
+        item_ref: surface_ref,
+        requested_by: owner,
+        caller_scopes: granted_caps,
+        current_site_id: state.threads.site_id(),
+        origin_site_id: state.threads.site_id(),
+        thread_profile: SEAT_KIND.to_string(),
+    };
+    match project_access {
+        Some(access) => {
+            ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+                &state.engine,
+                node_history_policy,
+                access.directory(),
+                request,
+            )
+        }
+        None => ryeos_app::thread_lifecycle::admit_non_execution_root(
+            &state.engine,
+            node_history_policy,
+            &state.config.app_root,
+            request,
+        ),
+    }
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))
 }
 
 pub async fn handle_append(

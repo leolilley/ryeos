@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-23T12:15:50Z:8ea2011b521f2f9ea8e52d327aa68f0b34f167bde501b8d06a572ef1d95025d8:RxdbXYE78ZVdtqvTiF7GvvTlRuWgFEYE5X1Rs6ncC2NMjMeuv/vgsq4CKZUnjFHfaAhocPcDZSqWHOvmtgs1Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:d148cc4401d2a5ba230f15daf8f35730bd42c494bb553161c22875dcd31e3026:MnDE+kGJkXlvJktwEw7U4RXA3fnvC4rfmUYmuHftC838ZpBys8N9gi+MD98aLD636pPZ2Yc14iQArNuQ20UyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-measure
 version: "1.0.0"
 description: Re-admit exact retained qualification testimony and compose a reviewable bundle-publication policy candidate without installing policy or publishing content.
-endpoint: bundle_release.authority_measure
+endpoint: bundle-release.authority-measure
 ui_read_only: true
 state_access: read_only_existing
 record_thread: false

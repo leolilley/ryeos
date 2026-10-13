@@ -1,0 +1,359 @@
+//! Operator state lock for mutual exclusion between daemon and standalone mode.
+//!
+//! The daemon acquires an exclusive lock on `<app_root>/.ai/state/operator.lock`
+//! at startup and holds it for its lifetime. Standalone state-backed services
+//! must acquire the same lock or fail with "daemon is running."
+//!
+//! Uses `flock(LOCK_EX | LOCK_NB)` for non-blocking exclusive access. The lock
+//! is automatically released when the file descriptor is closed (process exit,
+//! including panic).
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::Result;
+
+/// RAII guard for the operator state lock.
+///
+/// Holds the lock file open for the lifetime of the guard. Drop releases.
+pub struct StateLock {
+    inner: Arc<lillux::ExactExclusiveFileLock>,
+}
+
+/// Retained proof that the exact operator state lock remains held.
+///
+/// Unlike [`StateLock`], this authority cannot be acquired directly and does
+/// not authorize stopped-node operations. It exists so work already admitted
+/// by the live controller can keep replacement controllers excluded until the
+/// work has actually stopped, including after a bounded async-runtime shutdown
+/// gives up waiting for an uninterruptible blocking call.
+pub struct StateLockLease {
+    inner: Arc<lillux::ExactExclusiveFileLock>,
+}
+
+impl std::fmt::Debug for StateLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateLock").finish_non_exhaustive()
+    }
+}
+
+impl StateLock {
+    /// Transfer the SAME concrete lock allocation to an outside owner census.
+    /// The target's fork-child-close registration, parent and target semantics
+    /// remain inside the returned owner; no descriptor is closed or duplicated.
+    /// This supplies neither stopped-node mutation authority nor close evidence.
+    /// A foreign process retains the whole original wrapper on refusal.
+    pub fn into_original_owner(
+        self,
+    ) -> std::result::Result<Arc<lillux::ExactExclusiveFileLock>, (Self, anyhow::Error)> {
+        if let Err(error) = self.inner.require_original_process() {
+            return Err((self, error));
+        }
+        Ok(self.inner)
+    }
+
+    /// Attempt to acquire an exclusive, non-blocking lock on `lock_path`.
+    ///
+    /// Creates the file and parent directories if they don't exist.
+    /// Returns `Ok(StateLock)` if the lock was acquired.
+    /// Returns an error if another process holds the lock.
+    pub fn acquire(lock_path: &Path) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire(lock_path)?),
+        })
+    }
+
+    /// Acquire the same exact state authority with a bounded wait for kernel
+    /// teardown of a crashed predecessor generation.
+    pub fn acquire_with_timeout(lock_path: &Path, timeout: std::time::Duration) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire_with_timeout(
+                lock_path, timeout,
+            )?),
+        })
+    }
+
+    /// Acquire the already-existing operator lock without creating or writing
+    /// any filesystem entry. Read-only inspections use this to prove daemon
+    /// exclusion without changing the inspected state namespace.
+    pub fn acquire_existing_read_only(lock_path: &Path) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(lillux::ExactExclusiveFileLock::acquire_existing_read_only(
+                lock_path,
+            )?),
+        })
+    }
+
+    /// Require this guard to protect the exact operational lock of `app_root`.
+    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.inner.ensure_path_binding(&default_lock_path(app_root))
+    }
+
+    /// Retain only the live controller's exclusion lifetime. The returned
+    /// lease cannot be promoted into stopped-node mutation authority.
+    pub fn retain(&self) -> StateLockLease {
+        StateLockLease {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for StateLockLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateLockLease").finish_non_exhaustive()
+    }
+}
+
+impl StateLockLease {
+    /// Retain the SAME concrete exclusion owner for an outside inventory while
+    /// this lease still protects admitted work and durable account settlement.
+    /// This supplies no stopped-node mutation authority or retirement evidence.
+    /// The caller funds counted-alias work before calling this method.
+    pub fn original_owner_alias(&self) -> Result<Arc<lillux::ExactExclusiveFileLock>> {
+        self.inner.require_original_process()?;
+        Ok(Arc::clone(&self.inner))
+    }
+
+    /// Transfer the SAME concrete lock allocation to an outside owner census.
+    /// The target's fork-child-close registration, parent and target semantics
+    /// remain inside the returned owner; no descriptor is closed or duplicated.
+    /// This supplies neither stopped-node mutation authority nor close evidence.
+    /// A foreign process retains the whole original wrapper on refusal.
+    pub fn into_original_owner(
+        self,
+    ) -> std::result::Result<Arc<lillux::ExactExclusiveFileLock>, (Self, anyhow::Error)> {
+        if let Err(error) = self.inner.require_original_process() {
+            return Err((self, error));
+        }
+        Ok(self.inner)
+    }
+
+    /// Require this retained lease to protect the exact operational lock of
+    /// `app_root` before it is attached to admitted blocking work.
+    pub fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
+        self.inner.ensure_path_binding(&default_lock_path(app_root))
+    }
+}
+
+/// Return the default lock path for a given state directory.
+pub fn default_lock_path(app_root: &Path) -> PathBuf {
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("operator.lock")
+}
+
+/// Compose the live-controller lifetime used by an isolated application test.
+///
+/// Production composition must retain the lease from the state lock it
+/// acquired before startup. A test application has no outer daemon process,
+/// so this helper performs that same acquisition once and returns only the
+/// restricted lifetime authority carried by the App service container.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_controller_lifetime(app_root: &Path) -> Result<Arc<StateLockLease>> {
+    let lock = StateLock::acquire(&default_lock_path(app_root))?;
+    lock.ensure_protects_app_root(app_root)?;
+    Ok(Arc::new(lock.retain()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn acquire_and_release_lock() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+
+        {
+            let _lock = StateLock::acquire(&lock_path).unwrap();
+            assert!(lock_path.exists());
+            // Lock released when dropped
+        }
+
+        // Should be able to re-acquire after drop
+        let _lock2 = StateLock::acquire(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn double_acquire_fails() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+
+        let _lock1 = StateLock::acquire(&lock_path).unwrap();
+
+        let result = StateLock::acquire(&lock_path);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("state lock held"),
+            "expected 'state lock held' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn failed_acquire_preserves_holder_pid() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+
+        let _lock1 = StateLock::acquire(&lock_path).unwrap();
+        let holder_pid = fs::read_to_string(&lock_path).unwrap();
+
+        let result = StateLock::acquire(&lock_path);
+        assert!(result.is_err());
+
+        let after_failed_acquire = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(after_failed_acquire, holder_pid);
+    }
+
+    #[test]
+    fn bounded_acquire_never_steals_live_state_authority() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let _lock1 = StateLock::acquire(&lock_path).unwrap();
+        let holder_pid = fs::read_to_string(&lock_path).unwrap();
+
+        let error =
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(75))
+                .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("after waiting 0.1s"),
+            "bounded acquisition did not report its refusal: {error:#}"
+        );
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), holder_pid);
+    }
+
+    #[test]
+    fn bounded_acquire_obtains_the_exact_lock_after_holder_release() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let holder = StateLock::acquire(&lock_path).unwrap();
+        let waiter_path = lock_path.clone();
+        let waiter = std::thread::spawn(move || {
+            StateLock::acquire_with_timeout(&waiter_path, std::time::Duration::from_secs(1))
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(holder);
+        let acquired = waiter
+            .join()
+            .expect("bounded lock waiter panicked")
+            .expect("bounded waiter did not acquire the released exact lock");
+        assert!(StateLock::acquire(&lock_path).is_err());
+        drop(acquired);
+        StateLock::acquire(&lock_path).expect("released bounded lock was not reacquirable");
+    }
+
+    #[test]
+    fn retained_lease_excludes_replacement_after_primary_guard_drops() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+        let holder = StateLock::acquire(&lock_path).unwrap();
+        let lease = holder.retain();
+
+        drop(holder);
+        assert!(StateLock::acquire(&lock_path).is_err());
+
+        drop(lease);
+        StateLock::acquire(&lock_path).expect("replacement remained excluded after final lease");
+    }
+
+    #[test]
+    fn consuming_owner_handoff_preserves_same_lock_and_alias_refusal() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = default_lock_path(tmpdir.path());
+        let primary = StateLock::acquire(&path).unwrap();
+        let lease = primary.retain();
+        let primary = primary.into_original_owner().unwrap();
+        let lease = lease.into_original_owner().unwrap();
+        assert!(Arc::ptr_eq(&primary, &lease));
+        let primary = match Arc::try_unwrap(primary) {
+            Err(original) => original,
+            Ok(_) => panic!("retained lease lost the actual exclusion owner"),
+        };
+        assert!(StateLock::acquire(&path).is_err());
+        primary.ensure_path_binding(&path).unwrap();
+        drop(lease);
+        let unique = match Arc::try_unwrap(primary) {
+            Ok(original) => original,
+            Err(_) => panic!("whole-owner refusal failed to preserve the consuming source"),
+        };
+        unique.ensure_path_binding(&path).unwrap();
+        assert!(StateLock::acquire(&path).is_err());
+        // Ordinary RAII semantics remain available here; this is not an
+        // account-settlement or explicit registered-close receipt assertion.
+        drop(unique);
+        StateLock::acquire(&path).expect("final original owner did not release exclusion");
+    }
+
+    #[test]
+    fn inventory_alias_preserves_shared_admission_exclusion_until_final_holder() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = default_lock_path(tmpdir.path());
+        let primary = StateLock::acquire(&path).unwrap();
+        let store_lease = Arc::new(primary.retain());
+        let admission_lease = Arc::clone(&store_lease);
+        // Inventory registration happens before the admission inputs settle.
+        // It must work without consuming or replacing this shared lease.
+        let inventory_owner = store_lease.original_owner_alias().unwrap();
+        let primary_owner = primary.into_original_owner().unwrap();
+        assert!(Arc::ptr_eq(&inventory_owner, &primary_owner));
+        assert!(Arc::ptr_eq(&store_lease, &admission_lease));
+        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        let other_path = tmpdir.path().join("other.lock");
+        let other_owner = StateLock::acquire(&other_path).unwrap().into_original_owner().unwrap();
+        assert!(!Arc::ptr_eq(&inventory_owner, &other_owner));
+        drop(other_owner);
+        drop(primary_owner);
+        drop(store_lease);
+        assert!(StateLock::acquire(&path).is_err());
+        // Ending only the inventory alias must not release account protection.
+        drop(inventory_owner);
+        assert!(StateLock::acquire(&path).is_err());
+        admission_lease.ensure_protects_app_root(tmpdir.path()).unwrap();
+        drop(admission_lease);
+        StateLock::acquire(&path).expect("final admission lease did not release exclusion");
+        // This control exercises holder lifetime, not durable settlement or an
+        // original registered descriptor-close receipt.
+    }
+
+    #[test]
+    fn default_lock_path_is_under_state() {
+        let path = default_lock_path(Path::new("/var/lib/ryeosd"));
+        assert_eq!(
+            path,
+            PathBuf::from("/var/lib/ryeosd/.ai/state/operator.lock")
+        );
+    }
+
+    #[test]
+    fn read_only_acquire_preserves_existing_lock_file_and_never_creates_one() {
+        let tmpdir = TempDir::new().unwrap();
+        let missing = tmpdir.path().join("missing.lock");
+        assert!(StateLock::acquire_existing_read_only(&missing).is_err());
+        assert!(!missing.exists());
+
+        let lock_path = tmpdir.path().join("existing.lock");
+        fs::write(&lock_path, b"retained-holder\n").unwrap();
+        let before = fs::metadata(&lock_path).unwrap();
+        {
+            let _lock = StateLock::acquire_existing_read_only(&lock_path).unwrap();
+            assert_eq!(fs::read(&lock_path).unwrap(), b"retained-holder\n");
+        }
+        let after = fs::metadata(&lock_path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(fs::read(&lock_path).unwrap(), b"retained-holder\n");
+    }
+
+    #[test]
+    fn lock_creates_parent_dirs() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("nested").join("dir").join("test.lock");
+
+        let _lock = StateLock::acquire(&lock_path).unwrap();
+        assert!(lock_path.exists());
+    }
+}

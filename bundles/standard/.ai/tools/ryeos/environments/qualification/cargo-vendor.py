@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-22T03:00:54Z:77fb09fd2f47d9804891a4cd62c862db9f9d1be15662955f49c6bde068e7d898:9PjtDONc966+Rp6Wu/qbUL0QZnaShAv3BnnvBPt9AbPQ+UFCaRN7f3TzfKIfBql0KUQ7YTrxz9QRBdGkQvvkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-29T01:29:19Z:6e09711ecdbc51de77419abc1528e05468177f9c0a847b4c7496b56289b6b57d:NdFhkLrP2A1yUlYxfz89pCHj61uWK7iiBv7o5QB9AhZhInbWKDAKJRVtmHBFX4Y6amXRvKQWxFf59RY6Xf+iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/environments/qualification
-#   version: "1.0.2"
+#   version: "1.0.3"
 #   description: Independently qualify an exact offline Cargo vendor closure
 #   executor_id: "@subprocess"
 #   execution_protocol: protocol:ryeos/core/opaque
@@ -57,7 +57,6 @@ import tomllib
 
 
 ROOT = Path("/ryeos/realizations/cargo-vendor")
-PRODUCER = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
 HASH = re.compile(r"[0-9a-f]{64}")
 MAX_FILES = 50000
 MAX_FILE_BYTES = 134217728
@@ -76,7 +75,13 @@ def realizations():
     if any(set(item) != keys or not isinstance(item["entry_count"], int) or
            not isinstance(item["total_bytes"], int) for item in value):
         raise ValueError("vendor qualification realization identity is not canonical")
-    if python.get("manifest_hash") != PRODUCER or python.get("mount") != "producer-python":
+    # Signed Tool external_content pins this runtime; the daemon-authored
+    # sealed set supplies its selected identity independently of the subject.
+    if (python.get("kind") != "tree" or python.get("mode") != "pinned" or
+            python.get("mount_root") != "execution_runtime" or
+            python.get("mount") != "producer-python" or
+            not isinstance(python.get("manifest_hash"), str) or
+            not HASH.fullmatch(python["manifest_hash"])):
         raise ValueError("vendor verifier runtime changed")
     if (not HASH.fullmatch(platform.get("manifest_hash", "")) or
             platform.get("kind") != "tree" or platform.get("mode") != "pinned" or
@@ -88,7 +93,7 @@ def realizations():
             subject.get("mount") != "cargo-vendor" or
             not HASH.fullmatch(subject.get("manifest_hash", ""))):
         raise ValueError("vendor subject identity changed")
-    if subject["manifest_hash"] == PRODUCER:
+    if subject["manifest_hash"] == python["manifest_hash"]:
         raise ValueError("vendor closure may not qualify itself")
     if platform["manifest_hash"] == subject["manifest_hash"]:
         raise ValueError("vendor subject may not supply its verifier platform")

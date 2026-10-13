@@ -193,9 +193,10 @@ pub fn write_sealed_secrets(
 
     let mut sorted: Vec<(&String, &String)> = secrets.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
-    let mut plaintext_toml = String::new();
+    // Every plaintext staging buffer is zeroized on drop, including refusals.
+    let mut plaintext_toml = zeroize::Zeroizing::new(String::new());
     for (k, v) in &sorted {
-        let line = format!("{k} = {}\n", toml_quote(v));
+        let line = zeroize::Zeroizing::new(format!("{k} = {}\n", toml_quote(v).as_str()));
         let next_len = plaintext_toml
             .len()
             .checked_add(line.len())
@@ -233,8 +234,9 @@ pub fn read_sealed_secrets(
     let raw = read_bounded_envelope(store_path)?;
     let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw)
         .with_context(|| format!("parse envelope TOML at {}", store_path.display()))?;
-    let plaintext =
-        lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?;
+    let plaintext = zeroize::Zeroizing::new(
+        lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?,
+    );
     if plaintext.len() > MAX_VAULT_PLAINTEXT_BYTES {
         anyhow::bail!(
             "vault: decrypted plaintext is {} bytes; maximum is {MAX_VAULT_PLAINTEXT_BYTES}",
@@ -243,9 +245,15 @@ pub fn read_sealed_secrets(
     }
     let plaintext_str =
         std::str::from_utf8(&plaintext).context("decrypted plaintext is not UTF-8")?;
-    let map: HashMap<String, String> =
+    let mut map: HashMap<String, String> =
         toml::from_str(plaintext_str).context("decrypted plaintext is not a TOML map")?;
-    validate_decrypted_keys(&map, store_path)?;
+    if let Err(error) = validate_decrypted_keys(&map, store_path) {
+        use zeroize::Zeroize as _;
+        for value in map.values_mut() {
+            value.zeroize();
+        }
+        return Err(error);
+    }
     Ok(map)
 }
 
@@ -289,20 +297,24 @@ pub fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u
     Ok(bytes)
 }
 
-fn toml_quote(s: &str) -> String {
+fn toml_quote(s: &str) -> zeroize::Zeroizing<String> {
     if s.bytes()
         .all(|b| b.is_ascii() && b != b'"' && b != b'\\' && !b.is_ascii_control())
     {
-        format!("\"{s}\"")
+        zeroize::Zeroizing::new(format!("\"{s}\""))
     } else {
         let mut tmp = std::collections::BTreeMap::new();
         tmp.insert("v", s);
-        let serialized = toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\""));
-        serialized
-            .trim()
-            .strip_prefix("v = ")
-            .unwrap_or(&serialized)
-            .to_string()
+        let serialized = zeroize::Zeroizing::new(
+            toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\"")),
+        );
+        zeroize::Zeroizing::new(
+            serialized
+                .trim()
+                .strip_prefix("v = ")
+                .unwrap_or(&serialized)
+                .to_string(),
+        )
     }
 }
 

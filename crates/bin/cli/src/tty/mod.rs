@@ -649,10 +649,23 @@ async fn lifecycle_summary(app_root: PathBuf) -> TtyNodeSummary {
             status: "not initialized".to_string(),
             detail: Some(diagnostics.message),
         },
-        Ok(LifecycleStatus::Stopped { app_root }) => TtyNodeSummary {
-            status: "stopped".to_string(),
-            detail: Some(format!("app root: {}", app_root.display())),
-        },
+        Ok(LifecycleStatus::Stopped {
+            app_root,
+            capacity,
+            capacity_error,
+        }) => {
+            let mut detail = vec![format!("app root: {}", app_root.display())];
+            for (key, value) in ryeos_node::status::capacity_status_rows(
+                capacity.as_ref(),
+                capacity_error.as_deref(),
+            ) {
+                detail.push(format!("{key}: {value}"));
+            }
+            TtyNodeSummary {
+                status: "stopped".to_string(),
+                detail: Some(detail.join(", ")),
+            }
+        }
         Ok(LifecycleStatus::Running { metadata, .. }) => {
             let mut detail = Vec::new();
             if let Some(pid) = metadata.pid {

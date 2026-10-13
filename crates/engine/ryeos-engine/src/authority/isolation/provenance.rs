@@ -144,8 +144,9 @@ pub struct AppliedIsolationLaunch {
 /// this type when handing it to Lillux's attachment-aware spawn path instead of
 /// accidentally passing it to an ordinary spawn API.
 pub struct IsolationRequestAwaitingAttachment {
-    request: lillux::SubprocessRequest,
+    request: Option<lillux::SubprocessRequest>,
     scope: Option<lillux::ProcessScope>,
+    original_backend_capture: Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>>,
 }
 
 impl IsolationRequestAwaitingAttachment {
@@ -153,18 +154,53 @@ impl IsolationRequestAwaitingAttachment {
         request: lillux::SubprocessRequest,
         scope: Option<lillux::ProcessScope>,
     ) -> Self {
-        Self { request, scope }
+        Self {
+            request: Some(request),
+            scope,
+            original_backend_capture: None,
+        }
+    }
+
+    /// Only the actual selected runtime compiler can populate this private
+    /// request custody. It carries capture facts, not native authority.
+    pub(super) fn new_with_original_backend_capture(
+        request: lillux::SubprocessRequest,
+        capture: std::sync::Arc<super::VerifiedIsolationBackendCapture>,
+    ) -> Self {
+        Self {
+            request: Some(request),
+            scope: None,
+            original_backend_capture: Some(capture),
+        }
+    }
+
+    pub(crate) fn take_original_backend_capture(
+        &mut self,
+    ) -> Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>> {
+        self.original_backend_capture.take()
     }
 
     /// Require exact post-release applied-launch testimony on this held
     /// supervised adapter request. This is an explicit stronger consumer
     /// contract; ordinary managed launches keep their existing status floor.
     pub fn require_applied_launch_receipt(mut self) -> Result<Self, EngineError> {
-        let status = self.request.supervised_status.as_mut().ok_or_else(|| {
+        let request = self
+            .request
+            .as_mut()
+            .ok_or_else(|| EngineError::Internal("compiled held request already spent".into()))?;
+        let status = request.supervised_status.as_mut().ok_or_else(|| {
             EngineError::IsolationPolicyRefused {
                 reason: "held launch has no supervised adapter status channel".into(),
             }
         })?;
+        if status
+            .validate_existing_native_settlement_requirements(
+                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+            )
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?
+        {
+            return Ok(self);
+        }
         status
             .require_applied_launch_receipt(
                 ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
@@ -183,12 +219,46 @@ impl IsolationRequestAwaitingAttachment {
         // The concrete scope was validated and retained BEFORE compiling the
         // plan. It cannot be swapped or omitted at this last launch seam.
         // Its higher owner separately journals recovery through any error.
+        let Some(request) = self.request else {
+            return Err(lillux::SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "compiled held request already spent".into(),
+                exit_code: -1,
+                duration_ms: 0.0,
+                pid: 0,
+                timed_out: false,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            });
+        };
         match self.scope {
             Some(scope) => scope
-                .spawn_awaiting_attachment(self.request)
+                .spawn_awaiting_attachment(request)
                 .map_err(|error| error.result),
-            None => lillux::spawn_awaiting_attachment(self.request),
+            None => lillux::spawn_awaiting_attachment(request),
         }
+    }
+
+    /// Narrow the existing unscoped attachment path by its original expiry.
+    /// Trusted pooled ownership does not acquire a local process scope.
+    pub fn spawn_until(
+        self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lillux::ProcessAwaitingAttachment, EngineError> {
+        if self.scope.is_some() {
+            return Err(EngineError::Internal(
+                "deadline-bound unscoped attachment cannot acquire local scope".into(),
+            ));
+        }
+        let request = self
+            .request
+            .ok_or_else(|| EngineError::Internal("compiled held request already spent".into()))?;
+        lillux::spawn_awaiting_attachment_until(request, deadline)
+            .map_err(crate::dispatch::subprocess_spawn_error)
     }
 }
 
@@ -203,6 +273,33 @@ pub struct AppliedIsolationLaunchAwaitingAttachment {
     /// Exact destination/kind/access expectation compiled independently of
     /// adapter translation, before the held target or provider can run.
     pub expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
+    /// Private compiler custody; callers cannot construct or replace it.
+    pub(crate) original_command_binding: Option<super::CompiledOriginalCommandBinding>,
+}
+
+#[cfg(target_os = "linux")]
+impl AppliedIsolationLaunchAwaitingAttachment {
+    /// Lexical component preparation only. The upper must retain this SAME
+    /// outer owner and private lower storage. L1 supplies no production mint.
+    /// This bridge does not admit a callback/caller or prove final owner Drop.
+    pub fn prepare_selected_scoped_into(
+        &mut self,
+        destination: &mut lillux::exec::SelectedScopedBorrow<'_>,
+        original_service: lillux::time::MonotonicDeadline,
+        original_cleanup: lillux::time::MonotonicDeadline,
+    ) -> Result<(), EngineError> {
+        destination
+            .prepare_from_compiled_slots(
+                &mut self.request.request,
+                &mut self.request.scope,
+                &mut self.expected_applied_launch,
+                &mut self.expected_mount_preparation,
+                original_service,
+                original_cleanup,
+            )
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })
+        // Provenance, actual original binding and backend capture remain HERE.
+    }
 }
 
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {
@@ -241,6 +338,11 @@ pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, Engin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The former selected_outer_refusal fixture minted owned Lillux custody.
+    // L1 intentionally exports no dependency-build fixture/native issuer, so
+    // exact outer refusal/transfer controls require the future real root loan.
+    // Lower lexical refusal controls remain in Lillux's private unit fixtures.
 
     fn provenance(protocol: &str) -> IsolationLaunchProvenance {
         IsolationLaunchProvenance {

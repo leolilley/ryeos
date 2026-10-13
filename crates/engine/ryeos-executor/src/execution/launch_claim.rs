@@ -139,6 +139,10 @@ impl ThreadLaunchClaim {
         // stored atomically by StateStore before this guard was constructed.
         Ok(self.canonical_owner.clone())
     }
+
+    pub(super) fn selected_claim_identity(&self) -> (&str, &str, &str) {
+        (&self.thread_id, &self.claim_id, &self.canonical_owner)
+    }
 }
 
 impl Drop for ThreadLaunchClaim {

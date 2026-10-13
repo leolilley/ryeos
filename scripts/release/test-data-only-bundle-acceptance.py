@@ -74,6 +74,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         self.assertEqual(plan["target"], self.case["target"])
         self.assertEqual(plan["payloads"], [])
         self.assertEqual(plan["cargo_packages"], [])
+        self.assertEqual(plan["cargo_feature_selections"], [])
         self.assertFalse(plan["requires_binary_build"])
         self.assertTrue(plan["clean_output_required"])
         self.assertFalse(plan["ambient_target_reuse_allowed"])
@@ -237,10 +238,16 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         forged["payloads"] = [{
             "bundle": "central-auth", "binary": "forged", "cargo_package": "forged",
             "build_class": "release", "bundle_sets": ["release-authority"],
+            "required_features": [],
+        }]
+        stale_features = copy.deepcopy(plan)
+        stale_features["cargo_feature_selections"] = [{
+            "cargo_package": "ryeos-handler-bins", "features": ["core-handlers"]
         }]
         cases = [
             ({"release_input": plan}, "verified ownership resolution required"),
             ({"release_input": forged, "resolved_config": verified}, "exact ownership selection"),
+            ({"release_input": stale_features, "resolved_config": verified}, "feature, or build-class projection"),
             ({"release_input": plan, "resolved_config": {**verified, "source": {
                 **verified["source"], "bundle_name": "another-bundle",
             }}}, "another source"),

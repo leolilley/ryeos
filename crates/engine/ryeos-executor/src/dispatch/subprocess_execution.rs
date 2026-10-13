@@ -11,15 +11,39 @@ pub(super) enum ManagedProtocolRoute {
     FramedStreaming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectProtocolRoute {
+    Ordinary,
+    QualificationOpaqueCallback,
+}
+
+pub(crate) fn direct_protocol_route(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Option<DirectProtocolRoute> {
+    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+    if protocol.descriptor.lifecycle.mode == LifecycleMode::Managed
+        && protocol.descriptor.stdin.shape == StdinShape::Opaque
+        && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
+        && protocol.descriptor.stdout.mode == StdoutMode::Terminal
+        && protocol.descriptor.callback_channel == CallbackChannel::Http
+        && !protocol.descriptor.capabilities.allows_detached
+        && protocol.descriptor.qualification_callback
+            == Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
+    {
+        return Some(DirectProtocolRoute::QualificationOpaqueCallback);
+    }
+    (protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
+        || protocol.descriptor.callback_channel == CallbackChannel::None)
+        .then_some(DirectProtocolRoute::Ordinary)
+}
+
 /// Select the existing executor-plan surface from wire mechanics, never a
 /// kind or protocol name. Managed callback runtimes own launch envelopes;
 /// callback-free streams consume the ordinary signed subprocess plan.
 pub(super) fn uses_direct_subprocess_plan(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> bool {
-    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode};
-    protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
-        || protocol.descriptor.callback_channel == CallbackChannel::None
+    direct_protocol_route(protocol).is_some()
 }
 
 /// Enforce the one ordinary-subprocess wire contract everywhere admission can
@@ -30,6 +54,13 @@ pub(crate) fn validate_ordinary_protocol_contract(
     kind: &str,
 ) -> Result<(), DispatchError> {
     use ryeos_engine::protocol_vocabulary::{LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+
+    if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_owned(),
+            detail: "qualification opaque callback requires original bound provenance and composition-retained native custody; selected route remains refused".into(),
+        });
+    }
 
     let terminal = protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
@@ -175,7 +206,13 @@ pub(crate) async fn dispatch_subprocess(
         root_subject,
         hop_runtime,
         launch_handoff,
+        invocation_root,
     } = sctx;
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected dedicated owner issuer is not yet joined; contact and ordinary fallback refused"
+        )));
+    }
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
@@ -280,6 +317,7 @@ pub(crate) async fn dispatch_subprocess(
                     root_subject,
                     hop_runtime,
                     launch_handoff,
+                    invocation_root,
                 },
                 protocol,
             ))
@@ -319,8 +357,14 @@ async fn dispatch_managed_subprocess(
         handler_context,
         role,
         launch_handoff,
+        invocation_root,
     } = sctx;
 
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected managed owner driver is not admitted"
+        )));
+    }
     if classify_managed_protocol(protocol, &canonical_ref.kind)?
         == ManagedProtocolRoute::FramedStreaming
     {
@@ -663,28 +707,33 @@ async fn dispatch_tool_subprocess(
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
+    // Direct tools have no continuation admission. Refuse before resolution,
+    // finalization, CAS context or any vault access.
+    if let Some(previous) = request.previous_thread_id.as_deref() {
+        return Err(DispatchError::DirectContinuationUnsupported {
+            item_ref,
+            previous_thread_id: previous.to_owned(),
+        });
+    }
+
     require_terminal_executor_id(verified, &item_ref)?;
 
-    let admitted_resolution = if request.previous_thread_id.is_none() {
-        request
-            .root_admission
-            .as_ref()
-            .map(|admission| {
-                admission
-                    .ensure_matches_provenance(&request.provenance)
-                    .map_err(DispatchError::Internal)?;
-                admission
-                    .execution_request(
-                        ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
-                        request.launch_mode.to_owned(),
-                        request.params.clone(),
-                    )
-                    .map_err(DispatchError::Internal)
-            })
-            .transpose()?
-    } else {
-        None
-    };
+    let admitted_resolution = request
+        .root_admission
+        .as_ref()
+        .map(|admission| {
+            admission
+                .ensure_matches_provenance(&request.provenance)
+                .map_err(DispatchError::Internal)?;
+            admission
+                .execution_request(
+                    ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
+                    request.launch_mode.to_owned(),
+                    request.params.clone(),
+                )
+                .map_err(DispatchError::Internal)
+        })
+        .transpose()?;
     let resolution_engine = std::sync::Arc::clone(&ctx.engine);
     let resolution_item_ref = item_ref.clone();
     let resolution_plan_context = ctx.plan_ctx.clone();
@@ -701,8 +750,7 @@ async fn dispatch_tool_subprocess(
     let resolution_parameters = request.params.clone();
     let resolution_usage_subject = request.usage_subject.clone();
     let resolution_usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
-    let creates_chain_root =
-        request.previous_thread_id.is_none() && request.root_admission.is_none();
+    let creates_chain_root = request.root_admission.is_none();
     let mut resolved = match admitted_resolution {
         Some(resolved) => resolved,
         None => tokio::task::spawn_blocking(move || {
@@ -800,9 +848,7 @@ async fn dispatch_tool_subprocess(
     // A method-dispatch wrapper carries the target's admission through the
     // recursive request above. Only a concrete subprocess root may attach that
     // admission to the locally resolved subject.
-    if request.previous_thread_id.is_none()
-        && let Some(admission) = request.root_admission.as_ref()
-    {
+    if let Some(admission) = request.root_admission.as_ref() {
         let local_subject = verified.ok_or_else(|| {
             DispatchError::InvalidRef(
                 item_ref.clone(),
@@ -890,41 +936,10 @@ async fn dispatch_tool_subprocess(
         )?;
     }
 
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(request.provenance.original_project_path()));
-    let vault_bindings = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        request.acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| match e {
-        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
-            let env_var = names
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            DispatchError::RequiredSecretMissing {
-                item_ref: item_ref_for_error.clone(),
-                env_var: env_var.clone(),
-                source_kind: "declared".to_string(),
-                source_name: "item metadata".to_string(),
-                remediation: crate::dispatch_error::required_secret_remediation(&env_var),
-            }
-        }
-        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
-        }
-        ryeos_app::vault::VaultReadError::Internal(e) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
-        }
-    })?;
-
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
         handler_context,
-        vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
@@ -1072,6 +1087,34 @@ fn validate_direct_source_closure(
 }
 
 fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
+    // The runner reads declared secrets only after admission verification;
+    // their refusal keeps its public class rather than a subprocess failure.
+    if let Some(vault_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ryeos_app::vault::VaultReadError>())
+    {
+        return match vault_error {
+            ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+                let env_var = names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                DispatchError::RequiredSecretMissing {
+                    item_ref,
+                    env_var: env_var.clone(),
+                    source_kind: "declared".to_string(),
+                    source_name: "item metadata".to_string(),
+                    remediation: crate::dispatch_error::required_secret_remediation(&env_var),
+                }
+            }
+            error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+            }
+            ryeos_app::vault::VaultReadError::Internal(error) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error}"))
+            }
+        };
+    }
     if let Some(eligibility) = error.chain().find_map(|cause| {
         cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
     }) {
@@ -1091,6 +1134,98 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
     DispatchError::SubprocessRunFailed { item_ref, detail }
 }
 
+/// Static control: no production `DispatchRequest`/`DispatchLaunchOptions`
+/// literal produces a predecessor thread. A direct continuation needs its own
+/// admission first; until then a new producer must fail this control.
+#[cfg(test)]
+mod direct_continuation_producer_controls {
+    fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "tests" && name != "target" && !name.starts_with('.') {
+                    visit(&path, files);
+                }
+            } else if name.ends_with(".rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn literal_body(source: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &source[open..]
+    }
+
+    #[test]
+    fn no_production_literal_produces_a_previous_thread_id() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        visit(&crates, &mut files);
+        let mut literals = 0usize;
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            // Production code only: stop at the first test module.
+            let source = source.split("#[cfg(test)]").next().unwrap_or("");
+            for name in ["DispatchRequest {", "DispatchLaunchOptions {"] {
+                for (index, _) in source.match_indices(name) {
+                    let prefix = &source[..index];
+                    if prefix.ends_with("struct ") || prefix.ends_with("impl ")
+                        || prefix.ends_with("for ")
+                    {
+                        continue;
+                    }
+                    let body = literal_body(source, index + name.len() - 1);
+                    for line in body.lines().map(str::trim) {
+                        let Some(value) = line.strip_prefix("previous_thread_id") else {
+                            continue;
+                        };
+                        literals += 1;
+                        let value = value.trim_start_matches(':').trim();
+                        assert!(
+                            value.starts_with("None")
+                                || value.starts_with("request.previous_thread_id")
+                                || value == ",",
+                            "{}: a dispatch literal produces previous_thread_id `{line}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            // In a file that builds a dispatch literal, a shorthand forward
+            // must forward an existing request or option.
+            let builds_literal = ["DispatchRequest {", "DispatchLaunchOptions {"]
+                .iter()
+                .any(|name| source.contains(name));
+            for line in source.lines().map(str::trim).filter(|_| builds_literal) {
+                if let Some(value) = line.strip_prefix("let previous_thread_id =") {
+                    let value = value.trim();
+                    assert!(
+                        value.starts_with("request.previous_thread_id")
+                            || value.starts_with("options.previous_thread_id"),
+                        "{}: previous_thread_id local is produced, not forwarded: `{line}`",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(literals > 0, "the scan found no dispatch literal");
+    }
+}
+
 #[cfg(test)]
 mod runner_error_tests {
     use super::*;
@@ -1104,6 +1239,24 @@ mod runner_error_tests {
         };
         assert_eq!(item_ref, "tool:test/run");
         assert_eq!(detail, "spawn item: lillux refused exact mount authority");
+    }
+
+    #[test]
+    fn post_admission_missing_secret_keeps_its_public_class() {
+        let error = anyhow::Error::new(ryeos_app::vault::VaultReadError::MissingSecrets {
+            principal: "fp:test".to_owned(),
+            names: vec!["API_TOKEN".to_owned()],
+        })
+        .context("authorize declared secrets for the admitted waiting root");
+        let mapped = map_runner_error("tool:test/run".to_owned(), error);
+        let DispatchError::RequiredSecretMissing {
+            item_ref, env_var, ..
+        } = mapped
+        else {
+            panic!("missing declared secret must keep its public error class");
+        };
+        assert_eq!(item_ref, "tool:test/run");
+        assert_eq!(env_var, "API_TOKEN");
     }
 }
 
@@ -1138,6 +1291,48 @@ mod direct_protocol_tests {
         validate_ordinary_protocol_contract(&protocol, "fixture").unwrap();
         protocol.descriptor.stdin.shape = StdinShape::ParametersJson;
         assert!(validate_ordinary_protocol_contract(&protocol, "fixture").is_err());
+    }
+
+    #[test]
+    fn exact_qualification_wire_is_direct_but_unconditionally_refused() {
+        let mut protocol = streaming();
+        protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        ))).unwrap();
+        // Canonical label cannot determine the mechanics or grant readiness.
+        protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
+        assert_eq!(direct_protocol_route(&protocol), Some(DirectProtocolRoute::QualificationOpaqueCallback));
+        assert!(uses_direct_subprocess_plan(&protocol));
+        let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
+        assert!(error.to_string().contains("selected route remains refused"));
+        assert!(classify_managed_protocol(&protocol, "tool").is_err());
+        protocol.descriptor.qualification_callback = None;
+        assert_eq!(direct_protocol_route(&protocol), None);
+        protocol.descriptor.qualification_callback = Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
+        assert_eq!(direct_protocol_route(&protocol), None);
+    }
+
+    #[test]
+    fn qualification_near_miss_wire_cannot_select_the_typed_route() {
+        let mut original = streaming();
+        original.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        ))).unwrap();
+        let mut changed = original.clone();
+        changed.descriptor.capabilities.allows_detached = true;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdin.shape = StdinShape::LaunchEnvelope;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdout.shape = ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original;
+        changed.descriptor.callback_channel = ryeos_engine::protocol_vocabulary::CallbackChannel::None;
+        assert_eq!(direct_protocol_route(&changed), Some(DirectProtocolRoute::Ordinary));
+        assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
     }
 
     #[test]

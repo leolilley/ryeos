@@ -558,7 +558,12 @@ impl LargeObjectStore {
         let bytes = lillux::canonical_json(&serde_json::to_value(sidecar)?)?.into_bytes();
         if self
             .sidecars
-            .atomic_create_regular(OsStr::new(&sidecar.file_sha256), &bytes, 0o444)?
+            .atomic_create_regular(
+                OsStr::new(&sidecar.file_sha256),
+                &bytes,
+                0o444,
+                crate::STATE_TEMP_PURPOSE,
+            )?
             .is_none()
         {
             let existing = self

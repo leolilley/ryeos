@@ -13,6 +13,7 @@ use std::{
 use anyhow::Context as _;
 use ryeos_app::{handler_context::HandlerContext, state::AppState};
 use serde_json::Value;
+use serde_json::json;
 
 /// An immutable release source tree backed by RyeOS's verified ProjectSnapshot
 /// materialization authority. No VCS serialization or mutable pathname is an
@@ -528,7 +529,7 @@ pub(crate) async fn execute_pinned_graph(
         let maximum_bytes = state
             .node_policy
             .require::<
-                ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+                ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
             >()?
             .limits
             .max_total_bytes;
@@ -619,6 +620,337 @@ pub(crate) async fn execute_pinned_graph(
     drop(project_ctx.take_captured_generation());
     drop(workspace);
     result
+}
+
+/// Capture the exact signed release overlay, then let the dedicated
+/// qualification owner reserve, preflight, seal and dispatch its read-only
+/// verifier. The captured generation stays rooted until accepted handoff.
+pub(crate) async fn execute_protected_qualification(
+    request: PinnedGraphExecution,
+    witness_hash: String,
+    relationship_name: String,
+    context: HandlerContext,
+    state: Arc<AppState>,
+) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        context.verified,
+        "bundle qualification requires an authenticated caller"
+    );
+    let PinnedGraphExecution {
+        graph_ref,
+        source_generation,
+        signed_build_recipe,
+        build_recipe_filename,
+        build_recipe_must_match_source,
+        capture_recipe_filename,
+        signed_capture_recipe,
+        recipe_ref,
+        expected_recipe_raw_digest,
+        parameters,
+        product_selections,
+        pre_minted_thread_id,
+    } = request;
+    anyhow::ensure!(
+        graph_ref.starts_with("tool:"),
+        "release qualification requires a Tool"
+    );
+    anyhow::ensure!(
+        parameters == json!({}),
+        "release qualification parameters belong to signed policy"
+    );
+    anyhow::ensure!(
+        pre_minted_thread_id.is_none(),
+        "protected qualification reserves its own thread"
+    );
+    let product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(product_selections)?;
+    let full_product_selections = product_selections.clone();
+    let complete_selections = product_selections
+        .iter()
+        .map(|input| input.selection.clone())
+        .collect::<Vec<_>>();
+    let mut auxiliary_product_selections = Vec::new();
+    let mut subject_count = 0;
+    for input in product_selections {
+        anyhow::ensure!(matches!(&input.target, ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}), "release qualification requires Root selections");
+        // The protected owner derives the actual subject slot from the signed
+        // policy. This only removes the one unqualified captured witness that
+        // the release stage supplied; every other slot remains explicit.
+        if input.selection.witness_hash == witness_hash
+            && matches!(&input.selection.witness_source, ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {})
+            && input.selection.qualification_hash.is_none()
+        {
+            subject_count += 1;
+        } else {
+            auxiliary_product_selections.push(input);
+        }
+    }
+    anyhow::ensure!(
+        subject_count == 1,
+        "release qualification requires one exact subject selection"
+    );
+    let overlay_recipe_digest = ryeos_state::objects::canonical_value_digest(&json!({
+        "build": signed_build_recipe.as_str(),
+        "capture": signed_capture_recipe.as_deref(),
+        "recipe_ref": recipe_ref,
+    }))?;
+    let workspace = tokio::task::spawn_blocking(move || {
+        source_generation.materialize_with_recipe_overlay(
+            &signed_build_recipe,
+            build_recipe_filename,
+            build_recipe_must_match_source,
+            capture_recipe_filename,
+            signed_capture_recipe.as_deref(),
+        )
+    })
+    .await
+    .context("release qualification overlay materializer stopped")??;
+    let mut overlay = crate::routes::response_modes::execute_mode::resolve_project_context_off_thread(
+        crate::routes::response_modes::execute_mode::ResolveProjectContextRequest {
+            state: state.as_ref().clone(),
+            source: ryeos_executor::execution::project_source::ProjectSource::CaptureLiveFullProject,
+            project_path: workspace.path().to_path_buf(),
+            principal_id: context.fingerprint.clone(),
+            checkout_id: format!("bundle-qualification-{}", uuid::Uuid::new_v4()),
+            pinned_realization: Some(ryeos_executor::execution::project_source::PinnedContextRealization::ReadOnly),
+            normalization: crate::routes::response_modes::execute_mode::ProjectRootNormalization::CanonicalizeLive,
+            launch_timings: None,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("capture release qualification overlay: {error}"))?;
+    let snapshot_hash = overlay
+        .snapshot_hash
+        .clone()
+        .context("release qualification lost its overlay snapshot")?;
+    let site_id = state.threads.site_id().to_owned();
+    let plan_ctx = ryeos_engine::contracts::PlanContext {
+        requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+            ryeos_engine::contracts::Principal {
+                fingerprint: context.fingerprint.clone(),
+                scopes: context.scopes.clone(),
+            },
+        ),
+        project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: overlay.effective_path.clone(),
+        },
+        subject_resolution_authority:
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.clone(),
+            },
+        current_site_id: site_id.clone(),
+        origin_site_id: context.execution_origin(&site_id),
+        execution_hints: Default::default(),
+        scheduled_fire: None,
+        validate_only: false,
+    };
+    let recipe_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(recipe_ref)?;
+    let resolved_recipe = overlay.request_engine.resolve(&plan_ctx, &recipe_ref)?;
+    anyhow::ensure!(
+        resolved_recipe.raw_content_digest == expected_recipe_raw_digest,
+        "protected qualifier overlay differs from publisher-authorized recipe"
+    );
+    overlay
+        .request_engine
+        .verify(&plan_ctx, resolved_recipe)
+        .context("publisher-authorized qualification recipe is not trusted")?;
+
+    let maximum_bytes = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .limits
+        .max_total_bytes;
+    compose_pinned_release_consumer(
+        Arc::clone(&state),
+        context.clone(),
+        graph_ref.to_owned(),
+        snapshot_hash.clone(),
+        complete_selections,
+        maximum_bytes,
+    )
+    .await?;
+
+    // Snapshot wrappers carry a capture timestamp, so their hashes change on
+    // retry even when the exact overlay bytes do not. Use the authenticated
+    // tree and policy identities for the stable stage coordinate. The actual
+    // snapshot hash remains sealed by the protected launch purpose.
+    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(
+        &state
+            .state_store
+            .pinned_state_authority()?
+            .cas_store()?
+            .get_object(&snapshot_hash)?
+            .context("release qualification overlay snapshot is absent")?,
+    )?;
+    // The recorded service root is an executor-owned retry coordinate. When
+    // absent, exact stage content still produces one stable launch id.
+    let stage = json!({
+        "schema": "ryeos.bundle_release_qualification_launch.v1",
+        "owner": context.fingerprint,
+        "site": site_id,
+        "origin_site": context.execution_origin(&site_id),
+        "recorded_service_root": context.recorded_service_root_id(),
+        "overlay_recipes": overlay_recipe_digest,
+        "recipe_ref": recipe_ref.to_string(),
+        "recipe_raw_digest": expected_recipe_raw_digest,
+        "qualifier_ref": graph_ref,
+        "subject_witness": witness_hash,
+        "relationship": relationship_name,
+        "auxiliary_selections": auxiliary_product_selections,
+    });
+    let launch_id = release_stage_launch_id(&snapshot, &stage)?;
+    let captured = overlay
+        .take_captured_generation()
+        .context("release qualification lost its staged overlay snapshot")?;
+    // The outer service request may be cancelled while the protected owner is
+    // still admitting its root. Move the staged snapshot into a detached task
+    // before awaiting handoff so cancellation cannot release its CAS roots.
+    let launch_owner = spawn_protected_qualification_launch_owner(
+        captured,
+        super::product_qualification_launch::Request {
+            launch_id: launch_id.clone(),
+            witness_hash,
+            witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+            relationship_name,
+            consumer_invocation: None,
+            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash }),
+            auxiliary_product_selections,
+        },
+        context,
+        Arc::clone(&state),
+        graph_ref.to_owned(),
+        full_product_selections,
+        #[cfg(test)]
+        None,
+    );
+    drop(overlay);
+    drop(workspace);
+    let accepted = launch_owner.await.with_context(|| {
+        format!("protected qualification launch {launch_id} owner stopped; query launch/status")
+    })??;
+    let thread_id = accepted
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .context("protected qualification lost its checked thread identity")?
+        .to_owned();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
+    loop {
+        if let Some(thread) = state.threads.get_thread(&thread_id)? {
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status).is_some_and(
+                |status| {
+                    status.is_terminal() && status != ryeos_state::objects::ThreadStatus::Continued
+                },
+            ) {
+                let envelope = json!({"thread":{"thread_id": thread_id}});
+                return normalize_retained_dispatch_terminal(envelope, Some(&thread_id), |id| {
+                    Ok(state
+                        .threads
+                        .build_execute_result(id)?
+                        .map(|terminal| (thread.status.clone(), terminal)))
+                });
+            }
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "protected release qualification did not reach a terminal within 30 minutes; query launch/status for {launch_id}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+fn spawn_protected_qualification_launch_owner(
+    captured: ryeos_executor::execution::CapturedProjectGeneration,
+    request: super::product_qualification_launch::Request,
+    context: HandlerContext,
+    state: Arc<AppState>,
+    expected_verifier_ref: String,
+    full_product_selections: ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    #[cfg(test)] before_handoff: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> tokio::task::JoinHandle<anyhow::Result<Value>> {
+    let task_launch_id = request.launch_id.clone();
+    let owner_fingerprint = context.fingerprint.clone();
+    tokio::spawn(async move {
+        #[cfg(test)]
+        if let Some(before_handoff) = before_handoff {
+            let _ = before_handoff.await;
+        }
+        let launch = super::product_qualification_launch::handle_expected_verifier(
+            request,
+            context,
+            Arc::clone(&state),
+            Some(&expected_verifier_ref),
+            Some(&full_product_selections),
+        )
+        .await;
+        let accepted = match launch {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                retain_uncertain_release_capture(
+                    captured,
+                    state,
+                    task_launch_id.clone(),
+                    owner_fingerprint,
+                );
+                return Err(anyhow::anyhow!(
+                    "protected qualification launch {task_launch_id} refused or has uncertain handoff: {error}; query launch/status for this exact owner-bound coordinate"
+                ));
+            }
+        };
+        if accepted.get("launch_id").and_then(Value::as_str) != Some(task_launch_id.as_str())
+            || accepted.get("thread_id").and_then(Value::as_str).is_none()
+        {
+            retain_uncertain_release_capture(
+                captured,
+                state,
+                task_launch_id.clone(),
+                owner_fingerprint,
+            );
+            anyhow::bail!(
+                "protected qualification {task_launch_id} returned divergent handoff; query launch/status"
+            );
+        }
+        captured.publish().with_context(|| {
+            format!("release qualification {task_launch_id} could not release its staged snapshot; query launch/status")
+        })?;
+        Ok::<Value, anyhow::Error>(accepted)
+    })
+}
+
+fn release_stage_launch_id(
+    snapshot: &ryeos_state::objects::ProjectSnapshot,
+    stage: &Value,
+) -> anyhow::Result<String> {
+    let digest = ryeos_state::objects::canonical_value_digest(&json!({
+        "overlay_tree": snapshot.project_tree_hash,
+        "overlay_policy": snapshot.effective_policy_hash,
+        "stage": stage,
+    }))?;
+    Ok(format!("L-{}", &digest[..32]))
+}
+
+fn retain_uncertain_release_capture(
+    captured: ryeos_executor::execution::CapturedProjectGeneration,
+    state: Arc<AppState>,
+    launch_id: String,
+    owner_fingerprint: String,
+) {
+    tokio::spawn(async move {
+        loop {
+            match state
+                .state_store
+                .launch_planning_status(&launch_id, &owner_fingerprint)
+            {
+                Ok(Some(status)) if status.status != "planning" => break,
+                Ok(None) => break,
+                Ok(Some(_)) | Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        if let Err(error) = captured.publish() {
+            tracing::warn!(%error, %launch_id, "release qualification snapshot roots could not be released");
+        }
+    });
 }
 
 /// Managed runtimes and direct Tools expose different live response payloads.
@@ -763,12 +1095,219 @@ pub(crate) async fn publish_qualification(
 }
 
 #[cfg(test)]
+#[path = "../../tests/test_state.rs"]
+mod release_test_state;
+
+#[cfg(test)]
 mod tests {
     use super::{
-        normalize_retained_dispatch_terminal, selected_release_graph_child,
+        normalize_retained_dispatch_terminal, release_stage_launch_id,
+        selected_release_graph_child, spawn_protected_qualification_launch_owner,
         successful_dispatch_result, verify_recipe_producer_parameters,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
+        use base64::Engine as _;
+        use ryeos_app::handler_context::HandlerContext;
+        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+        use ryeos_state::external_content::products::transfer::ProductWitnessSource;
+        use std::{sync::Arc, time::Duration};
+
+        let (directory, _state_owner, state) = super::release_test_state::build_test_state();
+        let state = Arc::new(state);
+        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let scopes =
+            vec!["ryeos.execute.service.external-content/launch-product-qualification".to_owned()];
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
+            &state.config.authorized_keys_dir,
+            operator.fingerprint(),
+            &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
+            &scopes,
+            "release qualification test operator",
+            state.identity.fingerprint(),
+            "2026-09-07T00:00:00Z",
+            &state.identity,
+            WildcardPolicy::Reject,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        let context = HandlerContext::new_with_authority(
+            operator.principal_id(),
+            scopes,
+            true,
+            Some(AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+        let project = directory.path().join("release-overlay");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("qualifier.txt"), b"signed overlay fixture").unwrap();
+        let mut overlay = crate::routes::response_modes::execute_mode::resolve_project_context_off_thread(
+            crate::routes::response_modes::execute_mode::ResolveProjectContextRequest {
+                state: state.as_ref().clone(),
+                source: ryeos_executor::execution::project_source::ProjectSource::CaptureLiveFullProject,
+                project_path: project,
+                principal_id: context.fingerprint.clone(),
+                checkout_id: "release-cancel-fixture".to_owned(),
+                pinned_realization: Some(ryeos_executor::execution::project_source::PinnedContextRealization::ReadOnly),
+                normalization: crate::routes::response_modes::execute_mode::ProjectRootNormalization::CanonicalizeLive,
+                launch_timings: None,
+            },
+        )
+        .await
+        .unwrap();
+        let snapshot_hash = overlay.snapshot_hash.clone().unwrap();
+        let captured = overlay.take_captured_generation().unwrap();
+        drop(overlay);
+        let staged_contains_snapshot = || {
+            state
+                .state_store
+                .pinned_state_authority()
+                .unwrap()
+                .require_recovery()
+                .unwrap()
+                .inspect_staged_cas_root_hashes_read_only()
+                .unwrap()
+                .object_hashes
+                .contains(&snapshot_hash)
+        };
+        assert!(
+            staged_contains_snapshot(),
+            "capture must own a staged CAS root"
+        );
+
+        let launch_id = format!("L-{}", "c".repeat(32));
+        let request = super::super::product_qualification_launch::Request {
+            launch_id: launch_id.clone(),
+            witness_hash: "d".repeat(64),
+            witness_source: ProductWitnessSource::LocalCapture {},
+            relationship_name: "missing_qualification_relationship".to_owned(),
+            consumer_invocation: None,
+            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash: snapshot_hash.clone() }),
+            auxiliary_product_selections: Vec::new(),
+        };
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let (owner_started_tx, owner_started_rx) = tokio::sync::oneshot::channel();
+        let outer_state = Arc::clone(&state);
+        let outer_context = context.clone();
+        let outer_request = request.clone();
+        let outer = tokio::spawn(async move {
+            let owner = spawn_protected_qualification_launch_owner(
+                captured,
+                outer_request,
+                outer_context,
+                outer_state,
+                "tool:missing/release-verifier".to_owned(),
+                Vec::new(),
+                Some(continue_rx),
+            );
+            owner_started_tx.send(()).unwrap();
+            owner.await
+        });
+        owner_started_rx.await.unwrap();
+        outer.abort();
+        assert!(outer.await.unwrap_err().is_cancelled());
+        assert!(
+            staged_contains_snapshot(),
+            "outer cancellation released the captured snapshot before owner handoff"
+        );
+        assert!(
+            state
+                .state_store
+                .launch_planning_status(&launch_id, &context.fingerprint)
+                .unwrap()
+                .is_none()
+        );
+
+        continue_tx.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let settled = loop {
+            if let Some(status) = state
+                .state_store
+                .launch_planning_status(&launch_id, &context.fingerprint)
+                .unwrap()
+            {
+                if status.status == "failed" && !staged_contains_snapshot() {
+                    break status;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "protected refusal did not settle and release the staged snapshot"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(settled.thread_id.is_none());
+        let replay = super::super::product_qualification_launch::handle_expected_verifier(
+            request,
+            context.clone(),
+            Arc::clone(&state),
+            Some("tool:missing/release-verifier"),
+            Some(&Vec::new()),
+        )
+        .await;
+        assert!(replay.is_err(), "replayed launch coordinate must refuse");
+        assert_eq!(
+            state
+                .state_store
+                .launch_planning_status(&launch_id, &context.fingerprint)
+                .unwrap()
+                .unwrap(),
+            settled,
+            "replay must not reserve another protected verifier"
+        );
+    }
+
+    #[test]
+    fn protected_release_stage_reuses_id_across_timestamped_recapture() {
+        let first = ryeos_state::objects::ProjectSnapshot {
+            project_tree_hash: "a".repeat(64),
+            effective_policy_hash: "b".repeat(64),
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-09-29T00:00:00Z".to_owned(),
+            source: "explicit-execution-policy-capture".to_owned(),
+        };
+        let mut recaptured = first.clone();
+        recaptured.created_at = "2026-09-29T00:00:01Z".to_owned();
+        assert_ne!(
+            ryeos_state::objects::canonical_value_digest(&first.to_value()).unwrap(),
+            ryeos_state::objects::canonical_value_digest(&recaptured.to_value()).unwrap(),
+        );
+        let stage = json!({
+            "owner": "fp:operator",
+            "site": "site-a",
+            "recorded_service_root": "T-release",
+            "overlay_recipes": "c".repeat(64),
+            "recipe_ref": "config:bundle-release/signed-capture-products",
+            "qualifier_ref": "tool:ryeos/bundle-release/native-qualify",
+            "subject_witness": "d".repeat(64),
+            "relationship": "signed_native_bundle_to_release_qualification",
+            "auxiliary_selections": [{"selection":{"declaration_id":"python","witness_hash":"e".repeat(64),"qualification_hash":"f".repeat(64)}}],
+        });
+        let id = release_stage_launch_id(&first, &stage).unwrap();
+        assert_eq!(id, release_stage_launch_id(&recaptured, &stage).unwrap());
+        assert!(ryeos_app::state_store::is_canonical_launch_id(&id));
+        let mut changed_tree = first.clone();
+        changed_tree.project_tree_hash = "0".repeat(64);
+        assert_ne!(id, release_stage_launch_id(&changed_tree, &stage).unwrap());
+        let mut changed_policy = first.clone();
+        changed_policy.effective_policy_hash = "1".repeat(64);
+        assert_ne!(
+            id,
+            release_stage_launch_id(&changed_policy, &stage).unwrap()
+        );
+        let mut changed_selector = stage.clone();
+        changed_selector["auxiliary_selections"][0]["selection"]["qualification_hash"] =
+            json!("2".repeat(64));
+        assert_ne!(
+            id,
+            release_stage_launch_id(&first, &changed_selector).unwrap()
+        );
+    }
 
     fn retained_terminal(
         status: &str,

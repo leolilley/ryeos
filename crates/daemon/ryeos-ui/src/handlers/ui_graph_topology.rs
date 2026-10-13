@@ -22,9 +22,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::item_resolution::{
-    enumerate_kind_refs, parse_signature_header, resolve_item_full,
-};
+use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::{DelegationVia, KindSchema};
 use ryeos_engine::trust::verify_item_signature;
 use ryeos_executor::executor::ServiceAvailability;
@@ -336,6 +334,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let graph = build_topology(
         &state,
         project_resolution_root,
+        project_access.as_ref(),
         project_identity,
         root_surface,
     );
@@ -345,6 +344,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
 pub(crate) fn build_topology(
     state: &AppState,
     project_resolution_root: Option<String>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     project_identity: Option<String>,
     root_surface: Option<String>,
 ) -> TopologyGraph {
@@ -361,9 +361,16 @@ pub(crate) fn build_topology(
 
         add_kind_schema_node_and_edges(&mut builder, kind, schema, state);
 
-        for item_ref in enumerate_kind_refs(&roots, schema, kind) {
+        for item_ref in
+            crate::seat_auth::enumerate_kind_refs_for_access(&roots, schema, kind, project_access)
+        {
             let canonical = item_ref.to_string();
-            let resolution = match resolve_item_full(&roots, schema, &item_ref) {
+            let resolution = match crate::seat_auth::resolve_item_for_access(
+                &roots,
+                schema,
+                &item_ref,
+                project_access,
+            ) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -384,6 +391,7 @@ pub(crate) fn build_topology(
                 }),
                 trust: classify_trust(
                     &resolution.winner_path,
+                    project_access,
                     schema
                         .spec_for(&resolution.matched_ext)
                         .map(|spec| &spec.signature),
@@ -391,7 +399,12 @@ pub(crate) fn build_topology(
                 ),
             });
 
-            add_item_edges(&mut builder, &canonical, &resolution.winner_path);
+            add_item_edges(
+                &mut builder,
+                &canonical,
+                &resolution.winner_path,
+                project_access,
+            );
         }
     }
 
@@ -485,8 +498,13 @@ fn add_kind_schema_node_and_edges(
     }
 }
 
-fn add_item_edges(builder: &mut TopologyBuilder, item_ref: &str, path: &std::path::Path) {
-    let Some(raw) = read_item_body(path) else {
+fn add_item_edges(
+    builder: &mut TopologyBuilder,
+    item_ref: &str,
+    path: &std::path::Path,
+    access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) {
+    let Some(raw) = read_item_body(path, access) else {
         return;
     };
     let value = read_structured_value(path, &raw);
@@ -711,8 +729,11 @@ fn add_execute_reference_edges(
     }
 }
 
-pub(crate) fn read_item_body(path: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read_to_string(path).ok()?;
+pub(crate) fn read_item_body(
+    path: &std::path::Path,
+    access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) -> Option<String> {
+    let raw = crate::seat_auth::read_whole_item_source(path, access)?;
     Some(lillux::signature::strip_signature_lines(&raw))
 }
 
@@ -878,10 +899,11 @@ fn space_to_string(space: ItemSpace) -> String {
 
 pub(crate) fn classify_trust(
     path: &std::path::Path,
+    access: Option<&crate::seat_auth::RetainedProjectAccess>,
     envelope: Option<&SignatureEnvelope>,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Option<TrustSummary> {
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = crate::seat_auth::read_whole_item_source(path, access)?;
     let Some(envelope) = envelope else {
         return Some(TrustSummary {
             class: "unknown".into(),
@@ -1049,8 +1071,8 @@ mod tests {
         builder.add_ref_node("surface:ryeos/ui/graph", "surface");
         builder.add_ref_node("client:ryeos/web", "client");
 
-        add_item_edges(&mut builder, "surface:ryeos/ui/graph", &surface_path);
-        add_item_edges(&mut builder, "client:ryeos/web", &client_path);
+        add_item_edges(&mut builder, "surface:ryeos/ui/graph", &surface_path, None);
+        add_item_edges(&mut builder, "client:ryeos/web", &client_path, None);
 
         assert!(
             builder
@@ -1091,6 +1113,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             &mut builder,
             "directive:rye/code/quality/build",
             &directive_path,
+            None,
         );
 
         assert!(builder.edges.contains_key(
@@ -1141,7 +1164,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
 
-        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
+        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path, None);
 
         assert!(
             builder.edges.contains_key(
@@ -1176,7 +1199,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
 
         let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
-        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
+        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path, None);
 
         let missing = builder
             .nodes
@@ -1210,7 +1233,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
 
         let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
-        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
+        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path, None);
 
         let zeta = builder
             .nodes
@@ -1250,7 +1273,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             "2026-05-27T00:00:00Z",
         );
         std::fs::write(&item_path, signed).unwrap();
-        let trusted = classify_trust(&item_path, Some(&envelope), &trust_store)
+        let trusted = classify_trust(&item_path, None, Some(&envelope), &trust_store)
             .expect("signed item should classify");
         assert_eq!(trusted.class, "trusted");
         assert_eq!(trusted.signer.as_deref(), Some(fingerprint.as_str()));
@@ -1259,7 +1282,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             .unwrap()
             .replace(body, "name: tampered\n");
         std::fs::write(&item_path, tampered).unwrap();
-        let tampered = classify_trust(&item_path, Some(&envelope), &trust_store)
+        let tampered = classify_trust(&item_path, None, Some(&envelope), &trust_store)
             .expect("tampered signed item should classify");
         assert_ne!(tampered.class, "trusted");
     }

@@ -4,17 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
-use ryeos_app::{
-    bundle_publication::catalog::{
+use ryeos_app::{bundle_publication::catalog::{
         BUNDLE_CATALOG_HEAD_NAMESPACE, CatalogPublicationRequest, LocalCatalogClosureStageRequest,
         inspect_catalog, publish_catalog, stage_local_catalog_closure,
-    },
-    handler_context::HandlerContext,
-    node_policy::sections::{
+    }, handler_context::HandlerContext, state::AppState};
+use ryeos_node_runtime::{node_policy::sections::{
         bundle_publication::BundlePublicationPolicy, object_closure::NodeObjectClosurePolicy,
-    },
-    state::AppState,
-};
+    }};
 use ryeos_executor::executor::ServiceAvailability;
 use serde_json::Value;
 
@@ -331,7 +327,7 @@ macro_rules! descriptor {
 descriptor!(
     UPLOAD,
     "service:bundle-catalog/upload",
-    "bundle_catalog.upload",
+    "bundle-catalog.upload",
     "ryeos.execute.service.bundle-catalog/upload",
     UploadRequest,
     upload,
@@ -340,7 +336,7 @@ descriptor!(
 descriptor!(
     STAGE_LOCAL,
     "service:bundle-catalog/stage-local",
-    "bundle_catalog.stage_local",
+    "bundle-catalog.stage-local",
     "ryeos.execute.service.bundle-catalog/stage-local",
     StageLocalRequest,
     stage_local,
@@ -349,7 +345,7 @@ descriptor!(
 descriptor!(
     INSPECT,
     "service:bundle-catalog/inspect",
-    "bundle_catalog.inspect",
+    "bundle-catalog.inspect",
     "ryeos.execute.service.bundle-catalog/inspect",
     InspectRequest,
     inspect
@@ -357,7 +353,7 @@ descriptor!(
 descriptor!(
     RESOLVE,
     "service:bundle-catalog/resolve",
-    "bundle_catalog.resolve",
+    "bundle-catalog.resolve",
     "ryeos.execute.service.bundle-catalog/resolve",
     ResolveRequest,
     resolve
@@ -365,7 +361,7 @@ descriptor!(
 descriptor!(
     EXPORT_RECOVERY,
     "service:bundle-catalog/export-recovery",
-    "bundle_catalog.export_recovery",
+    "bundle-catalog.export-recovery",
     "ryeos.execute.service.bundle-catalog/export-recovery",
     ExportRecoveryRequest,
     export_recovery
@@ -373,7 +369,7 @@ descriptor!(
 descriptor!(
     RESTORE_GENESIS,
     "service:bundle-catalog/restore-genesis",
-    "bundle_catalog.restore_genesis",
+    "bundle-catalog.restore-genesis",
     "ryeos.execute.service.bundle-catalog/restore-genesis",
     RestoreGenesisRequest,
     restore_genesis,

@@ -76,7 +76,7 @@ pub fn verify_schedule_source_content(
         .file_stem()
         .and_then(|stem| stem.to_str())
         .context("schedule source filename must be UTF-8")?;
-    super::crontab::validate_schedule_id(expected_id)?;
+    ryeos_scheduler_contract::validate_schedule_id(expected_id)?;
 
     let envelope = ryeos_engine::contracts::SignatureEnvelope {
         prefix: "#".to_owned(),
@@ -142,7 +142,7 @@ pub fn append_fire_jsonl_entry_in_directory<T: serde::Serialize>(
     expected_schedule_id: &str,
     entry: &T,
 ) -> Result<()> {
-    super::crontab::validate_schedule_id(expected_schedule_id)?;
+    ryeos_scheduler_contract::validate_schedule_id(expected_schedule_id)?;
     let entry: FireRecord = serde_json::from_value(serde_json::to_value(entry)?)
         .context("fire journal append requires the current FireRecord shape")?;
     if entry.schedule_id != expected_schedule_id {
@@ -207,7 +207,7 @@ fn ensure_fire_journal_parent(path: &Path) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .context("fire journal schedule directory must be UTF-8")?;
-    super::crontab::validate_schedule_id(schedule_id)?;
+    ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
     let schedules_dir = schedule_dir
         .parent()
         .context("fire journal has no schedules directory")?;
@@ -288,7 +288,7 @@ pub fn canonical_schedule_source_paths(schedules_dir: &Path) -> Result<Vec<std::
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .context("schedule source filename must be UTF-8")?;
-            super::crontab::validate_schedule_id(schedule_id)?;
+            ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
             Ok(path)
         })
         .collect()
@@ -343,7 +343,7 @@ pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> 
         let schedule_id = relative
             .to_str()
             .context("scheduler fire directory name must be UTF-8")?;
-        super::crontab::validate_schedule_id(schedule_id)?;
+        ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
     }
     for jsonl_path in tree.regular_files {
         let relative = jsonl_path.strip_prefix(fires_dir)?;
@@ -373,7 +373,7 @@ pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> 
                 jsonl_path.display()
             );
         }
-        super::crontab::validate_schedule_id(schedule_id)?;
+        ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
         rebuild_fire_projection(&jsonl_path, schedule_id, db)?;
     }
 
@@ -398,7 +398,7 @@ pub fn rebuild_fires_from_runtime_directory(
         let schedule_id = schedule_name
             .to_str()
             .context("scheduler fire directory name must be UTF-8")?;
-        super::crontab::validate_schedule_id(schedule_id)?;
+        ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
         let schedule_directory = schedules_directory
             .open_child_directory(&schedule_name)?
             .ok_or_else(|| {
@@ -537,8 +537,8 @@ mod tests {
 
     const TEST_KEY: [u8; 32] = [42; 32];
 
-    fn test_db() -> SchedulerDb {
-        SchedulerDb::new_in_memory().expect("open in-memory scheduler db")
+    fn test_db() -> crate::test_native::TestSchedulerDb {
+        crate::test_native::TestSchedulerDb::open()
     }
 
     fn schedule_dir(root: &Path) -> PathBuf {
@@ -573,8 +573,8 @@ mod tests {
             enabled: true,
             project_root: None,
             registered_at: 1_700_000_000_000,
-            execution: super::super::types::ScheduleExecution {
-                authority: super::super::types::ScheduleExecutionAuthority::Node {
+            execution: ryeos_scheduler_contract::ScheduleExecution {
+                authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                     principal_id: format!("fp:{}", "33".repeat(32)),
                     effective_origin_site_id: "site:test".to_owned(),
                 },

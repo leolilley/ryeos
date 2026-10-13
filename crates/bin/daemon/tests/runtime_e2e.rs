@@ -20,6 +20,8 @@
 //!   branching/string-prefix hits — the schema is the only route
 //!   decision-maker.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 mod common;
 
 use std::path::Path;
@@ -29,6 +31,7 @@ use anyhow::Context as _;
 use common::DaemonHarness;
 use common::fast_fixture::FastFixture;
 use lillux::crypto::SigningKey;
+use rusqlite::OptionalExtension as _;
 
 // ── Helpers (signing setup uses the fast fixture's publisher key) ──────
 
@@ -93,12 +96,35 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {{}}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 description: "synth runtime for runtime_e2e"
 "#
@@ -342,118 +368,36 @@ fn parse_rotated_recovery_marker(raw: &str) -> anyhow::Result<RotatedRecoveryMar
     Ok(marker)
 }
 
-/// Read-only proof that the marker-writing process is the exact live process
-/// durably attached to this thread and owned by its current launch claim.
-/// Missing fields are transient while attachment commits; contradictory fields
-/// are hard test failures. This deliberately mirrors the typed runtime-store
-/// invariants without adding a production corruption or observation API.
-fn prove_rotated_recovery_process_attached(
-    state_path: &Path,
+/// Proof, through `service:threads/get`, that the marker-writing process is
+/// the live process durably attached to this running thread. `false` while the
+/// attachment is still committing; contradictory coordinates are hard test
+/// failures. The running daemon's Runtime store is never opened from the test
+/// process: the published PID/PGID must equal the marker, and the process must
+/// still carry this thread's protocol identity in its own environment.
+async fn rotated_recovery_process_attached(
+    h: &DaemonHarness,
     marker: &RotatedRecoveryMarker,
-) -> anyhow::Result<Option<usize>> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/runtime.sqlite3");
-    let connection =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    connection.busy_timeout(Duration::from_secs(2))?;
-    let row = connection.query_row(
-        "SELECT runtime.pid, runtime.pgid, runtime.process_identity, runtime.launch_metadata, \
-                claim.claim_id, claim.claimed_by, epoch.last_epoch \
-           FROM thread_runtime AS runtime \
-           LEFT JOIN thread_launch_claim AS claim ON claim.thread_id=runtime.thread_id \
-           LEFT JOIN thread_launch_epoch AS epoch ON epoch.thread_id=runtime.thread_id \
-          WHERE runtime.thread_id=?1",
-        rusqlite::params![&marker.thread_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-            ))
-        },
-    );
-    let (pid, pgid, process_identity, launch_metadata, claim_id, claimed_by, launch_epoch) =
-        match row {
-            Ok(row) => row,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-    let (
-        Some(pid),
-        Some(pgid),
-        Some(process_identity),
-        Some(launch_metadata),
-        Some(claim_id),
-        Some(claimed_by),
-        Some(launch_epoch),
-    ) = (
-        pid,
-        pgid,
-        process_identity,
-        launch_metadata,
-        claim_id,
-        claimed_by,
-        launch_epoch,
-    )
-    else {
-        return Ok(None);
+) -> anyhow::Result<bool> {
+    let Some(detail) = h.get_thread(&marker.thread_id).await? else {
+        return Ok(false);
     };
-
+    let runtime = &detail["thread"]["runtime"];
+    let (Some(pid), Some(pgid)) = (runtime["pid"].as_i64(), runtime["pgid"].as_i64()) else {
+        return Ok(false);
+    };
     anyhow::ensure!(
         pid == marker.pid && pgid == marker.pgid,
         "marker PID/PGID {}/{} contradict durable attachment {pid}/{pgid}",
         marker.pid,
         marker.pgid
     );
-    let identity: ryeos_app::process::ExecutionProcessIdentity =
-        serde_json::from_str(&process_identity)
-            .context("decode attached native recovery process identity")?;
-    ryeos_app::process::validate_execution_process_identity_shape(&identity)
-        .context("validate attached native recovery process identity")?;
     anyhow::ensure!(
-        identity.target_pid == marker.pid && identity.group_leader_pid == marker.pgid,
-        "marker coordinates contradict the attached exact process identity"
+        detail["thread"]["status"].as_str() == Some("running"),
+        "attached native recovery thread is not running: {detail:#}"
     );
-    anyhow::ensure!(
-        ryeos_app::process::execution_alive(&identity),
-        "marker-writing native process is not the exact live attached incarnation"
-    );
-
-    let owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(&claimed_by)
-        .context("decode attached native recovery launch owner")?;
-    let canonical_owner = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
-    anyhow::ensure!(
-        canonical_owner == claimed_by
-            && owner.thread_id == marker.thread_id
-            && owner.unpredictable_nonce == claim_id
-            && owner.monotonic_launch_epoch == u64::try_from(launch_epoch)?
-            && owner.monotonic_launch_epoch > 0
-            && !owner.daemon_generation_id.is_empty(),
-        "durable launch owner contradicts its exact native recovery claim"
-    );
-    let metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
-        serde_json::from_str(&launch_metadata)
-            .context("decode attached native recovery launch metadata")?;
-    metadata
-        .validate()
-        .context("validate attached native recovery launch metadata")?;
-    let sealed = metadata.sealed_root_request.as_ref();
-    anyhow::ensure!(
-        metadata.native_resume.is_some() && metadata.resume_context.is_some() && sealed.is_some(),
-        "attached native recovery process lacks its fully sealed resume metadata"
-    );
-    let source_bytes = sealed
-        .expect("sealed request presence was proved")
-        .admitted_program_subject()
-        .context("read exact admitted native recovery subject")?
-        .source_content
-        .into_bytes();
-    Ok(Some(source_bytes.len()))
+    ryeos_app::process::verify_thread_process_identity(pid, pgid, &marker.thread_id)
+        .context("marker-writing native process is not the live attached incarnation")?;
+    Ok(true)
 }
 
 /// Plant one conflicting recovery-only source materialization after the exact
@@ -476,6 +420,7 @@ fn plant_conflicting_rotated_recovery_source(
             std::ffi::OsStr::new("subject.source"),
             &vec![b'!'; admitted_source_bytes],
             0o600,
+            TEST_PURPOSE,
         )?
         .is_some(),
         "recovery capsule source was materialized before the deliberate conflict"
@@ -625,7 +570,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
             "e2e-direct-runtime",
             "e2e_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -704,6 +649,9 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         .await
         .expect("start daemon with rotated-recovery runtime");
 
+    let admitted_item = h
+        .state_path
+        .join(".ai/bundles/runtime-e2e-rotated-recovery/.ai/e2e_recovery_kind_items/rotated-recovery.yaml");
     let execute = h.post_execute(
         "e2e_recovery_kind:rotated-recovery",
         ".",
@@ -723,29 +671,34 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
-        let admitted_source_bytes = loop {
-            if let Some(admitted_source_bytes) =
-                prove_rotated_recovery_process_attached(&h.state_path, &marker)?
-            {
-                break admitted_source_bytes;
+        loop {
+            if rotated_recovery_process_attached(&h, &marker).await? {
+                break;
             }
             anyhow::ensure!(
                 Instant::now() < deadline,
-                "marker-writing process never acquired its exact durable process attachment and launch owner"
+                "marker-writing process never acquired its exact durable process attachment"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        }
+        // The admitted subject source is the exact signed item file; the
+        // conflicting materialization keeps its length so reconstruction
+        // must reject the content, not a truncated file.
+        let admitted_source_bytes = std::fs::metadata(&admitted_item)
+            .context("measure the admitted rotated-recovery item source")?
+            .len();
+        let admitted_source_bytes = usize::try_from(admitted_source_bytes)?;
         plant_conflicting_rotated_recovery_source(
             &h.state_path,
             &marker.thread_id,
             admitted_source_bytes,
         )?;
         anyhow::ensure!(
-            prove_rotated_recovery_process_attached(&h.state_path, &marker)?.is_some(),
+            rotated_recovery_process_attached(&h, &marker).await?,
             "native recovery attachment changed while planting its reconstruction conflict"
         );
         std::fs::write(&release, b"release")?;
-        Ok::<String, anyhow::Error>(marker.thread_id)
+        Ok::<(String, usize), anyhow::Error>((marker.thread_id, admitted_source_bytes))
     };
     let (response, thread_id) = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::join!(execute, corrupt)
@@ -753,8 +706,8 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
     .await
     .expect("rotated recovery request timed out");
     let (status, body) = response.expect("post rotated-recovery runtime");
-    let thread_id = match thread_id {
-        Ok(thread_id) => thread_id,
+    let (thread_id, admitted_source_bytes) = match thread_id {
+        Ok(settled) => settled,
         Err(error) => {
             let daemon_stderr = h.drain_stderr_nonblocking().await;
             panic!(
@@ -764,14 +717,14 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         }
     };
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Read the projected result through `service:threads/get`; the running
+    // daemon's projection is never opened from the test process.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let result = loop {
-        if let Ok(db) = ryeos_state::projection::ProjectionDb::open(&projection_path)
-            && let Ok(Some(result)) = ryeos_state::queries::get_thread_result(&db, &thread_id)
+    let detail = loop {
+        if let Ok(Some(detail)) = h.get_thread(&thread_id).await
+            && !detail["result"].is_null()
         {
-            break result;
+            break detail;
         }
         assert!(
             Instant::now() < deadline,
@@ -779,18 +732,22 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert_eq!(result.status, "failed", "response={status} {body:#}");
+    assert_eq!(
+        detail["thread"]["status"].as_str(),
+        Some("failed"),
+        "response={status} {body:#}"
+    );
     assert!(
-        result.outcome_code.is_none(),
+        detail["result"]["outcome_code"].is_null(),
         "generic managed-launch finalization must retain its typed cause in error"
     );
-    let error: serde_json::Value = serde_json::from_str(
-        result
-            .error
-            .as_deref()
-            .expect("rotated reconstruction failure retains structured error"),
-    )
-    .expect("projected failure error is JSON");
+    let error = match &detail["result"]["error"] {
+        serde_json::Value::String(text) => {
+            serde_json::from_str(text).expect("projected failure error is JSON")
+        }
+        serde_json::Value::Null => panic!("rotated reconstruction failure retains structured error"),
+        structured => structured.clone(),
+    };
     assert_eq!(error["code"].as_str(), Some("launch_failure"));
     assert!(
         error["message"]
@@ -803,42 +760,99 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
     // attached process was compare-cleared and that rotation did not invent or
     // retain workspace membership. Physical cleanup of an existing pinned-COW
     // view belongs to its separate workspace lifecycle integration fixtures.
+    // The settled runtime row has no service surface. Stop the node in order
+    // and read its Runtime store through the native test gate.
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Runtime store");
     let runtime_db_path = h
         .state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let connection = rusqlite::Connection::open_with_flags(
-        runtime_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open runtime DB read-only");
-    let runtime: (
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = connection
-        .query_row(
-            "SELECT resume_attempts, pid, pgid, process_identity, workspace_id, \
-                    workspace_view_identity, workspace_borrower_launch_owner \
-               FROM thread_runtime WHERE thread_id=?1",
-            rusqlite::params![thread_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .expect("read settled runtime row");
+    let (runtime, claims, workspaces, launch_metadata, launch_epoch) =
+        ryeos_app::test_support::read_existing_runtime(&runtime_db_path, |connection| {
+            let runtime: (
+                i64,
+                Option<i64>,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = connection.query_row(
+                "SELECT resume_attempts, pid, pgid, process_identity, workspace_id, \
+                        workspace_view_identity, workspace_borrower_launch_owner \
+                   FROM thread_runtime WHERE thread_id=?1",
+                rusqlite::params![thread_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )?;
+            let claims: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM thread_launch_claim WHERE thread_id=?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let workspaces: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM execution_workspace WHERE thread_id=?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let launch_metadata: Option<String> = connection.query_row(
+                "SELECT launch_metadata FROM thread_runtime WHERE thread_id=?1",
+                rusqlite::params![thread_id],
+                |row| row.get(0),
+            )?;
+            let launch_epoch: Option<i64> = connection
+                .query_row(
+                    "SELECT last_epoch FROM thread_launch_epoch WHERE thread_id=?1",
+                    rusqlite::params![thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok((runtime, claims, workspaces, launch_metadata, launch_epoch))
+        });
+
+    // The attached incarnation's sealed launch metadata and launch epoch
+    // outlive settlement; they are checked here, after the stop, with the
+    // same strictness the in-flight attachment proof once applied.
+    let launch_metadata = launch_metadata.expect("settled recovery row retains its launch metadata");
+    let metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
+        serde_json::from_str(&launch_metadata).expect("decode native recovery launch metadata");
+    metadata
+        .validate()
+        .expect("validate native recovery launch metadata");
+    let sealed = metadata
+        .sealed_root_request
+        .as_ref()
+        .expect("native recovery launch metadata retains its sealed root request");
+    assert!(
+        metadata.native_resume.is_some() && metadata.resume_context.is_some(),
+        "native recovery launch metadata lacks its resume context"
+    );
+    let sealed_source_bytes = sealed
+        .admitted_program_subject()
+        .expect("read exact admitted native recovery subject")
+        .source_content
+        .into_bytes()
+        .len();
+    assert_eq!(
+        sealed_source_bytes, admitted_source_bytes,
+        "the planted conflict did not mirror the exact admitted subject length"
+    );
+    let launch_epoch = launch_epoch.expect("rotated thread retains its launch epoch");
+    assert!(
+        launch_epoch > 0,
+        "launch epoch must be positive after rotation; got {launch_epoch}"
+    );
     assert_eq!(runtime.0, 1, "recovery did not rotate exactly once");
     assert!(
         runtime.1.is_none() && runtime.2.is_none() && runtime.3.is_none(),
@@ -848,21 +862,7 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
         runtime.4.is_none() && runtime.5.is_none() && runtime.6.is_none(),
         "projectless recovery retained workspace membership"
     );
-    let claims: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM thread_launch_claim WHERE thread_id=?1",
-            rusqlite::params![thread_id],
-            |row| row.get(0),
-        )
-        .expect("count retained launch claims");
     assert_eq!(claims, 0, "rotated launch claim leaked after settlement");
-    let workspaces: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM execution_workspace WHERE thread_id=?1",
-            rusqlite::params![thread_id],
-            |row| row.get(0),
-        )
-        .expect("count projectless workspaces");
     assert_eq!(
         workspaces, 0,
         "workspace-less fixture unexpectedly acquired a workspace"
@@ -887,7 +887,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-a",
             "dup_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         install_runtime(
@@ -895,7 +895,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-b",
             "dup_kind",
             true,
-            "v2",
+            "v3",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -1085,8 +1085,10 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
                 let config_root = bundle_root.join(".ai/config/ryeos-runtime");
                 let provider_dir = config_root.join("model-providers");
                 std::fs::create_dir_all(&provider_dir)?;
-                let provider = r#"base_url: "http://127.0.0.1:9"
-family: chat_completions
+                let provider = r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "http://127.0.0.1:9"
 body_template:
   model: "{model}"
   messages: "{messages}"
@@ -1162,27 +1164,21 @@ model:
     // the response so any pre-launch fixture regression is explicit in failure
     // diagnostics rather than discarded.
 
-    // Open the projection DB and find the thread row created for
-    // this directive invocation. ProjectionDb writes happen on the
-    // daemon side; give it a brief settle window so the row is
-    // visible to a fresh read.
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Find the thread row created for this directive invocation. Projection
+    // writes happen on the daemon side; poll briefly until the row is
+    // visible.
+    // Read the thread rows through `service:threads/list`, never by opening
+    // the running daemon's projection. The test principal requests the
+    // subject and any runtime row this launch could record, so the principal
+    // filter hides neither.
+    let mut threads = Vec::new();
     for _ in 0..20 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads.iter().any(|t| t.item_ref == "directive:p16/flow") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -1209,10 +1205,17 @@ model:
          runtime ref. Got: {:#?}",
         subject_thread
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject_thread.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
     assert!(
-        subject_thread.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",
-        subject_thread.executor_ref
+        executor_ref
     );
 
     // Defense in depth: there must NOT be a separate row recorded
@@ -1257,7 +1260,8 @@ async fn e2e_indirect_graph_records_graph_thread_profile() {
     let project = tempfile::tempdir().expect("project tempdir");
     let dir = project.path().join(".ai/graphs/p4");
     std::fs::create_dir_all(&dir).expect("create project graph dir");
-    let body = r#"category: "p4"
+    let body = r#"version: "1.0.0"
+category: "p4"
 description: "P4 B2 graph subject/runtime split pin"
 config:
   start: done
@@ -1281,26 +1285,21 @@ config:
 
     // The dispatch may succeed or fail (real runtime binary exists but
     // no LLM provider configured). The KEY assertion is the thread
-    // row identity below — regardless of dispatch outcome.
-    let _ = (status, body);
+    // row identity below — regardless of dispatch outcome; the response is
+    // retained for failure diagnostics.
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Read the thread rows through `service:threads/list`, never by opening
+    // the running daemon's projection. The test principal requests the
+    // subject and any runtime row this launch could record, so the principal
+    // filter hides neither.
+    let mut threads = Vec::new();
     for _ in 0..20 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads.iter().any(|t| t.item_ref == "graph:p4/flow") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -1309,7 +1308,7 @@ config:
             panic!(
                 "no thread row with subject item_ref 'graph:p4/flow' \
                  — root/runtime split regressed for graph kind. \
-                 All rows: {:#?}",
+                 response_status={status}; response={body:#}; All rows: {:#?}",
                 threads
             )
         });
@@ -1327,10 +1326,17 @@ config:
          not the runtime ref. Got: {:#?}",
         subject_thread
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject_thread.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
     assert!(
-        subject_thread.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the runtime executor binary; got: {:?}",
-        subject_thread.executor_ref
+        executor_ref
     );
 
     // Defense in depth: no parallel thread row recorded against the
@@ -1397,12 +1403,11 @@ config:
     );
     assert!(response.get("thread").is_none(), "response={response:#}");
 
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
-    if projection_path.exists() {
-        let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
-            .expect("open projection db");
-        let threads = ryeos_state::queries::list_threads(&db, 100).expect("list threads");
+    // `service:threads/list` shows the rows of the requesting principal. Any
+    // durable thread this validation could create would be requested by the
+    // test principal, so the check holds within that principal.
+    {
+        let threads = h.list_threads(100).await.expect("threads/list");
         assert!(
             threads
                 .iter()

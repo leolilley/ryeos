@@ -8,7 +8,7 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
-use ryeos_app::route_raw::RawRouteSpec;
+use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
 // ── Generic static asset provider trait ────────────────────────────────────
 
@@ -95,6 +95,13 @@ impl ResponseMode for StaticMode {
         &self,
         raw: &RawRouteSpec,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
+        if raw.request.body == RawRequestBody::ObjectsPutV1 {
+            return Err(RouteConfigError::InvalidResponseSpec {
+                id: raw.id.clone(),
+                mode: "static".into(),
+                reason: "static mode does not accept the objects_put_v1 body profile".into(),
+            });
+        }
         let status_raw =
             raw.response
                 .status
@@ -402,6 +409,17 @@ mod tests {
             .downcast_ref::<CompiledStaticMode>()
             .expect("downcast to CompiledStaticMode");
         assert_eq!(inner.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn static_rejects_objects_put_v1_profile() {
+        let mode = StaticMode::default();
+        let mut raw = make_raw(Some(200), Some("text/plain"), Some("aGVsbG8="));
+        raw.request.body = RawRequestBody::ObjectsPutV1;
+        assert!(matches!(
+            mode.compile(&raw),
+            Err(RouteConfigError::InvalidResponseSpec { .. })
+        ));
     }
 
     #[test]

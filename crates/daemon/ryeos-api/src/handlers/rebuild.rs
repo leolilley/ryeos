@@ -39,14 +39,24 @@ pub struct ProjectionMaintenanceReport {
 }
 
 async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
-    let _scheduler_guard = match operation {
+    let scheduler_guard = match operation {
         Operation::Verify => None,
-        Operation::Rebuild => Some(state.scheduler_runtime_gate.clone().write_owned().await),
+        Operation::Rebuild => Some(
+            state
+                .scheduler()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "projection rebuild requires the selected scheduler recovery owner"
+                    )
+                })?
+                .acquire_retention()
+                .await?,
+        ),
     };
     let state_store = state.state_store.clone();
-    let scheduler_db = state.scheduler_db.clone();
 
     let report = tokio::task::spawn_blocking(move || -> Result<ProjectionMaintenanceReport> {
+        let mut scheduler_guard = scheduler_guard;
         let rebuilt = match operation {
             Operation::Verify => None,
             Operation::Rebuild => Some(state_store.rebuild_projection_generation()?),
@@ -59,15 +69,12 @@ async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
                         &lillux::time::iso8601_now(),
                         false,
                         |thread_ids| {
-                            let mut pins = 0_u64;
-                            for thread_id in thread_ids {
-                                if scheduler_db.find_fire_by_thread(thread_id)?.is_some() {
-                                    pins = pins.checked_add(1).ok_or_else(|| {
-                                        anyhow::anyhow!("scheduler recovery pin count overflow")
-                                    })?;
-                                }
-                            }
-                            Ok(pins)
+                            scheduler_guard
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("scheduler retention guard disappeared")
+                                })?
+                                .count_thread_pins(thread_ids)
                         },
                     )?
                     .pending_retirements_recovered

@@ -26,9 +26,15 @@ use crate::objects::{
 
 pub mod remote_verifier_source;
 
-pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v3";
+pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v4";
+pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
+    "ryeos.qualification_worker_request.v5";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v13";
+// Current-only cut: an immutable v12 qualification head at the same
+// coordinate cannot be replaced by v14. Reissuance requires a fresh
+// coordinate or separately recovered node state; this decoder does not adopt
+// predecessor testimony.
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v14";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -300,7 +306,16 @@ impl ProductQualificationConsumerContentIdentity {
         {
             bail!("qualification consumer content requires exact pinned realizations");
         }
+        // The subject is one separately authenticated runtime realization for
+        // either declaration authority. It cannot also be a Worker literal.
         let mut realization_ids = BTreeSet::from([context.product_declaration_id.as_str()]);
+        if let QualificationConsumerDeclarationAuthority::ActivatedContent {
+            declaration_id, ..
+        } = &self.declaration_authority
+            && declaration_id != &context.product_declaration_id
+        {
+            bail!("activated qualification declaration differs from runtime subject");
+        }
         for realized in self
             .worker_literals
             .iter()
@@ -407,6 +422,90 @@ pub struct ProductQualificationProducerScenario {
     /// selects no remote verifier; the producer target is never a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_verifier: Option<ProductQualificationRemoteVerifierSelection>,
+    /// Signed, bounded session setup and turn Request bodies for the qualification Worker.
+    /// Absence is valid for scenarios that do not use the local Worker; the
+    /// Q command owner must require this for its exact selected scenario.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_worker_request: Option<ProductQualificationConsumerWorkerRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerWorkerRequest {
+    pub schema: String,
+    /// Explicit instance selection, never a default or credential bytes.
+    /// Null is valid data; launch admission checks the accepted environment.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub credential_profile_id: Option<String>,
+    /// Signed finite fixture data only; null preserves the no-fixture lane.
+    /// Native mount/capture admission and claim interpretation remain separate.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture: Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
+    /// Fixed original-controller custody selection; provider syntax is external.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub controller_canary: Option<
+        crate::external_execution::qualification_controller_canary::QControllerCanaryContract,
+    >,
+    #[serde(deserialize_with = "Value::deserialize")]
+    pub session_setup: Value,
+    #[serde(deserialize_with = "Value::deserialize")]
+    pub body: Value,
+}
+
+impl ProductQualificationConsumerWorkerRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA {
+            bail!("unsupported qualification Worker request schema");
+        }
+        if let Some(profile) = &self.credential_profile_id {
+            if profile.is_empty()
+                || profile.len() > 256
+                || profile.trim() != profile
+                || profile.chars().any(char::is_control)
+            {
+                bail!("qualification Worker credential profile ID is not canonical and bounded");
+            }
+        }
+        if let Some(fixture) = &self.fixture {
+            fixture.validate()?;
+        }
+        bounded_object(&self.session_setup, "qualification Worker session setup")?;
+        bounded_object(&self.body, "qualification Worker request body")?;
+        bounded(
+            &serde_json::json!({"session_setup": self.session_setup, "body": self.body}),
+            MAX_PROBE_VALUE_BYTES,
+            "qualification Worker combined requests",
+        )?;
+        if canonical_value_digest(&self.session_setup)? == canonical_value_digest(&self.body)? {
+            bail!("qualification Worker setup and turn requests must have distinct digests");
+        }
+        Ok(())
+    }
+
+    /// Verify retained selected-adapter byte commitments, without interpreting
+    /// provider syntax or treating deserialized data as original custody.
+    pub fn bound_controller_canary_body(
+        &self,
+        binding: Option<
+            &crate::external_execution::qualification_controller_canary::QControllerCanaryBinding,
+        >,
+    ) -> anyhow::Result<Value> {
+        self.validate()?;
+        let body = match (self.controller_canary, binding) {
+            (None, None) => self.body.clone(),
+            (Some(_), Some(binding)) => binding.require_bound_body(&self.body)?,
+            _ => bail!("Q canary binding presence differs from signed request"),
+        };
+        bounded(
+            &serde_json::json!({"session_setup":self.session_setup,"body":body}),
+            MAX_PROBE_VALUE_BYTES,
+            "qualification Worker combined bound requests",
+        )?;
+        if canonical_value_digest(&self.session_setup)? == canonical_value_digest(&body)? {
+            bail!("qualification Worker setup and actual turn must have distinct digests");
+        }
+        Ok(body)
+    }
 }
 
 /// Signed executable selection, not a caller path or executable permission.
@@ -483,6 +582,9 @@ impl ProductQualificationProducerScenario {
                 bail!("remote verifier must belong to its signed scenario recipe Bundle");
             }
         }
+        if let Some(request) = &self.consumer_worker_request {
+            request.validate()?;
+        }
         Ok(())
     }
 
@@ -503,9 +605,15 @@ impl ProductQualificationProducerScenario {
         if source.canonical_ref != self.recipe_ref {
             bail!("remote verifier source differs from signed scenario recipe");
         }
+        // This source identity covers only the selected verifier and recipe.
+        // The full signed policy and accepted purpose separately commit the
+        // optional Worker Request for this scenario.
         canonical_value_digest(&serde_json::json!({
             "domain": "ryeos.remote-consumer-verifier-source.v1",
-            "scenario": self,
+            "scenario": {
+                "recipe_ref": self.recipe_ref,
+                "remote_verifier": verifier,
+            },
             "producer_source": source,
         }))
     }
@@ -665,6 +773,17 @@ impl ProductQualificationResult {
         canonical_value_digest(&serde_json::to_value(self)?)
     }
 
+    /// A result reference is structural data, not proof of Q execution.
+    pub fn q_transcript_manifest_hash(&self) -> anyhow::Result<&str> {
+        let hash = self
+            .probe_evidence
+            .get("qualification_worker_transcript_manifest_hash")
+            .and_then(Value::as_str)
+            .context("qualification result has no Q transcript manifest reference")?;
+        validate_hash("qualification result Q transcript manifest", hash)?;
+        Ok(hash)
+    }
+
     pub fn validate_claims_for(
         &self,
         policy: &ProductQualificationPolicy,
@@ -672,12 +791,8 @@ impl ProductQualificationResult {
     ) -> anyhow::Result<()> {
         self.validate()?;
         policy.validate()?;
-        // The typed declaration alone is not an admitted Worker closure.
-        // Until launch, proof, and fresh selection all authenticate the same
-        // retained consumer context, no claim may be issued under this field.
-        if policy.consumer_execution_context.is_some() {
-            bail!("qualification consumer execution context has no authenticated closure proof");
-        }
+        // This checks signed claim vocabulary only. Execution authentication
+        // belongs to the complete evidence and its admitting application.
         validate_claims_allow_empty(required)?;
         if self
             .claims
@@ -949,6 +1064,7 @@ impl ProductQualificationScopedAttemptProof {
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationRemoteConsumerProof {
     pub launch_owner_digest: String,
+    pub consumer_input_blob_hash: String,
     pub intent: ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
     pub selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
     pub observation: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation,
@@ -962,6 +1078,10 @@ impl ProductQualificationRemoteConsumerProof {
     pub fn validate_for(&self, root: &ProductQualificationVerifier) -> anyhow::Result<()> {
         use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
         validate_hash("remote verifier launch owner", &self.launch_owner_digest)?;
+        validate_hash(
+            "remote verifier retained input",
+            &self.consumer_input_blob_hash,
+        )?;
         let RemoteVerificationPurpose::ConsumerRuntime {
             coordinate,
             nonce_hex,
@@ -1120,6 +1240,11 @@ pub struct ProductQualificationEvidence {
     /// never reconstructed from a later Bundle generation as historical proof.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
+    /// Required nullable: one portable Q Worker transcript is owned by the
+    /// signed qualification only after the app proves its exact local run.
+    /// A hash alone grants no claim.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub qualification_worker_transcript_manifest_hash: Option<String>,
     pub verifier: ProductQualificationVerifier,
     pub execution_proof: ProductQualificationExecutionProof,
     /// Exact root product selections retained from the admitted verifier.
@@ -1166,6 +1291,33 @@ impl ProductQualificationEvidence {
             }
             (None, None) => {}
             _ => bail!("qualification evidence consumer content differs from signed policy"),
+        }
+        match (
+            &self.consumer_content,
+            &self.qualification_worker_transcript_manifest_hash,
+        ) {
+            (Some(_), Some(hash)) => {
+                validate_hash("qualification Worker transcript manifest", hash)?;
+                if self.result.q_transcript_manifest_hash()? != hash {
+                    bail!("qualification result changed its Q transcript manifest");
+                }
+            }
+            (None, None) => {
+                if self
+                    .result
+                    .probe_evidence
+                    .get("qualification_worker_transcript_manifest_hash")
+                    .is_some()
+                {
+                    bail!("qualification result Q reference has no admitted consumer content");
+                }
+            }
+            (Some(_), None) => {
+                bail!("qualification consumer evidence has no Q transcript manifest")
+            }
+            (None, Some(_)) => {
+                bail!("qualification Worker transcript has no admitted consumer content")
+            }
         }
         validate_qualification_execution(
             &self.policy_source,
@@ -1269,6 +1421,7 @@ impl ProductQualificationEvidence {
             product_coordinate,
             policy_source,
             consumer_content,
+            qualification_worker_transcript_manifest_hash,
             verifier,
             execution_proof,
             verifier_root_selections,
@@ -1281,6 +1434,7 @@ impl ProductQualificationEvidence {
             product_coordinate: &'a ProductCaptureCoordinate,
             policy_source: &'a ProductQualificationPolicySource,
             consumer_content: &'a Option<ProductQualificationConsumerContentIdentity>,
+            qualification_worker_transcript_manifest_hash: &'a Option<String>,
             verifier: &'a ProductQualificationVerifier,
             execution_proof: &'a ProductQualificationExecutionProof,
             verifier_root_selections: Option<Value>,
@@ -1296,6 +1450,7 @@ impl ProductQualificationEvidence {
             product_coordinate,
             policy_source,
             consumer_content,
+            qualification_worker_transcript_manifest_hash,
             verifier,
             execution_proof,
             verifier_root_selections,
@@ -1415,6 +1570,15 @@ pub(crate) fn validate_qualification_execution(
     policy.validate()?;
     verifier.validate()?;
     proof.validate_for(verifier)?;
+    if policy.policy.consumer_execution_context.is_some() {
+        if !matches!(
+            proof.subordinate_attempt,
+            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { .. })
+        ) {
+            bail!("qualification consumer execution requires a remote consumer attempt");
+        }
+        result.q_transcript_manifest_hash()?;
+    }
     if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote }) =
         &proof.subordinate_attempt
     {
@@ -1428,6 +1592,24 @@ pub(crate) fn validate_qualification_execution(
             .context("remote qualification proof has no signed producer scenario")?;
         if scenario.remote_verifier.is_none() {
             bail!("remote qualification proof scenario has no signed remote verifier");
+        }
+        if policy.policy.consumer_execution_context.is_some() {
+            scenario
+                .consumer_worker_request
+                .as_ref()
+                .context("consumer qualification scenario has no signed Worker request")?
+                .validate()?;
+        }
+        let expected_references = serde_json::json!({
+            "operation_id": remote.intent.operation_id,
+            "evidence_sha256": remote.observation.evidence_sha256,
+            "termination_operation_id": remote.termination_intent.operation_id,
+            "terminal_observation_sha256": canonical_value_digest(&serde_json::to_value(&remote.terminal_observation)?)?,
+        });
+        if result.probe_evidence.get("remote_consumer_attempt") != Some(&expected_references)
+            || result.probe_evidence.get("scoped_attempt").is_some()
+        {
+            bail!("qualification result remote references differ from daemon execution proof");
         }
         // Source/use/purpose and prerequisite history are corroborated by the
         // app proof owner, not inferred from scenario membership here.
@@ -1444,6 +1626,14 @@ pub(crate) fn validate_qualification_execution(
             .context("qualification scoped attempt has no signed producer scenario")?;
         if scenario.recipe_ref != scoped.producer_source.canonical_ref {
             bail!("qualification scoped attempt recipe differs from signed scenario");
+        }
+        let expected_coordinate = serde_json::json!({
+            "attempt_id": scoped.attempt_id,
+            "scenario_id": scoped.scenario_id,
+            "observation_object_hash": scoped.observation_object_hash,
+        });
+        if result.probe_evidence.get("scoped_attempt") != Some(&expected_coordinate) {
+            bail!("qualification result scoped attempt differs from daemon execution proof");
         }
     }
     for occurrence in std::iter::once(verifier).chain(

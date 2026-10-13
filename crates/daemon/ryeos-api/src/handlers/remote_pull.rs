@@ -99,7 +99,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 let name = OsString::from(format!("{}.json", entry.hash));
                 if staging
                     .directory()
-                    .atomic_create_regular(&name, &content, 0o600)?
+                    .atomic_create_regular(&name, &content, 0o600, crate::API_TEMP_PURPOSE)?
                     .is_none()
                 {
                     anyhow::bail!("duplicate remote object artifact name");
@@ -202,6 +202,7 @@ impl Drop for PinnedStagingDirectory {
         if let Err(error) = directory.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, directory)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())

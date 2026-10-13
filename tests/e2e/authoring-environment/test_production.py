@@ -205,9 +205,26 @@ class ProductionTests(unittest.TestCase):
             for name, arguments in tools.calls if name == "patchelf"
         ]
         self.assertEqual(patchelf_options, ["--set-rpath", "--set-interpreter"])
+        first = next(arguments for name, arguments in tools.calls
+                     if name == "patchelf" and "--set-rpath" in arguments)
+        self.assertEqual(first[first.index("--set-rpath") + 1],
+                         production.RUNTIME_ROOT + "/lib")
         self.assertEqual(tools.facts(executable)["interpreter"], [
             production.RUNTIME_ROOT + "/lib/ld-linux-x86-64.so.2",
         ])
+
+    def test_relocation_accepts_only_finite_private_origin_paths(self):
+        executable = self.inputs / "utilities/zsh"
+        tools = FakeElfTools()
+        production.relocate_elf(
+            executable, tools, production.RUNTIME_ROOT, runpath="$ORIGIN/../lib")
+        first = next(arguments for name, arguments in tools.calls
+                     if name == "patchelf" and "--set-rpath" in arguments)
+        self.assertEqual(first[first.index("--set-rpath") + 1], "$ORIGIN/../lib")
+        with self.assertRaisesRegex(ValueError, "finite relocation policies"):
+            production.relocate_elf(
+                executable, tools, production.RUNTIME_ROOT,
+                runpath="/ryeos/realizations/python-gnu/python/lib")
 
     def test_unclosed_interpreter_or_dependency_refuses(self):
         self.assemble()

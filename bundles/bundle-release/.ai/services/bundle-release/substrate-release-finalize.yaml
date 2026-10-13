@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-20T11:15:48Z:2516d1e02d90bebca8fad1b93a67de850874cd43fdf9c0e0a652f079e4a4e8cf:w8DQXj2K1rScK993BW/DrugLR831fEeGRukAUtyl053czUf0uZKwlijDMsVWT6pNLCiFNgs+hOxj/SDUhrGRCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:763d1f5c8b4443e0d765925914a4c3bebbc166539e13abac1f69e9e4dccf7410:cL53PeO5Lygll5OuAzf/QRHcl48fud5DY3Xp6gvrdvjpe1SAd+e8loAwgPCww/JYlHYsfJwzN8KrfUxVI4C9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-release-finalize
 version: "1.0.0"
 description: Verify and retain one exact qualified substrate-release descriptor without signing it.
-endpoint: bundle_release.substrate_release_finalize
+endpoint: bundle-release.substrate-release-finalize
 ui_read_only: false
 state_access: read_write
 record_thread: true

@@ -40,10 +40,21 @@ pub async fn handle_remotes_list(
 ) -> Result<Value> {
     let attachment = retained_attachment()?;
     let project_access = retained_project_access(&attachment)?;
-    let project = project_access.as_ref().map(|access| access.path());
+    remotes_list_for_access(&state.config.app_root, project_access.as_ref())
+}
 
-    let report =
-        ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
+/// The `remotes.list` projection for an attachment's project access. The
+/// project layer is read only through the retained project directory, never
+/// by re-walking the project's pathname, so a directory substituted at that
+/// path after attachment cannot redirect the read.
+pub fn remotes_list_for_access(
+    app_root: &std::path::Path,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) -> Result<Value> {
+    let report = ryeos_api::remote::config::load_remotes_layered_report_under_project_authority(
+        app_root,
+        project_access.map(crate::seat_auth::RetainedProjectAccess::directory),
+    )?;
 
     let mut entries: Vec<Value> = report
         .remotes
@@ -90,12 +101,16 @@ pub async fn handle_remotes_probe(
 ) -> Result<Value> {
     let attachment = retained_attachment()?;
     let project_access = retained_project_access(&attachment)?;
-    let project = project_access.as_ref().map(|access| access.path());
 
     let req: ProbeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let remotes = ryeos_api::remote::config::load_remotes_layered(&state.config.app_root, project)?;
+    let remotes = ryeos_api::remote::config::load_remotes_layered_under_project_authority(
+        &state.config.app_root,
+        project_access
+            .as_ref()
+            .map(crate::seat_auth::RetainedProjectAccess::directory),
+    )?;
     let remote_cfg = ryeos_api::remote::config::get_remote(&remotes, &req.remote)?;
 
     let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg);

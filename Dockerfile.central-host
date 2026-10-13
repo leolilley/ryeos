@@ -3,14 +3,14 @@
 # ryeos-central-host — standard node that hosts its own central-auth realm
 # and can search the web.
 #
-# Bakes core + central-auth + standard + web + tv-tracker-authoring: everything
-# the `standard` image ships, plus the central-auth bundle (login/verify/revoke,
-# policy) so the node is its own auth authority, the web bundle (rye/web/search +
-# rye/web/tavily-search), and tv-tracker-authoring (operator context-doc
-# author/read wrappers). RyeOS UI, browser, and hosted-node are intentionally excluded.
+# Bakes core + scheduling + standard + central-auth + web: everything the
+# `standard` image ships, plus the central-auth bundle (login/verify/revoke,
+# policy) so the node is its own auth authority, and the web bundle
+# (rye/web/search + rye/web/tavily-search). RyeOS UI, browser, and hosted-node
+# are intentionally excluded.
 #
-# This is the base for app-hosting images such as tv-tracker's ryeos-node,
-# which layer their project tree and a project-aware entrypoint on top.
+# This is the base for app-hosting images, which layer their project tree, any
+# project-owned bundles, and a project-aware entrypoint on top.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -76,10 +76,10 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 
 COPY --from=builder /build/bundles/.ai           /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core          /opt/ryeos/core
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/central-auth  /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard      /opt/ryeos/standard
 COPY --from=builder /build/bundles/web           /opt/ryeos/web
-COPY --from=builder /build/bundles/tv-tracker-authoring /opt/ryeos/tv-tracker-authoring
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -31,6 +31,7 @@ fn realization_mount_authority(
 /// Descriptor-pinned materializations and their exact cache-generation
 /// leases. This value must live until the spawned process exits.
 pub(crate) struct BoundExternalRealizations {
+    binding_mode: ExternalRealizationBinding,
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Exact materialization descriptors retained independently for external
     /// guest transfer. They are kept in the same canonical order as
@@ -47,7 +48,192 @@ pub(crate) struct BoundExternalRealizations {
     _leases: Vec<fs::File>,
 }
 
+/// Complete-set consistency observed on the same retained owner. This is
+/// metadata only, not qualified product authority or applied mount proof.
+pub(crate) struct ExternalSetAssociation<'a> {
+    source: &'a std::sync::Arc<BoundExternalRealizations>,
+    project_path: &'a Path,
+}
+
+/// A single position in the complete associated inventory. No retained
+/// descriptor, mount authority, owner, or cache coordinate can be extracted.
+pub(crate) struct ExternalAssociationMetadata<'a> {
+    entry: &'a ryeos_state::objects::ExternalContentRealization,
+    project_path: &'a Path,
+}
+
+impl ExternalSetAssociation<'_> {
+    pub(crate) fn len(&self) -> usize {
+        self.source.realized.iter().len()
+    }
+
+    pub(crate) fn entry(&self, index: usize) -> Option<ExternalAssociationMetadata<'_>> {
+        self.source
+            .realized
+            .iter()
+            .nth(index)
+            .map(|entry| ExternalAssociationMetadata {
+                entry,
+                project_path: self.project_path,
+            })
+    }
+}
+
+impl ExternalAssociationMetadata<'_> {
+    pub(crate) fn id(&self) -> &str {
+        &self.entry.id
+    }
+    pub(crate) fn manifest_hash(&self) -> &str {
+        &self.entry.manifest_hash
+    }
+    pub(crate) fn kind(&self) -> ExternalContentKind {
+        self.entry.kind
+    }
+    pub(crate) fn mode(&self) -> ryeos_state::objects::ExternalContentMode {
+        self.entry.mode
+    }
+    pub(crate) fn mount_root(&self) -> ryeos_state::objects::ExternalContentMountRoot {
+        self.entry.mount_root
+    }
+    pub(crate) fn mount(&self) -> &str {
+        &self.entry.mount
+    }
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entry.entry_count
+    }
+    pub(crate) fn total_bytes(&self) -> u64 {
+        self.entry.total_bytes
+    }
+    pub(crate) fn workload_destination(&self) -> anyhow::Result<PathBuf> {
+        self.entry
+            .mount_root
+            .destination(Some(self.project_path), &self.entry.mount)
+    }
+}
+
+// Count admission precedes decoding, quadratic canonical-set validation, and
+// descriptor work. Empty production inventories retain their existing None
+// behavior; a complete-set association itself must be nonempty.
+fn require_isolation_realization_count(count: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        count <= ryeos_isolation_protocol::MAX_MOUNTS,
+        "isolation realization count exceeds MAX_MOUNTS"
+    );
+    Ok(())
+}
+
+fn require_isolation_realization_value_count(value: &serde_json::Value) -> anyhow::Result<()> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("isolation realization inventory must be an array"))?;
+    require_isolation_realization_count(entries.len())
+}
+
 impl BoundExternalRealizations {
+    /// Project the same complete, generation-pinned materialization into the
+    /// data-only GPU loader contract. The projection borrows both each
+    /// realization and its positional descriptor from this retained owner.
+    pub(crate) fn project_gpu_loader_roots<'a>(
+        source: &'a std::sync::Arc<Self>,
+        expected: &RealizedExternalContentSet,
+        project_path: &'a Path,
+    ) -> anyhow::Result<ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots<'a>>
+    {
+        let _complete = Self::associate_complete_set(source, expected, project_path)?;
+        ryeos_gpu_loader_owner_contract::BorrowedGpuLoaderRealizationRoots::from_retained_parts(
+            &source.realized,
+            &source.guest_sources,
+        )
+    }
+
+    /// Borrow the same complete isolation-mounted owner after positional
+    /// consistency and current descriptor-relative generation checks. The
+    /// expected set and project coordinate are consistency data, not authority.
+    pub(crate) fn associate_complete_set<'a>(
+        source: &'a std::sync::Arc<Self>,
+        expected: &RealizedExternalContentSet,
+        project_path: &'a Path,
+    ) -> anyhow::Result<ExternalSetAssociation<'a>> {
+        anyhow::ensure!(
+            source.binding_mode == ExternalRealizationBinding::IsolationMounts
+                && source.private_workspace_identity.is_none(),
+            "external association requires isolation-mounted realizations"
+        );
+        let count = source.realized.iter().len();
+        let expected_count = expected.iter().len();
+        require_isolation_realization_count(count)?;
+        require_isolation_realization_count(expected_count)?;
+        anyhow::ensure!(
+            count != 0 && expected_count != 0,
+            "external association requires nonempty complete sets"
+        );
+        anyhow::ensure!(
+            count == expected_count
+                && source.custody_generations.len() == count
+                && source.guest_sources.len() == count
+                && source.mounts.len() == count,
+            "external association complete-set cardinality differs"
+        );
+        source.realized.validate()?;
+        expected.validate()?;
+        anyhow::ensure!(
+            &source.realized == expected,
+            "external association requires exact complete ordered set equality"
+        );
+        for (index, entry) in source.realized.iter().enumerate() {
+            // Validate workload coordinates without opening daemon source paths.
+            entry
+                .mount_root
+                .destination(Some(project_path), &entry.mount)?;
+            let (cache, generation) = &source.custody_generations[index];
+            cache.ensure_path_binding()?;
+            generation.ensure_path_binding()?;
+            // Descriptor-only pins have no pathname obligation: this named
+            // child check is mandatory even when ensure_path_binding is a no-op.
+            let named = cache
+                .open_child_directory(OsStr::new(&entry.manifest_hash))?
+                .ok_or_else(|| anyhow::anyhow!("external association named generation missing"))?;
+            anyhow::ensure!(
+                named.is_same_directory(generation)?,
+                "external association named generation identity differs"
+            );
+            let guest = &source.guest_sources[index];
+            match entry.kind {
+                ExternalContentKind::Tree => {
+                    anyhow::ensure!(
+                        guest.directory_identity()? == generation.identity()?,
+                        "external association tree descriptor identity differs"
+                    );
+                }
+                ExternalContentKind::File => {
+                    let current = generation
+                        .open_inherited_regular(
+                            OsStr::new(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH),
+                            false,
+                        )?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("external association content file missing")
+                        })?;
+                    anyhow::ensure!(
+                        current.file_identity()? == guest.file_identity()?,
+                        "external association file descriptor identity differs"
+                    );
+                }
+            }
+            // These are observations, not an immutable-tree/loader guarantee.
+            cache.ensure_path_binding()?;
+            generation.ensure_path_binding()?;
+            anyhow::ensure!(
+                named.is_same_directory(generation)?,
+                "external association retained generation identity changed"
+            );
+        }
+        Ok(ExternalSetAssociation {
+            source,
+            project_path,
+        })
+    }
+
     /// Retention inputs only; these records never grant spawn or cleanup.
     pub(crate) fn custody_records(
         &self,
@@ -254,6 +440,7 @@ impl ExternalGenerationRetirement<'_> {
         self.directory.remove_contents_recursive()?;
         self.root
             .remove_empty_child_if_same(OsStr::new(self.generation), self.directory)
+            .map(|receipt| receipt.is_some())
     }
 }
 
@@ -722,7 +909,9 @@ impl ExternalMaterializationCache {
         })();
         if result.is_err() {
             let _ = staging.remove_contents_recursive();
-            let _ = root.remove_empty_child_if_same(&staging_name, &staging);
+            let _ = root
+                .remove_empty_child_if_same(&staging_name, &staging)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -778,7 +967,9 @@ impl ExternalMaterializationCache {
         })();
         if result.is_err() {
             let _ = staging.remove_contents_recursive();
-            let _ = root.remove_empty_child_if_same(&staging_name, &staging);
+            let _ = root
+                .remove_empty_child_if_same(&staging_name, &staging)
+                .map(|receipt| receipt.is_some());
         }
         result
     }
@@ -902,7 +1093,9 @@ impl ExternalMaterializationCache {
                     .is_some_and(|age| age > STALE_STAGING_MAX_AGE);
                 if abandoned {
                     directory.remove_contents_recursive()?;
-                    let _ = root.remove_empty_child_if_same(OsStr::new(&name), &directory);
+                    let _ = root
+                        .remove_empty_child_if_same(OsStr::new(&name), &directory)
+                        .map(|receipt| receipt.is_some());
                 }
                 continue;
             }
@@ -1168,7 +1361,10 @@ where
             // without being replaced.
             if verify_existing(existing).is_ok() {
                 staging.remove_contents_recursive()?;
-                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                if !parent
+                    .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!(
                         "unused external realization staging directory remained non-empty"
                     );
@@ -1178,7 +1374,10 @@ where
             match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
                     directory.remove_contents_recursive()?;
-                    if !parent.remove_empty_child_if_same(&mount_name, directory)? {
+                    if !parent
+                        .remove_empty_child_if_same(&mount_name, directory)
+                        .map(|receipt| receipt.is_some())?
+                    {
                         anyhow::bail!(
                             "private external realization destination remained non-empty: {}",
                             parent.path().join(&mount_name).display()
@@ -1213,7 +1412,10 @@ where
                     );
                 }
                 published = true;
-                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                if !parent
+                    .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("file realization staging directory remained non-empty");
                 }
             }
@@ -1222,7 +1424,9 @@ where
     })();
     if result.is_err() && !published {
         let _ = staging.remove_contents_recursive();
-        let _ = parent.remove_empty_child_if_same(&staging_name, &staging);
+        let _ = parent
+            .remove_empty_child_if_same(&staging_name, &staging)
+            .map(|receipt| receipt.is_some());
     }
     result
 }
@@ -1270,12 +1474,31 @@ pub(crate) fn bind_retained_external_guest_realizations(
     state: &ryeos_app::state::AppState,
     realized: &ryeos_state::objects::ExternalContentRealizationSet,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    require_isolation_realization_count(realized.iter().len())?;
     bind_external_realization_set_with(
         state,
         realized.clone(),
         Path::new("/workspace"),
         ExternalRealizationBinding::IsolationMounts,
         None,
+    )
+}
+
+/// Redeem the same accepted Q realization set for its local Worker. Project
+/// mounts target the supplied owned runtime workspace, while fixed runtime
+/// mounts keep their signed execution-runtime coordinates.
+pub(crate) fn bind_retained_qualification_local_realizations(
+    state: &ryeos_app::state::AppState,
+    realized: &ryeos_state::objects::ExternalContentRealizationSet,
+    workspace: &Path,
+    budget: &PrivateMaterializationBudget,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realization_set_with(
+        state,
+        realized.clone(),
+        workspace,
+        ExternalRealizationBinding::PrivateRuntimeView,
+        Some(budget),
     )
 }
 
@@ -1365,6 +1588,9 @@ fn bind_external_realizations_with(
     else {
         return Ok(None);
     };
+    if binding == ExternalRealizationBinding::IsolationMounts {
+        require_isolation_realization_value_count(value)?;
+    }
     let realized = RealizedExternalContentSet::from_value(value)?;
     bind_external_realization_set_with(state, realized, project_path, binding, budget)
 }
@@ -1376,6 +1602,9 @@ fn bind_external_realization_set_with(
     binding: ExternalRealizationBinding,
     budget: Option<&PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    if binding == ExternalRealizationBinding::IsolationMounts {
+        require_isolation_realization_count(realized.iter().len())?;
+    }
     realized.validate()?;
     if realized.is_empty() {
         return Ok(None);
@@ -1606,6 +1835,7 @@ fn bind_external_realization_set_with(
         tracing::warn!(%error, "external-content materialization sweep failed");
     }
     Ok(Some(BoundExternalRealizations {
+        binding_mode: binding,
         mounts,
         guest_sources,
         realized,
@@ -2953,7 +3183,7 @@ mod tests {
         };
         for large in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
             let authority = state.state_store.pinned_state_authority().unwrap();
             let cas = authority.cas_store().unwrap();
             let ordinary = store_tree_closure(&cas, &[("content", b"retained")]);
@@ -3210,6 +3440,9 @@ mod tests {
             assert!(path.join("payload").exists());
             // An unrelated empty pin namespace cannot authorize this repair or
             // sweep. It has a cache root so absence alone cannot explain refusal.
+            // One Store is live per process: the owner closes first, and its
+            // durable pin stays behind in its own namespace only.
+            store.close().unwrap();
             let other_app = dir.path().join("other-app");
             let other = open_custody_store(&other_app);
             let other_cache =
@@ -3231,12 +3464,11 @@ mod tests {
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let dir = tempfile::tempdir().unwrap();
             let app = dir.path().join("app");
+            // One Store is live per process. The pinned authority outlives
+            // each Store owner, and no Store opens while a CAS guard is held.
             let owner = open_custody_store(&app);
             let authority = owner.pinned_state_authority().unwrap();
-            // All store/anchor initialization precedes the original CAS guard;
-            // opening another namespace while holding it is not this test's authority.
             let other_app = dir.path().join("other-app");
-            let other = open_custody_store(&other_app);
             let other_cache =
                 ExternalMaterializationCache::from_runtime_state_root(&other_app.join(".ai/state"));
             lillux::PinnedDirectory::open_or_create(&other_cache.root).unwrap();
@@ -3312,25 +3544,36 @@ mod tests {
             let target =
                 lillux::PinnedDirectory::open_or_create(&dir.path().join("output")).unwrap();
             let budget = PrivateMaterializationBudget::new(4096);
-            let restore = |store| {
+            let restore = |guard: &ryeos_state::CasMutationGuard,
+                           store: Option<&ryeos_app::state_store::StateStore>| {
                 restore_workspace_output_tree(
-                    &authority, &guard, &target, hash, storage, &budget, store,
+                    &authority, guard, &target, hash, storage, &budget, store,
                 )
             };
             assert!(
-                restore(Some(&owner)).is_err(),
+                restore(&guard, Some(&owner)).is_err(),
                 "live generation must not be repaired"
             );
             assert!(target.entries_no_follow().unwrap().is_empty());
             drop(generation);
             assert!(
-                restore(None).is_err(),
+                restore(&guard, None).is_err(),
                 "CAS authority alone must not authorize deletion"
             );
-            assert!(restore(Some(&other)).is_err());
+            // The idle, unpinned generation is offered to an unrelated empty
+            // pin namespace while the owner is closed.
+            drop(guard);
+            owner.close().unwrap();
+            let other = open_custody_store(&other_app);
+            let guard = authority.acquire_shared_guard().unwrap();
+            assert!(restore(&guard, Some(&other)).is_err());
+            drop(guard);
+            other.close().unwrap();
             assert!(path.join("unexpected").exists());
             assert!(target.entries_no_follow().unwrap().is_empty());
-            restore(Some(&owner)).unwrap();
+            let owner = open_custody_store(&app);
+            let guard = authority.acquire_shared_guard().unwrap();
+            restore(&guard, Some(&owner)).unwrap();
             let expected: &[u8] = match storage {
                 ProductStorage::Content => b"small runtime",
                 ProductStorage::LargeContent => large_bytes,
@@ -3398,5 +3641,509 @@ mod tests {
         drop(live);
         cache.sweep_to_budget(0).unwrap();
         assert!(!live_root.exists());
+    }
+
+    // Source-only association controls: actual State/CAS and original binder
+    // owners, never a manufactured verified product or original admission.
+    #[cfg(target_os = "linux")]
+    fn association_inventory(
+        state: &ryeos_app::state::AppState,
+        large: bool,
+    ) -> RealizedExternalContentSet {
+        use ryeos_state::objects::{
+            ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,
+            ExternalContentRealizationSet,
+        };
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let mut entries = Vec::new();
+        for (id, path, bytes, kind, mount_root, mount) in [
+            (
+                "a-tree",
+                "alpha.txt",
+                b"alpha".as_slice(),
+                ExternalContentKind::Tree,
+                ExternalContentMountRoot::Project,
+                "vendor/tree",
+            ),
+            (
+                "b-tree-alias",
+                "alpha.txt",
+                b"alpha".as_slice(),
+                ExternalContentKind::Tree,
+                ExternalContentMountRoot::ExecutionRuntime,
+                "tree-alias",
+            ),
+            (
+                "c-file",
+                "content",
+                b"retained".as_slice(),
+                ExternalContentKind::File,
+                ExternalContentMountRoot::Project,
+                "vendor/file",
+            ),
+        ] {
+            let closure = store_tree_closure(&cas, &[(path, bytes)]);
+            let mut manifest = serde_json::to_value(closure.manifest()).unwrap();
+            if large {
+                manifest["schema"] =
+                    serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA);
+                manifest["kind"] =
+                    serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND);
+            }
+            entries.push(ExternalContentRealization {
+                id: id.into(),
+                kind,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: cas.store_object(&manifest).unwrap(),
+                entry_count: 1,
+                total_bytes: bytes.len() as u64,
+                mount_root,
+                mount: mount.into(),
+            });
+        }
+        ExternalContentRealizationSet::new(entries).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn association_owner(
+        state: &ryeos_app::state::AppState,
+        set: &RealizedExternalContentSet,
+    ) -> std::sync::Arc<BoundExternalRealizations> {
+        std::sync::Arc::new(
+            bind_retained_external_guest_realizations(state, set)
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_complete_metadata_preserves_hash_aliases_for_both_tiers() {
+        for large in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let set = association_inventory(&state, large);
+            let owner = association_owner(&state, &set);
+            let references = std::sync::Arc::strong_count(&owner);
+            let view = BoundExternalRealizations::associate_complete_set(
+                &owner,
+                &set,
+                Path::new("/workspace"),
+            )
+            .unwrap();
+            assert_eq!(std::sync::Arc::strong_count(&owner), references);
+            assert!(std::ptr::eq(view.source, &owner));
+            assert_eq!(view.len(), 3);
+            let tree = view.entry(0).unwrap();
+            let alias = view.entry(1).unwrap();
+            let file = view.entry(2).unwrap();
+            assert_eq!(tree.manifest_hash(), alias.manifest_hash());
+            assert_ne!(tree.id(), alias.id());
+            assert_ne!(tree.mount_root(), alias.mount_root());
+            assert_eq!(tree.kind(), ExternalContentKind::Tree);
+            assert_eq!(file.kind(), ExternalContentKind::File);
+            assert_eq!(
+                tree.mode(),
+                ryeos_state::objects::ExternalContentMode::Pinned
+            );
+            assert_eq!(tree.mount(), "vendor/tree");
+            assert_eq!(tree.entry_count(), 1);
+            assert_eq!(file.total_bytes(), 8);
+            assert_eq!(
+                tree.workload_destination().unwrap(),
+                Path::new("/workspace/vendor/tree")
+            );
+            assert_eq!(
+                alias.workload_destination().unwrap(),
+                Path::new("/ryeos/realizations/tree-alias")
+            );
+            assert!(view.entry(3).is_none());
+            assert!(
+                owner.custody_generations[0]
+                    .1
+                    .is_same_directory(&owner.custody_generations[1].1)
+                    .unwrap()
+            );
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &set,
+                    Path::new("relative-project")
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_refuses_incomplete_changed_and_noncanonical_expected_sets() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let set = association_inventory(&state, false);
+        let owner = association_owner(&state, &set);
+        let original = set.to_value().unwrap();
+        for variant in 0..7 {
+            let mut value = original.clone();
+            let rows = value.as_array_mut().unwrap();
+            match variant {
+                0 => {
+                    rows.pop();
+                }
+                1 => {
+                    let mut extra = rows[2].clone();
+                    extra["id"] = serde_json::json!("d-extra");
+                    extra["mount"] = serde_json::json!("vendor/extra");
+                    rows.push(extra);
+                }
+                2 => {
+                    rows[0]["mount"] = serde_json::json!("vendor/changed");
+                }
+                3 => {
+                    rows.swap(0, 1);
+                }
+                4 => {
+                    rows[0]["manifest_hash"] = rows[2]["manifest_hash"].clone();
+                }
+                5 => {
+                    rows[0]["mode"] = serde_json::json!("captured");
+                }
+                6 => {
+                    rows[0]["mount_root"] = serde_json::json!("execution_runtime");
+                }
+                _ => unreachable!(),
+            }
+            // Decode typed consistency DATA without repairing/sorting invalid
+            // order. Association itself must reject it before accepting a view.
+            let expected: RealizedExternalContentSet = serde_json::from_value(value).unwrap();
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &expected,
+                    Path::new("/workspace")
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            BoundExternalRealizations::associate_complete_set(
+                &owner,
+                &RealizedExternalContentSet::default(),
+                Path::new("/workspace")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_refuses_private_delivery_modes_from_actual_binders() {
+        for binding in [
+            ExternalRealizationBinding::PrivateWorkspace,
+            ExternalRealizationBinding::PrivateRuntimeView,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let set = association_inventory(&state, false);
+            let project_only = ryeos_state::objects::ExternalContentRealizationSet::new(
+                set.iter()
+                    .filter(|entry| {
+                        entry.mount_root == ryeos_state::objects::ExternalContentMountRoot::Project
+                    })
+                    .cloned()
+                    .collect(),
+            )
+            .unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let budget = PrivateMaterializationBudget::new(1024 * 1024);
+            let owner = std::sync::Arc::new(
+                bind_external_realization_set_with(
+                    &state,
+                    project_only.clone(),
+                    workspace.path(),
+                    binding,
+                    Some(&budget),
+                )
+                .unwrap()
+                .unwrap(),
+            );
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &project_only,
+                    workspace.path()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_refuses_parallel_cardinality_order_and_descriptor_class_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let set = association_inventory(&state, false);
+        for variant in 0..8 {
+            let mut owner = association_owner(&state, &set);
+            let bound = std::sync::Arc::get_mut(&mut owner).unwrap();
+            match variant {
+                0 => {
+                    bound.mounts.pop();
+                }
+                1 => {
+                    bound.guest_sources.pop();
+                }
+                2 => {
+                    bound.custody_generations.pop();
+                }
+                3 => {
+                    bound.guest_sources.swap(0, 2);
+                }
+                4 => {
+                    bound.custody_generations.swap(0, 2);
+                }
+                5 => {
+                    bound.guest_sources[2] = bound.guest_sources[0].clone();
+                }
+                6 => {
+                    let mut value = bound.realized.to_value().unwrap();
+                    value.as_array_mut().unwrap().swap(0, 1);
+                    bound.realized = serde_json::from_value(value).unwrap();
+                }
+                7 => {
+                    bound.realized = RealizedExternalContentSet::default();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &set,
+                    Path::new("/workspace")
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_refuses_missing_or_replaced_named_generation_retaining_original() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let set = association_inventory(&state, false);
+        let owner = association_owner(&state, &set);
+        let cache = ExternalMaterializationCache::from_runtime_state_root(
+            &state.config.runtime_state_dir(),
+        );
+        let hash = &set.iter().next().unwrap().manifest_hash;
+        let named = cache.root.join(hash);
+        let moved = cache.root.join("association-fixture-moved");
+        fs::rename(&named, &moved).unwrap();
+        assert!(
+            BoundExternalRealizations::associate_complete_set(
+                &owner,
+                &set,
+                Path::new("/workspace")
+            )
+            .is_err()
+        );
+        fs::create_dir(&named).unwrap();
+        assert!(
+            BoundExternalRealizations::associate_complete_set(
+                &owner,
+                &set,
+                Path::new("/workspace")
+            )
+            .is_err()
+        );
+        let original = owner.custody_generations[0]
+            .1
+            .open_inherited_regular(OsStr::new("alpha.txt"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original.read_regular_file_stable_bounded(5).unwrap().0,
+            b"alpha"
+        );
+        // Only the replacement directory created by this fixture is removed.
+        fs::remove_dir(&named).unwrap();
+        fs::rename(&moved, &named).unwrap();
+        assert!(
+            BoundExternalRealizations::associate_complete_set(
+                &owner,
+                &set,
+                Path::new("/workspace")
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_refuses_replaced_file_content_retaining_original_readable_inode() {
+        for large in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let set = association_inventory(&state, large);
+            let owner = association_owner(&state, &set);
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                &state.config.runtime_state_dir(),
+            );
+            let hash = &set.iter().nth(2).unwrap().manifest_hash;
+            let content = cache.root.join(hash).join("content");
+            let moved = content.with_file_name("association-fixture-original");
+            fs::rename(&content, &moved).unwrap();
+            fs::write(&content, b"retained").unwrap();
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &set,
+                    Path::new("/workspace")
+                )
+                .is_err()
+            );
+            assert_eq!(
+                owner.guest_sources[2]
+                    .read_regular_file_stable_bounded(8)
+                    .unwrap()
+                    .0,
+                b"retained"
+            );
+            fs::remove_file(&content).unwrap();
+            fs::rename(&moved, &content).unwrap();
+            assert!(
+                BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &set,
+                    Path::new("/workspace")
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn association_borrow_retains_actual_owner_leases_without_descriptor_substitution() {
+        for large in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let set = association_inventory(&state, large);
+            let owner = association_owner(&state, &set);
+            let file_descriptor = owner.guest_sources[2].clone();
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                &state.config.runtime_state_dir(),
+            );
+            {
+                let view = BoundExternalRealizations::associate_complete_set(
+                    &owner,
+                    &set,
+                    Path::new("/workspace"),
+                )
+                .unwrap();
+                cache.sweep_to_budget(0).unwrap();
+                assert_eq!(view.len(), 3);
+                for entry in set.iter() {
+                    assert!(cache.root.join(&entry.manifest_hash).exists());
+                }
+            }
+            drop(owner);
+            cache.sweep_to_budget(0).unwrap();
+            for entry in set.iter() {
+                assert!(!cache.root.join(&entry.manifest_hash).exists());
+            }
+            assert_eq!(
+                file_descriptor
+                    .read_regular_file_stable_bounded(8)
+                    .unwrap()
+                    .0,
+                b"retained"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn isolation_realization_count_guards_precede_decode_validate_and_retained_clone() {
+        assert!(require_isolation_realization_count(0).is_ok());
+        assert!(require_isolation_realization_count(4096).is_ok());
+        assert!(require_isolation_realization_count(4097).is_err());
+        let invalid_rows = serde_json::Value::Array(vec![serde_json::Value::Null; 4097]);
+        assert!(
+            require_isolation_realization_value_count(&invalid_rows)
+                .unwrap_err()
+                .to_string()
+                .contains("MAX_MOUNTS")
+        );
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let invocation = serde_json::to_value(
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture(),
+        )
+        .unwrap();
+        let mut resolution: ryeos_engine::resolution::ResolutionOutput =
+            serde_json::from_value(invocation["resolution_output"].clone()).unwrap();
+        resolution.composed.derived.insert(
+            ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+            invalid_rows,
+        );
+        let error = bind_external_guest_realizations(&state, &resolution)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("MAX_MOUNTS"));
+        // Typed DATA only, no 4096 materializations and no canonical validation
+        // during construction. Duplicates would fail canonical validation if
+        // the isolation count guard did not run first.
+        let set = association_inventory(&state, false);
+        let row = serde_json::to_value(set.iter().next().unwrap()).unwrap();
+        let excessive: RealizedExternalContentSet =
+            serde_json::from_value(serde_json::Value::Array(vec![row; 4097])).unwrap();
+        let error = bind_retained_external_guest_realizations(&state, &excessive)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("MAX_MOUNTS"));
+        let error = bind_external_realization_set_with(
+            &state,
+            excessive.clone(),
+            Path::new("/workspace"),
+            ExternalRealizationBinding::IsolationMounts,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("MAX_MOUNTS"));
+        let owner = association_owner(&state, &set);
+        let error = BoundExternalRealizations::associate_complete_set(
+            &owner,
+            &excessive,
+            Path::new("/workspace"),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("MAX_MOUNTS"));
+        let mut owner = owner;
+        std::sync::Arc::get_mut(&mut owner).unwrap().realized = excessive;
+        let error = BoundExternalRealizations::associate_complete_set(
+            &owner,
+            &set,
+            Path::new("/workspace"),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("MAX_MOUNTS"));
+        assert!(
+            bind_external_realization_set_with(
+                &state,
+                RealizedExternalContentSet::default(),
+                Path::new("/workspace"),
+                ExternalRealizationBinding::IsolationMounts,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }

@@ -68,6 +68,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let topology = super::ui_graph_topology::build_topology(
         &state,
         project_root.clone(),
+        project_access.as_ref(),
         project_query_identity
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
@@ -92,11 +93,17 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         validate_only: true,
     };
     let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;
-    let mut projection_session = EffectiveProgramProjectionSession::new(
-        &state.engine,
-        &plan_context,
-        project_root.as_deref().map(std::path::Path::new),
-    )?;
+    // The project is reached only through its retained directory owner; its
+    // descriptor pathname is a resolution coordinate, never walked.
+    let mut projection_session = match project_access.as_ref() {
+        Some(access) => EffectiveProgramProjectionSession::new_under_project_authority(
+            &state.engine,
+            &plan_context,
+            access.path(),
+            access.content_authority(),
+        )?,
+        None => EffectiveProgramProjectionSession::new(&state.engine, &plan_context, None)?,
+    };
     let mut projections = BTreeMap::new();
     let mut projection_warnings = Vec::new();
     for node in topology
@@ -133,10 +140,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             )
         })
         .unwrap_or_else(|| "project:node".to_string());
-    let admission = project_root.as_deref().map(|root| {
+    let admission = project_query_identity.as_deref().map(|root| {
         ryeos_app::admission_events::read_admission_events(
             &state.state_store,
-            std::path::Path::new(root),
+            root,
             MAX_ADMISSION_FACTS,
         )
     });

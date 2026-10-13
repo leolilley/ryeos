@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 fn sealed_exec_child(name: &str) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
@@ -98,6 +100,35 @@ fn sandbox_target(name: &str) -> Result<(), String> {
     };
     if remount == 0 {
         return Err("sandbox target restored writable source mount".into());
+    }
+    // This process exists only after trusted setup and explicit held release.
+    // Inspect the actual native limits rather than trusting request metadata.
+    for (resource, expected) in [
+        (libc::RLIMIT_NOFILE, 64_u64),
+        (libc::RLIMIT_AS, 134217728_u64),
+        (libc::RLIMIT_CPU, 3_u64),
+    ] {
+        let mut actual = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(resource, &mut actual) } != 0
+            || actual.rlim_cur as u64 != expected
+            || actual.rlim_max as u64 != expected
+        {
+            return Err("released native target observed different resource limits".to_owned());
+        }
+    }
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        unsafe { libc::_exit(91) };
+    }
+    if child > 0 {
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
+        return Err("released native target created a forbidden child".to_owned());
+    }
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return Err("target fork refusal did not match installed denial".to_owned());
     }
     writeln!(std::io::stdout(), "TARGET").map_err(|error| error.to_string())?;
     std::io::stdout()
@@ -261,6 +292,13 @@ fn held_source_target(
         contain_process_group: true,
         nested_sandbox: false,
         aggregate_limits: None,
+        target_limits: Some(lillux::SubprocessLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            deny_process_creation: true,
+            ..Default::default()
+        }),
     };
     let expected = request.clone();
     let mut held = lillux::sandbox::prepare_linux_sandbox_from_sealed_source(
@@ -382,7 +420,7 @@ fn child(
         .create_child(OsStr::new(name), 0o700)
         .map_err(|error| error.to_string())?;
     child
-        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600)
+        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600, TEST_PURPOSE)
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
     if wrong_source {

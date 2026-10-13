@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use lillux::{InheritedReadonlyDocument, PinnedDirectory, PinnedDirectoryIdentity};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 1;
+pub const HOST_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 2;
 pub const HOST_RUNTIME_AUTHORITY_FD_ENV: &str = "RYEOS_HOST_RUNTIME_AUTHORITY_FD";
 const MAX_HOST_RUNTIME_DOCUMENT_BYTES: u64 = 64 * 1024;
 
@@ -24,6 +24,7 @@ pub struct HostRuntimeBinding {
     pub app_root_identity: PinnedDirectoryIdentity,
     pub node_fingerprint: String,
     pub account: lillux::ControllerAccount,
+    pub node_resources: lillux::ProcessScopeResourceLimits,
     pub process_scopes: lillux::ProcessScopeConfiguration,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_lifecycle: Option<lillux::OciLifecycleGeneration>,
@@ -37,13 +38,17 @@ impl HostRuntimeBinding {
         observed_app_root: &PinnedDirectory,
         runtime_app_root: PathBuf,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
         oci_lifecycle: lillux::OciLifecycleGeneration,
     ) -> Result<Self> {
         account.validate().map_err(anyhow::Error::msg)?;
+        node_resources.validate().map_err(anyhow::Error::msg)?;
         account.require_directory_owner(observed_app_root)?;
         process_scopes.validate().map_err(anyhow::Error::msg)?;
         oci_lifecycle.validate().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(node_resources == oci_lifecycle.node_resources(),
+            "host runtime node envelope differs from OCI generation");
         process_scopes
             .require_oci_generation_as_administrator(&account, &oci_lifecycle)
             .map_err(anyhow::Error::msg)?;
@@ -56,7 +61,7 @@ impl HostRuntimeBinding {
             .open_pinned_regular_descendant(&identity_path, false)?
             .context("OCI app root has no node public identity")?;
         let observation = identity_file.observation()?;
-        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+        let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
             &identity_file.read_stable_bounded(&observation, MAX_HOST_RUNTIME_DOCUMENT_BYTES)?,
         )?;
         Ok(Self {
@@ -65,6 +70,7 @@ impl HostRuntimeBinding {
             app_root_identity: observed_app_root.identity()?,
             node_fingerprint: identity.verified_fingerprint()?,
             account,
+            node_resources,
             process_scopes,
             oci_lifecycle: Some(oci_lifecycle),
         })
@@ -74,6 +80,7 @@ impl HostRuntimeBinding {
         app_root: &PinnedDirectory,
         node_fingerprint: String,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
     ) -> Result<Self> {
         let binding = Self {
@@ -82,6 +89,7 @@ impl HostRuntimeBinding {
             app_root_identity: app_root.identity()?,
             node_fingerprint,
             account,
+            node_resources,
             process_scopes,
             oci_lifecycle: None,
         };
@@ -124,6 +132,12 @@ impl HostRuntimeBinding {
             bail!("host runtime has a wrong epoch or app root");
         }
         self.account.validate().map_err(anyhow::Error::msg)?;
+        self.node_resources.validate().map_err(anyhow::Error::msg)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            lifecycle.validate().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(self.node_resources == lifecycle.node_resources(),
+                "host runtime node envelope differs from OCI generation");
+        }
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
         if !lillux::valid_hash(&self.node_fingerprint) {
             bail!("host runtime has an invalid node public identity");
@@ -140,7 +154,7 @@ impl HostRuntimeBinding {
             .open_pinned_regular_descendant(&identity_path, false)?
             .context("host-runtime node public identity is absent")?;
         let observation = identity_file.observation()?;
-        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+        let identity: ryeos_node_runtime::identity::PublicIdentityDoc = serde_json::from_slice(
             &identity_file.read_stable_bounded(&observation, MAX_HOST_RUNTIME_DOCUMENT_BYTES)?,
         )?;
         if identity.verified_fingerprint()? != self.node_fingerprint {
@@ -153,10 +167,11 @@ impl HostRuntimeBinding {
         app_root: &PinnedDirectory,
         node_fingerprint: String,
         account: lillux::ControllerAccount,
+        node_resources: lillux::ProcessScopeResourceLimits,
         process_scopes: lillux::ProcessScopeConfiguration,
         oci_lifecycle: lillux::OciLifecycleGeneration,
     ) -> Result<Self> {
-        let mut binding = Self::capture(app_root, node_fingerprint, account, process_scopes)?;
+        let mut binding = Self::capture(app_root, node_fingerprint, account, node_resources, process_scopes)?;
         binding.oci_lifecycle = Some(oci_lifecycle);
         binding.validate_as_administrator(app_root.path())?;
         Ok(binding)
@@ -164,7 +179,7 @@ impl HostRuntimeBinding {
 
     pub fn verify_loaded_node_identity(
         &self,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<()> {
         self.account.require_current_process()?;
         self.validate(&self.app_root)?;
@@ -184,6 +199,23 @@ impl HostRuntimeBinding {
             "sha256:{}",
             lillux::sha256_hex(canonical.as_bytes())
         ))
+    }
+
+    /// A supervised claim is placement, not association: refuse unless this
+    /// process runs as the bound account inside the exact controller leaf the
+    /// host supervisor places it in. Call before any lock, debit or allowance.
+    pub fn require_current_process_placed(&self) -> Result<()> {
+        // Placement first: for a direct launch it is the precise cause.
+        self.process_scopes
+            .require_current_process_in_controller(&self.account)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "supervised route refused for app root {}",
+                    self.app_root.display()
+                )
+            })?;
+        self.account.require_current_process()
     }
 
     pub fn open_process_scope_provider(
@@ -289,6 +321,7 @@ pub fn exec_external_controller(
             .process_scopes
             .exec_prepared_oci_controller_with_inherited_document(
                 &binding.account,
+                binding.node_resources,
                 lifecycle,
                 &executable,
                 &arguments,
@@ -302,6 +335,7 @@ pub fn exec_external_controller(
             .process_scopes
             .exec_controller_with_inherited_document(
                 &binding.account,
+                binding.node_resources,
                 &executable,
                 &arguments,
                 &app_root,
@@ -316,8 +350,6 @@ pub fn exec_external_controller(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt as _;
 
     fn binding_value() -> serde_json::Value {
         serde_json::json!({
@@ -326,6 +358,7 @@ mod tests {
             "app_root_identity": {"containing_device": 1, "inode": 2},
             "node_fingerprint": "a".repeat(64),
             "account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+            "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
             "process_scopes": {
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
@@ -367,6 +400,28 @@ mod tests {
         assert_eq!(first.identity_digest().unwrap().len(), "sha256:".len() + 64);
     }
 
+    #[test]
+    fn node_envelope_is_required_closed_and_part_of_authority_identity() {
+        let original = binding_value();
+        let first: HostRuntimeBinding = serde_json::from_value(original.clone()).unwrap();
+        let mut absent = original.clone();
+        absent.as_object_mut().unwrap().remove("node_resources");
+        assert!(serde_json::from_value::<HostRuntimeBinding>(absent).is_err());
+        let mut unknown = original.clone();
+        unknown["node_resources"]["ambient_allowance"] = true.into();
+        assert!(serde_json::from_value::<HostRuntimeBinding>(unknown).is_err());
+        let mut changed = original;
+        changed["node_resources"]["maximum_memory_bytes"] = 536870912_u64.into();
+        let changed: HostRuntimeBinding = serde_json::from_value(changed).unwrap();
+        assert_ne!(first.identity_digest().unwrap(), changed.identity_digest().unwrap());
+        let mut no_capacity = first.node_resources;
+        no_capacity.maximum_memory_bytes = 0;
+        assert!(no_capacity.validate().is_err());
+        no_capacity = first.node_resources;
+        no_capacity.maximum_processes = 0;
+        assert!(no_capacity.validate().is_err());
+    }
+
     #[cfg(unix)]
     fn binding_for_directory(path: &Path, uid: u32, gid: u32) -> HostRuntimeBinding {
         let directory = PinnedDirectory::open(path).unwrap().unwrap();
@@ -376,6 +431,7 @@ mod tests {
             "app_root_identity": directory.identity().unwrap(),
             "node_fingerprint": "a".repeat(64),
             "account": {"implementation": "unix", "uid": uid, "gid": gid},
+            "node_resources": {"maximum_memory_bytes": 268435456, "maximum_processes": 64},
             "process_scopes": {
                 "version": 3,
                 "backend": {"implementation": "linux_cgroup_v2", "parent": "/scope"}
@@ -390,12 +446,35 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("node");
         std::fs::create_dir(&root).unwrap();
-        let metadata = std::fs::metadata(&root).unwrap();
-        let binding = binding_for_directory(&root, metadata.uid(), metadata.gid());
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let binding = binding_for_directory(&root, uid, gid);
         std::fs::rename(&root, parent.path().join("old-node")).unwrap();
         std::fs::create_dir(&root).unwrap();
         let error = binding.validate(&root).unwrap_err();
         assert!(format!("{error:#}").contains("app root has been replaced"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_process_on_an_associated_root_is_not_supervised() {
+        // This test process stands in for a directly launched daemon: it is
+        // the bound account, but no host supervisor placed it.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("node");
+        std::fs::create_dir(&root).unwrap();
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let mut binding = binding_for_directory(&root, uid, gid);
+        binding.process_scopes = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "backend": {
+                "implementation": "linux_cgroup_v2",
+                "parent": "/sys/fs/cgroup/lillux-host-services/ryeos-direct-fixture"
+            }
+        }))
+        .unwrap();
+        let error = format!("{:#}", binding.require_current_process_placed().unwrap_err());
+        assert!(error.contains("supervised route refused"), "{error}");
+        assert!(error.contains("ryeos-direct-fixture/controller"), "{error}");
     }
 
     #[cfg(unix)]
@@ -404,8 +483,8 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("node");
         std::fs::create_dir(&root).unwrap();
-        let metadata = std::fs::metadata(&root).unwrap();
-        let binding = binding_for_directory(&root, metadata.uid().wrapping_add(1), metadata.gid());
+        let (uid, gid) = lillux::path_owner_ids(&root).unwrap();
+        let binding = binding_for_directory(&root, uid.wrapping_add(1), gid);
         let error = binding.validate(&root).unwrap_err();
         assert!(format!("{error:#}").contains("owner"));
     }

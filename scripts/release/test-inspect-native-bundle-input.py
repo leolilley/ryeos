@@ -25,6 +25,7 @@ class NativeBundleInputInspectionTests(unittest.TestCase):
         plan = json.loads(result.stdout)
         self.assertFalse(plan["requires_binary_build"])
         self.assertEqual(plan["cargo_packages"], [])
+        self.assertEqual(plan["cargo_feature_selections"], [])
         self.assertFalse(plan["ambient_target_reuse_allowed"])
 
     def test_source_only_bundle_rejects_architecture_specific_identity(self):
@@ -36,6 +37,9 @@ class NativeBundleInputInspectionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout)
         self.assertEqual(plan["cargo_packages"], ["ryeos-web-tools"])
+        self.assertEqual(plan["cargo_feature_selections"], [
+            {"cargo_package": "ryeos-web-tools", "features": []}
+        ])
         self.assertEqual(plan["target"], {
             "kind": "triple", "triple": "x86_64-unknown-linux-gnu"
         })
@@ -51,6 +55,13 @@ class NativeBundleInputInspectionTests(unittest.TestCase):
             payload["cargo_package"] for payload in plan["payloads"]
         )))
         self.assertIn("ryeos-handler-bins", plan["cargo_packages"])
+        feature_selections = {
+            item["cargo_package"]: item["features"]
+            for item in plan["cargo_feature_selections"]
+        }
+        self.assertEqual(feature_selections["ryeos-handler-bins"], ["core-handlers"])
+        self.assertTrue(all(not features for package, features in feature_selections.items()
+                            if package != "ryeos-handler-bins"))
         self.assertTrue(plan["requires_binary_build"])
 
     def test_distinct_bundles_are_independently_inspectable(self):

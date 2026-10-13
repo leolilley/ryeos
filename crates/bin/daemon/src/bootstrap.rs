@@ -9,9 +9,9 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
+use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 
 /// Bootstrap options.
 ///
@@ -335,7 +335,7 @@ fn write_operator_authorized(
         .ok_or_else(|| anyhow::anyhow!("authorized-key path has no parent directory"))?;
     let now = lillux::time::iso8601_now();
 
-    let _path = ryeos_app::identity::write_authorized_key_toml(
+    let _path = ryeos_node_runtime::identity::write_authorized_key_toml(
         auth_dir,
         &fp,
         &key_b64,
@@ -344,7 +344,7 @@ fn write_operator_authorized(
         &fp,
         &now,
         node_signing_key,
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
 
     tracing::info!(
@@ -586,15 +586,40 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// selected after runtime admission. A mandatory launch preparer may cause the
 /// returned snapshot to capture its selected isolation backend even when the
 /// general policy is disabled.
+/// Every optional Cargo feature of this daemon, with whether it is compiled
+/// in. The capability report lists the compiled ones.
+const COMPILED_FEATURES: [(&str, bool); 5] = [
+    ("crash-qualification-test-support", cfg!(feature = "crash-qualification-test-support")),
+    ("handoff-test-support", cfg!(feature = "handoff-test-support")),
+    ("latency-profiling", cfg!(feature = "latency-profiling")),
+    ("model-provider-setup", cfg!(feature = "model-provider-setup")),
+    ("scheduling", cfg!(feature = "scheduling")),
+];
+
+fn compiled_features() -> Vec<String> {
+    COMPILED_FEATURES
+        .iter()
+        .filter(|(_, compiled)| *compiled)
+        .map(|(name, _)| (*name).to_owned())
+        .collect()
+}
+
 pub fn load_node_config_two_phase(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.uds_path),
+        None,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Running-daemon bootstrap with one already selected protected host runtime.
@@ -603,13 +628,20 @@ pub fn load_node_config_two_phase(
 pub fn load_node_config_two_phase_with_host_runtime(
     config: &Config,
     host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.uds_path),
+        host_runtime,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
@@ -618,26 +650,34 @@ pub fn load_node_config_two_phase_with_host_runtime(
 /// It also does not own the supervised process-scope provider. Definition
 /// admission retains enforced isolation without claiming those capabilities;
 /// persistent worker execution belongs to the normal daemon bootstrap.
+///
+/// The capability report it admitted the service on is returned with the
+/// rest: the floor was met on the planned residency, and the native host
+/// the service issues must meet it again on the residency it establishes.
 pub fn load_node_config_two_phase_standalone(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
-    load_node_config_two_phase_with_socket(config, None, None)
+    load_node_config_two_phase_with_socket(config, None, None, provider_environment)
 }
 
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
     host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
     let app_root = &config.app_root;
 
@@ -646,7 +686,7 @@ fn load_node_config_two_phase_with_socket(
     // snapshot. Mutation paths take this same node-wide lock before planning
     // or activation, so one daemon generation cannot mix bundle generations.
     let _bundle_generation_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
             .context("acquire bundle-generation lock for node bootstrap")?;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
@@ -655,7 +695,7 @@ fn load_node_config_two_phase_with_socket(
     let bootstrap_trust_store = TrustStore::load(None, &operator_config_root)
         .context("failed to load bootstrap trust store for node-config verification")?;
 
-    let bootstrap_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let bootstrap_loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -665,7 +705,7 @@ fn load_node_config_two_phase_with_socket(
         .context("Phase 1: failed to load bundle section from node config")?;
 
     let generation = Arc::new(
-        ryeos_app::engine_init::VerifiedBundleGeneration::capture(
+        ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(
             bundle_records,
             &bootstrap_trust_store,
         )
@@ -677,7 +717,7 @@ fn load_node_config_two_phase_with_socket(
     // validate before any registry is constructed from these roots.
     generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::validate_installed_bundle_plan(
+            ryeos_node_runtime::engine_init::validate_installed_bundle_plan(
                 app_root,
                 &generation,
                 &bootstrap_trust_store,
@@ -693,23 +733,29 @@ fn load_node_config_two_phase_with_socket(
     // raw path.
     let config_table = NodeConfigTable::new();
     let policy_table = NodePolicyTable::new();
-    let policy_generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let policy_generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &bootstrap_trust_store,
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
+    // The provider environment was taken before the async runtime existed,
+    // under the generation then on disk. Composing under any other
+    // generation would deliver names this policy does not declare.
+    provider_environment
+        .require_generation(app_root, policy_generation.digest())
+        .context("Phase 1: bind the startup provider environment to the loaded policy")?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
+    let node_policy = Arc::new(ryeos_node_runtime::node_policy::compile_generation(
         app_root,
         &policy_table,
         &policy_generation,
         node_identity.fingerprint(),
     )?);
     let command_registration = node_policy.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let full_loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -724,13 +770,22 @@ fn load_node_config_two_phase_with_socket(
             .context("Phase 2: failed to load full node config")
     })?);
 
-    let isolation_backend = generation
+    let (isolation_backend, verified_backend_capture) = generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::resolve_isolation_backend(
-                &generation,
-                &bootstrap_trust_store,
-                node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
-            )
+            if daemon_socket.is_some() {
+                ryeos_node_runtime::engine_init::resolve_isolation_backend_with_verified_captures(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+            } else {
+                ryeos_node_runtime::engine_init::resolve_isolation_backend(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+                .map(|backend| (backend, None))
+            }
         })
         .context("Phase 1: resolve selected isolation backend")?;
     // A stopped-node snapshot validates the signed contract only. It must not
@@ -749,10 +804,11 @@ fn load_node_config_two_phase_with_socket(
                 runtime.verify_loaded_node_identity(&node_identity)?;
                 Some(runtime.open_process_scope_provider()?)
             }
-            // Direct nodes remain valid for non-scope-backed work. The
-            // isolation runtime records no capability, and dedicated workers
-            // fail admission rather than selecting a weaker host process
-            // boundary.
+            // Without a host runtime no scope capability qualifies. Policy
+            // validation guarantees required scopes name termination:scope
+            // and recovery:scope in the capability floor, so the floor match
+            // below refuses this start, records why, and names what the host
+            // can prove instead.
             None => None,
         }
     } else {
@@ -770,7 +826,7 @@ fn load_node_config_two_phase_with_socket(
                 node_policy
                     .require::<ryeos_engine::isolation::IsolationPolicy>()?
                     .clone(),
-                ryeos_app::node_policy::generation::policy_directory(app_root)
+                ryeos_node_runtime::node_policy::generation::policy_directory(app_root)
                     .join("isolation.yaml"),
                 format!("sha256:{}", node_policy.generation_digest()),
                 isolation_backend,
@@ -787,18 +843,94 @@ fn load_node_config_two_phase_with_socket(
             node_policy
                 .require::<ryeos_engine::isolation::IsolationPolicy>()?
                 .clone(),
-            ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+            ryeos_node_runtime::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
             format!("sha256:{}", node_policy.generation_digest()),
             isolation_backend,
         ),
     }
     .context("Phase 1: load node isolation policy")?;
-    let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
+    // Same actual runtime/backend and checked node-generation captures.
+    // Retention alone grants no native launch or settlement evidence.
+    let isolation = match verified_backend_capture {
+        Some(capture) => isolation
+            .retain_verified_backend_capture(capture)
+            .context("Phase 1: retain actual isolation executable captures")?,
+        None => isolation,
+    };
+    let isolation = Arc::new(ryeos_node_runtime::engine_init::retain_daemon_generation(
         isolation,
         app_root.to_path_buf(),
         Arc::clone(&generation),
         bootstrap_trust_store.clone(),
     ));
+
+    // Signed inits trusted to exit with their only child, admitted before
+    // the host is observed below and before any lifetime witness is recorded,
+    // so both judge the node's enclosure by the same policy.
+    lillux::process_control::admit_enclosure_inits(&isolation.inspection().enclosure_inits)
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: admit trusted enclosure inits")?;
+
+    // Every node process records what it contains and what its host proves,
+    // then admits itself only if the signed policy's capability floor is met.
+    // This precedes the engine and every native reservation, so a refusal
+    // spends no incarnation.
+    let daemon_digest = lillux::current_executable_digest()
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: measure the running daemon executable")?;
+    // Only the running daemon serves the TCP listener; it is bound before
+    // this point, so the configured address is the bound one.
+    let listeners = match daemon_socket {
+        Some(_) => vec![config.bind.to_string()],
+        None => Vec::new(),
+    };
+    let report = ryeos_node::capability_report::NodeCapabilityReport::assemble(
+        ryeos_node::capability_report::ReportInputs {
+            app_root,
+            node_fingerprint: node_identity.fingerprint(),
+            daemon_digest: format!("sha256:{daemon_digest}"),
+            bundles: generation.records().iter().map(|record| record.name.clone()).collect(),
+            compiled_features: compiled_features(),
+            listeners,
+            policy_generation: format!("sha256:{}", node_policy.generation_digest()),
+            isolation: isolation.inspection(),
+            host_runtime_present: host_runtime.is_some(),
+            provider_environment: provider_environment.environment().as_ref(),
+        },
+    )
+    .context("Phase 1: assemble node capability report")?;
+    if daemon_socket.is_none() {
+        // A standalone or stopped-node service opens no process scopes and
+        // admits no scoped job, so the per-scope names of the floor describe
+        // nothing it does and are not checked here; every host-level name
+        // is. The recorded report stays the running daemon's, so it is not
+        // overwritten from this process. This check is on the planned
+        // residency; the service checks again on the one its native host
+        // establishes.
+        report
+            .require_floor_without_scopes()
+            .context("Phase 1: node capability floor for a service without process scopes")?;
+    } else {
+        // The daemon's report is written either way so the doctor can show
+        // the reason.
+        let floor_result = report.require_floor();
+        let signed = report
+            .clone()
+            .sign(node_identity.signing_key())
+            .context("Phase 1: sign node capability report")?;
+        let path = signed.write(app_root).context("Phase 1: record node capability report")?;
+        tracing::info!(
+            report = %path.display(),
+            digest = %signed.digest,
+            provided = ?signed.report.provided.keys().collect::<Vec<_>>(),
+            missing = ?signed.report.missing.keys().collect::<Vec<_>>(),
+            floor_met_by = ?signed.report.floor.met_by,
+            residency_basis = ?signed.report.host.residency.as_ref().and_then(|proof| proof.capability_name()),
+            residency = ?signed.report.host.residency,
+            "node capability report recorded"
+        );
+        floor_result?;
+    }
 
     tracing::info!(
         app_root = %app_root.display(),
@@ -814,7 +946,7 @@ fn load_node_config_two_phase_with_socket(
         isolation,
         &bootstrap_trust_store,
         node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
             )?,
     )?;
     let engine = Arc::new(engine);
@@ -825,13 +957,36 @@ fn load_node_config_two_phase_with_socket(
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot, node_policy, isolation))
+    Ok((engine, snapshot, node_policy, isolation, report))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::identity::NodeIdentity;
+    use ryeos_node_runtime::identity::NodeIdentity;
+
+    #[test]
+    fn every_optional_cargo_feature_is_reported_when_compiled() {
+        let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+        let declared: std::collections::BTreeSet<&str> = manifest["features"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| *name != "default")
+            .collect();
+        let reported: std::collections::BTreeSet<&str> =
+            COMPILED_FEATURES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(reported, declared, "the report table must list every daemon feature");
+        assert_eq!(compiled_features().contains(&"scheduling".to_owned()), cfg!(feature = "scheduling"));
+    }
+
+    #[test]
+    fn the_daemon_digest_is_stable_for_one_executable() {
+        let first = lillux::current_executable_digest().unwrap();
+        assert_eq!(first.len(), 64, "{first}");
+        assert_eq!(lillux::current_executable_digest().unwrap(), first);
+    }
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {

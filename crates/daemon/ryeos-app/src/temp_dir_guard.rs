@@ -24,14 +24,48 @@
 //! The internal path slot allows `disarm()` to transfer ordinary cleanup
 //! ownership without removing the directory.
 
+use anyhow::Context as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub(crate) const MAX_FINITE_SCRATCH_SHARED_ROOTS: usize = 4;
+
+pub fn quote_finite_scratch_shared_root_handoffs()
+    -> lillux_sqlite::original_physical_custody::OutsideWork {
+    lillux_sqlite::original_physical_custody::OutsideWork { bytes: 1024, steps: 8 }
+}
+
+pub fn quote_finite_scratch_outside_custody()
+    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+    let bytes = std::mem::size_of::<OriginalFiniteScratchCustody>()
+        .checked_add(std::mem::size_of::<lillux::PinnedDirectory>())
+        .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+        .context("finite scratch custody quote overflow")?;
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
+        bytes: u64::try_from(bytes)?, steps: 16,
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static FAIL_FINITE_AFTER_ROOT_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Local phase of the SAME pinned removal, never inferred from path absence.
+#[derive(Default)]
+enum FiniteScratchRemoval {
+    #[default]
+    RootPresent,
+    RootRemovedPendingSync,
+    RootRemovedSynced,
+}
+
 struct PinnedRemoval {
+    process: u32,
     parent: lillux::PinnedDirectory,
     name: std::ffi::OsString,
-    root: lillux::PinnedDirectory,
+    root: Arc<lillux::PinnedDirectory>,
 }
 
 struct OwnedWorkspaceView {
@@ -63,6 +97,10 @@ pub struct TempDirGuard {
     remove_on_drop: AtomicBool,
     owns_removal: bool,
     pinned_removal: Option<PinnedRemoval>,
+    finite_removal: Mutex<FiniteScratchRemoval>,
+    finite_native_receipt: Mutex<Option<Arc<lillux::secure_fs::RemovedEmptyChild>>>,
+    finite_native_pending: Mutex<Option<Arc<lillux::secure_fs::EmptyChildRemovalFailure>>>,
+    finite_cleanup_deadline: Mutex<Option<lillux::time::MonotonicDeadline>>,
     workspace_view: Mutex<Option<WorkspaceViewSlot>>,
     /// A projectless controller may create one separately confined workspace.
     /// Retain its ORIGINAL guard here; neither path lookup nor a pool registry
@@ -70,7 +108,142 @@ pub struct TempDirGuard {
     owned_workspace_lifeline: Mutex<Option<Arc<TempDirGuard>>>,
 }
 
+/// Actual completed finite scratch owner. The original guard shell and its
+/// semantic metadata remain retained; Drop performs no removal or FD close.
+pub(crate) struct OriginalFiniteScratchCustody {
+    process: u32,
+    original: std::mem::ManuallyDrop<TempDirGuard>,
+    parent: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
+    root: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
+    name: std::ffi::OsString,
+    receipt: std::mem::ManuallyDrop<Option<Arc<lillux::secure_fs::RemovedEmptyChild>>>,
+    receipt_parent: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
+    receipt_child: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
+    receipt_name: Option<std::ffi::OsString>,
+    registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>;
+        MAX_FINITE_SCRATCH_SHARED_ROOTS],
+}
+impl OriginalFiniteScratchCustody {
+    pub(crate) fn require_removal_alias(&self,
+        alias: &Arc<lillux::secure_fs::RemovedEmptyChild>) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign original scratch removal alias");
+        let original = self.receipt.as_ref().ok_or_else(|| anyhow::anyhow!("actual original scratch removal receipt already consumed"))?;
+        anyhow::ensure!(Arc::ptr_eq(original, alias), "scratch alias selects another actual removal receipt");
+        Ok(())
+    }
+    /// # Safety
+    /// The same original supervisor owns the complete inventory and prepays
+    /// these actual transfers. Partial success remains cached in this token.
+    pub(crate) unsafe fn register_shared_roots(
+        &mut self,
+        registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign finite scratch custody");
+        if self.receipt.is_some() {
+            let quote = quote_finite_scratch_shared_root_handoffs();
+            registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
+            let receipt = self.receipt.take().expect("same retained original removal receipt");
+            match receipt.try_into_original_parts() {
+                Ok((parent, child, name)) => {
+                    // Preserve both actual descriptor owners and exact removal
+                    // coordinate before any later registration can refuse.
+                    *self.receipt_parent = Some(Arc::new(parent));
+                    *self.receipt_child = Some(Arc::new(child));
+                    self.receipt_name = Some(name);
+                }
+                Err(receipt) => {
+                    *self.receipt = Some(receipt);
+                    anyhow::bail!("actual finite removal receipt still has original aliases");
+                }
+            }
+        }
+        for index in 0..MAX_FINITE_SCRATCH_SHARED_ROOTS {
+            if self.registrations[index].is_some() { continue; }
+            let source = match index {
+                0 => &mut self.parent,
+                1 => &mut self.root,
+                2 => &mut self.receipt_parent,
+                _ => &mut self.receipt_child,
+            };
+            let original = source.take().ok_or_else(|| anyhow::anyhow!("actual finite scratch directory owner absent"))?;
+            // SAFETY: genuine consumed original guard/removal receipt, not a
+            // reopened directory or matching inode interpreted as ownership.
+            match unsafe { registry.register_directory(original, prepay) } {
+                Ok(binding) => self.registrations[index] = Some(binding),
+                Err((original, error)) => { **source = Some(original); return Err(error); }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn descriptors_retired(&self) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign finite scratch receipt custody");
+        if self.receipt.is_some() || self.receipt_name.is_none()
+            || self.parent.is_some() || self.root.is_some()
+            || self.receipt_parent.is_some() || self.receipt_child.is_some() { return Ok(false); }
+        for binding in &self.registrations {
+            let Some(binding) = binding else { return Ok(false); };
+            if !binding.retired() { return Ok(false); }
+        }
+        // The actual guard metadata/name/deadline remain in outside custody.
+        // This is descriptor retirement only, never account/map settlement.
+        Ok(true)
+    }
+}
+
 impl TempDirGuard {
+    /// # Safety
+    /// Genuine original finite scratch cleanup has completed and the caller
+    /// retains this exact native removal receipt and original prepaid account.
+    /// This consumes the actual guard; it never infers removal from a path.
+    pub(crate) unsafe fn into_outside_finite_removal(
+        mut self,
+        receipt: &Arc<lillux::secure_fs::RemovedEmptyChild>,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> std::result::Result<OriginalFiniteScratchCustody, (Self, anyhow::Error)> {
+        let result = (|| -> anyhow::Result<()> {
+            let pinned = self.pinned_removal.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("finite scratch original pinned owner absent"))?;
+            anyhow::ensure!(pinned.process == std::process::id(), "foreign original finite scratch guard");
+            // Exclusive owned guard: get_mut does not acquire or hold mutexes
+            // across accounting callbacks. Poison refuses the whole owner.
+            anyhow::ensure!(self.owns_removal && self.explicit_cleanup.load(Ordering::Acquire)
+                && !self.remove_on_drop.load(Ordering::Acquire), "finite scratch guard not preserved for explicit cleanup");
+            anyhow::ensure!(self.workspace_view.get_mut().map_err(|_| anyhow::anyhow!("original scratch view poisoned"))?.is_none()
+                && self.owned_workspace_lifeline.get_mut().map_err(|_| anyhow::anyhow!("original scratch lifeline poisoned"))?.is_none()
+                && self.inner.get_mut().map_err(|_| anyhow::anyhow!("original scratch path poisoned"))?.is_none()
+                && self.leases.get_mut().map_err(|_| anyhow::anyhow!("original scratch leases poisoned"))?.is_empty()
+                && matches!(*self.finite_removal.get_mut().map_err(|_| anyhow::anyhow!("original scratch phase poisoned"))?, FiniteScratchRemoval::RootRemovedSynced)
+                && self.finite_native_pending.get_mut().map_err(|_| anyhow::anyhow!("original scratch pending custody poisoned"))?.is_none(),
+                "actual finite scratch removal has not completed");
+            let original = self.finite_native_receipt.get_mut()
+                .map_err(|_| anyhow::anyhow!("original scratch receipt poisoned"))?.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("actual scratch removal receipt absent"))?;
+            anyhow::ensure!(Arc::ptr_eq(original, receipt), "finite scratch transfer selects a different actual receipt");
+            let deadline = self.finite_cleanup_deadline.get_mut()
+                .map_err(|_| anyhow::anyhow!("original scratch deadline poisoned"))?.as_ref().copied()
+                .ok_or_else(|| anyhow::anyhow!("original finite scratch deadline absent"))?;
+            Self::require_original_cleanup_window(deadline)?;
+            let quote = quote_finite_scratch_outside_custody()?;
+            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+                prepay(quote.bytes, quote.steps)
+            })?;
+            Self::require_original_cleanup_window(deadline)
+        })();
+        if let Err(error) = result { return Err((self, error)); }
+        let pinned = self.pinned_removal.take().expect("prechecked actual finite scratch owner");
+        let receipt = self.finite_native_receipt.get_mut().unwrap().take();
+        Ok(OriginalFiniteScratchCustody {
+            process: pinned.process,
+            parent: std::mem::ManuallyDrop::new(Some(Arc::new(pinned.parent))),
+            root: std::mem::ManuallyDrop::new(Some(pinned.root)),
+            name: pinned.name, receipt: std::mem::ManuallyDrop::new(receipt),
+            receipt_parent: std::mem::ManuallyDrop::new(None),
+            receipt_child: std::mem::ManuallyDrop::new(None), receipt_name: None,
+            registrations: std::array::from_fn(|_| None), original: std::mem::ManuallyDrop::new(self),
+        })
+    }
+
     pub fn new(path: PathBuf) -> Self {
         Self {
             inner: Mutex::new(Some(path.clone())),
@@ -80,6 +253,10 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: None,
+            finite_removal: Mutex::new(FiniteScratchRemoval::default()),
+            finite_native_receipt: Mutex::new(None),
+            finite_native_pending: Mutex::new(None),
+            finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
         }
@@ -103,6 +280,10 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(false),
             owns_removal: true,
             pinned_removal: None,
+            finite_removal: Mutex::new(FiniteScratchRemoval::default()),
+            finite_native_receipt: Mutex::new(None),
+            finite_native_pending: Mutex::new(None),
+            finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(Some(WorkspaceViewSlot::Uncreated)),
             owned_workspace_lifeline: Mutex::new(None),
         })
@@ -120,6 +301,10 @@ impl TempDirGuard {
             remove_on_drop: AtomicBool::new(false),
             owns_removal: false,
             pinned_removal: None,
+            finite_removal: Mutex::new(FiniteScratchRemoval::default()),
+            finite_native_receipt: Mutex::new(None),
+            finite_native_pending: Mutex::new(None),
+            finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
         }
@@ -128,7 +313,7 @@ impl TempDirGuard {
     pub(crate) fn new_pinned(
         parent: lillux::PinnedDirectory,
         name: std::ffi::OsString,
-        root: lillux::PinnedDirectory,
+        root: Arc<lillux::PinnedDirectory>,
     ) -> Self {
         let path = root.path().to_path_buf();
         Self {
@@ -138,7 +323,11 @@ impl TempDirGuard {
             explicit_cleanup: AtomicBool::new(false),
             remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
-            pinned_removal: Some(PinnedRemoval { parent, name, root }),
+            pinned_removal: Some(PinnedRemoval { process: std::process::id(), parent, name, root }),
+            finite_removal: Mutex::new(FiniteScratchRemoval::default()),
+            finite_native_receipt: Mutex::new(None),
+            finite_native_pending: Mutex::new(None),
+            finite_cleanup_deadline: Mutex::new(None),
             workspace_view: Mutex::new(None),
             owned_workspace_lifeline: Mutex::new(None),
         }
@@ -149,7 +338,7 @@ impl TempDirGuard {
     pub fn owned_scratch_root(&self) -> anyhow::Result<&lillux::PinnedDirectory> {
         self.pinned_removal
             .as_ref()
-            .map(|owned| &owned.root)
+            .map(|owned| owned.root.as_ref())
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch descriptor"))
     }
 
@@ -162,6 +351,21 @@ impl TempDirGuard {
             .as_ref()
             .map(|owned| (&owned.parent, owned.name.as_os_str()))
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch parent"))
+    }
+
+    /// The Q private-directory owner never invokes backend Create. Check that
+    /// its original pinned workspace has not acquired, drained or closed a
+    /// backend view. This is a custody check, not isolation evidence.
+    pub fn require_uncreated_private_workspace(&self) -> anyhow::Result<()> {
+        let view = self.workspace_view.lock().unwrap();
+        anyhow::ensure!(
+            self.owns_removal
+                && self.pinned_removal.is_some()
+                && self.inner.lock().unwrap().is_some()
+                && matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)),
+            "private workspace has no original uncreated pinned owner"
+        );
+        self.owned_scratch_root()?.ensure_path_binding()
     }
 
     /// Borrow the exact effective directory below this guard's retained
@@ -210,22 +414,46 @@ impl TempDirGuard {
         evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
         authority: ryeos_engine::isolation::CreatedWorkspaceView,
     ) -> anyhow::Result<()> {
+        self.install_workspace_view_retaining_authority(evidence, authority)
+            .map_err(|(_, error)| error)
+    }
+
+    /// Q custody must retain the backend's original descriptor if installing
+    /// its Create view fails. Return the authority on every refusal so the
+    /// caller can quarantine it beside the original workspace owner.
+    pub fn install_workspace_view_retaining_authority(
+        &self,
+        evidence: &ryeos_engine::isolation::WorkspaceLifecycleEvidence,
+        authority: ryeos_engine::isolation::CreatedWorkspaceView,
+    ) -> std::result::Result<(), (ryeos_engine::isolation::CreatedWorkspaceView, anyhow::Error)>
+    {
         if evidence.operation != ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create {
-            anyhow::bail!("only Create may install a workspace view");
+            return Err((
+                authority,
+                anyhow::anyhow!("only Create may install a workspace view"),
+            ));
         }
-        let path = self
-            .path()
-            .ok_or_else(|| anyhow::anyhow!("workspace is disarmed"))?;
+        let Some(path) = self.path() else {
+            return Err((authority, anyhow::anyhow!("workspace is disarmed")));
+        };
         if path.file_name().and_then(|name| name.to_str()) != Some(&evidence.workspace_id) {
-            anyhow::bail!("created view belongs to another workspace");
+            return Err((
+                authority,
+                anyhow::anyhow!("created view belongs to another workspace"),
+            ));
         }
-        let view_identity = evidence
-            .mount_identity
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("created workspace has no view identity"))?;
+        let Some(view_identity) = evidence.mount_identity.as_ref() else {
+            return Err((
+                authority,
+                anyhow::anyhow!("created workspace has no view identity"),
+            ));
+        };
         let mut slot = self.workspace_view.lock().unwrap();
         if !matches!(*slot, Some(WorkspaceViewSlot::Uncreated)) {
-            anyhow::bail!("workspace view slot is not awaiting its original Create result");
+            return Err((
+                authority,
+                anyhow::anyhow!("workspace view slot is not awaiting its original Create result"),
+            ));
         }
         *slot = Some(WorkspaceViewSlot::Available(OwnedWorkspaceView {
             workspace_id: evidence.workspace_id.clone(),
@@ -403,6 +631,193 @@ impl TempDirGuard {
 
     /// Remove the exact pinned directory tree now. Failure leaves the guard
     /// armed so recovery retains both the journal evidence and the path.
+    /// Physically dispose only the SAME already-preserved pinned scratch.
+    /// Every lock/traversal step shares the original expiry. Partial error
+    /// keeps the armed path and remaining aliases; it is no cleanup receipt.
+    /// Caller must retain namespace-writer exclusion through removal and retry.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remove_now_until(
+        &self,
+        budget: lillux::secure_fs::DirectoryTraversalBudget,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        self.remove_owned_now_until(Some(budget), deadline)
+    }
+
+    /// Remove only an EMPTY original root. Unexpected children always refuse;
+    /// this method cannot recursively erase unclassified copied-role deposits.
+    /// Caller must retain the original parent's namespace-writer exclusion
+    /// through removal, pending-sync retry and receipt acknowledgement. This
+    /// guard's bookkeeping mutexes do not exclude external namespace writers.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remove_empty_now_until(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        self.remove_owned_now_until(None, deadline)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_owned_now_until(
+        &self,
+        budget: Option<lillux::secure_fs::DirectoryTraversalBudget>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        if !self.owns_removal || !self.explicit_cleanup.load(Ordering::Acquire) {
+            anyhow::bail!("original finite scratch removal requires preserved ORIGINAL ownership");
+        }
+        let pinned = self.pinned_removal.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("finite scratch removal cannot reopen a replacement pathname guard")
+        })?;
+        let view = Self::lock_original_cleanup(&self.workspace_view, deadline)?;
+        if view
+            .as_ref()
+            .is_some_and(|slot| !matches!(slot, WorkspaceViewSlot::Closed { .. }))
+        {
+            anyhow::bail!("finite scratch removal requires ORIGINAL view physical-close proof");
+        }
+        let mut removal = Self::lock_original_cleanup(&self.finite_removal, deadline)?;
+        let deadline = {
+            let mut retained =
+                Self::lock_original_cleanup(&self.finite_cleanup_deadline, deadline)?;
+            // Once this SAME guard enters finite cleanup, later callers may
+            // narrow the original expiry but never start another window.
+            let original = retained.map_or(deadline, |original| original.min(deadline));
+            *retained = Some(original);
+            Self::require_original_cleanup_window(original)?;
+            original
+        };
+        let mut path_slot = Self::lock_original_cleanup(&self.inner, deadline)?;
+        let mut leases = Self::lock_original_cleanup(&self.leases, deadline)?;
+        if path_slot.is_none() {
+            anyhow::bail!(
+                "original finite scratch guard is disarmed; replay grants no disposal proof"
+            );
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        pinned.parent.ensure_path_binding()?;
+        let mut native_pending =
+            Self::lock_original_cleanup(&self.finite_native_pending, deadline)?;
+        let mut native_receipt =
+            Self::lock_original_cleanup(&self.finite_native_receipt, deadline)?;
+        match *removal {
+            FiniteScratchRemoval::RootPresent => {
+                pinned.root.ensure_path_binding()?;
+                Self::require_original_cleanup_window(deadline)?;
+                if let Some(budget) = budget {
+                    pinned
+                        .root
+                        .remove_contents_recursive_bounded_until(budget, deadline)?;
+                } else {
+                    anyhow::ensure!(
+                        pinned.root.entry_names_bounded(1)?.is_empty(),
+                        "original empty-root removal refuses unexpected children"
+                    );
+                }
+                Self::require_original_cleanup_window(deadline)?;
+                match pinned
+                    .parent
+                    .remove_empty_child_if_same(&pinned.name, &pinned.root)
+                {
+                    Ok(Some(receipt)) => {
+                        *native_receipt = Some(Arc::new(receipt));
+                        // Record the native effect BEFORE any subsequent
+                        // deadline/ack failure. Retry never removes this name.
+                        *removal = FiniteScratchRemoval::RootRemovedSynced;
+                    }
+                    Ok(None) => anyhow::bail!(
+                        "original pinned scratch remained nonempty; cleanup is unproved"
+                    ),
+                    Err(error) => {
+                        return match error.downcast::<lillux::secure_fs::EmptyChildRemovalFailure>()
+                        {
+                            Ok(failure) => {
+                                let failure = Arc::new(failure);
+                                if failure.stage()
+                                    == lillux::secure_fs::EmptyChildRemovalStage::RemovedPendingSync
+                                {
+                                    *native_pending = Some(failure.clone());
+                                    *removal = FiniteScratchRemoval::RootRemovedPendingSync;
+                                }
+                                Err(anyhow::Error::new(failure))
+                            }
+                            Err(error) => Err(error),
+                        };
+                    }
+                }
+                #[cfg(test)]
+                if FAIL_FINITE_AFTER_ROOT_REMOVAL.with(|slot| slot.replace(false)) {
+                    anyhow::bail!(
+                        "injected finite cleanup acknowledgement failure after root removal"
+                    );
+                }
+            }
+            FiniteScratchRemoval::RootRemovedPendingSync => {
+                // Absence is only an observation joined to this retained
+                // actual rmdir stage; it never constructs a removal owner.
+                anyhow::ensure!(
+                    pinned.parent.entry_no_follow(&pinned.name)?.is_none(),
+                    "original removed scratch coordinate was replaced; retain cleanup custody"
+                );
+                Self::require_original_cleanup_window(deadline)?;
+                let original = native_pending.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("original native pending removal owner missing")
+                })?;
+                let receipt = original.retry_sync()?;
+                *native_receipt = Some(receipt);
+                *removal = FiniteScratchRemoval::RootRemovedSynced;
+            }
+            FiniteScratchRemoval::RootRemovedSynced => {}
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        anyhow::ensure!(
+            pinned.parent.entry_no_follow(&pinned.name)?.is_none(),
+            "original removed scratch coordinate reappeared; cleanup is unproved"
+        );
+        while !leases.is_empty() {
+            Self::require_original_cleanup_window(deadline)?;
+            drop(leases.pop()); // original descriptor closes, not driver retirement
+            Self::require_original_cleanup_window(deadline)?;
+        }
+        Self::require_original_cleanup_window(deadline)?;
+        *path_slot = None;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_original_cleanup_window(
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<()> {
+        if deadline.has_elapsed() {
+            anyhow::bail!("original scratch cleanup deadline expired; disposal may be partial");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn lock_original_cleanup<T>(
+        mutex: &Mutex<T>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<std::sync::MutexGuard<'_, T>> {
+        loop {
+            Self::require_original_cleanup_window(deadline)?;
+            match mutex.try_lock() {
+                Ok(guard) => {
+                    Self::require_original_cleanup_window(deadline)?;
+                    return Ok(guard);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("original scratch cleanup mutex poisoned")
+                }
+                Err(std::sync::TryLockError::WouldBlock) => lillux::time::sleep(
+                    deadline
+                        .remaining()
+                        .min(lillux::time::Duration::from_millis(1)),
+                ),
+            }
+        }
+    }
+
     pub fn remove_now(&self) -> anyhow::Result<()> {
         if !self.owns_removal {
             anyhow::bail!("borrowed cache/workspace guard does not own directory removal");
@@ -416,6 +831,127 @@ impl TempDirGuard {
         {
             anyhow::bail!("workspace removal requires original view physical-close proof");
         }
+        self.remove_owned_directory_now()
+    }
+
+    /// Remove an original pinned Q workspace whose durable start never
+    /// authorized backend Create. Its view slot is still Uncreated, so there
+    /// is no view identity to close or synthesize. The caller must first hold
+    /// the journal's no-Create cleanup intent and exact custody entry.
+    pub fn remove_uncreated_workspace_now(&self) -> anyhow::Result<()> {
+        if !self.owns_removal || self.pinned_removal.is_none() {
+            anyhow::bail!("uncreated workspace has no original pinned removal owner");
+        }
+        let view = self.workspace_view.lock().unwrap();
+        if !matches!(view.as_ref(), Some(WorkspaceViewSlot::Uncreated)) {
+            anyhow::bail!("uncreated workspace removal changed its original view slot");
+        }
+        let removed = self.remove_owned_directory_now();
+        drop(view);
+        removed
+    }
+
+    /// Prove that this original, uncreated workspace was removed through its
+    /// pinned parent. This also accepts a successful unlink whose following
+    /// journal update was interrupted; a disarmed guard alone is insufficient.
+    pub fn prove_uncreated_workspace_removed(&self) -> anyhow::Result<()> {
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("uncreated workspace has no pinned removal owner"))?;
+        if !self.owns_removal
+            || !matches!(
+                self.workspace_view.lock().unwrap().as_ref(),
+                Some(WorkspaceViewSlot::Uncreated)
+            )
+            || self.inner.lock().unwrap().is_some()
+        {
+            anyhow::bail!("uncreated workspace has no physical removal proof");
+        }
+        pinned.parent.ensure_path_binding()?;
+        if pinned.root.path().parent() != Some(pinned.parent.path())
+            || pinned.root.path().file_name() != Some(pinned.name.as_os_str())
+            || pinned.parent.open_child_directory(&pinned.name)?.is_some()
+        {
+            anyhow::bail!("uncreated workspace reappeared or changed its pinned parent");
+        }
+        Ok(())
+    }
+
+    /// Prove an original pinned scratch child is absent after `remove_now()`.
+    /// The retained parent and child descriptors, not a reopened diagnostic
+    /// pathname, identify what this process physically removed. This permits
+    /// a lost post-unlink journal ACK to retry without reminting custody.
+    /// Acknowledge this SAME guard's completed finite removal without issuing
+    /// another rmdir, reopening the removed root, or renewing its deadline.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acknowledge_finite_removal_until(
+        &self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> anyhow::Result<Arc<lillux::secure_fs::RemovedEmptyChild>> {
+        // Same order as the remover: view -> phase -> retained deadline ->
+        // path -> leases. Observation cannot invert the original mutex order.
+        let view = Self::lock_original_cleanup(&self.workspace_view, deadline)?;
+        let phase = Self::lock_original_cleanup(&self.finite_removal, deadline)?;
+        let retained = Self::lock_original_cleanup(&self.finite_cleanup_deadline, deadline)?;
+        let deadline = retained
+            .as_ref()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("original finite removal never entered"))?
+            .min(deadline);
+        Self::require_original_cleanup_window(deadline)?;
+        anyhow::ensure!(
+            self.owns_removal && self.explicit_cleanup.load(Ordering::Acquire),
+            "finite removal acknowledgement lacks original preserved owner"
+        );
+        let path = Self::lock_original_cleanup(&self.inner, deadline)?;
+        let leases = Self::lock_original_cleanup(&self.leases, deadline)?;
+        anyhow::ensure!(
+            view.is_none()
+                && matches!(*phase, FiniteScratchRemoval::RootRemovedSynced)
+                && path.is_none()
+                && leases.is_empty(),
+            "original finite removal has not completed"
+        );
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("finite removal lacks original pinned parent"))?;
+        pinned.parent.ensure_path_binding()?;
+        anyhow::ensure!(
+            pinned.parent.entry_no_follow(&pinned.name)?.is_none(),
+            "original removed root coordinate reappeared"
+        );
+        let receipt = Self::lock_original_cleanup(&self.finite_native_receipt, deadline)?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("actual native removal receipt missing"))?;
+        Self::require_original_cleanup_window(deadline)?;
+        Ok(receipt)
+    }
+
+    pub fn prove_owned_scratch_removed(&self) -> anyhow::Result<()> {
+        let pinned = self
+            .pinned_removal
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("scratch has no original pinned removal owner"))?;
+        if !self.owns_removal
+            || self.workspace_view.lock().unwrap().is_some()
+            || self.inner.lock().unwrap().is_some()
+        {
+            anyhow::bail!("scratch has no original physical removal proof");
+        }
+        pinned.parent.ensure_path_binding()?;
+        if pinned.root.path().parent() != Some(pinned.parent.path())
+            || pinned.root.path().file_name() != Some(pinned.name.as_os_str())
+            || pinned.parent.open_child_directory(&pinned.name)?.is_some()
+        {
+            anyhow::bail!("scratch reappeared or changed its pinned parent");
+        }
+        Ok(())
+    }
+
+    fn remove_owned_directory_now(&self) -> anyhow::Result<()> {
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
             return Ok(());
@@ -424,7 +960,8 @@ impl TempDirGuard {
             pinned.root.remove_contents_recursive()?;
             if !pinned
                 .parent
-                .remove_empty_child_if_same(&pinned.name, &pinned.root)?
+                .remove_empty_child_if_same(&pinned.name, &pinned.root)
+                .map(|receipt| receipt.is_some())?
             {
                 anyhow::bail!("guarded directory remained non-empty: {}", path.display());
             }
@@ -441,7 +978,10 @@ impl TempDirGuard {
                 .open_child_directory(path_name)?
                 .ok_or_else(|| anyhow::anyhow!("guarded directory disappeared"))?;
             opened_root.remove_contents_recursive()?;
-            if !opened_parent.remove_empty_child_if_same(path_name, &opened_root)? {
+            if !opened_parent
+                .remove_empty_child_if_same(path_name, &opened_root)
+                .map(|receipt| receipt.is_some())?
+            {
                 anyhow::bail!("guarded directory remained non-empty: {}", path.display());
             }
         }
@@ -465,6 +1005,7 @@ impl Drop for TempDirGuard {
                         pinned
                             .parent
                             .remove_empty_child_if_same(&pinned.name, &pinned.root)
+                            .map(|receipt| receipt.is_some())
                             .and_then(|removed| {
                                 if removed {
                                     Ok(())
@@ -498,7 +1039,7 @@ pub fn create_projectless_workspace(
     let name = std::ffi::OsString::from(workspace_name);
     let workspace = execution_root.create_child(&name, 0o700)?;
     let path = workspace.path().to_path_buf();
-    let guard = TempDirGuard::new_pinned(execution_root, name, workspace);
+    let guard = TempDirGuard::new_pinned(execution_root, name, Arc::new(workspace));
     guard
         .owned_scratch_root()?
         .create_child(std::ffi::OsStr::new(ryeos_engine::AI_DIR), 0o700)?;
@@ -543,7 +1084,10 @@ pub fn remove_abandoned_admitted_input_workspace(
         return Ok(false);
     };
     workspace.remove_contents_recursive()?;
-    if !execution_root.remove_empty_child_if_same(&name, &workspace)? {
+    if !execution_root
+        .remove_empty_child_if_same(&name, &workspace)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("abandoned admitted-input workspace remained non-empty");
     }
     Ok(true)
@@ -593,24 +1137,118 @@ pub fn create_runtime_workspace(
     let execution_root =
         lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
     execution_root.set_mode(0o700)?;
+    create_runtime_workspace_under_execution_root(execution_root, workspace_name)
+}
+
+/// Create the original runtime workspace beneath a retained cache descriptor.
+/// The journaled caller can therefore avoid reopening its reserved parent by
+/// pathname between durable reservation and the first directory side effect.
+pub fn create_runtime_workspace_in_pinned_cache(
+    runtime_cache: &lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> Result<(PathBuf, Arc<TempDirGuard>), PinnedWorkspaceCreationFailure> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    runtime_cache
+        .require_owner_private_directory()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    runtime_cache
+        .ensure_path_binding()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    let execution_root = runtime_cache
+        .open_or_create_child(std::ffi::OsStr::new("executions"), 0o700)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    execution_root
+        .require_owner_private_directory()
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
+    create_runtime_workspace_under_execution_root_with_custody(execution_root, workspace_name)
+}
+
+/// A failed pinned Q workspace creation may still own its newly created
+/// original directory. The caller must retain that guard if exact removal
+/// failed; a path reconstructed later cannot replace its pinned authority.
+pub struct PinnedWorkspaceCreationFailure {
+    pub error: anyhow::Error,
+    pub retained_workspace: Option<Arc<TempDirGuard>>,
+}
+
+impl PinnedWorkspaceCreationFailure {
+    fn without_guard(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            retained_workspace: None,
+        }
+    }
+}
+
+/// The exact workspace child could have been created, but no original pinned
+/// owner survived to prove its removal. A caller with a durable reservation
+/// must fence cleanup rather than infer absence from this error.
+#[derive(Debug)]
+pub struct PinnedWorkspaceCreationUnproved;
+
+impl std::fmt::Display for PinnedWorkspaceCreationUnproved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("pinned workspace creation cleanup is unproved")
+    }
+}
+
+impl std::error::Error for PinnedWorkspaceCreationUnproved {}
+
+fn create_runtime_workspace_under_execution_root(
+    execution_root: lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    create_runtime_workspace_under_execution_root_with_custody(execution_root, workspace_name)
+        .map_err(|failure| failure.error)
+}
+
+fn create_runtime_workspace_under_execution_root_with_custody(
+    execution_root: lillux::PinnedDirectory,
+    workspace_name: &str,
+) -> Result<(PathBuf, Arc<TempDirGuard>), PinnedWorkspaceCreationFailure> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)
+        .map_err(PinnedWorkspaceCreationFailure::without_guard)?;
     let name = std::ffi::OsString::from(workspace_name);
-    let workspace = execution_root.create_child(&name, 0o700)?;
+    let workspace = execution_root.create_child(&name, 0o700).map_err(|error| {
+        let error = if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|cause| cause.kind() == std::io::ErrorKind::AlreadyExists)
+        {
+            error
+        } else {
+            error.context(PinnedWorkspaceCreationUnproved)
+        };
+        PinnedWorkspaceCreationFailure::without_guard(error)
+    })?;
     // Own rollback before any fallible initialization below the new root.
     // The caller transfers successful construction to its durable journal.
-    let mut guard = TempDirGuard::new_pinned(execution_root, name, workspace);
-    let workspace = guard.owned_scratch_root()?;
-    workspace.create_child(
-        std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
-        0o700,
-    )?;
-    workspace.sync()?;
-    let project = workspace
+    let mut guard = TempDirGuard::new_pinned(execution_root, name, Arc::new(workspace));
+    let project = guard
+        .owned_scratch_root()
+        .expect("new pinned workspace has its original descriptor")
         .path()
         .join(ryeos_engine::execution_workspace::PROJECT_DIR);
     guard.effective_path = project.clone();
     guard.workspace_view = Mutex::new(Some(WorkspaceViewSlot::Uncreated));
-    let guard = Arc::new(guard);
-    Ok((project, guard))
+    let prepared = (|| {
+        let workspace = guard.owned_scratch_root()?;
+        workspace.create_child(
+            std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
+            0o700,
+        )?;
+        workspace.sync()?;
+        Ok::<_, anyhow::Error>(project)
+    })();
+    match prepared {
+        Ok(project) => Ok((project, Arc::new(guard))),
+        // The Q caller journals a cleanup fence before trying to remove this
+        // exact child. The ordinary caller still has its Drop rollback.
+        Err(error) => Err(PinnedWorkspaceCreationFailure {
+            error,
+            retained_workspace: Some(Arc::new(guard)),
+        }),
+    }
 }
 
 impl std::fmt::Debug for TempDirGuard {
@@ -626,6 +1264,20 @@ impl std::fmt::Debug for TempDirGuard {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn finite_scratch_outside_quotes_match_retained_frames() {
+        use lillux_sqlite::original_physical_custody::OutsideWork;
+        assert_eq!(quote_finite_scratch_shared_root_handoffs(), OutsideWork {
+            bytes: 1024, steps: 8,
+        });
+        assert_eq!(quote_finite_scratch_outside_custody().unwrap(), OutsideWork {
+            bytes: (std::mem::size_of::<OriginalFiniteScratchCustody>()
+                + std::mem::size_of::<lillux::PinnedDirectory>()
+                + 2 * std::mem::size_of::<usize>()) as u64,
+            steps: 16,
+        });
+    }
 
     #[test]
     fn removes_dir_on_last_arc_drop() {
@@ -904,6 +1556,205 @@ mod tests {
         guard.remove_now().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_expiry_before_removal_keeps_same_guard_and_contents() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-expired").unwrap();
+        std::fs::write(path.join("retained"), b"original").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        assert!(
+            guard
+                .remove_now_until(
+                    lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                    lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO)
+                )
+                .is_err()
+        );
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("retained")).unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_mutex_expiry_retains_physical_namespace() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-mutex").unwrap();
+        std::fs::write(path.join("retained"), b"original").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        let original_slot = guard.inner.lock().unwrap();
+        let waiting = Arc::clone(&guard);
+        let original =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(40));
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(waiting.remove_now_until(
+                lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                original,
+            ))
+            .unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(original_slot);
+        worker.join().unwrap();
+        assert!(
+            result
+                .expect("actual original guard waiter must expire before mutex release")
+                .is_err()
+        );
+        assert!(original.has_elapsed());
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("retained")).unwrap(), b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_entry_bound_refusal_preserves_same_contents() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-entries").unwrap();
+        std::fs::write(path.join("one"), b"one").unwrap();
+        std::fs::write(path.join("two"), b"two").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        assert!(
+            guard
+                .remove_now_until(
+                    lillux::secure_fs::DirectoryTraversalBudget::new(1, 4),
+                    lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2))
+                )
+                .is_err()
+        );
+        assert_eq!(guard.path().as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(path.join("one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("two")).unwrap(), b"two");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_scratch_finite_removal_uses_same_parent_and_never_follows_symlink() {
+        let cache = tempfile::tempdir().unwrap();
+        let outside = cache.path().join("outside");
+        std::fs::write(&outside, b"outside-original").unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-success").unwrap();
+        std::fs::create_dir(path.join("nested")).unwrap();
+        std::fs::write(path.join("nested/value"), b"value").unwrap();
+        std::os::unix::fs::symlink(&outside, path.join("alias")).unwrap();
+        guard.preserve_for_explicit_cleanup();
+        guard
+            .remove_now_until(
+                lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+        assert!(guard.path().is_none());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside-original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_scratch_lost_removal_ack_retries_same_owner_and_refuses_replacement() {
+        for replace in [false, true] {
+            let cache = tempfile::tempdir().unwrap();
+            let (path, guard) =
+                create_projectless_workspace(cache.path(), "finite-lost-ack").unwrap();
+            std::fs::write(path.join("body"), b"original").unwrap();
+            guard.preserve_for_explicit_cleanup();
+            let deadline =
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+            let budget = lillux::secure_fs::DirectoryTraversalBudget::new(8, 4);
+            FAIL_FINITE_AFTER_ROOT_REMOVAL.with(|slot| slot.set(true));
+            let error = guard.remove_now_until(budget, deadline).unwrap_err();
+            assert!(format!("{error:#}").contains("acknowledgement failure after root removal"));
+            assert!(!path.exists());
+            assert!(guard.path().is_some());
+            assert!(matches!(
+                *guard.finite_removal.lock().unwrap(),
+                FiniteScratchRemoval::RootRemovedSynced
+            ));
+            if replace {
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("foreign"), b"replacement").unwrap();
+                assert!(guard.remove_now_until(budget, deadline).is_err());
+                drop(guard);
+                assert_eq!(std::fs::read(path.join("foreign")).unwrap(), b"replacement");
+            } else {
+                guard.remove_now_until(budget, deadline).unwrap();
+                assert!(guard.path().is_none());
+                guard.prove_owned_scratch_removed().unwrap();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_original_guard_refuses_foreign_contents_without_recursive_removal() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "empty-only").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        std::fs::write(path.join("foreign"), b"foreign bytes").unwrap();
+        assert!(guard.remove_empty_now_until(deadline).is_err());
+        assert_eq!(
+            std::fs::read(path.join("foreign")).unwrap(),
+            b"foreign bytes"
+        );
+        assert!(matches!(
+            *guard.finite_removal.lock().unwrap(),
+            FiniteScratchRemoval::RootPresent
+        ));
+        std::fs::remove_file(path.join("foreign")).unwrap();
+        // A projectless workspace is created with its control directory;
+        // only a root emptied of it too is eligible for empty-only removal.
+        std::fs::remove_dir(path.join(ryeos_engine::AI_DIR)).unwrap();
+        FAIL_FINITE_AFTER_ROOT_REMOVAL.with(|slot| slot.set(true));
+        let error = guard.remove_empty_now_until(deadline).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("acknowledgement failure after root removal"),
+            "{error:#}"
+        );
+        assert!(!path.exists());
+        assert!(guard.path().is_some());
+        guard.remove_empty_now_until(deadline).unwrap();
+        guard.prove_owned_scratch_removed().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_scratch_retry_cannot_renew_original_removed_root_expiry() {
+        let cache = tempfile::tempdir().unwrap();
+        let (path, guard) = create_projectless_workspace(cache.path(), "finite-no-renew").unwrap();
+        guard.preserve_for_explicit_cleanup();
+        let original = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        FAIL_FINITE_AFTER_ROOT_REMOVAL.with(|slot| slot.set(true));
+        let error = guard
+            .remove_now_until(
+                lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                original,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("acknowledgement failure after root removal"));
+        assert!(!path.exists());
+        lillux::time::sleep(lillux::time::Duration::from_secs(2));
+        assert!(original.has_elapsed());
+        let fresh = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(2));
+        assert!(
+            guard
+                .remove_now_until(
+                    lillux::secure_fs::DirectoryTraversalBudget::new(8, 4),
+                    fresh
+                )
+                .is_err()
+        );
+        assert!(
+            guard.path().is_some(),
+            "expired original owner stays unsettled"
+        );
+        assert!(matches!(
+            *guard.finite_removal.lock().unwrap(),
+            FiniteScratchRemoval::RootRemovedSynced
+        ));
+    }
+
     #[test]
     fn workspace_alias_refusal_drains_admission_and_last_owner_retry_closes() {
         let cache = tempfile::tempdir().unwrap();
@@ -958,6 +1809,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let (project, original) = create_runtime_workspace(cache.path(), "view-uncreated").unwrap();
         original.preserve_for_explicit_cleanup();
+        original.require_uncreated_private_workspace().unwrap();
         assert!(
             original
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -966,6 +1818,7 @@ mod tests {
         assert!(original.remove_now().is_err());
         let root = original.path().unwrap();
         let reopened = TempDirGuard::new_workspace(root, project.clone()).unwrap();
+        assert!(reopened.require_uncreated_private_workspace().is_err());
         assert!(
             reopened
                 .close_workspace_view("view-uncreated", &"a".repeat(64), close_deadline())
@@ -978,6 +1831,9 @@ mod tests {
         );
         assert!(reopened.remove_now().is_err());
         assert!(project.is_dir());
+        original.remove_uncreated_workspace_now().unwrap();
+        original.prove_uncreated_workspace_removed().unwrap();
+        assert!(original.require_uncreated_private_workspace().is_err());
     }
 
     #[test]

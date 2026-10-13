@@ -1264,12 +1264,20 @@ mod tests {
         })
     }
 
-    fn build_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes.
+    fn build_test_state() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(
+            tmpdir.path(),
+        )
+        .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
-        let config = ryeos_app::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             db_path: runtime_db_path.clone(),
             uds_path: tmpdir.path().join("test.sock"),
@@ -1278,7 +1286,7 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
-        let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
@@ -1288,17 +1296,8 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = std::sync::Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                tmpdir.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                std::sync::Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), std::sync::Arc::new(head_trust)).unwrap();
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = std::sync::Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -1342,8 +1341,7 @@ mod tests {
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
         let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new());
-        let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: std::sync::Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -1385,7 +1383,7 @@ mod tests {
             external_provider_configurations: std::sync::Arc::new(Default::default()),
             external_candidate_imports: std::sync::Arc::new(Default::default()),
             node_policy: std::sync::Arc::new(
-                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     std::sync::Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),
@@ -1393,13 +1391,9 @@ mod tests {
                 ]),
             ),
             vault: std::sync::Arc::new(ryeos_app::vault::EmptyVault),
+            provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
             command_registry: test_command_registry,
             authorizer: test_auth,
-            scheduler_db: std::sync::Arc::new(
-                ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap(),
-            ),
-            scheduler_runtime_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: std::sync::Arc::new(
                 ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),
@@ -1416,8 +1410,9 @@ mod tests {
             ),
             scoped_producer_authorities: std::sync::Arc::new(Default::default()),
             scoped_producer_processes: std::sync::Arc::new(Default::default()),
+            qualification_workspace_custody: std::sync::Arc::new(Default::default()),
         };
-        (tmpdir, state)
+        (tmpdir, store_owner, state)
     }
 
     fn now_unix() -> u64 {
@@ -1458,6 +1453,7 @@ mod tests {
             workspace_lifeline: None,
             launch_timings: None,
             state,
+            publication: None,
             webhook_dedupe,
         }
     }
@@ -1497,7 +1493,7 @@ mod tests {
             let sig = hex_encode(&hmac_sha256(b"stripe-secret", &sp), false);
             let header = format!("t={now},v1={sig}");
             let headers = header_map(&[("stripe-signature", &header)]);
-            let (_tmp, state) = build_test_state();
+            let (_tmp, _store_owner, state) = build_test_state();
             let ctx = make_invocation_ctx(state, headers, body);
             let result = compiled.invoke(ctx).await.unwrap();
             match result {
@@ -1545,7 +1541,7 @@ mod tests {
             let bad_sig = hex_encode(&hmac_sha256(b"different", &sp), false);
             let header = format!("t={now},v1={bad_sig}");
             let headers = header_map(&[("stripe-signature", &header)]);
-            let (_tmp, state) = build_test_state();
+            let (_tmp, _store_owner, state) = build_test_state();
             let ctx = make_invocation_ctx(state, headers, body);
             let err = expect_dispatch_err(compiled.invoke(ctx).await);
             assert!(matches!(err, RouteDispatchError::Unauthorized));
@@ -1579,7 +1575,7 @@ mod tests {
                 ("x-github-delivery", "abc-123"),
                 ("x-github-event", "push"),
             ]);
-            let (_tmp, state) = build_test_state();
+            let (_tmp, _store_owner, state) = build_test_state();
             let dedupe =
                 std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
 
@@ -1678,7 +1674,7 @@ mod tests {
             let sig = hex_encode(&hmac_sha256(b"stripe-secret", &sp), false);
             let header = format!("t={stale},v1={sig}");
             let headers = header_map(&[("stripe-signature", &header)]);
-            let (_tmp, state) = build_test_state();
+            let (_tmp, _store_owner, state) = build_test_state();
             let ctx = make_invocation_ctx(state, headers, body);
             let err = expect_dispatch_err(compiled.invoke(ctx).await);
             assert!(matches!(err, RouteDispatchError::Unauthorized));
@@ -1728,7 +1724,7 @@ mod tests {
                 ("x-slack-request-timestamp", &now.to_string()),
                 ("x-slack-signature", &sig_header),
             ]);
-            let (_tmp, state) = build_test_state();
+            let (_tmp, _store_owner, state) = build_test_state();
             let ctx = make_invocation_ctx(state, headers, body);
             let result = compiled.invoke(ctx).await.unwrap();
             match result {
@@ -2218,7 +2214,7 @@ mod tests {
                 let body = b"";
                 let sig = hex_encode(&hmac_sha256(b"secret", body), false);
                 let headers = header_map(&[("x-sig", &sig), ("x-id", "evt_1")]);
-                let (_tmp, state) = build_test_state();
+                let (_tmp, _store_owner, state) = build_test_state();
                 let dedupe =
                     std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
 

@@ -1,17 +1,14 @@
 //! Standalone constrained bundle-publisher process.
 use anyhow::Context as _;
 use clap::Parser;
-use ryeos_app::{
-    bundle_publication::{
+use ryeos_app::{bundle_publication::{
         producer::LocalConstrainedPublisherAuthority,
         standalone_publisher::{
             ManifestOnlyTreePublisher, StandalonePublisherPolicy, StandalonePublisherProof,
             observe_current_publisher_tool, observe_publisher_tool,
         },
-    },
-    identity::NodeIdentity,
-    state_store::NodeIdentitySigner,
-};
+    }, state_store::NodeIdentitySigner};
+use ryeos_node_runtime::{identity::NodeIdentity};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Parser)]

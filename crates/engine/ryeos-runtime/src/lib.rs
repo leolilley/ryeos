@@ -1,3 +1,6 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const RUNTIME_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("runtime");
+
 pub mod arg_binder;
 pub mod authorizer;
 pub mod callback;
@@ -14,6 +17,7 @@ pub mod events;
 pub mod process_outcome;
 pub use ryeos_expression as expression;
 pub mod framing;
+pub mod graph_result;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod method_wire;

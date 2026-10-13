@@ -1,5 +1,4 @@
 use super::*;
-use crate::StateDb;
 use crate::external_content::products::{publication, qualification};
 use crate::signer::TestSigner;
 
@@ -60,7 +59,7 @@ fn receiver_local_qualification_retains_and_authenticates_origin_receipt_chain()
     );
     let receiver = TestSigner::new();
     let temp = tempfile::tempdir().unwrap();
-    let db = StateDb::open(temp.path(), publication::tests::trust(&receiver)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&receiver)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let mut evidence = fixture(&authority, &receiver);
     let cas = authority.cas_store().unwrap();
@@ -260,7 +259,7 @@ fn seed_verifier_realization(
 fn graph_qualification_owns_and_authenticates_both_runtime_closures() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), publication::tests::trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let mut evidence = fixture(&authority, &signer);
     let mut child = evidence.verifier.clone();
@@ -331,7 +330,7 @@ fn graph_qualification_owns_and_authenticates_both_runtime_closures() {
 fn qualification_owns_realization_closure_and_refuses_missing_or_contradictory_material() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), publication::tests::trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let evidence = fixture(&authority, &signer);
     let guard = authority.acquire_shared_guard().unwrap();
@@ -428,7 +427,7 @@ fn durable_qualification_retry_uses_incumbent_and_refuses_changed_testimony() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
     let trust = publication::tests::trust(&signer);
-    let db = StateDb::open(temp.path(), trust.clone()).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust.clone()).unwrap();
     let authority = db.pinned_authority().unwrap();
     let evidence = fixture(&authority, &signer);
     let coordinate = QualificationCoordinate::from_evidence(&evidence).unwrap();
@@ -497,7 +496,7 @@ fn durable_qualification_retry_uses_incumbent_and_refuses_changed_testimony() {
     drop(guard);
     drop(authority);
     drop(db);
-    let reopened = StateDb::open(temp.path(), trust).unwrap();
+    let reopened = crate::test_support::TestState::open(temp.path(), trust).unwrap();
     let reopened_authority = reopened.pinned_authority().unwrap();
     assert_eq!(
         lookup_qualification_witness(
@@ -515,7 +514,7 @@ fn durable_qualification_retry_uses_incumbent_and_refuses_changed_testimony() {
 fn qualification_lookup_checks_owner_node_subject_and_published_heads() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), publication::tests::trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let evidence = fixture(&authority, &signer);
     let coordinate = QualificationCoordinate::from_evidence(&evidence).unwrap();
@@ -600,7 +599,7 @@ fn qualification_lookup_checks_owner_node_subject_and_published_heads() {
 fn qualification_is_bounded_and_expiry_remains_explicit_consumer_eligibility() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), publication::tests::trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), publication::tests::trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let evidence = fixture(&authority, &signer);
     let coordinate = QualificationCoordinate::from_evidence(&evidence).unwrap();

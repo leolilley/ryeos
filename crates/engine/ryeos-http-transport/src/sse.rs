@@ -4,8 +4,11 @@ use lillux::network::NetworkCancellation;
 use lillux::time::MonotonicDeadline;
 use std::io::{self, Read};
 
-const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
-const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+// A consumer verifier may arrive as one provider-framed output event. Each
+// caller still supplies its own smaller limits; this is only the parser's
+// absolute ceiling, bounded by the same maximum total stream size below.
+const MAX_SSE_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SSE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SSE_EVENTS: u64 = 65_536;
 

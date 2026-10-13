@@ -58,6 +58,8 @@ pub async fn stop_supervised_with_invalid_config(
     Ok(StopReport {
         status: LifecycleStatus::Stopped {
             app_root: app_root.to_path_buf(),
+            capacity: None,
+            capacity_error: None,
         },
         already_stopped: false,
     })
@@ -99,26 +101,7 @@ pub async fn stop_with_progress(
         // attempt; retained failure testimony remains available for diagnosis.
         match pin_live_daemon(env).await {
             Ok(target) => Some(target),
-            Err(_) => {
-                // `Failed` is retained exited-process testimony. The CLI tells
-                // the operator to inspect it and run `ryeos stop`; that
-                // explicit acknowledgement must make the node observably
-                // stopped. Remove the non-authoritative discovery hint first,
-                // then compare-and-remove only the exact failed marker. A
-                // concurrent replacement marker is never removed.
-                crate::DaemonMetadata::remove_hint(&env.config().app_root)?;
-                let runtime_state_dir =
-                    ryeos_engine::roots::RuntimeRoot::new(env.config().app_root.clone()).state();
-                crate::lifecycle_marker::acknowledge_startup_failure(&runtime_state_dir)?;
-                let settled = crate::status::status(env).await?;
-                if !matches!(settled, LifecycleStatus::Stopped { .. }) {
-                    bail!("startup failure acknowledgement did not settle the node offline");
-                }
-                return Ok(StopReport {
-                    status: settled,
-                    already_stopped: false,
-                });
-            }
+            Err(_) => return acknowledge_failed_start(env).await,
         }
     } else {
         None
@@ -168,6 +151,8 @@ pub async fn stop_with_progress(
             return Ok(StopReport {
                 status: LifecycleStatus::Stopped {
                     app_root: env.config().app_root.clone(),
+                    capacity: None,
+                    capacity_error: None,
                 },
                 already_stopped: false,
             });
@@ -201,6 +186,14 @@ pub async fn stop_with_progress(
         if target.has_exited()? {
             let status = crate::status::status(env).await?;
             observe(&mut observer, &status);
+            if failure_names_exited_target(&status, target.pid()) {
+                // A daemon pinned while reporting its own startup failure
+                // leaves that failure as retained testimony once it exits.
+                // The pidfd proved this exact process gone, so nothing is
+                // left to signal: acknowledge it as a failure seen offline.
+                // A live process would still answer and refuse below.
+                return acknowledge_failed_start(env).await;
+            }
             if !matches!(
                 status,
                 LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. }
@@ -239,6 +232,37 @@ pub async fn stop_with_progress(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// `Failed` is retained exited-process testimony. The CLI tells the operator
+/// to inspect it and run `ryeos stop`; that explicit acknowledgement must make
+/// the node observably stopped. Remove the non-authoritative discovery hint
+/// first, then compare-and-remove only the exact failed marker. A concurrent
+/// replacement marker is never removed, and any node process still visible
+/// afterwards refuses the acknowledgement.
+async fn acknowledge_failed_start(env: &LocalLifecycleEnv) -> Result<StopReport> {
+    crate::DaemonMetadata::remove_hint(&env.config().app_root)?;
+    let runtime_state_dir =
+        ryeos_engine::roots::RuntimeRoot::new(env.config().app_root.clone()).state();
+    crate::lifecycle_marker::acknowledge_startup_failure(&runtime_state_dir)?;
+    let settled = crate::status::status(env).await?;
+    if !matches!(settled, LifecycleStatus::Stopped { .. }) {
+        bail!("startup failure acknowledgement did not settle the node offline");
+    }
+    Ok(StopReport {
+        status: settled,
+        already_stopped: false,
+    })
+}
+
+/// True only when a status observed after the pinned daemon exited is the
+/// startup failure of that same process. A failure naming any other process,
+/// or none, is not this stop's to acknowledge.
+fn failure_names_exited_target(status: &LifecycleStatus, target_pid: u32) -> bool {
+    matches!(
+        status,
+        LifecycleStatus::Failed { metadata, startup: _ } if metadata.pid == Some(target_pid)
+    )
 }
 
 fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &LifecycleStatus) {
@@ -308,4 +332,68 @@ fn pin_verified_ryeosd_peer(stream: &lillux::LocalDuplexStream) -> Result<LiveDa
     let pid = u32::try_from(peer.pid()).context("invalid daemon peer PID")?;
     peer.require_executable_name(std::ffi::OsStr::new("ryeosd"))?;
     Ok(LiveDaemonTarget { pid, peer })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NodeConfig;
+
+    fn failed_start_env(root: &std::path::Path) -> (LocalLifecycleEnv, std::path::PathBuf) {
+        let config = NodeConfig {
+            app_root: root.join("state"),
+            bind: "127.0.0.1:7400".parse().unwrap(),
+            uds_path: root.join("runtime/ryeosd.sock"),
+        };
+        let bundles = config.app_root.join(".ai/node/bundles");
+        std::fs::create_dir_all(&bundles).unwrap();
+        std::fs::write(bundles.join("core.yaml"), "# ryeos:signed:test\nkind: node\n").unwrap();
+        let state = ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state();
+        std::fs::create_dir_all(&state).unwrap();
+        let started_at = crate::lifecycle_marker::record_running(
+            &state,
+            crate::lifecycle_marker::LaunchRoute::Direct,
+        )
+        .unwrap();
+        crate::lifecycle_marker::record_exit(
+            &state,
+            "startup_failed",
+            &started_at,
+            Some("probe exact group leader pidfd: Operation not permitted"),
+            crate::lifecycle_marker::LaunchRoute::Direct,
+        );
+        (LocalLifecycleEnv::from_config(config), state)
+    }
+
+    #[tokio::test]
+    async fn exited_target_failure_is_acknowledged_as_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (env, state) = failed_start_env(tmp.path());
+        let failed = crate::status::status(&env).await.unwrap();
+        // The retained failure names the process that recorded it; once that
+        // exact process is proven gone, it is this stop's to acknowledge.
+        assert!(failure_names_exited_target(&failed, std::process::id()));
+        let report = acknowledge_failed_start(&env).await.unwrap();
+        assert!(matches!(report.status, LifecycleStatus::Stopped { .. }));
+        assert!(!report.already_stopped);
+        assert!(crate::lifecycle_marker::read(&state).is_none());
+    }
+
+    #[tokio::test]
+    async fn failure_of_another_process_is_never_the_exited_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (env, _state) = failed_start_env(tmp.path());
+        let failed = crate::status::status(&env).await.unwrap();
+        let LifecycleStatus::Failed { metadata, startup: _ } = &failed else {
+            panic!("expected retained startup failure, got {failed:?}")
+        };
+        let recorded = metadata.pid.unwrap();
+        assert!(!failure_names_exited_target(&failed, recorded.wrapping_add(1)));
+        let stopped = LifecycleStatus::Stopped {
+            app_root: env.config().app_root.clone(),
+            capacity: None,
+            capacity_error: None,
+        };
+        assert!(!failure_names_exited_target(&stopped, recorded));
+    }
 }

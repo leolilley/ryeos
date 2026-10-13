@@ -4,8 +4,14 @@
 //! bundle from the sealed supervisor bootstrap. It never uses ambient proxy,
 //! CA, credential, redirect, or endpoint configuration.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const SUPERVISOR_TEMP_PURPOSE: lillux::TempPurpose =
+    lillux::TempPurpose::new("supervisor");
+
 pub mod entrypoint;
 mod http_transport;
+pub mod native_host;
+pub mod relay_transport;
 pub mod runtime;
 
 use anyhow::{Context as _, Result, ensure};
@@ -40,6 +46,56 @@ pub struct AttachedExternalExecutionChannel {
     occurrence_id: String,
     maximum_response_bytes: u64,
     request_timeout: Duration,
+}
+
+/// Guest control-loop seam. A relay implementation must enter here only
+/// after its private mailbox descriptor and exact response authentication
+/// have been installed. Merely selecting the signed relay policy cannot
+/// construct a transport or fall back to HTTP.
+pub enum AttachedExternalExecutionTransport {
+    HttpJson(AttachedExternalExecutionChannel),
+    ControllerFileRelay(relay_transport::AttachedFileRelayChannel),
+}
+
+impl From<AttachedExternalExecutionChannel> for AttachedExternalExecutionTransport {
+    fn from(value: AttachedExternalExecutionChannel) -> Self {
+        Self::HttpJson(value)
+    }
+}
+
+impl From<relay_transport::AttachedFileRelayChannel> for AttachedExternalExecutionTransport {
+    fn from(value: relay_transport::AttachedFileRelayChannel) -> Self {
+        Self::ControllerFileRelay(value)
+    }
+}
+
+impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
+    fn fresh_idle_poll_interval(&self) -> Option<lillux::time::Duration> {
+        match self {
+            Self::HttpJson(http) => http.fresh_idle_poll_interval(),
+            Self::ControllerFileRelay(relay) => relay.fresh_idle_poll_interval(),
+        }
+    }
+
+    fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
+        match self {
+            Self::HttpJson(http) => http.exchange(canonical_supervisor_frame),
+            Self::ControllerFileRelay(relay) => relay.exchange(canonical_supervisor_frame),
+        }
+    }
+
+    fn exchange_until(
+        &mut self,
+        canonical_supervisor_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
+        match self {
+            Self::HttpJson(http) => http.exchange_until(canonical_supervisor_frame, deadline),
+            Self::ControllerFileRelay(relay) => {
+                relay.exchange_until(canonical_supervisor_frame, deadline)
+            }
+        }
+    }
 }
 
 pub fn attach_external_execution_channel(
@@ -82,11 +138,11 @@ pub fn attach_external_execution_channel_exact(
     let request_bytes = request.canonical_bytes()?;
     let response = client
         .post_json(
-            &bootstrap.controller.attach_url()?,
+            &bootstrap.controller.http()?.attach_url()?,
             request_bytes,
             ATTACH_RESPONSE_BYTES,
             lillux::time::MonotonicDeadline::after(Duration::from_millis(u64::from(
-                bootstrap.controller.request_timeout_ms,
+                bootstrap.controller.http()?.request_timeout_ms,
             ))),
         )
         .map_err(anyhow::Error::new)
@@ -123,13 +179,14 @@ fn attached_channel(
     bootstrap: &ExternalSupervisorBootstrap,
     client: BoundedHttpClient,
 ) -> Result<AttachedExternalExecutionChannel> {
+    let http = bootstrap.controller.http()?;
     Ok(AttachedExternalExecutionChannel {
         client,
-        exchange_url: bootstrap.controller.exchange_url()?,
+        exchange_url: http.exchange_url()?,
         placement_thread_id: bootstrap.placement_thread_id.clone(),
         occurrence_id: bootstrap.occurrence_id.clone(),
-        maximum_response_bytes: bootstrap.controller.maximum_response_bytes,
-        request_timeout: Duration::from_millis(u64::from(bootstrap.controller.request_timeout_ms)),
+        maximum_response_bytes: http.maximum_response_bytes,
+        request_timeout: Duration::from_millis(u64::from(http.request_timeout_ms)),
     })
 }
 
@@ -137,7 +194,7 @@ fn build_client(
     bootstrap: &ExternalSupervisorBootstrap,
     network_inputs: &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs,
 ) -> Result<BoundedHttpClient> {
-    network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
+    network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
     let network = lillux::network::NetworkContext::from_config_bytes(
         &network_inputs.resolver_bytes()?,
         &network_inputs.hosts_bytes()?,
@@ -291,7 +348,7 @@ mod tests {
         bootstrap: &ExternalSupervisorBootstrap,
     ) -> ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs {
         ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-            &bootstrap.controller.network_inputs,
+            &bootstrap.controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
@@ -315,6 +372,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: 55,
@@ -366,7 +424,7 @@ mod tests {
             )
             .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
                     schema: 2,
@@ -390,7 +448,7 @@ mod tests {
                     connect_timeout_ms: 1_000,
                     request_timeout_ms: 2_000,
                     maximum_response_bytes: 64 * 1024,
-                },
+                }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
             occurrence_id: "occurrence-one".into(),
@@ -423,6 +481,14 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
         }
     }
 
@@ -898,6 +964,8 @@ mod tests {
 
     #[test]
     fn lost_attach_response_retries_same_key_after_bootstrap_deadline() {
+        use ryeos_state::external_execution::native_journal::testing::{census, retire};
+        let host = ryeos_state::test_support::shared_test_host();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut bootstrap = bootstrap(
@@ -952,6 +1020,9 @@ mod tests {
             bootstrap,
             captured_network_inputs,
             lillux::crypto::SigningKey::from_bytes(&[53; 32]),
+            host.factory(),
+            host.destination(),
+            &census(&host),
         )
         .unwrap();
         let store_identity = journal.store_identity().clone();
@@ -960,11 +1031,11 @@ mod tests {
                 journal.bootstrap(),
                 journal.supervisor_signing_key(),
                 journal.attachment_request(),
-                journal.captured_network_inputs(),
+                journal.captured_network_inputs().unwrap(),
             )
             .is_err()
         );
-        drop(journal);
+        retire(&host, journal.close());
         std::thread::sleep(Duration::from_millis(150));
         let ExternalSupervisorJournalRecovery::Prepared(recovered) =
             ExternalSupervisorJournalRecovery::open(
@@ -972,6 +1043,9 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 &store_identity,
+                host.factory(),
+                host.destination(),
+                &census(&host),
             )
             .unwrap()
         else {
@@ -985,14 +1059,14 @@ mod tests {
             recovered.bootstrap(),
             recovered.supervisor_signing_key(),
             recovered.attachment_request(),
-            recovered.captured_network_inputs(),
+            recovered.captured_network_inputs().unwrap(),
         )
         .unwrap();
         assert_eq!(
             binding.supervisor_public_key,
             encode_channel_public_key(&recovered.supervisor_signing_key().verifying_key()).unwrap()
         );
-        recovered.record_binding(binding).unwrap();
+        retire(&host, recovered.record_binding(binding).unwrap().close());
         assert_eq!(server.join().unwrap(), 2);
     }
 

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 pub(crate) struct BoundSourceClosure {
+    binding_mode: BindingMode,
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     sealed_identity_env: String,
     execution_entry_path: PathBuf,
@@ -22,6 +23,164 @@ pub(crate) struct BoundSourceClosure {
     private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
     _leases: Vec<std::fs::File>,
+}
+
+/// Unused local data custody exported from one already-retained source owner.
+/// This is neither launch admission nor a local adapter transport contract.
+/// The SAME Arc keeps its directory, verified records and generation lease;
+/// sealed documents do not prove immutable source-tree contents.
+#[cfg(target_os = "linux")]
+pub(crate) struct LocalSourceRecordCustody {
+    source: std::sync::Arc<BoundSourceClosure>,
+    binding: lillux::InheritedDescriptorAuthority,
+    manifest: lillux::InheritedDescriptorAuthority,
+    binding_bytes: u64,
+    manifest_bytes: u64,
+}
+
+/// Borrow one fixed document's immutable data and independently retained hash.
+/// No constructor, owned descriptor extraction or numeric-FD export is supplied
+/// by this data API. The source custodian must outlive any future delivery.
+#[cfg(target_os = "linux")]
+pub(crate) struct LocalSourceRecordObservation<'a> {
+    descriptor: &'a lillux::InheritedDescriptorAuthority,
+    raw_sha256: &'a str,
+    bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl LocalSourceRecordObservation<'_> {
+    pub(crate) fn descriptor(&self) -> &lillux::InheritedDescriptorAuthority {
+        self.descriptor
+    }
+
+    pub(crate) fn raw_sha256(&self) -> &str {
+        self.raw_sha256
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LocalSourceRecordCustody {
+    /// Consume only the caller's SAME retained Arc, without another redemption
+    /// or an unchecked record/descriptor constructor. All checks precede any
+    /// returned data custody; failure never grants a launch or transport role.
+    pub(crate) fn from_bound_source(
+        source: std::sync::Arc<BoundSourceClosure>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            matches!(
+                source.binding_mode,
+                BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime)
+            ) && source.private_workspace_identity().is_none()
+                && source.mounts().len() == 1,
+            "local source records require isolation-mounted runtime source"
+        );
+        anyhow::ensure!(
+            source.execution_root == source.records.runtime_destination(),
+            "local source records require exact runtime destination"
+        );
+        anyhow::ensure!(
+            source.execution_entry_path() == source.records.runtime_entry_path(),
+            "local source records require exact runtime entry"
+        );
+        let binding_bytes = lillux::canonical_json(&source.records.binding().to_value()?)?;
+        let manifest_bytes = lillux::canonical_json(&source.records.manifest().to_value()?)?;
+        anyhow::ensure!(
+            !binding_bytes.is_empty()
+                && binding_bytes.len() <= ryeos_state::objects::MAX_SOURCE_BINDING_BYTES,
+            "local source binding exceeds unchanged record byte bound"
+        );
+        anyhow::ensure!(
+            !manifest_bytes.is_empty()
+                && manifest_bytes.len() <= ryeos_state::objects::MAX_SOURCE_MANIFEST_BYTES,
+            "local source manifest exceeds unchanged record byte bound"
+        );
+        anyhow::ensure!(
+            lillux::sha256_hex(binding_bytes.as_bytes()) == source.records.binding_hash()
+                && lillux::sha256_hex(manifest_bytes.as_bytes())
+                    == source.records.content_manifest_hash(),
+            "local source records differ from independently retained identities"
+        );
+        let binding = lillux::sealed_memfd(c"local-source-binding", binding_bytes.as_bytes())
+            .map_err(anyhow::Error::msg)?;
+        let manifest = lillux::sealed_memfd(c"local-source-manifest", manifest_bytes.as_bytes())
+            .map_err(anyhow::Error::msg)?;
+        binding.require_write_sealed_regular()?;
+        manifest.require_write_sealed_regular()?;
+        Ok(Self {
+            source,
+            binding,
+            manifest,
+            binding_bytes: binding_bytes.len() as u64,
+            manifest_bytes: manifest_bytes.len() as u64,
+        })
+    }
+
+    pub(crate) fn binding(&self) -> LocalSourceRecordObservation<'_> {
+        LocalSourceRecordObservation {
+            descriptor: &self.binding,
+            raw_sha256: self.source.records.binding_hash(),
+            bytes: self.binding_bytes,
+        }
+    }
+
+    pub(crate) fn manifest(&self) -> LocalSourceRecordObservation<'_> {
+        LocalSourceRecordObservation {
+            descriptor: &self.manifest,
+            raw_sha256: self.source.records.content_manifest_hash(),
+            bytes: self.manifest_bytes,
+        }
+    }
+
+    pub(crate) fn runtime_destination(&self) -> &Path {
+        &self.source.execution_root
+    }
+
+    pub(crate) fn execution_entry_path(&self) -> &Path {
+        self.source.execution_entry_path()
+    }
+
+    pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
+        self.source.source_directory()
+    }
+}
+
+/// Unused checked metadata borrow of the SAME retained runtime source Arc.
+/// This view exposes no directory, descriptor, mount, Arc or record owner.
+/// Validation is a point-in-time association, not continuing path/State,
+/// immutable-content, applied-copy or original launch authority.
+pub(crate) struct SourceRuntimeAssociation<'a> {
+    source: &'a std::sync::Arc<BoundSourceClosure>,
+}
+
+impl SourceRuntimeAssociation<'_> {
+    pub(crate) fn binding_hash(&self) -> &str {
+        self.source.records.binding_hash()
+    }
+
+    pub(crate) fn content_manifest_hash(&self) -> &str {
+        self.source.records.content_manifest_hash()
+    }
+
+    pub(crate) fn runtime_destination(&self) -> &Path {
+        &self.source.execution_root
+    }
+
+    pub(crate) fn execution_entry_path(&self) -> &Path {
+        self.source.execution_entry_path()
+    }
+
+    pub(crate) fn file_count(&self) -> usize {
+        self.source.records.manifest().totals.file_count
+    }
+
+    pub(crate) fn total_bytes(&self) -> u64 {
+        self.source.records.manifest().totals.total_bytes
+    }
 }
 
 /// Descriptor-bound delivery of the existing B-owned source closure. The
@@ -42,10 +201,6 @@ pub(crate) fn bind_external_source(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> anyhow::Result<Option<ExternalSourceDelivery>> {
-    use ryeos_external_execution_contract::{
-        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
-        GuestMountRole,
-    };
     capsule.validate()?;
     let expected = ryeos_state::objects::AdmittedLaunchCapsule::source_projection_in_program(
         &capsule.exact_program,
@@ -60,6 +215,69 @@ pub(crate) fn bind_external_source(
         actual == expected,
         "external source resolution differs from the retained launch capsule"
     );
+    bind_external_source_bytes(state, resolution, expected.as_ref())
+}
+
+/// Redeem only the B-owned source bytes admitted by the real source owner.
+/// This is not a substitute for the original mechanism root, deadline,
+/// fixture, program, or born-capsule checks at their respective owners.
+pub(crate) fn bind_external_admitted_source(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    source: &ryeos_app::source_closure_admission::AdmittedSourceClosure,
+) -> anyhow::Result<ExternalSourceDelivery> {
+    let projection = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()?
+        .ok_or_else(|| anyhow::anyhow!("admitted source has no finalized source projection"))?;
+    let (proof, store) = source.finalization_evidence();
+    anyhow::ensure!(
+        proof.projection() == &projection
+            && source.binding().digest()? == projection.binding_hash
+            && source.manifest().digest()? == projection.content_manifest_hash
+            && source.binding().owner_key()? == projection.owner_key
+            && source.manifest().totals.file_count == projection.file_count
+            && source.manifest().totals.total_bytes == projection.total_bytes,
+        "finalized B source differs from its admitted capture"
+    );
+    source
+        .binding()
+        .validate_content_manifest(source.manifest())?;
+    let source_authority = source.source_authority()?;
+    let state_authority = state.state_store.pinned_state_authority()?;
+    anyhow::ensure!(
+        source_authority.cas_directory().identity()?
+            == state_authority.cas_directory().identity()?
+            && store.source_closure_available(
+                &projection.binding_hash,
+                &projection.content_manifest_hash,
+            )?,
+        "admitted B source lost its original pinned CAS authority"
+    );
+    let delivered = bind_external_source_bytes(state, resolution, Some(&projection))?
+        .ok_or_else(|| anyhow::anyhow!("admitted B source produced no external delivery"))?;
+    anyhow::ensure!(
+        delivered.records.binding() == source.binding()
+            && delivered.records.manifest() == source.manifest(),
+        "delivered B source differs from its admitted binding and manifest"
+    );
+    Ok(delivered)
+}
+
+/// Shared CAS redemption and descriptor construction after the caller's
+/// independent capsule or retained-source-owner provenance check.
+fn bind_external_source_bytes(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    expected: Option<&ryeos_state::objects::EffectiveSourceClosureProjection>,
+) -> anyhow::Result<Option<ExternalSourceDelivery>> {
+    use ryeos_external_execution_contract::{
+        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
+        GuestMountRole,
+    };
     validate_external_mount_separation(state, resolution, SourceMountPlacement::ExecutionRuntime)?;
     let Some(bound) = bind_source(
         state,
@@ -73,9 +291,7 @@ pub(crate) fn bind_external_source(
     };
     let records = bound.records.clone();
     records.validate_projection(
-        expected
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("external source lacks capsule authority"))?,
+        expected.ok_or_else(|| anyhow::anyhow!("external source lacks admitted authority"))?,
     )?;
     let binding_bytes = lillux::canonical_json(&records.binding().to_value()?)?;
     let manifest_bytes = lillux::canonical_json(&records.manifest().to_value()?)?;
@@ -120,6 +336,59 @@ pub(crate) fn bind_external_source(
 }
 
 impl BoundSourceClosure {
+    /// Borrow only the actual retained Arc, without export serialization,
+    /// new seals, tree hashing or another source redemption. Transient path
+    /// strings/descriptor checks are bounded; this is not zero-allocation.
+    pub(crate) fn runtime_association(
+        source: &std::sync::Arc<Self>,
+    ) -> anyhow::Result<SourceRuntimeAssociation<'_>> {
+        anyhow::ensure!(
+            matches!(
+                source.binding_mode,
+                BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime)
+            ) && source.private_workspace_identity().is_none()
+                && source.mounts().len() == 1,
+            "source runtime association requires isolation-mounted runtime source"
+        );
+        anyhow::ensure!(
+            source.execution_root == source.records.runtime_destination(),
+            "source runtime association requires exact runtime destination"
+        );
+        anyhow::ensure!(
+            source.execution_entry_path() == source.records.runtime_entry_path(),
+            "source runtime association requires exact runtime entry"
+        );
+        source
+            .custody_cache_root
+            .ensure_path_binding()
+            .context("source runtime association cache path binding changed")?;
+        source
+            .source_directory
+            .ensure_path_binding()
+            .context("source runtime association original source path binding changed")?;
+        // A descriptor-only pin may have no path-binding obligation. Always
+        // join the named generation under the actual retained cache FD, too.
+        let named = source
+            .custody_cache_root
+            .open_child_directory(OsStr::new(source.records.content_manifest_hash()))?
+            .context("source runtime association named generation is missing")?;
+        anyhow::ensure!(
+            named.is_same_directory(&source.source_directory)?,
+            "source runtime association named generation identity differs"
+        );
+        // Recheck path obligations after the named-child identity observation.
+        // A future runtime/cache/State parent-chain proof remains separate.
+        source
+            .custody_cache_root
+            .ensure_path_binding()
+            .context("source runtime association cache path binding changed")?;
+        source
+            .source_directory
+            .ensure_path_binding()
+            .context("source runtime association original source path binding changed")?;
+        Ok(SourceRuntimeAssociation { source })
+    }
+
     fn member_path(&self, relative: &str) -> anyhow::Result<String> {
         ryeos_engine::runtime::validate_source_member_path(relative)?;
         anyhow::ensure!(
@@ -321,6 +590,37 @@ pub(crate) fn validate_external_mount_separation(
     Ok(())
 }
 
+/// The Q root carries these two accepted projections separately. Check their
+/// exact runtime destinations without constructing a live ResolutionOutput.
+pub(crate) fn validate_retained_qualification_mount_separation(
+    state: &ryeos_app::state::AppState,
+    source: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> anyhow::Result<()> {
+    realizations.validate()?;
+    let authority = super::pinned_state_authority(state)?;
+    let cas = authority.cas_store()?;
+    let (binding, _) = retained_source_records_for_projection(&cas, source)?;
+    let source = SourceMountPlacement::Project.relative_mount(&binding)?;
+    let source = Path::new(&source);
+    for realization in realizations.iter() {
+        if mount_destinations_overlap(source, Path::new(&realization.mount)) {
+            anyhow::bail!("qualification Worker source and realization destinations overlap");
+        }
+    }
+    // Private descriptor delivery collapses both logical roots into one
+    // physical directory. Cross-root aliases must refuse before copying.
+    let entries: Vec<_> = realizations.iter().collect();
+    for (index, left) in entries.iter().enumerate() {
+        for right in &entries[index + 1..] {
+            if mount_destinations_overlap(Path::new(&left.mount), Path::new(&right.mount)) {
+                anyhow::bail!("qualification private realization destinations overlap");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
@@ -337,6 +637,24 @@ pub(crate) fn bind_source(
         workspace,
         BindingMode::IsolationMount(placement),
         None,
+    )
+}
+
+/// Redeem the source projection held by an authenticated qualification root.
+/// The caller owns its accepted-root/profile join; this function only verifies
+/// the exact retained CAS binding and materializes its immutable source bytes.
+pub(crate) fn bind_retained_qualification_source(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    budget: &super::external_content::PrivateMaterializationBudget,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::PrivateWorkspace,
+        Some(budget),
     )
 }
 
@@ -362,13 +680,29 @@ fn bind_source_with(
     mode: BindingMode,
     budget: Option<&super::external_content::PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+    else {
+        return Ok(None);
+    };
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    bind_source_projection_with(state, &projection, workspace, mode, budget).map(Some)
+}
+
+fn bind_source_projection_with(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    mode: BindingMode,
+    budget: Option<&super::external_content::PrivateMaterializationBudget>,
+) -> anyhow::Result<BoundSourceClosure> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let Some((binding, manifest, projection)) = retained_source_records(&cas, resolution)? else {
-        return Ok(None);
-    };
+    let (binding, manifest) = retained_source_records_for_projection(&cas, projection)?;
     let records =
         ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
             &projection.binding_hash,
@@ -447,6 +781,7 @@ fn bind_source_with(
             let _ = staging.remove_contents_recursive().and_then(|()| {
                 cache_root
                     .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())
                     .map(|_| ())
             });
         }
@@ -490,7 +825,8 @@ fn bind_source_with(
         }
     };
     authority.ensure_guard(&guard)?;
-    Ok(Some(BoundSourceClosure {
+    Ok(BoundSourceClosure {
+        binding_mode: mode,
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
@@ -505,7 +841,7 @@ fn bind_source_with(
         private_workspace_identity,
         records,
         _leases: vec![lease],
-    }))
+    })
 }
 
 fn retained_source_records(
@@ -526,6 +862,18 @@ fn retained_source_records(
         return Ok(None);
     };
     let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    let (binding, manifest) = retained_source_records_for_projection(cas, &projection)?;
+    Ok(Some((binding, manifest, projection)))
+}
+
+fn retained_source_records_for_projection(
+    cas: &lillux::CasStore,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+) -> anyhow::Result<(
+    ryeos_state::objects::EffectiveSourceBinding,
+    ryeos_state::objects::SourceClosureManifest,
+)> {
+    projection.validate()?;
     let binding_value = cas
         .get_object(&projection.binding_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
@@ -540,11 +888,7 @@ fn retained_source_records(
             lillux::canonical_json(&manifest_value)?.as_bytes(),
         )?;
     records.validate_projection(&projection)?;
-    Ok(Some((
-        records.binding().clone(),
-        records.manifest().clone(),
-        projection,
-    )))
+    Ok((records.binding().clone(), records.manifest().clone()))
 }
 
 fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<String> {
@@ -579,7 +923,10 @@ fn publish_private_source(
         match existing {
             lillux::PinnedDirectoryEntry::Directory(directory) => {
                 directory.remove_contents_recursive()?;
-                if !parent.remove_empty_child_if_same(name, &directory)? {
+                if !parent
+                    .remove_empty_child_if_same(name, &directory)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("private source shadow remained non-empty");
                 }
             }
@@ -798,7 +1145,7 @@ pub(crate) mod tests {
                 }, "executor_chain":[]}],
                 "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
                 "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy",
-                "target_requirement":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
+                "target_requirement":null, "endpoint_requirement":{"kind":"local"}, "external_endpoint_binding":null, "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
             }),
             protocol_descriptor_document: String::new(),
             command: AdmittedDirectCommandClosure::NodePolicy,
@@ -854,6 +1201,7 @@ pub(crate) mod tests {
         std::fs::create_dir(cache.path().join("directory")).unwrap();
         std::os::unix::fs::symlink("baseline.toml", cache.path().join("alias")).unwrap();
         let bound = BoundSourceClosure {
+            binding_mode: BindingMode::IsolationMount(SourceMountPlacement::Project),
             mounts: Vec::new(),
             sealed_identity_env: "{}".to_owned(),
             execution_entry_path: workspace.path().join("not-mounted/profile.json"),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:23Z:f38b611a34b359732e7a45c4a5a58b2a1adfadff900dc45250b4d1b792bb03cf:kARWpChd65S5SZ9QEaEqs8USNVwmOg5edvLIu1I5hEDmewmXO7Q/wKIFhRr34ydddSeNL1Jbud/ssOsfIzBLCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:8481b219d6704a54b686ba778f2e2f860b12ffa44f1d46121f126ef66fba6a9a:UdOU7VHZ1Y90Fl8nnkafllF+9pLPfhhVvWdYq3ZFOw+biXn1BmZNiX9zJcMKHjIaV7i8e5BaB6y1AXclcaO5BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-invite"
@@ -26,7 +26,7 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
     roles:
       type: array
       items: { type: string }

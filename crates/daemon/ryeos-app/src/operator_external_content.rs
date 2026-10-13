@@ -14,7 +14,7 @@ use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
 pub mod content_qualification;
@@ -29,33 +29,6 @@ mod retained_product;
 mod retained_result;
 
 const BINDING_HEAD_NAMESPACE: &str = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
-
-/// Retire every predecessor external-content binding head while the node is
-/// stopped. Manifest-schema cuts change the binding coordinate itself; old
-/// active heads cannot remain roots under the new decoder and are never
-/// translated.
-pub fn discard_binding_heads_offline(
-    config: &crate::config::Config,
-    dry_run: bool,
-) -> anyhow::Result<usize> {
-    let _state_lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
-        &config.app_root,
-    ))
-    .context("external-content binding reset requires the daemon to be stopped")?;
-    let runtime_state_dir = config.runtime_state_dir();
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for external-content binding reset")?;
-    let mut trust = ryeos_state::refs::TrustStore::new();
-    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-    let state = ryeos_state::StateDb::open_for_projection_rebuild(
-        &runtime_state_dir,
-        std::sync::Arc::new(trust),
-    )
-    .context("open pinned state authority for external-content binding reset")?;
-    let authority = state.pinned_authority()?;
-    let guard = authority.acquire_exclusive_guard(!dry_run)?;
-    state.discard_external_content_binding_heads(&guard, dry_run)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -323,7 +296,7 @@ async fn import_filesystem(
         bail!("expected_file_sha256 is not a canonical sha256 digest");
     }
     let policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let root_policy = policy
         .roots
@@ -457,7 +430,7 @@ pub fn import_managed_activation_component(
     let expected_file_sha256 = component.expected_file_sha256.clone();
     validate_relative_path(staged_name)?;
     let import_policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let policy = import_policy.managed_activation.require_enabled()?;
     activation.document.validate_portable()?;
@@ -482,7 +455,7 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content component exceeds current node import policy");
     }
-    let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
+    let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
         max_depth: maximum_depth,
         max_entries: maximum_entries,
         max_file_bytes: maximum_file_bytes,
@@ -1562,7 +1535,7 @@ struct ResolvedConsumer {
 #[allow(clippy::too_many_arguments)]
 fn capture_content_import(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
@@ -1639,7 +1612,7 @@ fn capture_content_import(
 #[allow(clippy::too_many_arguments)]
 fn capture_large_import(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
@@ -1940,7 +1913,7 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
 
 fn import_request_digest(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     root_device: u64,
     root_inode: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -2011,7 +1984,7 @@ mod tests {
                 expected_file_sha256: None,
             };
             let limits =
-                crate::node_policy::sections::external_content::ExternalContentImportLimits {
+                ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
                     max_depth: 8,
                     max_entries: 32,
                     max_file_bytes: 4096,
@@ -2272,7 +2245,7 @@ mod tests {
             maximum_bytes: 4096,
             expected_file_sha256: None,
         };
-        let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
+        let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 32,
             max_file_bytes: 4096,

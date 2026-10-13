@@ -3,19 +3,22 @@ mod test_state;
 use ryeos_api::handlers::commands_dispatch::{self, Request};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::service_registry::ServiceRegistry;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// Returns the Store owner ahead of the application, so the caller's bindings
+/// drop the application before the owner closes the Store.
 fn setup(
     commands: &[&str],
 ) -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     ryeos_app::state::AppState,
     HandlerContext,
 ) {
-    let (root, mut state) = test_state::build_test_state_with_bundles();
+    let (root, store_owner, mut state) = test_state::build_test_state_with_bundles();
     ryeos_executor::execution::arm_private_materialization_copy_limit(32 * 1024 * 1024).unwrap();
     let bundle = ryeos_engine::test_support::core_bundle_root();
     let records = commands
@@ -39,7 +42,7 @@ fn setup(
         Some(AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
-    (root, state, context)
+    (root, store_owner, state, context)
 }
 
 fn request(tokens: &[&str]) -> Request {
@@ -68,7 +71,7 @@ fn echo(
 
 #[tokio::test]
 async fn command_capability_does_not_grant_target_capability() {
-    let (_root, state, mut context) = setup(&["status"]);
+    let (_root, _store_owner, state, mut context) = setup(&["status"]);
     context.scopes = vec!["ryeos.execute.service.commands/dispatch".into()];
     let error = commands_dispatch::handle(
         request(&["daemon", "status"]),
@@ -89,7 +92,7 @@ async fn command_capability_does_not_grant_target_capability() {
 
 #[tokio::test]
 async fn absent_project_does_not_discover_daemon_app_root() {
-    let (_root, mut state, mut context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, mut context) = setup(&["execute"]);
     // Test app_root contains .ai. With no live-write grant this must still work.
     assert!(state.config.app_root.join(".ai").is_dir());
     context.scopes = vec!["ryeos.execute.service.health/status".into()];
@@ -108,7 +111,7 @@ async fn absent_project_does_not_discover_daemon_app_root() {
 
 #[tokio::test]
 async fn structured_target_consumes_only_its_own_coordinate() {
-    let (_root, mut state, mut context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, mut context) = setup(&["execute"]);
     context.scopes = vec!["ryeos.execute.service.health/status".into()];
     let mut services = ServiceRegistry::new();
     services.register_raw("health.status", echo);
@@ -123,7 +126,7 @@ async fn structured_target_consumes_only_its_own_coordinate() {
 
 #[tokio::test]
 async fn nested_recorded_service_gets_its_own_root() {
-    let (_root, mut state, context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, context) = setup(&["execute"]);
     let context = context
         .with_recorded_service_root_id("T-parent-command".into())
         .unwrap();
@@ -152,7 +155,7 @@ async fn nested_recorded_service_gets_its_own_root() {
 
 #[tokio::test]
 async fn descriptor_pinning_reaches_real_capture_admission() {
-    let (_root, state, context) = setup(&["remote-worker-run"]);
+    let (_root, _store_owner, state, context) = setup(&["remote-worker-run"]);
     let project = tempfile::tempdir().unwrap();
     // Deliberately invalid snapshot policy: pinned admission must reject it
     // before contacting the workflow. A live-authority downgrade misses this.
@@ -187,7 +190,7 @@ async fn descriptor_pinning_reaches_real_capture_admission() {
 
 #[tokio::test]
 async fn shipped_worker_command_retains_a_real_pinned_generation() {
-    let (_root, mut state, context) = setup(&["remote-worker-run"]);
+    let (_root, _store_owner, mut state, context) = setup(&["remote-worker-run"]);
     let project = tempfile::tempdir().unwrap();
     let policy = project
         .path()
@@ -226,7 +229,7 @@ async fn shipped_worker_command_retains_a_real_pinned_generation() {
 
 #[tokio::test]
 async fn accepted_command_requires_caller_retained_launch_before_effects() {
-    let (_root, state, context) = setup(&["execute"]);
+    let (_root, _store_owner, state, context) = setup(&["execute"]);
     let error = commands_dispatch::handle(
         request(&[
             "execute",
@@ -248,7 +251,7 @@ async fn accepted_command_requires_caller_retained_launch_before_effects() {
 
 #[tokio::test]
 async fn forwarded_operator_keeps_verified_authority_without_second_wire_assertion() {
-    let (_root, mut state, mut context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, mut context) = setup(&["execute"]);
     let origin = format!("site:{}", "a".repeat(64));
     context.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
     context.authenticated_origin_site_id = Some(origin.clone());
@@ -286,7 +289,7 @@ async fn forwarded_operator_keeps_verified_authority_without_second_wire_asserti
 
 #[tokio::test]
 async fn command_parameters_use_the_selected_callee_types() {
-    let (_root, mut state, context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, context) = setup(&["execute"]);
     let mut services = ServiceRegistry::new();
     services.register_raw("threads.list", echo);
     services.register_raw("threads.tail", echo);
@@ -334,7 +337,7 @@ async fn rejected_accepted_launch_retains_coordinate_and_refuses_duplicate_deliv
         CONTACTS.fetch_add(1, Ordering::SeqCst);
         echo(params, context, state)
     }
-    let (_root, mut state, context) = setup(&["execute"]);
+    let (_root, _store_owner, mut state, context) = setup(&["execute"]);
     let mut services = ServiceRegistry::new();
     services.register_raw("federation.capabilities", count);
     state.services = Arc::new(services);

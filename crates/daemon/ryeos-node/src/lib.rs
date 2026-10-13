@@ -1,7 +1,11 @@
 //! Shared RyeOS local node lifecycle and bootstrap semantics.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const NODE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("node");
+
 pub mod bundle_set_apply;
 pub mod bundle_set_update;
+pub mod capability_report;
 mod control;
 pub mod host_runtime;
 pub mod init;
@@ -10,6 +14,8 @@ pub mod lifecycle_marker;
 pub mod lifecycle_wire;
 pub mod metadata;
 pub mod model_setup;
+pub mod native_capacity;
+pub mod provider_env;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -30,7 +36,8 @@ pub use init::{
     load_verified_substrate_identity, preflight_existing_policy_generation,
     prepare_bundle_set_init_completion, prepare_prospective_init_completion, run_init,
     run_init_with_operator_ceremony, run_init_with_progress,
-    seal_init_completion_after_policy_update, verify_init_completion,
+    seal_init_completion_after_bundle_registration_change, seal_init_completion_after_policy_update,
+    verify_init_completion,
 };
 pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{
@@ -70,19 +77,19 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     pub fn default_local() -> Result<Self> {
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources::default())?;
+        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources::default())?;
         Ok(Self::from_app_config(&config))
     }
 
     pub fn load_local(app_root: Option<PathBuf>) -> Result<Self> {
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
             app_root,
             ..Default::default()
         })?;
         Ok(Self::from_app_config(&config))
     }
 
-    pub fn from_app_config(config: &ryeos_app::config::Config) -> Self {
+    pub fn from_app_config(config: &ryeos_node_runtime::config::Config) -> Self {
         Self {
             app_root: config.app_root.clone(),
             bind: config.bind,
@@ -124,7 +131,7 @@ impl LocalLifecycleEnv {
     /// supervised Down intent after a configuration failure; it never supplies
     /// substitute endpoints or direct-launch authority.
     pub fn selected_app_root(app_root: Option<PathBuf>) -> Result<PathBuf> {
-        ryeos_app::config::Config::selected_app_root(&ryeos_app::config::ConfigSources {
+        ryeos_node_runtime::config::Config::selected_app_root(&ryeos_node_runtime::config::ConfigSources {
             app_root,
             ..Default::default()
         })

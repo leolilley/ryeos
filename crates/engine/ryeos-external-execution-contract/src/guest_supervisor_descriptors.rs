@@ -24,6 +24,8 @@ pub const SUPERVISOR_EXECUTABLE_FD: u32 = 57;
 /// Sealed one-way launch record delivered only after the stage was imported
 /// and the outer owner committed its exact mounted-launch intent.
 pub const SUPERVISOR_LAUNCH_INTENT_FD: u32 = 58;
+/// Distinct original pinned relay mailbox, never an admitted candidate mount.
+pub const SUPERVISOR_RELAY_MAILBOX_FD: u32 = 59;
 pub const SUPERVISOR_STAGE_MOUNT_DESTINATION: &str = "/ryeos/guest-stage";
 /// Only non-source controls may cross the held sealed-source launch. Source
 /// content is opened from the sole read-only stage mount after target exec.
@@ -33,6 +35,14 @@ pub const SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS: [u32; 5] = [
     SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_PRIVATE_PARENT_FD,
     SUPERVISOR_LAUNCH_INTENT_FD,
+];
+pub const SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS: [u32; 6] = [
+    SUPERVISOR_BOOTSTRAP_FD,
+    SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_CANDIDATE_RUNTIME_FD,
+    SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_LAUNCH_INTENT_FD,
+    SUPERVISOR_RELAY_MAILBOX_FD,
 ];
 pub const SUPERVISOR_RUNTIME_MOUNT_FD_BASE: u32 = 64;
 pub const SUPERVISOR_CONTENT_RECORD_FD_BASE: u32 =

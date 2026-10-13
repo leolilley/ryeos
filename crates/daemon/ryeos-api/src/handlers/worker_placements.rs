@@ -79,7 +79,7 @@ fn reach_target_handoff_crash_boundary(
 fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
-            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+            != Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
     {
         return Err(HandlerError::Forbidden(
             "authenticated source-node authority required".into(),
@@ -1728,7 +1728,7 @@ async fn adopt_authorized(
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         let transfer_policy = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
             .map_err(internal)?;
         if u64::try_from(payload.total_bytes).map_err(internal)?
             > transfer_policy
@@ -3293,7 +3293,7 @@ fn returning_local_operator_anchor(
     chain_root_id: &str,
     source_chain_head_hash: &str,
 ) -> Result<Option<String>> {
-    if admitted.principal_class != ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient {
+    if admitted.principal_class != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient {
         return Ok(None);
     }
     state
@@ -4164,7 +4164,7 @@ async fn prepare_after_staging(
     drop(guard);
     let transfer_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
     let admission_limits = ryeos_state::object_closure::ObjectClosureLimits {
         max_objects: transfer_policy.max_objects,
         max_blobs: transfer_policy.max_blobs,
@@ -4669,7 +4669,10 @@ fn load_source_launch_capsule(
     expected_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
     let value = cas
-        .get_object(expected_hash)?
+        .get_object_bounded(
+            expected_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .context("source admitted launch capsule is absent")?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
     if capsule.content_hash()? != expected_hash {
@@ -4687,10 +4690,14 @@ fn source_project_path_from_payload(
         .iter()
         .find(|entry| !entry.is_blob && entry.hash == manifest.source_launch_capsule_hash)
         .context("transfer payload omits source launch capsule")?;
+    if entry.data.len() > ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES {
+        bail!("transferred launch capsule exceeds its raw byte ceiling");
+    }
+    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash {
+        bail!("transfer launch capsule content address changed");
+    }
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash
-        || lillux::canonical_json(&value)?.as_bytes() != entry.data
-    {
+    if lillux::canonical_json_bounded(&value, ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?.as_slice() != entry.data {
         bail!("transfer launch capsule content identity changed");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
@@ -4726,7 +4733,10 @@ fn credential_contract_from_capsule(
         .values()
     {
         let value = cas
-            .get_object(capsule_hash)?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
             .context("source persistent-session capsule is absent")?;
         let capsule =
             ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4755,7 +4765,10 @@ fn persistent_programs(
         .iter()
         .map(|(name, hash)| {
             let value = cas
-                .get_object(hash)?
+                .get_object_bounded(
+                    hash,
+                    ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+                )?
                 .with_context(|| format!("target persistent session {name:?} is absent"))?;
             let capsule =
                 ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -5052,7 +5065,7 @@ mod authority_tests {
     use super::*;
 
     fn context(
-        class: ryeos_app::identity::AuthorizedKeyPrincipalClass,
+        class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass,
         fingerprint: &str,
         site_id: Option<&str>,
     ) -> HandlerContext {
@@ -5068,7 +5081,7 @@ mod authority_tests {
     #[test]
     fn placement_transport_requires_the_exact_configured_remote_node() {
         let admitted = context(
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             "fp:source-node",
             Some("site:source"),
         );
@@ -5076,17 +5089,17 @@ mod authority_tests {
 
         for rejected in [
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
                 "fp:operator",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:other-node",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:source-node",
                 Some("site:other"),
             ),

@@ -8,10 +8,12 @@ pub mod bootstrap;
 pub mod config;
 pub mod engine_init;
 pub mod reconcile;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_impl;
 pub mod uds;
 
 // ── Extracted crates ─────────────────────────────────────────────
+#[cfg(feature = "scheduling")]
 pub use ryeos_scheduler as scheduler;
 
 static SHUTDOWN_TX: OnceCell<tokio::sync::broadcast::Sender<()>> = OnceCell::new();
@@ -32,6 +34,20 @@ pub fn request_shutdown() {
 
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+}
+
+static SERVICE_SQL_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// Record that this incarnation's service SQL is refused. Only an atomic
+/// store, so it is safe from the native latch wake. Never cleared.
+pub fn refuse_service_sql() {
+    SERVICE_SQL_REFUSED.store(true, Ordering::SeqCst);
+}
+
+/// Whether this incarnation's service SQL is refused. Service loops stop
+/// before attempting another write once it is.
+pub fn service_sql_refused() -> bool {
+    SERVICE_SQL_REFUSED.load(Ordering::SeqCst)
 }
 
 pub fn subscribe_shutdown() -> Option<tokio::sync::broadcast::Receiver<()>> {

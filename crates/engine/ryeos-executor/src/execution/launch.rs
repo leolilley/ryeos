@@ -2128,6 +2128,7 @@ impl QuarantinedExecutorEntry {
                 })?;
                 if !executors
                     .remove_empty_child_if_same(OsStr::new(&name), &directory)
+                    .map(|receipt| receipt.is_some())
                     .map_err(|error| MaterializationError::MaterializationFailed {
                         executor_ref: executor_ref.to_string(),
                         detail: format!("failed to remove executor quarantine {name}: {error}"),
@@ -2228,7 +2229,10 @@ fn remove_staging_directory(
     staging: &lillux::secure_fs::PinnedDirectory,
 ) -> anyhow::Result<()> {
     staging.remove_contents_recursive()?;
-    if !executors.remove_empty_child_if_same(OsStr::new(staging_name), staging)? {
+    if !executors
+        .remove_empty_child_if_same(OsStr::new(staging_name), staging)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("executor staging directory remained non-empty");
     }
     Ok(())
@@ -3631,7 +3635,7 @@ impl LaunchHandoff {
 struct PreparedManagedLaunchAuthority {
     effective_program: ryeos_engine::effective_program::FinalizedEffectiveProgram,
     prepared_launch: super::launch_preparation::PreparedRuntimeLaunch,
-    effective_vault: HashMap<String, String>,
+    secret_env: ryeos_engine::contracts::DeliveredSecretEnv,
     effective_caps: Vec<String>,
     selected_runtime: ryeos_engine::runtime_registry::VerifiedRuntime,
     verified_protocol: ryeos_engine::protocols::VerifiedProtocol,
@@ -3889,38 +3893,13 @@ pub(crate) fn verify_admitted_signed_descriptor_document(
     expected_signer: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<String, BuildAndLaunchError> {
-    let header =
-        lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
-            .ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "admitted descriptor has no valid signature header"
-            ))
-        })?;
-    let body = lillux::signature::strip_signature_lines(document);
-    let observed_hash = lillux::signature::content_hash(&body);
-    if observed_hash != expected_content_hash
-        || header.content_hash != expected_content_hash
-        || header.signer_fingerprint != expected_signer
-    {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor document contradicts its sealed identity"
-        )));
-    }
-    let signer = trust_store.get(expected_signer).ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor signer is no longer trusted: {expected_signer}"
-        ))
-    })?;
-    if !lillux::signature::verify_signature(
+    ryeos_app::admitted_program_trust::verify_admitted_signed_descriptor_document(
+        document,
         expected_content_hash,
-        &header.signature_b64,
-        &signer.verifying_key,
-    ) {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "admitted descriptor signature no longer verifies"
-        )));
-    }
-    Ok(body)
+        expected_signer,
+        trust_store,
+    )
+    .map_err(BuildAndLaunchError::Internal)
 }
 
 async fn prepare_managed_launch_authority(
@@ -4482,7 +4461,10 @@ async fn prepare_managed_launch_authority(
                     .launch_timings
                     .as_ref()
                     .map(|timings| timings.nested("background_dispatch", "launch_augmentation"));
-                let audits = crate::augmentations::run_augmentations(
+                // Boxed: the augmentation chain (context composition, inline
+                // finalization, metadata decoding) otherwise polls on this
+                // frame and exhausts the worker stack in debug builds.
+                let audits = Box::pin(crate::augmentations::run_augmentations(
                     exec,
                     &mut resolution,
                     thread_id,
@@ -4499,7 +4481,7 @@ async fn prepare_managed_launch_authority(
                         .root_admission
                         .as_ref()
                         .and_then(|admission| admission.admitted_request_snapshot()),
-                )
+                ))
                 .await
                 .map_err(|error| {
                     BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -5088,8 +5070,8 @@ async fn prepare_managed_launch_authority(
         .iter()
         .map(|requirement| requirement.name.clone())
         .collect();
-    let effective_vault = ryeos_app::vault::read_required_secrets_with_authority(
-        params.state.vault.as_ref(),
+    let secret_env = ryeos_app::vault::authorize_secret_delivery(
+        &params.state.secret_sources(),
         params.acting_principal,
         &secret_names,
         params.provenance.project_authority(),
@@ -5347,7 +5329,7 @@ async fn prepare_managed_launch_authority(
     Ok(PreparedManagedLaunchAuthority {
         effective_program,
         prepared_launch,
-        effective_vault,
+        secret_env,
         effective_caps,
         selected_runtime,
         verified_protocol,
@@ -5483,7 +5465,7 @@ pub async fn build_and_launch(
             })
             .await
         }
-        Ok(None) => build_and_launch_inner(params).await,
+        Ok(None) => Box::pin(build_and_launch_inner(params)).await,
         Err(error) => Err(BuildAndLaunchError::from(
             DispatchError::pre_birth_admission_refused(error.into_dispatch_error(&runtime_ref)),
         )),
@@ -5691,7 +5673,8 @@ async fn build_and_launch_inner(
                 map_launch_planning_check_error(error, &thread_id, "authoritative planning")
             })?;
     }
-    let mut authority = prepare_managed_launch_authority(&params, &thread_id, None, None).await?;
+    let mut authority =
+        Box::pin(prepare_managed_launch_authority(&params, &thread_id, None, None)).await?;
     if params.pre_minted_thread_id.is_some() {
         params
             .state
@@ -6161,7 +6144,7 @@ async fn run_claimed_thread_row_inner(
     let PreparedManagedLaunchAuthority {
         effective_program,
         prepared_launch,
-        effective_vault,
+        secret_env,
         effective_caps,
         selected_runtime,
         verified_protocol,
@@ -6834,10 +6817,9 @@ async fn run_claimed_thread_row_inner(
                     .required_secrets
                     .iter()
                     .map(|required| {
-                        effective_vault
+                        secret_env
                             .get(&required.name)
-                            .cloned()
-                            .map(|value| (required.name.clone(), value))
+                            .map(|value| (required.name.as_str(), value))
                             .ok_or_else(|| {
                                 BuildAndLaunchError::Internal(anyhow::anyhow!(
                                     "prepared financial launch secret `{}` disappeared before \
@@ -7043,15 +7025,6 @@ async fn run_claimed_thread_row_inner(
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
-    // The native-runtime spawn pipe must include vault_bindings the
-    // same way `services::thread_lifecycle::spawn_item` does for
-    // generic plan-node subprocesses. Without this, operator secrets
-    // never reach the runtime — the trait machinery in `vault.rs`
-    // gets called and discarded.
-    let vault_owned: Vec<(String, String)> = effective_vault
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
 
     if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
         return Err(BuildAndLaunchError::LaunchCancelled {
@@ -7198,7 +7171,7 @@ async fn run_claimed_thread_row_inner(
             launch_owner: &launch_owner_owned,
             chain_root_id: &chain_root_id_for_spawn,
             accounting_scope: accounting_scope_for_spawn.as_ref(),
-            vault_bindings: &vault_owned,
+            secret_env: &secret_env,
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
             isolation: isolation.as_ref(),
@@ -8192,7 +8165,7 @@ pub async fn prepare_follow_child_launch(
     parent_context: crate::dispatch::ParentExecutionContext,
     handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
-    prepare_follow_child_launch_inner(
+    Box::pin(prepare_follow_child_launch_inner(
         state,
         thread_id,
         launch_metadata,
@@ -8201,7 +8174,7 @@ pub async fn prepare_follow_child_launch(
         provenance,
         parent_context,
         true,
-    )
+    ))
     .await
 }
 
@@ -8230,7 +8203,7 @@ pub async fn prepare_existing_follow_child_launch(
             "follow child {thread_id} re-drive parent context differs from its persisted birth identity"
         )));
     }
-    prepare_follow_child_launch_inner(
+    Box::pin(prepare_follow_child_launch_inner(
         state,
         thread_id,
         launch_metadata,
@@ -8239,7 +8212,7 @@ pub async fn prepare_existing_follow_child_launch(
         provenance,
         parent_context,
         false,
-    )
+    ))
     .await
 }
 
@@ -8347,7 +8320,6 @@ async fn prepare_follow_child_launch_inner(
         resolved: admitted_request,
         acting_principal,
         handler_context,
-        vault_bindings: HashMap::new(),
         parameters: resume.parameters.clone(),
         pre_minted_thread_id: None,
         effective_caps: operational_resume.effective_caps.clone(),
@@ -8360,7 +8332,7 @@ async fn prepare_follow_child_launch_inner(
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
-    let mut authority = prepare_managed_launch_authority(
+    let mut authority = Box::pin(prepare_managed_launch_authority(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -8395,7 +8367,7 @@ async fn prepare_follow_child_launch_inner(
         thread_id,
         Some(launch_metadata),
         None,
-    )
+    ))
     .await?;
     let (launch_metadata, prepared_resume, fresh_launch_authority_digest) =
         if capture_project_snapshot {
@@ -8643,6 +8615,43 @@ async fn prepare_successor_launch(
         launch_metadata = launch_metadata.with_execution_realization_hash(realization.hash);
         authority.launch_metadata = Some(launch_metadata.clone());
     }
+    // The managed authority pass leaves resource selection to its caller. A
+    // successor prepared here is launched directly from this carrier, so the
+    // selection must be bound now: spawn refuses any managed launch whose
+    // authority carries no selected resources. The selection is verified
+    // against the realization the successor already carries (transferred from
+    // its continuation source or persisted with the existing row) exactly as a
+    // re-driven follow child is, so a node whose resources no longer match the
+    // admitted realization refuses rather than launching on a different
+    // substrate. A remote-adopted successor is the one exception: its template
+    // carries the foreign node's realization hash, which the adoption caller
+    // clears before minting and binding the local selection itself.
+    if transferred_continuation_capsule.is_none() {
+        let selected_resources = state
+            .execution_resources
+            .select(authority.prepared_launch.target_requirement.as_ref())
+            .map_err(BuildAndLaunchError::Internal)?;
+        let verified = super::execution_realization::admit_or_verify(
+            state,
+            &launch_metadata,
+            authority.effective_program.resolution(),
+            authority
+                .effective_program
+                .effective_definition_digest()
+                .as_str(),
+            &authority.selected_runtime.canonical_ref.to_string(),
+            &authority.selected_runtime.raw_content_digest,
+            selected_resources.selections(),
+            None,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+        if launch_metadata.execution_realization_hash.as_deref() != Some(verified.hash.as_str()) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "continuation successor resource selection differs from retained execution realization"
+            )));
+        }
+        authority.selected_resources = Some(selected_resources);
+    }
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
@@ -8833,7 +8842,12 @@ async fn prepare_machine_successor_launch_with_bootstrap(
         .with_continuation_source(source_thread_id)
         .with_continuation_runtime_bootstrap(bootstrap)
         .with_sealed_root_request(sealed);
-    let mut prepared = prepare_successor_launch(
+    // Preparation re-admits the successor from its sealed capsule: the
+    // resolution closure, launch policy and realization state it carries
+    // across awaits make this the largest future on the continuation path.
+    // Heap-allocate it so the request handler that awaits it stays small
+    // on the runtime worker's stack.
+    let mut prepared = Box::pin(prepare_successor_launch(
         state,
         successor_thread_id,
         resume,
@@ -8841,7 +8855,7 @@ async fn prepare_machine_successor_launch_with_bootstrap(
         Some(source_thread_id),
         Some(&successor_metadata),
         None,
-    )
+    ))
     .await?;
 
     // A machine continuation is another segment of the same admitted launch,
@@ -9247,14 +9261,18 @@ async fn launch_successor_inner_with_claim(
 
     // Rebuild + run while the owned claim guard remains in this future. It is
     // released on every return, including cancellation and panic unwind.
-    let result = launch_claimed_successor(
+    // The rebuild-and-run state machine carries the successor's whole
+    // admitted authority, envelope and managed-runtime launch across its
+    // awaits; it lives on the heap so building it inside a runtime worker
+    // never costs that worker's stack.
+    let result = Box::pin(launch_claimed_successor(
         &state,
         successor,
         mode,
         launch_handoff,
         prepared_successor,
         None,
-    )
+    ))
     .await;
 
     match result {
@@ -9427,12 +9445,20 @@ async fn launch_claimed_successor(
         rearm_native_resume_budget_after_attach: mode == SuccessorMode::Machine,
         launch_handoff,
     };
+    // Each run future holds the rebuilt launch envelope and the managed
+    // runtime attachment across its awaits; heap-allocate it so the two
+    // arms are not both reserved inline in this frame.
     match prepared_authority {
         Some((authority, launch_audit)) => {
-            run_claimed_thread_row_with_authority(launch_params, successor, authority, launch_audit)
-                .await
+            Box::pin(run_claimed_thread_row_with_authority(
+                launch_params,
+                successor,
+                authority,
+                launch_audit,
+            ))
+            .await
         }
-        None => run_claimed_thread_row(launch_params, successor).await,
+        None => Box::pin(run_claimed_thread_row(launch_params, successor)).await,
     }
 }
 
@@ -10586,12 +10612,20 @@ async fn launch_claimed_follow_child(
         effect_authority: metadata.effect_authority.as_ref(),
         launch_handoff,
     };
+    // Each run future holds the rebuilt launch envelope and the managed
+    // runtime attachment across its awaits; heap-allocate it so the two arms
+    // are not both reserved inline in this frame.
     match prepared_authority {
         Some(authority) => {
-            run_claimed_thread_row_with_authority(launch_params, thread, authority, launch_audit)
-                .await
+            Box::pin(run_claimed_thread_row_with_authority(
+                launch_params,
+                thread,
+                authority,
+                launch_audit,
+            ))
+            .await
         }
-        None => run_claimed_thread_row(launch_params, thread).await,
+        None => Box::pin(run_claimed_thread_row(launch_params, thread)).await,
     }
 }
 
@@ -10690,11 +10724,14 @@ pub fn prepare_and_spawn_follow_child(
         }
     };
     let child_id = child_id.to_string();
+    // The launch future is built on this worker's stack before the task takes
+    // it; its claim-and-run state machine is boxed so that build costs a
+    // pointer here rather than the whole follow-child launch.
     tokio::spawn(async move {
         if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
             return;
         }
-        match launch_follow_child_with_claim(
+        match Box::pin(launch_follow_child_with_claim(
             state,
             &child_id,
             provenance_override,
@@ -10702,7 +10739,7 @@ pub fn prepare_and_spawn_follow_child(
             None,
             None,
             Some(claim),
-        )
+        ))
         .await
         {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
@@ -10803,14 +10840,18 @@ async fn launch_follow_child_with_claim(
         return Ok(SuccessorLaunchOutcome::Skipped("already_started"));
     }
 
-    let result = launch_claimed_follow_child(
+    // The prepare-and-run state machine carries the child's whole admitted
+    // authority, envelope and managed-runtime launch across its awaits; it
+    // lives on the heap so building it inside a runtime worker never costs
+    // that worker's stack.
+    let result = Box::pin(launch_claimed_follow_child(
         &state,
         thread,
         provenance_override,
         parent_context,
         launch_handoff,
         prepared_child,
-    )
+    ))
     .await;
 
     match result {
@@ -12289,7 +12330,17 @@ mod tests {
         bare_name: &str,
         signing_key: &lillux::crypto::SigningKey,
     ) -> ExecutableMaterializerFixture {
-        let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        // A bounded host-native prefix keeps the arch check real without
+        // copying the whole debug test binary past the executor size cap.
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(
+                std::fs::File::open(std::env::current_exe().unwrap()).unwrap(),
+                64 * 1024,
+            ),
+            &mut bytes,
+        )
+        .unwrap();
         let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
         let objects_root = ai_dir.join("objects");
         let cas = lillux::cas::CasStore::new(objects_root.clone());

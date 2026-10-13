@@ -434,6 +434,7 @@ fn produce_guest_owner_runtime_from_exact_source(
             &mut source,
             MAX_OWNER_EXECUTABLE_BYTES,
             0o555,
+            crate::GUEST_TEMP_PURPOSE,
         )?
         .context("guest runtime owner executable already exists")?;
     source.finish()?;
@@ -449,6 +450,7 @@ fn produce_guest_owner_runtime_from_exact_source(
         &mut Cursor::new(root_hex.as_bytes()),
         64,
         0o444,
+        crate::GUEST_TEMP_PURPOSE,
     )?
     .context("guest runtime controller root already exists")?;
     let profile_bytes = ryeos_external_execution_contract::canonical_json(profile)?;
@@ -457,6 +459,7 @@ fn produce_guest_owner_runtime_from_exact_source(
         &mut Cursor::new(&profile_bytes),
         4 * 1024,
         0o444,
+        crate::GUEST_TEMP_PURPOSE,
     )?
     .context("guest runtime profile already exists")?;
     let observed = ObservedGuestRuntime::observe(&root)?;

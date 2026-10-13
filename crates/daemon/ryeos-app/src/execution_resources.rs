@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 
-use crate::node_policy::sections::execution::{
+use ryeos_node_runtime::node_policy::sections::execution::{
     NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
 };
 use ryeos_engine::contracts::{
@@ -845,6 +845,31 @@ pub fn issue_process_resource_operations(
     Ok(())
 }
 
+/// Preserve the SAME original window when issuing the retained operation.
+/// The financial anchor's filesystem work is not claimed bounded by SQL hooks.
+pub fn issue_process_resource_operations_until(
+    state: &crate::state::AppState,
+    bindings: &[ryeos_accounting::ResourceOperationBinding],
+    deadline: lillux::time::MonotonicDeadline,
+) -> anyhow::Result<()> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let accounting = state
+        .accounting
+        .as_ref()
+        .context("resource operation issue requires the shared accounting ledger")?;
+    for binding in bindings {
+        accounting.issue_resource_operation_until(
+            binding.operation_id.as_str(),
+            binding.request_digest.as_str(),
+            lillux::time::timestamp_millis(),
+            deadline,
+        )?;
+    }
+    Ok(())
+}
+
 /// Revalidate the exact financial owner immediately before live process
 /// release. This is deliberately separate from issuing the operation: an
 /// idempotent historical issue result is not a current release capability.
@@ -860,6 +885,26 @@ pub fn authorize_process_resource_release(
         .as_ref()
         .context("resource-owner release requires the shared accounting ledger")?
         .authorize_resource_owner_release(bindings, lillux::time::timestamp_millis())
+}
+
+/// Revalidate existing release bindings under the SAME original window.
+pub fn authorize_process_resource_release_until(
+    state: &crate::state::AppState,
+    bindings: &[ryeos_accounting::ResourceOperationBinding],
+    deadline: lillux::time::MonotonicDeadline,
+) -> anyhow::Result<()> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    state
+        .accounting
+        .as_ref()
+        .context("resource-owner release requires the shared accounting ledger")?
+        .authorize_resource_owner_release_until(
+            bindings,
+            lillux::time::timestamp_millis(),
+            deadline,
+        )
 }
 
 pub fn release_unissued_process_resource_operations(

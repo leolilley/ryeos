@@ -108,54 +108,54 @@ pub(crate) fn refresh_chain_retention(
     db: &ProjectionDb,
     chain_root_id: &str,
 ) -> anyhow::Result<()> {
-    let root: Option<(Option<String>,)> = db
-        .connection()
-        .query_row(
-            "SELECT captured_history_policy_json FROM threads \
-             WHERE thread_id=?1 AND chain_root_id=?1",
-            [chain_root_id],
-            |row| Ok((row.get(0)?,)),
-        )
-        .optional()
-        .context("query root captured history policy")?;
-    let Some((policy_json,)) = root else {
-        db.connection().execute(
-            "DELETE FROM chain_retention WHERE chain_root_id=?1",
-            [chain_root_id],
+    db.with_sql(|connection| {
+        let root: Option<(Option<String>,)> = connection
+            .query_row(
+                "SELECT captured_history_policy_json FROM threads \
+                 WHERE thread_id=?1 AND chain_root_id=?1",
+                [chain_root_id],
+                |row| Ok((row.get(0)?,)),
+            )
+            .optional()
+            .context("query root captured history policy")?;
+        let Some((policy_json,)) = root else {
+            connection.execute(
+                "DELETE FROM chain_retention WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            return Ok(());
+        };
+
+        let policy_json = policy_json.ok_or_else(|| {
+            anyhow::anyhow!("projected chain root {chain_root_id} is missing captured_history_policy")
+        })?;
+        let captured_policy: CapturedThreadHistoryPolicy =
+            serde_json::from_str(&policy_json).context("decode projected captured history policy")?;
+        let mut statement = connection
+            .prepare("SELECT status, finished_at, updated_at FROM threads WHERE chain_root_id=?1")?;
+        let members = statement
+            .query_map([chain_root_id], |row| {
+                let status: String = row.get(0)?;
+                let finished_at: Option<String> = row.get(1)?;
+                let updated_at: String = row.get(2)?;
+                Ok(TerminalMember {
+                    is_terminal: matches!(
+                        status.as_str(),
+                        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+                    ),
+                    timestamp: finished_at.unwrap_or(updated_at),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let derived = derive_terminal_retention(members, &captured_policy.retention)?;
+
+        connection.execute(
+            "INSERT OR REPLACE INTO chain_retention (chain_root_id, terminal_at, retire_after) \
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![chain_root_id, derived.terminal_at, derived.retire_after],
         )?;
-        return Ok(());
-    };
-
-    let policy_json = policy_json.ok_or_else(|| {
-        anyhow::anyhow!("projected chain root {chain_root_id} is missing captured_history_policy")
-    })?;
-    let captured_policy: CapturedThreadHistoryPolicy =
-        serde_json::from_str(&policy_json).context("decode projected captured history policy")?;
-    let mut statement = db
-        .connection()
-        .prepare("SELECT status, finished_at, updated_at FROM threads WHERE chain_root_id=?1")?;
-    let members = statement
-        .query_map([chain_root_id], |row| {
-            let status: String = row.get(0)?;
-            let finished_at: Option<String> = row.get(1)?;
-            let updated_at: String = row.get(2)?;
-            Ok(TerminalMember {
-                is_terminal: matches!(
-                    status.as_str(),
-                    "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-                ),
-                timestamp: finished_at.unwrap_or(updated_at),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let derived = derive_terminal_retention(members, &captured_policy.retention)?;
-
-    db.connection().execute(
-        "INSERT OR REPLACE INTO chain_retention (chain_root_id, terminal_at, retire_after) \
-         VALUES (?1, ?2, ?3)",
-        rusqlite::params![chain_root_id, derived.terminal_at, derived.retire_after],
-    )?;
-    Ok(())
+        Ok(())
+    })
 }
 
 impl ProjectionDb {
@@ -165,69 +165,72 @@ impl ProjectionDb {
         limit: usize,
         after: Option<&DueTerminalChainCursor>,
     ) -> anyhow::Result<Vec<DueTerminalChain>> {
-        let limit = i64::try_from(limit).context("due-chain limit exceeds i64")?;
-        let now = parse_canonical_timestamp(now)?.timestamp();
-        let after_deadline = after.map(|cursor| cursor.retire_after);
-        let after_root = after.map(|cursor| cursor.chain_root_id.as_str());
-        let mut statement = self.connection().prepare(&format!(
-            "SELECT root.chain_root_id, meta.indexed_chain_state_hash, retention.terminal_at, retention.retire_after, root.updated_at \
-             FROM chain_retention retention JOIN threads root \
-               ON root.thread_id=retention.chain_root_id AND root.chain_root_id=retention.chain_root_id \
-             JOIN projection_meta meta ON meta.chain_root_id=retention.chain_root_id \
-             WHERE retention.retire_after IS NOT NULL AND retention.retire_after <= ?1 \
-               AND retention.terminal_at IS NOT NULL \
-               AND (?2 IS NULL OR retention.retire_after > ?2 OR (retention.retire_after = ?2 AND retention.chain_root_id > ?3)) \
-               AND NOT EXISTS (SELECT 1 FROM threads member \
-                   WHERE member.chain_root_id=retention.chain_root_id \
-                     AND member.status NOT IN ({TERMINAL_STATUSES_SQL})) \
-             ORDER BY retention.retire_after, retention.chain_root_id LIMIT ?4"
-        ))?;
-        let rows = statement.query_map(
-            rusqlite::params![now, after_deadline, after_root, limit],
-            |row| {
-                Ok(DueTerminalChain {
-                    chain_root_id: row.get(0)?,
-                    indexed_chain_state_hash: row.get(1)?,
-                    terminal_at: row.get(2)?,
-                    retire_after: row.get(3)?,
-                    root_updated_at: row.get(4)?,
-                })
-            },
-        )?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        self.with_sql(|connection| {
+            let limit = i64::try_from(limit).context("due-chain limit exceeds i64")?;
+            let now = parse_canonical_timestamp(now)?.timestamp();
+            let after_deadline = after.map(|cursor| cursor.retire_after);
+            let after_root = after.map(|cursor| cursor.chain_root_id.as_str());
+            let mut statement = connection.prepare(&format!(
+                "SELECT root.chain_root_id, meta.indexed_chain_state_hash, retention.terminal_at, retention.retire_after, root.updated_at \
+                 FROM chain_retention retention JOIN threads root \
+                   ON root.thread_id=retention.chain_root_id AND root.chain_root_id=retention.chain_root_id \
+                 JOIN projection_meta meta ON meta.chain_root_id=retention.chain_root_id \
+                 WHERE retention.retire_after IS NOT NULL AND retention.retire_after <= ?1 \
+                   AND retention.terminal_at IS NOT NULL \
+                   AND (?2 IS NULL OR retention.retire_after > ?2 OR (retention.retire_after = ?2 AND retention.chain_root_id > ?3)) \
+                   AND NOT EXISTS (SELECT 1 FROM threads member \
+                       WHERE member.chain_root_id=retention.chain_root_id \
+                         AND member.status NOT IN ({TERMINAL_STATUSES_SQL})) \
+                 ORDER BY retention.retire_after, retention.chain_root_id LIMIT ?4"
+            ))?;
+            let rows = statement.query_map(
+                rusqlite::params![now, after_deadline, after_root, limit],
+                |row| {
+                    Ok(DueTerminalChain {
+                        chain_root_id: row.get(0)?,
+                        indexed_chain_state_hash: row.get(1)?,
+                        terminal_at: row.get(2)?,
+                        retire_after: row.get(3)?,
+                        root_updated_at: row.get(4)?,
+                    })
+                },
+            )?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 
     pub fn chain_retention_projection(
         &self,
         chain_root_id: &str,
     ) -> anyhow::Result<Option<ChainRetentionProjection>> {
-        let row: Option<(Option<String>, Option<String>, Option<i64>)> = self
-            .connection()
-            .query_row(
-                "SELECT root.captured_history_policy_json, retention.terminal_at, retention.retire_after \
-                 FROM threads root LEFT JOIN chain_retention retention \
-                   ON retention.chain_root_id=root.chain_root_id \
-                 WHERE root.thread_id=?1 AND root.chain_root_id=?1",
-                [chain_root_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        row.map(|(policy_json, terminal_at, retire_after)| {
-            let policy_json = policy_json.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "projected chain root {chain_root_id} is missing captured_history_policy"
+        self.with_sql(|connection| {
+            let row: Option<(Option<String>, Option<String>, Option<i64>)> = connection
+                .query_row(
+                    "SELECT root.captured_history_policy_json, retention.terminal_at, retention.retire_after \
+                     FROM threads root LEFT JOIN chain_retention retention \
+                       ON retention.chain_root_id=root.chain_root_id \
+                     WHERE root.thread_id=?1 AND root.chain_root_id=?1",
+                    [chain_root_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-            })?;
-            let captured_policy = serde_json::from_str(&policy_json)
-                .context("decode projected captured history policy")?;
-            Ok(ChainRetentionProjection {
-                chain_root_id: chain_root_id.to_string(),
-                captured_policy,
-                terminal_at,
-                retire_after,
+                .optional()?;
+            row.map(|(policy_json, terminal_at, retire_after)| {
+                let policy_json = policy_json.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "projected chain root {chain_root_id} is missing captured_history_policy"
+                    )
+                })?;
+                let captured_policy = serde_json::from_str(&policy_json)
+                    .context("decode projected captured history policy")?;
+                Ok(ChainRetentionProjection {
+                    chain_root_id: chain_root_id.to_string(),
+                    captured_policy,
+                    terminal_at,
+                    retire_after,
+                })
             })
+            .transpose()
         })
-        .transpose()
     }
 }
 
@@ -261,7 +264,7 @@ mod tests {
     #[test]
     fn deadline_uses_whole_chain_terminal_time() {
         let temp = tempfile::tempdir().unwrap();
-        let db = ProjectionDb::open(&temp.path().join("projection.sqlite3")).unwrap();
+        let db = crate::test_support::TestProjection::open();
         let root = ThreadSnapshotBuilder::new(
             "T-root",
             "T-root",

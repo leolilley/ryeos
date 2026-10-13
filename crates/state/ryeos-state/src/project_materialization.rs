@@ -425,6 +425,25 @@ impl PinnedProjectMaterialization {
         Ok(Some(bytes))
     }
 
+    /// Return one authoritative member's exact snapshot facts with its bounded
+    /// CAS bytes. This does not select or authorize a consumer input; callers
+    /// must bind the member through their admitted owner before projection.
+    /// Mutable checkout metadata and whole-tree enumeration are never used.
+    pub fn authoritative_file_with_metadata_bounded(
+        &self,
+        relative: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<(ProjectFile, Vec<u8>)>> {
+        let Some(bytes) = self.authoritative_file_bounded(relative, max_bytes)? else {
+            return Ok(None);
+        };
+        let metadata = self
+            .expected_tree
+            .get(relative)
+            .context("authoritative member metadata is missing from its immutable snapshot")?;
+        Ok(Some((metadata.clone(), bytes)))
+    }
+
     /// Validate one whole-file digest observed by a resolver against the
     /// authoritative snapshot tree. `path` must be rooted in this exact
     /// materialization.
@@ -614,6 +633,17 @@ pub fn load_project_snapshot_bounded(
         .transpose()
 }
 
+pub(crate) fn load_project_snapshot_bounded_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<Option<ProjectSnapshot>> {
+    budget
+        .get_object(cas, hash, MAX_PROJECT_SNAPSHOT_OBJECT_BYTES)?
+        .map(|value| ProjectSnapshot::from_value(&value))
+        .transpose()
+}
+
 pub fn load_project_tree_bounded(
     cas: &lillux::CasStore,
     hash: &str,
@@ -636,6 +666,17 @@ pub fn load_project_policy_bounded(
 ) -> anyhow::Result<Option<ProjectSnapshotPolicy>> {
     read_bounded_cas_object(cas, hash, MAX_PROJECT_POLICY_OBJECT_BYTES)?
         .map(|(value, _)| ProjectSnapshotPolicy::from_value(&value))
+        .transpose()
+}
+
+pub(crate) fn load_project_policy_bounded_with_budget(
+    cas: &lillux::CasStore,
+    hash: &str,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<Option<ProjectSnapshotPolicy>> {
+    budget
+        .get_object(cas, hash, MAX_PROJECT_POLICY_OBJECT_BYTES)?
+        .map(|value| ProjectSnapshotPolicy::from_value(&value))
         .transpose()
 }
 
@@ -973,6 +1014,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(still_authoritative, b"name: example\n");
+        let (metadata, exact_bytes) = materialization
+            .authoritative_file_with_metadata_bounded(".ai/tools/example.yaml", 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact_bytes, still_authoritative);
+        assert_eq!(
+            metadata,
+            materialization.expected_tree[".ai/tools/example.yaml"]
+        );
+        assert_eq!(metadata.blob_hash, lillux::sha256_hex(&exact_bytes));
+        assert!(
+            materialization
+                .authoritative_file_with_metadata_bounded(
+                    ".ai/tools/example.yaml",
+                    metadata.size - 1
+                )
+                .is_err()
+        );
+        assert!(
+            materialization
+                .authoritative_file_with_metadata_bounded(".ai/tools/shadow.yaml", 1024)
+                .unwrap()
+                .is_none()
+        );
         let still_exact = materialization
             .authoritative_entries_under(".ai/tools", false, 8)
             .unwrap();

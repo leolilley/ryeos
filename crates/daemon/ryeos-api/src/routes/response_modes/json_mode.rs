@@ -51,6 +51,7 @@ pub struct CompiledJsonMode {
     /// `source_config` is null/empty, the POST body is parsed as the
     /// handler input directly.
     body_is_json: bool,
+    raw_objects_put_v1: bool,
 }
 
 impl ResponseMode for JsonMode {
@@ -103,6 +104,29 @@ impl ResponseMode for JsonMode {
                 &self.kinds,
             )?;
 
+        let raw_objects_put_v1 = raw.request.body
+            == ryeos_app::route_raw::RawRequestBody::ObjectsPutV1;
+        if raw_objects_put_v1 {
+            let expected_methods = std::collections::HashSet::from(["POST".to_string()]);
+            let valid = raw.id == "objects/put"
+                && raw.path == "/objects/put"
+                && raw.methods == expected_methods
+                && raw.auth == "ryeos_signed"
+                && source_str == "service:objects/put"
+                && mechanics == crate::routes::invokers::CanonicalRefInvocationMechanics::InProcess(
+                    ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                )
+                && raw.response.source_config.is_null()
+                && raw.limits.body_bytes_max == 104_857_600;
+            if !valid {
+                return Err(RouteConfigError::InvalidSourceConfig {
+                    id: raw.id.clone(),
+                    src: source_str.into(),
+                    reason: "objects_put_v1 is restricted to the exact signed POST /objects/put service route with a 100 MiB body limit".into(),
+                });
+            }
+        }
+
         // Engine-dispatched sources require the typed project execution
         // envelope. In-process registry items consume handler parameters
         // directly. This distinction follows admitted execution mechanics,
@@ -148,7 +172,8 @@ impl ResponseMode for JsonMode {
             invoker,
             source_ref: source_str.to_string(),
             source_config_template: raw.response.source_config.clone(),
-            body_is_json: matches!(raw.request.body, ryeos_app::route_raw::RawRequestBody::Json),
+            body_is_json: matches!(raw.request.body, ryeos_app::route_raw::RawRequestBody::Json | ryeos_app::route_raw::RawRequestBody::ObjectsPutV1),
+            raw_objects_put_v1,
         }))
     }
 }
@@ -168,6 +193,15 @@ impl CompiledResponseMode for CompiledJsonMode {
         compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<axum::response::Response, RouteDispatchError> {
+        if self.raw_objects_put_v1 {
+            if !ctx.principal.verified || ctx.principal.verifier_key != "ryeos_signed" {
+                return Err(RouteDispatchError::BadRequest(
+                    "objects_put_v1 requires a verified ryeos_signed principal".into(),
+                ));
+            }
+            crate::handlers::objects_put::validate_raw_object_put_request(&ctx.body_raw)
+                .map_err(|error| RouteDispatchError::BadRequest(format!("invalid objects.put body: {error}")))?;
+        }
         // Determine input:
         // 1. If source_config is set, interpolate it with path captures.
         // 2. If source_config is null/empty and request.body is json,
@@ -202,6 +236,7 @@ impl CompiledResponseMode for CompiledJsonMode {
             workspace_lifeline: None,
             launch_timings: None,
             state: ctx.state,
+            publication: ctx.publication,
             webhook_dedupe: ctx.webhook_dedupe,
         };
 
@@ -355,6 +390,34 @@ mod tests {
         JsonMode {
             service_descriptors: crate::handlers::ALL,
             kinds: Arc::new(ryeos_engine::test_support::load_live_kind_registry()),
+        }
+    }
+
+    fn objects_put_profile_route() -> RawRouteSpec {
+        let mut raw = make_raw("/objects/put", Some("service:objects/put"), serde_json::Value::Null);
+        raw.id = "objects/put".into();
+        raw.methods = ["POST".into()].into_iter().collect();
+        raw.request.body = RawRequestBody::ObjectsPutV1;
+        raw.limits.body_bytes_max = 104_857_600;
+        raw
+    }
+
+    #[test]
+    fn objects_put_profile_compiles_only_for_exact_signed_service_tuple() {
+        let mode = api_mode();
+        assert!(mode.compile(&objects_put_profile_route()).is_ok());
+        let mutations: [fn(&mut RawRouteSpec); 6] = [
+            |raw: &mut RawRouteSpec| raw.auth = "none".into(),
+            |raw: &mut RawRouteSpec| raw.methods = ["GET".into()].into_iter().collect(),
+            |raw: &mut RawRouteSpec| raw.path = "/other".into(),
+            |raw: &mut RawRouteSpec| raw.response.source = Some("service:threads/get".into()),
+            |raw: &mut RawRouteSpec| raw.response.source_config = serde_json::json!({"x":1}),
+            |raw: &mut RawRouteSpec| raw.limits.body_bytes_max -= 1,
+        ];
+        for mutate in mutations {
+            let mut raw = objects_put_profile_route();
+            mutate(&mut raw);
+            assert!(mode.compile(&raw).is_err());
         }
     }
 

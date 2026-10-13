@@ -69,7 +69,7 @@ pub fn load_retained_guest_owner_materialization(
     );
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         &cas,
@@ -426,7 +426,7 @@ fn require_matching_operator(
         current == source.operator_authority
             && context.authorized_key_class == Some(current.principal_class)
             && (current.principal_class
-                == crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+                == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
                 || context.authenticated_origin_site_id.as_deref()
                     == Some(current.origin_site_id.as_str())),
         "materialization operator authority changed after preparation"

@@ -47,8 +47,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // post-removal planning/admission, and the final namespace mutation. It is
     // always acquired before the per-name transaction lock.
     let registry_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
-    let transaction = registry_lock.acquire_bundle(&req.name)?;
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
+    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, &req.name)?;
     let recovered = match transaction.reconcile(state.identity.signing_key()) {
         Ok(recovered) => recovered,
         Err(error) => {
@@ -135,6 +135,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     );
     transaction.begin_remove()?;
     transaction.commit_absent()?;
+    // The registration set is pinned by the signed init completion record;
+    // reseal it so the node without this bundle is startable and the next
+    // stopped-node operation is admitted.
+    ryeos_node::seal_init_completion_after_bundle_registration_change(
+        &state.config.app_root,
+        &state.controller_lifetime,
+    )
+    .context("commit bundle removal into initialized state")?;
 
     Ok(serde_json::json!({
         "name": req.name,
@@ -173,13 +181,13 @@ fn admit_prospective_remove(
         );
     }
 
-    let loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: node_trust_store,
     };
     let mut current_records: std::collections::BTreeMap<
         String,
-        ryeos_app::node_config::BundleRecord,
+        ryeos_node_runtime::node_config_source::BundleRecord,
     > = loader
         .load_bundle_section()
         .context("load current node bundle registrations for prospective removal")?
@@ -206,15 +214,18 @@ fn admit_prospective_remove(
         })
         .collect::<Result<Vec<_>>>()?;
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
-    let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
+    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     let policy_snapshot =
-        ryeos_app::node_policy::load_snapshot(app_root, node_trust_store, &policy_table)
+        ryeos_node_runtime::node_policy::load_snapshot(app_root, node_trust_store, &policy_table)
             .context("load exact node policy generation for prospective removal")?;
     let command_registration = policy_snapshot.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let snapshot = loader
-        .load_full(
+    let snapshot = ryeos_app::node_config::loader::NodeConfigLoader {
+        app_root,
+        trust_store: node_trust_store,
+    }
+    .load_full(
             &config_table,
             &prospective_records,
             command_registration,
@@ -230,7 +241,7 @@ fn admit_prospective_remove(
         .filter(|bundle| bundle.action != BundleAction::Remove)
         .map(|bundle| bundle.source.root_path().clone())
         .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(
+    ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         app_root,
         &prospective_roots,
         node_trust_store,

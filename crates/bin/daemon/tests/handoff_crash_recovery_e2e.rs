@@ -9,6 +9,7 @@
 //! manufacture the outcome.
 
 #![cfg(all(unix, feature = "handoff-test-support"))]
+#![recursion_limit = "256"]
 
 mod common;
 
@@ -24,9 +25,10 @@ use axum::routing::post;
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use lillux::time::{Duration, MonotonicTimer};
-use ryeos_app::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::runtime_db::{NewCredentialProfile, NewCredentialProfileReservation};
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord, NodeIdentitySigner, StateStore};
+use ryeos_app::test_support::TestStateStore;
 use ryeos_app::worker_handoff::test_support::{
     AppendAuthorityLane, CredentialDisposition, DurableJobExpectation, DurableJobPhase,
     DurableJobResult, DurableJobState, ExpectedHeadSigner, HANDOFF_ACCEPTANCE_MATRIX,
@@ -45,7 +47,6 @@ use ryeos_app::worker_handoff::{
     WorkerPlacementAdoptRequest, WorkerPlacementAdoptResult, WorkerSessionHandoffJobOperation,
     WorkerSessionHandoffProgress,
 };
-use ryeos_app::write_barrier::WriteBarrier;
 use ryeos_state::{
     FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt,
     SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptState, SyncJobState,
@@ -144,7 +145,7 @@ fn authorize_remote_node(
 ) -> Result<()> {
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(remote.node.verifying_key().as_bytes());
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &state_path
             .join(ryeos_engine::AI_DIR)
             .join("node/auth/authorized_keys"),
@@ -174,7 +175,7 @@ fn authorize_remote_operator(
         .encode(remote_operator.verifying_key().as_bytes());
     let fingerprint = lillux::signature::compute_fingerprint(&remote_operator.verifying_key());
     let identity = daemon_identity(state_path)?;
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state_path
             .join(ryeos_engine::AI_DIR)
             .join("node/auth/authorized_keys"),
@@ -188,7 +189,7 @@ fn authorize_remote_operator(
         &local.node_fp(),
         &lillux::time::iso8601_now(),
         &identity,
-        ryeos_app::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
         Some(remote_site_id),
         false,
@@ -243,7 +244,7 @@ fn source_directory_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String> 
 
 fn portable_worker_source() -> Result<BTreeMap<String, Vec<u8>>> {
     let profile = serde_json::to_vec(&serde_json::json!({
-        "schema_version":10,
+        "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
         "transport":"stdio_jsonrpc",
         "http_sse":null,
         "configuration_authority":"immutable_argv",
@@ -257,6 +258,7 @@ fn portable_worker_source() -> Result<BTreeMap<String, Vec<u8>>> {
         "baseline_destination":"fixture.conf",
         "auxiliary_configs":[],
         "runtime_configs":[],
+        "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         "external_candidate":null,
         "portable_state":{
             "schema":1,
@@ -759,16 +761,17 @@ fn daemon_identity(state_path: &Path) -> Result<NodeIdentity> {
         .with_context(|| format!("load daemon identity {}", identity_path.display()))
 }
 
-fn open_daemon_state(state_path: &Path) -> Result<StateStore> {
+/// Open a stopped daemon's node Store through the native test gate. The
+/// owner dereferences to the Store, closes it when dropped and stays on the
+/// opening thread.
+fn open_daemon_state(state_path: &Path) -> Result<TestStateStore> {
     open_daemon_state_with_trusted_nodes(state_path, &[])
 }
 
 fn open_daemon_state_with_trusted_nodes(
     state_path: &Path,
     trusted_nodes: &[&SigningKey],
-) -> Result<StateStore> {
-    let runtime_state_dir = state_path.join(ryeos_engine::AI_DIR).join("state");
-    let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
+) -> Result<TestStateStore> {
     let identity = daemon_identity(state_path)?;
     let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
     let mut head_trust = ryeos_state::refs::TrustStore::new();
@@ -780,42 +783,7 @@ fn open_daemon_state_with_trusted_nodes(
             verifying_key,
         );
     }
-    StateStore::new_with_head_trust(
-        state_path.to_path_buf(),
-        runtime_state_dir,
-        runtime_db_path,
-        signer,
-        WriteBarrier::new(),
-        Arc::new(head_trust),
-    )
-}
-
-/// Open the exact published projection for concurrent qualification reads.
-/// Unlike `open_daemon_state_with_trusted_nodes`, this never claims the live
-/// daemon's exclusive runtime-state namespace or constructs mutable runtime
-/// authority.
-fn open_daemon_projection_state_with_trusted_nodes(
-    state_path: &Path,
-    trusted_nodes: &[&SigningKey],
-) -> Result<StateStore> {
-    let runtime_state_dir = state_path.join(ryeos_engine::AI_DIR).join("state");
-    let identity = daemon_identity(state_path)?;
-    let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
-    let mut head_trust = ryeos_state::refs::TrustStore::new();
-    head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-    for key in trusted_nodes {
-        let verifying_key = key.verifying_key();
-        head_trust.insert(
-            lillux::signature::compute_fingerprint(&verifying_key),
-            verifying_key,
-        );
-    }
-    StateStore::new_for_projection_verification(
-        runtime_state_dir,
-        signer,
-        WriteBarrier::new(),
-        Arc::new(head_trust),
-    )
+    TestStateStore::open(state_path, signer, Arc::new(head_trust))
 }
 
 #[derive(Debug)]
@@ -976,45 +944,15 @@ fn observe_real_handoff_snapshot(
     successor_id: &str,
 ) -> Result<HandoffDurableSnapshot> {
     let trusted = [&handoff.source_fixture.node, &handoff.target_fixture.node];
+    // A test thread holds one Store at a time: read the source node and
+    // close its Store before the target's opens.
     let source = open_daemon_state_with_trusted_nodes(&handoff.source.state_path, &trusted)?;
-    let target = open_daemon_state_with_trusted_nodes(&handoff.target.state_path, &trusted)?;
     let chain_root_id = &handoff.checkpoint.chain_root_id;
     let source_job = find_handoff_job(&source, chain_root_id, WorkerHandoffJobRole::Source)?;
-    let target_job = find_handoff_job(&target, chain_root_id, WorkerHandoffJobRole::Target)?;
-    if let (Some(source_job), Some(target_job)) = (&source_job, &target_job) {
-        let source_operation =
-            WorkerSessionHandoffJobOperation::from_value(source_job.operation.clone())?;
-        let target_operation =
-            WorkerSessionHandoffJobOperation::from_value(target_job.operation.clone())?;
-        anyhow::ensure!(
-            source_operation.target_projection(target_operation.peer_remote_name.clone())?
-                == target_operation,
-            "source and target retained different handoff operations"
-        );
-    }
     let source_observed = observe_handoff_job(&source, source_job.as_ref())?;
-    let target_observed = observe_handoff_job(&target, target_job.as_ref())?;
-
-    let source_fingerprint = handoff.source_fixture.node_fp();
-    let target_fingerprint = handoff.target_fixture.node_fp();
     let source_head = source
         .with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?
         .context("source qualification chain head disappeared")?;
-    let target_head =
-        target.with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?;
-    let head_signer = if target_head
-        .as_ref()
-        .is_some_and(|head| head.signer == target_fingerprint)
-    {
-        ExpectedHeadSigner::TargetNode
-    } else {
-        anyhow::ensure!(
-            source_head.signer == source_fingerprint,
-            "handoff chain head is signed by neither admitted node"
-        );
-        ExpectedHeadSigner::SourceNode
-    };
-
     let current_placement = source.current_chain_placement_thread_id(chain_root_id)?;
     let append_authority = if current_placement.as_deref() == Some(successor_id) {
         AppendAuthorityLane::ExactSuccessorGrant
@@ -1047,6 +985,39 @@ fn observe_real_handoff_snapshot(
                 SourcePlacementState::CurrentWriter
             }
         };
+    drop(source);
+
+    let target = open_daemon_state_with_trusted_nodes(&handoff.target.state_path, &trusted)?;
+    let target_job = find_handoff_job(&target, chain_root_id, WorkerHandoffJobRole::Target)?;
+    if let (Some(source_job), Some(target_job)) = (&source_job, &target_job) {
+        let source_operation =
+            WorkerSessionHandoffJobOperation::from_value(source_job.operation.clone())?;
+        let target_operation =
+            WorkerSessionHandoffJobOperation::from_value(target_job.operation.clone())?;
+        anyhow::ensure!(
+            source_operation.target_projection(target_operation.peer_remote_name.clone())?
+                == target_operation,
+            "source and target retained different handoff operations"
+        );
+    }
+    let target_observed = observe_handoff_job(&target, target_job.as_ref())?;
+
+    let source_fingerprint = handoff.source_fixture.node_fp();
+    let target_fingerprint = handoff.target_fixture.node_fp();
+    let target_head =
+        target.with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?;
+    let head_signer = if target_head
+        .as_ref()
+        .is_some_and(|head| head.signer == target_fingerprint)
+    {
+        ExpectedHeadSigner::TargetNode
+    } else {
+        anyhow::ensure!(
+            source_head.signer == source_fingerprint,
+            "handoff chain head is signed by neither admitted node"
+        );
+        ExpectedHeadSigner::SourceNode
+    };
 
     let reservation = target.credential_profile_reservation_for_successor(successor_id)?;
     let target_credential = match reservation.as_ref().map(|record| record.state.as_str()) {
@@ -1252,6 +1223,14 @@ struct GenericHeadCoordinate {
     signer: String,
 }
 
+/// Retry evidence a running pair of daemons exposes over RPC: their handoff
+/// jobs and attempt ledgers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandoffRetryJobsEvidence {
+    source_job: Option<HandoffRetryJobEvidence>,
+    target_job: Option<HandoffRetryJobEvidence>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HandoffRetryEvidence {
     source_job: Option<HandoffRetryJobEvidence>,
@@ -1333,8 +1312,11 @@ struct LiveSyncJobAttemptRecord {
 
 #[derive(Debug, Clone, Copy)]
 enum RetryObservationMode {
+    /// Both daemons have already exited.
     Offline,
-    Live,
+    /// Both daemons run: read their jobs over RPC, then stop both for good
+    /// and read the rest from their Stores.
+    LiveThenStop,
 }
 
 fn validate_retained_attempt_ledger(
@@ -1753,49 +1735,66 @@ fn observe_target_handoff_branch(
     }
 }
 
+/// Observe the durable retry evidence of both nodes.
+///
+/// Offline mode reads the Stores of daemons that are already stopped.
+/// LiveThenStop mode reads the handoff jobs over RPC while both daemons run,
+/// then stops both for good, confirms each process has exited, and reads the
+/// remaining evidence from their Stores exactly as Offline mode does. A Store
+/// is never opened while its daemon runs, and nothing restarts the daemons.
 async fn observe_handoff_retry_evidence(
-    handoff: &RealPortableHandoff,
+    handoff: &mut RealPortableHandoff,
     successor_id: &str,
     operation_id: &str,
     mode: RetryObservationMode,
 ) -> Result<HandoffRetryEvidence> {
-    let trusted = [&handoff.source_fixture.node, &handoff.target_fixture.node];
-    let chain_root_id = &handoff.checkpoint.chain_root_id;
-    let (source, target, source_job, target_job) = match mode {
-        RetryObservationMode::Offline => {
-            let source =
-                open_daemon_state_with_trusted_nodes(&handoff.source.state_path, &trusted)?;
-            let target =
-                open_daemon_state_with_trusted_nodes(&handoff.target.state_path, &trusted)?;
-            let source_job = retry_job_evidence(
+    let source_node = handoff.source_fixture.node.clone();
+    let target_node = handoff.target_fixture.node.clone();
+    let trusted = [&source_node, &target_node];
+    let chain_root_id = handoff.checkpoint.chain_root_id.clone();
+    let chain_root_id = chain_root_id.as_str();
+    let (live_source_job, live_target_job) = match mode {
+        RetryObservationMode::Offline => (None, None),
+        RetryObservationMode::LiveThenStop => {
+            let HandoffRetryJobsEvidence {
+                source_job,
+                target_job,
+            } = observe_live_retry_jobs(handoff, operation_id).await?;
+            stop_handoff_daemons(handoff).await?;
+            (Some(source_job), Some(target_job))
+        }
+    };
+    // A test thread holds one Store at a time: read everything the source
+    // node retains and close its Store before the target's opens.
+    let (source_job, source_chain_head, source_remote_continuation) = {
+        let source = open_daemon_state_with_trusted_nodes(&handoff.source.state_path, &trusted)?;
+        let source_job = match live_source_job {
+            Some(job) => job,
+            None => retry_job_evidence(
                 &source,
                 find_handoff_job(&source, chain_root_id, WorkerHandoffJobRole::Source)?,
-            )?;
-            let target_job = retry_job_evidence(
-                &target,
-                find_handoff_job(&target, chain_root_id, WorkerHandoffJobRole::Target)?,
-            )?;
-            (source, target, source_job, target_job)
-        }
-        RetryObservationMode::Live => {
-            let source = open_daemon_projection_state_with_trusted_nodes(
-                &handoff.source.state_path,
-                &trusted,
-            )?;
-            let target = open_daemon_projection_state_with_trusted_nodes(
-                &handoff.target.state_path,
-                &trusted,
-            )?;
-            let source_id = format!("worker-handoff-source:{operation_id}");
-            let target_id = format!("worker-handoff-target:{operation_id}");
-            let source_job =
-                live_retry_job_evidence(&handoff.source, &source_id, WorkerHandoffJobRole::Source)
-                    .await?;
-            let target_job =
-                live_retry_job_evidence(&handoff.target, &target_id, WorkerHandoffJobRole::Target)
-                    .await?;
-            (source, target, source_job, target_job)
-        }
+            )?,
+        };
+        let source_chain_head = source
+            .with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?
+            .context("source retry evidence found no authoritative chain head")?;
+        let successor_exists = source
+            .with_state_db(|db| db.read_authoritative_thread_snapshot(chain_root_id, successor_id))?
+            .is_some();
+        let source_remote_continuation = if successor_exists {
+            source.remote_continuation_authority(chain_root_id, successor_id)?
+        } else {
+            None
+        };
+        (source_job, source_chain_head, source_remote_continuation)
+    };
+    let target = open_daemon_state_with_trusted_nodes(&handoff.target.state_path, &trusted)?;
+    let target_job = match live_target_job {
+        Some(job) => job,
+        None => retry_job_evidence(
+            &target,
+            find_handoff_job(&target, chain_root_id, WorkerHandoffJobRole::Target)?,
+        )?,
     };
     if let (Some(source_job), Some(target_job)) = (&source_job, &target_job) {
         anyhow::ensure!(
@@ -1859,9 +1858,6 @@ async fn observe_handoff_retry_evidence(
             upstream_session_id: reservation.upstream_session_id.clone(),
         }
     });
-    let source_chain_head = source
-        .with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?
-        .context("source retry evidence found no authoritative chain head")?;
     let target_chain_head = target
         .with_state_db(|db| db.read_generic_head_ref("chains", chain_root_id))?
         .map(|head| GenericHeadCoordinate {
@@ -1880,14 +1876,7 @@ async fn observe_handoff_retry_evidence(
         )?;
         drop(guard);
     }
-    let successor_exists = source
-        .with_state_db(|db| db.read_authoritative_thread_snapshot(chain_root_id, successor_id))?
-        .is_some();
-    let source_remote_continuation = if successor_exists {
-        source.remote_continuation_authority(chain_root_id, successor_id)?
-    } else {
-        None
-    };
+    drop(target);
     Ok(HandoffRetryEvidence {
         source_job,
         target_job,
@@ -1905,6 +1894,41 @@ async fn observe_handoff_retry_evidence(
         source_remote_continuation,
         signed_placement,
     })
+}
+
+/// Read both handoff jobs over RPC while both daemons keep running.
+async fn observe_live_retry_jobs(
+    handoff: &RealPortableHandoff,
+    operation_id: &str,
+) -> Result<HandoffRetryJobsEvidence> {
+    let source_id = format!("worker-handoff-source:{operation_id}");
+    let target_id = format!("worker-handoff-target:{operation_id}");
+    let source_job =
+        live_retry_job_evidence(&handoff.source, &source_id, WorkerHandoffJobRole::Source).await?;
+    let target_job =
+        live_retry_job_evidence(&handoff.target, &target_id, WorkerHandoffJobRole::Target).await?;
+    if let (Some(source_job), Some(target_job)) = (&source_job, &target_job) {
+        anyhow::ensure!(
+            source_job
+                .operation
+                .target_projection(target_job.operation.peer_remote_name.clone())?
+                == target_job.operation,
+            "live retry evidence found divergent source and target operations"
+        );
+    }
+    Ok(HandoffRetryJobsEvidence {
+        source_job,
+        target_job,
+    })
+}
+
+/// Stop both handoff daemons for good and confirm each child process has
+/// exited, not merely released its locks, before this test process opens
+/// their Stores.
+async fn stop_handoff_daemons(handoff: &mut RealPortableHandoff) -> Result<()> {
+    handoff.source.kill_daemon().await?;
+    handoff.target.kill_daemon().await?;
+    Ok(())
 }
 
 fn assert_canonical_source_operation(operation: &WorkerSessionHandoffJobOperation) -> Result<()> {
@@ -1939,11 +1963,17 @@ fn assert_canonical_source_operation(operation: &WorkerSessionHandoffJobOperatio
 fn combined_attempts(
     evidence: &HandoffRetryEvidence,
 ) -> Result<BTreeMap<HandoffAttemptKey, HandoffAttemptObservation>> {
+    combined_job_attempts(evidence.source_job.as_ref(), evidence.target_job.as_ref())
+}
+
+fn combined_job_attempts(
+    source_job: Option<&HandoffRetryJobEvidence>,
+    target_job: Option<&HandoffRetryJobEvidence>,
+) -> Result<BTreeMap<HandoffAttemptKey, HandoffAttemptObservation>> {
     let mut attempts = BTreeMap::new();
-    for (key, observation) in evidence
-        .source_job
-        .iter()
-        .chain(evidence.target_job.iter())
+    for (key, observation) in source_job
+        .into_iter()
+        .chain(target_job)
         .flat_map(|job| job.attempts.iter())
     {
         anyhow::ensure!(
@@ -2344,7 +2374,7 @@ fn assert_exact_abort_authority(
 fn assert_retry_disposition(
     case: &HandoffAcceptanceCase,
     at_cut: &HandoffRetryEvidence,
-    before_retry: &HandoffRetryEvidence,
+    before_retry: &HandoffRetryJobsEvidence,
     after_retry: &HandoffRetryEvidence,
     status: reqwest::StatusCode,
     response: &serde_json::Value,
@@ -2415,7 +2445,8 @@ fn assert_retry_disposition(
     )?;
 
     let cut_attempts = combined_attempts(at_cut)?;
-    let before_attempts = combined_attempts(before_retry)?;
+    let before_attempts =
+        combined_job_attempts(before_retry.source_job.as_ref(), before_retry.target_job.as_ref())?;
     let after_attempts = combined_attempts(after_retry)?;
     assert_attempt_ledger_transition("startup recovery", &cut_attempts, &before_attempts)?;
     assert_attempt_ledger_transition("explicit retry", &before_attempts, &after_attempts)?;
@@ -2495,54 +2526,32 @@ fn assert_retry_disposition(
         case.case_id
     );
 
+    // Store evidence is read only at the crash cut and after the final stop;
+    // between them both daemons keep running, so these coordinates are
+    // compared across startup recovery and the explicit retry together.
     if let Some(cut_reservation) = &at_cut.credential_reservation {
         anyhow::ensure!(
-            before_retry.credential_reservation.as_ref() == Some(cut_reservation)
-                && after_retry.credential_reservation.as_ref() == Some(cut_reservation),
-            "handoff retry changed the credential reservation coordinate after `{}`",
-            case.case_id
-        );
-    } else if let Some(before_reservation) = &before_retry.credential_reservation {
-        anyhow::ensure!(
-            after_retry.credential_reservation.as_ref() == Some(before_reservation),
-            "explicit retry changed the credential reservation coordinate after `{}`",
+            after_retry.credential_reservation.as_ref() == Some(cut_reservation),
+            "handoff recovery or retry changed the credential reservation coordinate after `{}`",
             case.case_id
         );
     }
     if let Some(cut_writer_grant) = &at_cut.writer_grant_hash {
         anyhow::ensure!(
-            before_retry.writer_grant_hash.as_ref() == Some(cut_writer_grant)
-                && after_retry.writer_grant_hash.as_ref() == Some(cut_writer_grant),
-            "handoff retry changed the one-shot writer-grant coordinate after `{}`",
-            case.case_id
-        );
-    } else if let Some(before_writer_grant) = &before_retry.writer_grant_hash {
-        anyhow::ensure!(
-            after_retry.writer_grant_hash.as_ref() == Some(before_writer_grant),
-            "explicit retry changed the one-shot writer grant after `{}`",
+            after_retry.writer_grant_hash.as_ref() == Some(cut_writer_grant),
+            "handoff recovery or retry changed the one-shot writer-grant coordinate after `{}`",
             case.case_id
         );
     }
     if let Some(receipt) = &at_cut.adoption_receipt {
         anyhow::ensure!(
-            before_retry.adoption_receipt.as_ref() == Some(receipt)
-                && after_retry.adoption_receipt.as_ref() == Some(receipt),
-            "restart or retry changed the permanent adoption receipt"
-        );
-    } else if let Some(receipt) = &before_retry.adoption_receipt {
-        anyhow::ensure!(
             after_retry.adoption_receipt.as_ref() == Some(receipt),
-            "explicit retry changed the permanent adoption receipt"
+            "restart or retry changed the permanent adoption receipt"
         );
     }
     assert_abort_fence_transition(
-        "startup recovery",
+        "startup recovery and explicit retry",
         at_cut.abort_fence.as_ref(),
-        before_retry.abort_fence.as_ref(),
-    )?;
-    assert_abort_fence_transition(
-        "explicit retry",
-        before_retry.abort_fence.as_ref(),
         after_retry.abort_fence.as_ref(),
     )?;
 
@@ -2553,8 +2562,7 @@ fn assert_retry_disposition(
                     && at_cut.target_job.is_none()
                     && before_retry.source_job.is_none()
                     && before_retry.target_job.is_none()
-                    && at_cut.adoption_receipt.is_none()
-                    && before_retry.adoption_receipt.is_none(),
+                    && at_cut.adoption_receipt.is_none(),
                 "reuse case `{}` had already published a durable operation",
                 case.case_id
             );
@@ -2607,7 +2615,6 @@ fn assert_retry_disposition(
                 at_cut.source_job.is_some()
                     && at_cut.abort_fence.is_none()
                     && status == reqwest::StatusCode::OK
-                    && before_retry.adoption_receipt.as_ref() == Some(cut_receipt)
                     && after_retry.adoption_receipt.as_ref() == Some(cut_receipt),
                 "source-from-target-receipt case `{}` did not fold the immutable target receipt",
                 case.case_id
@@ -2628,7 +2635,6 @@ fn assert_retry_disposition(
                 .context("receipt-observation case had no receipt at its crash cut")?;
             anyhow::ensure!(
                 status == reqwest::StatusCode::OK
-                    && before_retry.adoption_receipt.as_ref() == Some(cut_receipt)
                     && after_retry.adoption_receipt.as_ref() == Some(cut_receipt),
                 "receipt-observation case `{}` contacted a worker or changed its receipt: {status} {response}",
                 case.case_id
@@ -3065,7 +3071,7 @@ fn plant_target_abort_state(
     let auth_dir = state_path
         .join(ryeos_engine::AI_DIR)
         .join("node/auth/authorized_keys");
-    ryeos_app::identity::write_authorized_remote_node_key_toml(
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &source_fingerprint,
         &source_public_key,
@@ -4130,6 +4136,14 @@ async fn assert_real_handoff_completed(
 ) -> Result<()> {
     handoff.source.kill_daemon().await?;
     handoff.target.kill_daemon().await?;
+    assert_stopped_handoff_completed(handoff, successor_id)
+}
+
+/// [`assert_real_handoff_completed`] for daemons that have already exited.
+fn assert_stopped_handoff_completed(
+    handoff: &RealPortableHandoff,
+    successor_id: &str,
+) -> Result<()> {
     let source_store = open_daemon_state(&handoff.source.state_path)?;
     anyhow::ensure!(
         source_store.current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
@@ -4170,6 +4184,8 @@ async fn assert_real_handoff_completed(
             .is_some_and(|head| head.target_hash == source_head),
         "rejected stale source append still advanced the signed chain head"
     );
+    // A test thread holds one Store at a time.
+    drop(source_store);
     let target_store = open_daemon_state(&handoff.target.state_path)?;
     anyhow::ensure!(
         target_store.current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
@@ -4232,6 +4248,14 @@ async fn assert_real_handoff_aborted(
 ) -> Result<()> {
     handoff.source.kill_daemon().await?;
     handoff.target.kill_daemon().await?;
+    assert_stopped_handoff_aborted(handoff, successor_id)
+}
+
+/// [`assert_real_handoff_aborted`] for daemons that have already exited.
+fn assert_stopped_handoff_aborted(
+    handoff: &RealPortableHandoff,
+    successor_id: &str,
+) -> Result<()> {
     let source_store = open_daemon_state(&handoff.source.state_path)?;
     anyhow::ensure!(
         source_store.current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
@@ -4352,11 +4376,11 @@ async fn wait_for_handoff_terminal_state(
 }
 
 async fn wait_for_state_lock_release(state_path: &Path) -> Result<()> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(state_path);
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(state_path);
     let timer = MonotonicTimer::start();
     let mut last_error = None;
     while timer.elapsed() < Duration::from_secs(5) {
-        match ryeos_app::state_lock::StateLock::acquire_existing_read_only(&lock_path) {
+        match ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(&lock_path) {
             Ok(lock) => {
                 drop(lock);
                 return Ok(());
@@ -5110,6 +5134,8 @@ async fn target_operator_grant_change_after_preflight_refuses_pre_cut_handoff() 
         source_session.state == "frozen",
         "pre-cut grant refusal did not preserve the frozen source session: {source_session:?}"
     );
+    // A test thread holds one Store at a time.
+    drop(source_store);
     let target_store = open_daemon_state(&handoff.target.state_path)?;
     anyhow::ensure!(
         target_store.get_thread(&successor_id)?.is_none()
@@ -5502,7 +5528,7 @@ async fn qualify_source_request_case(
     handoff.target.kill_daemon().await?;
     assert_real_handoff_snapshot(&handoff, &successor_id, case.at_cut, "at crash cut")?;
     let retry_evidence_at_cut = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
         RetryObservationMode::Offline,
@@ -5523,19 +5549,18 @@ async fn qualify_source_request_case(
         .await?;
     handoff.refresh_routes()?;
     await_declared_startup_recovery(case, &mut handoff).await?;
-    let retry_evidence_before_retry = observe_handoff_retry_evidence(
-        &handoff,
-        &successor_id,
-        &cut_evidence.operation_id,
-        RetryObservationMode::Live,
-    )
-    .await?;
+    // Between the crash cut and the final stop both daemons keep running, so
+    // only RPC-exposed job evidence is read before the retry.
+    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
+    // Recovery ends with the retry response; the final stop and Store read
+    // that follow are observation, not recovery.
+    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     let retry_evidence_after_retry = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
-        RetryObservationMode::Live,
+        RetryObservationMode::LiveThenStop,
     )
     .await?;
     assert_retry_disposition(
@@ -5553,7 +5578,6 @@ async fn qualify_source_request_case(
     let stage_measurements = response
         .pointer("/result/qualification_measurements")
         .cloned();
-    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     match case.operator_outcome {
         OperatorOutcome::Completed => {
             anyhow::ensure!(
@@ -5561,7 +5585,7 @@ async fn qualify_source_request_case(
                 "source crash at {} did not complete on exact retry: {status} {response}",
                 case.boundary
             );
-            assert_real_handoff_completed(&mut handoff, &successor_id).await?;
+            assert_stopped_handoff_completed(&handoff, &successor_id)?;
         }
         OperatorOutcome::AbortedSourceContinues => {
             anyhow::ensure!(
@@ -5569,7 +5593,7 @@ async fn qualify_source_request_case(
                 "pre-cut source crash at {} admitted a handoff after abort recovery",
                 case.boundary
             );
-            assert_real_handoff_aborted(&mut handoff, &successor_id).await?;
+            assert_stopped_handoff_aborted(&handoff, &successor_id)?;
         }
     }
     assert_real_handoff_snapshot(
@@ -5623,7 +5647,7 @@ async fn qualify_source_recovery_case(
         "at recovery crash cut",
     )?;
     let retry_evidence_at_cut = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
         RetryObservationMode::Offline,
@@ -5645,19 +5669,18 @@ async fn qualify_source_recovery_case(
         .await?;
     handoff.refresh_routes()?;
     await_declared_startup_recovery(case, &mut handoff).await?;
-    let retry_evidence_before_retry = observe_handoff_retry_evidence(
-        &handoff,
-        &successor_id,
-        &cut_evidence.operation_id,
-        RetryObservationMode::Live,
-    )
-    .await?;
+    // Between the crash cut and the final stop both daemons keep running, so
+    // only RPC-exposed job evidence is read before the retry.
+    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
+    // Recovery ends with the retry response; the final stop and Store read
+    // that follow are observation, not recovery.
+    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     let retry_evidence_after_retry = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
-        RetryObservationMode::Live,
+        RetryObservationMode::LiveThenStop,
     )
     .await?;
     assert_retry_disposition(
@@ -5677,8 +5700,7 @@ async fn qualify_source_recovery_case(
         "source abort recovery at {} admitted the discarded handoff",
         case.boundary
     );
-    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
-    assert_real_handoff_aborted(&mut handoff, &successor_id).await?;
+    assert_stopped_handoff_aborted(&handoff, &successor_id)?;
     assert_real_handoff_snapshot(
         &handoff,
         &successor_id,
@@ -5707,7 +5729,7 @@ async fn qualify_target_request_case(
         crash_real_target_adoption_at(case.boundary).await?;
     assert_real_handoff_snapshot(&handoff, &successor_id, case.at_cut, "at target crash cut")?;
     let retry_evidence_at_cut = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
         RetryObservationMode::Offline,
@@ -5728,19 +5750,18 @@ async fn qualify_target_request_case(
         .await?;
     handoff.refresh_routes()?;
     await_declared_startup_recovery(case, &mut handoff).await?;
-    let retry_evidence_before_retry = observe_handoff_retry_evidence(
-        &handoff,
-        &successor_id,
-        &cut_evidence.operation_id,
-        RetryObservationMode::Live,
-    )
-    .await?;
+    // Between the crash cut and the final stop both daemons keep running, so
+    // only RPC-exposed job evidence is read before the retry.
+    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
+    // Recovery ends with the retry response; the final stop and Store read
+    // that follow are observation, not recovery.
+    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     let retry_evidence_after_retry = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
-        RetryObservationMode::Live,
+        RetryObservationMode::LiveThenStop,
     )
     .await?;
     assert_retry_disposition(
@@ -5758,7 +5779,6 @@ async fn qualify_target_request_case(
     let stage_measurements = response
         .pointer("/result/qualification_measurements")
         .cloned();
-    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     match case.operator_outcome {
         OperatorOutcome::Completed => {
             anyhow::ensure!(
@@ -5766,7 +5786,7 @@ async fn qualify_target_request_case(
                 "target crash at {} did not complete on exact retry: {status} {response}",
                 case.boundary
             );
-            assert_real_handoff_completed(&mut handoff, &successor_id).await?;
+            assert_stopped_handoff_completed(&handoff, &successor_id)?;
         }
         OperatorOutcome::AbortedSourceContinues => {
             anyhow::ensure!(
@@ -5774,7 +5794,7 @@ async fn qualify_target_request_case(
                 "pre-cut target crash at {} admitted a handoff after abort recovery",
                 case.boundary
             );
-            assert_real_handoff_aborted(&mut handoff, &successor_id).await?;
+            assert_stopped_handoff_aborted(&handoff, &successor_id)?;
         }
     }
     assert_real_handoff_snapshot(
@@ -5835,7 +5855,7 @@ async fn qualify_target_recovery_case(
         "at target recovery crash cut",
     )?;
     let retry_evidence_at_cut = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
         RetryObservationMode::Offline,
@@ -5876,19 +5896,18 @@ async fn qualify_target_recovery_case(
         .await?;
     handoff.refresh_routes()?;
     await_declared_startup_recovery(case, &mut handoff).await?;
-    let retry_evidence_before_retry = observe_handoff_retry_evidence(
-        &handoff,
-        &successor_id,
-        &cut_evidence.operation_id,
-        RetryObservationMode::Live,
-    )
-    .await?;
+    // Between the crash cut and the final stop both daemons keep running, so
+    // only RPC-exposed job evidence is read before the retry.
+    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
+    // Recovery ends with the retry response; the final stop and Store read
+    // that follow are observation, not recovery.
+    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
     let retry_evidence_after_retry = observe_handoff_retry_evidence(
-        &handoff,
+        &mut handoff,
         &successor_id,
         &cut_evidence.operation_id,
-        RetryObservationMode::Live,
+        RetryObservationMode::LiveThenStop,
     )
     .await?;
     assert_retry_disposition(
@@ -5908,8 +5927,7 @@ async fn qualify_target_recovery_case(
         "target abort recovery at {} admitted the discarded handoff",
         case.boundary
     );
-    let total_handoff_recovery_ms = recovery_timer.elapsed_millis();
-    assert_real_handoff_aborted(&mut handoff, &successor_id).await?;
+    assert_stopped_handoff_aborted(&handoff, &successor_id)?;
     assert_real_handoff_snapshot(
         &handoff,
         &successor_id,

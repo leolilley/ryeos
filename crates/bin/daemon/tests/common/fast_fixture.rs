@@ -6,7 +6,7 @@
 //!
 //! ## What is byte-stable
 //!
-//! After [`populate_initialized_state`] returns, the following files
+//! After [`populate_initialized_state_with_profile`] returns, the following files
 //! have identical bytes across every run of the fixture:
 //!
 //!   * `<state>/.ai/node/identity/private_key.pem`   (deterministic Ed25519)
@@ -94,13 +94,155 @@ pub fn vault_secret_key() -> lillux::vault::VaultSecretKey {
 }
 
 /// Bundle of deterministic test keys returned by
-/// [`populate_initialized_state`]. Tests use `fixture.publisher` to
+/// [`populate_initialized_state_with_profile`]. Tests use `fixture.publisher` to
 /// sign their own bundle/directive content.
 pub struct FastFixture {
     pub publisher: SigningKey,
     pub node: SigningKey,
     pub user: SigningKey,
     pub vault: lillux::vault::VaultSecretKey,
+}
+
+const FULL_BUNDLE_INVENTORY: &[&str] = &[
+    "browser",
+    "central-auth",
+    "codex",
+    "core",
+    "hosted-node",
+    "opencode",
+    "render-sandbox",
+    "ryeos-ui",
+    "scheduling",
+    "standard",
+    "web",
+];
+
+#[derive(Clone, Copy)]
+pub enum FastFixtureProfile {
+    Core,
+    CoreScheduling,
+    Standard,
+    Full,
+}
+
+impl FastFixtureProfile {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::CoreScheduling => "core-scheduling",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
+
+    pub(super) fn exact_bundles(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Core => Some(&["core"]),
+            Self::CoreScheduling => Some(&["core", "scheduling"]),
+            Self::Standard => Some(&["core", "scheduling", "standard"]),
+            Self::Full => Some(FULL_BUNDLE_INVENTORY),
+        }
+    }
+}
+
+/// Verify every authored profile member is registered to its exact prepared
+/// bundle root after caller fixtures have been installed.
+///
+/// A registration outside the authored inventory is admitted only when it
+/// names a synthetic test bundle (one with no published bundle of that name
+/// in the workspace), as written by [`register_fixture_bundle`],
+/// [`register_presigned_fixture_bundle`] or [`register_config_fixture_bundle`].
+/// A published bundle the selected profile does not include is refused, so a
+/// test cannot silently run a composition no authored profile selects.
+pub fn validate_profile_bundle_records(
+    state_path: &Path,
+    fixture: &FastFixture,
+    profile: FastFixtureProfile,
+) -> Result<()> {
+    let expected = profile
+        .exact_bundles()
+        .context("selected fast-fixture profile has no exact bundle inventory")?;
+    let records = state_path.join(AI_DIR).join("node/bundles");
+    let expected_names = expected
+        .iter()
+        .map(|name| format!("{name}.yaml"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut observed_names = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(&records).with_context(|| {
+        format!(
+            "enumerate selected profile bundle registrations at {}",
+            records.display()
+        )
+    })? {
+        anyhow::ensure!(
+            observed_names.len() < 4096,
+            "selected profile registration directory exceeds its bounded entry count"
+        );
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name
+            .as_os_str()
+            .to_str()
+            .context("selected profile bundle registration name is not UTF-8")?
+            .to_owned();
+        let metadata = fs::symlink_metadata(entry.path())?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "selected profile registration entry {name} is not a regular non-symlink file"
+        );
+        anyhow::ensure!(
+            observed_names.insert(name.clone()),
+            "selected profile registration directory contains duplicate entry {name}"
+        );
+    }
+    let missing = expected_names
+        .difference(&observed_names)
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "selected profile registration inventory lacks authored members {missing:?}"
+    );
+    for extra in observed_names.difference(&expected_names) {
+        let bundle_name = extra
+            .strip_suffix(".yaml")
+            .with_context(|| format!("bundle registration entry {extra} is not a YAML record"))?;
+        let published = super::workspace_root().join("bundles").join(bundle_name);
+        anyhow::ensure!(
+            !published.exists(),
+            "published bundle {bundle_name} is registered but the selected profile does not include it"
+        );
+    }
+    for bundle_name in expected {
+        let root = if *bundle_name == "core" {
+            state_path.join(AI_DIR).join("bundles/core")
+        } else {
+            super::workspace_root().join("bundles").join(bundle_name)
+        };
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("resolve selected profile bundle {bundle_name}"))?;
+        let body = node_bundle_record_body(bundle_name, &root)?;
+        let expected_signed = lillux::signature::sign_content_at(
+            &body,
+            &fixture.publisher,
+            "#",
+            None,
+            FAST_FIXTURE_TIME,
+        );
+        let record = records.join(format!("{bundle_name}.yaml"));
+        let metadata = fs::symlink_metadata(&record)
+            .with_context(|| format!("read selected profile registration {bundle_name}"))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "selected profile registration {bundle_name} is not a regular non-symlink file"
+        );
+        anyhow::ensure!(
+            fs::read(&record)? == expected_signed.as_bytes(),
+            "selected profile registration {bundle_name} does not bind its expected bundle root"
+        );
+    }
+    Ok(())
 }
 
 impl FastFixture {
@@ -261,33 +403,28 @@ pub fn install_signed_bundle_binary(
 /// <state>/.ai/config/keys/trusted/<user_fp>.toml       (self-signed trust doc)
 /// ```
 ///
-/// Does NOT install bundles. Tests that need the standard bundle
-/// installed call `register_standard_bundle()` separately.
-pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result<FastFixture> {
-    populate_initialized_state_with_node_key(state_path, _home_dir, node_signing_key())
-}
-
-/// Populate the fast fixture with an explicitly selected node identity.
-///
-/// Cross-site integration tests need independently authenticated nodes while
-/// retaining the same deterministic publisher and operator authorities. The
-/// ordinary fixture continues to use [`node_signing_key`].
-pub fn populate_initialized_state_with_node_key(
+/// Populate fast-fixture state and node policies from an explicit authored
+/// profile. Bundle registration remains a separate caller-owned step.
+pub fn populate_initialized_state_with_profile(
     state_path: &Path,
     _home_dir: &Path,
-    node: SigningKey,
+    profile: FastFixtureProfile,
 ) -> Result<FastFixture> {
-    populate_initialized_state_with_identities(state_path, _home_dir, node, user_signing_key())
+    populate_initialized_state_with_profile_and_identities(
+        state_path,
+        _home_dir,
+        node_signing_key(),
+        user_signing_key(),
+        profile,
+    )
 }
 
-/// Populate the fast fixture with independently selected node and operator
-/// identities. Cross-site tests use this form so a source operator is never
-/// accidentally interpreted as the target node's local operator.
-pub fn populate_initialized_state_with_identities(
+pub fn populate_initialized_state_with_profile_and_identities(
     state_path: &Path,
     _home_dir: &Path,
     node: SigningKey,
     user: SigningKey,
+    profile: FastFixtureProfile,
 ) -> Result<FastFixture> {
     let publisher = publisher_signing_key();
     let vault = vault_secret_key();
@@ -327,12 +464,12 @@ pub fn populate_initialized_state_with_identities(
         .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
         .context("create fast-fixture thread-projection recovery authority")?;
 
-    // Init completion now binds the immutable substrate coordinate. Keep the
-    // fast fixture on the same contract as a real full-profile initialization.
+    // Init completion binds the immutable substrate coordinate and selected
+    // composition profile, matching the authored policy generation below.
     let substrate = ryeos_node::SubstrateIdentity::new(
         format!("sha256:{}", "1".repeat(64)),
         1,
-        Some("full".to_owned()),
+        Some(profile.name().to_owned()),
     )
     .context("construct fast-fixture substrate identity")?;
     let substrate_path = state_path.join(AI_DIR).join("node/substrate-identity.json");
@@ -350,14 +487,13 @@ pub fn populate_initialized_state_with_identities(
     // would otherwise see a null result. Mirrors what
     // `bootstrap::init` writes after generating the node key.
     let public_identity_path = node_identity_dir.join("public-identity.json");
-    ryeos_app::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
+    ryeos_node_runtime::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
         .context("re-load node identity to write public doc")?
         .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
 
-    // Mirror first publication from the explicit full init profile: every
-    // registered compiler receives exactly one node-signed policy member.
-    materialize_seed_node_policy_generation(state_path, &node)
+    // Mirror first publication from the explicitly selected init profile.
+    materialize_seed_node_policy_generation(state_path, &node, profile)
         .context("materialize complete node policy generation")?;
 
     // ── Operator Ed25519 identity ──
@@ -408,7 +544,10 @@ pub fn populate_initialized_state_with_identities(
 }
 
 /// Seal the fixture's final policy and bundle-registration set using the same
-/// signed init-completion contract as the real node initializer.
+/// signed init-completion contract as the real node initializer. The test-only
+/// node helper also invokes the real capacity issuer under the stopped-node
+/// lock; a parsed native-capacity policy alone cannot make this fixture live.
+/// Capacity files bind real inode identities and are not byte-stability inputs.
 pub fn seal_initialized_state(state_path: &Path) -> Result<()> {
     ryeos_node::init::seal_test_fixture_init_completion(state_path)
         .context("seal fast-fixture initialization transaction")
@@ -625,24 +764,67 @@ pub fn register_config_fixture_bundle(
     Ok(())
 }
 
-/// Write a `kind: node` bundle record pointing at
-/// `bundles/standard`, signed with the publisher key. Use this
-/// when a test needs the standard bundle's runtime/directive YAMLs in
-/// the daemon's effective bundle roots. This mirrors the `standard` bundle
-/// set exactly; UI tests must register `ryeos-ui` explicitly.
+/// Register the central-auth component from the already prepared bundle set.
+pub fn register_central_auth_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::require_bundles_prepared(&["central-auth"])?;
+    register_bundle_record(state_path, fixture, "central-auth")
+}
+
+/// Write a `kind: node` bundle record pointing at `bundles/standard`.
 pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    super::ensure_bundles_fresh();
-    let standard = super::workspace_root().join("bundles/standard");
-    if !standard.is_dir() {
-        anyhow::bail!("bundles/standard does not exist at {}", standard.display());
+    super::require_bundles_prepared(&["core", "standard"])?;
+    register_bundle_record(state_path, fixture, "standard")
+}
+
+/// Register the exact authored Standard composition: Core,
+/// Scheduling, and Standard. Its policy retains Standard's maintenance
+/// obligations while its physical bundle set matches `standard.yaml`.
+pub fn register_standard_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::require_bundles_prepared(&["core", "scheduling", "standard"])?;
+    register_scheduling_bundle(state_path, fixture)?;
+    register_standard_bundle(state_path, fixture)
+}
+
+/// Register every bundle selected by the authored Full profile. The caller's
+/// prepared-artifact gate and the profile inventory share the same source list.
+pub fn register_full_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::require_bundles_prepared(FULL_BUNDLE_INVENTORY)?;
+    for bundle_name in FULL_BUNDLE_INVENTORY {
+        // Core was already registered against the copied state-root bundle
+        // by the base fixture. Preserve that exact root rather than replacing
+        // it with the workspace source tree.
+        if *bundle_name == "core" {
+            continue;
+        }
+        register_bundle_record(state_path, fixture, bundle_name)?;
     }
-    let abs = standard.canonicalize()?;
+    Ok(())
+}
+
+/// Register the separately selected Scheduling bundle without refreshing,
+/// building, or signing workspace artifacts. The caller must first prepare
+/// the published Core+Scheduling bundle set.
+pub fn register_scheduling_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::require_bundles_prepared(&["core", "scheduling"])?;
+    register_bundle_record(state_path, fixture, "scheduling")
+}
+
+fn register_bundle_record(
+    state_path: &Path,
+    fixture: &FastFixture,
+    bundle_name: &str,
+) -> Result<()> {
+    let bundle = super::workspace_root().join("bundles").join(bundle_name);
+    if !bundle.is_dir() {
+        anyhow::bail!("prepared bundle does not exist at {}", bundle.display());
+    }
+    let abs = bundle.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = node_bundle_record_body("standard", &abs)?;
+    let body = node_bundle_record_body(bundle_name, &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
-    fs::write(dir.join("standard.yaml"), signed)?;
+    fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
     Ok(())
 }
 
@@ -697,7 +879,7 @@ pub fn write_authorized_key_with_scopes(
         .join("auth")
         .join("authorized_keys");
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &auth_dir,
         &fp,
         &key_b64,
@@ -709,7 +891,7 @@ pub fn write_authorized_key_with_scopes(
         &lillux::signature::compute_fingerprint(&signer_sk.verifying_key()),
         FAST_FIXTURE_TIME,
         signer_sk,
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
     Ok(())
 }
@@ -747,19 +929,56 @@ pem = "ed25519:{key_b64}"
     Ok(())
 }
 
-fn materialize_seed_node_policy_generation(state_path: &Path, node: &SigningKey) -> Result<()> {
+fn materialize_seed_node_policy_generation(
+    state_path: &Path,
+    node: &SigningKey,
+    selected_profile: FastFixtureProfile,
+) -> Result<()> {
     let source = super::workspace_root()
         .join("bundles")
         .join(AI_DIR)
         .join("node")
         .join("init")
         .join("profiles")
-        .join("full.yaml");
+        .join(format!("{}.yaml", selected_profile.name()));
     let raw = fs::read_to_string(&source)
         .with_context(|| format!("read node init profile {}", source.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let profile: ryeos_app::node_policy::generation::NodeInitProfile = serde_yaml::from_str(&body)
+    let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile = serde_yaml::from_str(&body)
         .with_context(|| format!("parse node init profile {}", source.display()))?;
+    profile
+        .validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
+        .with_context(|| format!("validate selected node init profile {}", source.display()))?;
+    if let Some(expected) = selected_profile.exact_bundles() {
+        anyhow::ensure!(
+            profile.exact_bundles()
+                == expected
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            "selected profile {} exact bundle inventory differs from the fast-fixture selection",
+            selected_profile.name()
+        );
+    }
+    let mut profile = profile;
+    let isolation = profile
+        .policies
+        .get_mut("isolation")
+        .context("selected node init profile has no isolation policy")?;
+    direct_host_isolation(isolation).with_context(|| {
+        format!(
+            "derive direct-host isolation fixture from profile {}",
+            selected_profile.name()
+        )
+    })?;
+    profile
+        .validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
+        .with_context(|| {
+            format!(
+                "validate direct-host fixture policy generation for profile {}",
+                selected_profile.name()
+            )
+        })?;
     let target_dir = state_path.join(AI_DIR).join("node").join("policies");
     fs::create_dir_all(&target_dir).with_context(|| format!("create {}", target_dir.display()))?;
     for (name, policy) in profile.policies() {
@@ -772,7 +991,111 @@ fn materialize_seed_node_policy_generation(state_path: &Path, node: &SigningKey)
     Ok(())
 }
 
-fn authorize_fixture_bundle(state_path: &Path, bundle_name: &str, node: &SigningKey) -> Result<()> {
+/// Derive the fixture isolation member for a node started directly by this
+/// harness.
+///
+/// A direct `ryeosd` child has no protected host-runtime association: no host
+/// service or external controller delegates a writable cgroup subtree to it,
+/// so no per-scope capability (`limits:scope`, `recovery:scope`,
+/// `termination:scope`, ...) can ever qualify and an authored profile that
+/// requires process scopes is refused at startup by its capability floor.
+/// The fixture keeps every other authored isolation field and removes only
+/// the per-scope contract:
+///
+///   * `process_scopes` becomes `unconfigured`;
+///   * every per-scope name leaves `requires_capabilities` (an `any_of`
+///     entry that names only per-scope alternatives is refused rather than
+///     dropped);
+///   * `pid_namespace_nested` proc, which exists only for the scoped nested
+///     sandbox, narrows to `pid_namespace`.
+///
+/// The result is signed by the fixture node key and is never shipped. The
+/// authored profiles keep their floors; tests of per-scope containment need
+/// an administrator-prepared host-backed node, not this harness.
+fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
+    let policy = isolation
+        .get_mut("policy")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("isolation member has no policy mapping")?;
+    let scoped = matches!(
+        policy
+            .get("process_scopes")
+            .and_then(|scopes| scopes.get("mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("required")
+    );
+    if !scoped {
+        return Ok(());
+    }
+    policy.insert(
+        "process_scopes".to_owned(),
+        serde_json::json!({ "mode": "unconfigured" }),
+    );
+    let floor = policy
+        .get_mut("requires_capabilities")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("isolation policy has no requires_capabilities list")?;
+    let mut retained = Vec::with_capacity(floor.len());
+    for entry in floor.drain(..) {
+        match &entry {
+            serde_json::Value::String(name) => {
+                if !lillux::process_control::is_scope_capability(name) {
+                    retained.push(entry);
+                }
+            }
+            serde_json::Value::Object(alternatives) => {
+                let names = alternatives
+                    .get("any_of")
+                    .and_then(serde_json::Value::as_array)
+                    .context("isolation floor entry is neither a name nor an any_of set")?;
+                let kept = names
+                    .iter()
+                    .filter(|name| {
+                        name.as_str()
+                            .is_none_or(|name| !lillux::process_control::is_scope_capability(name))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    !kept.is_empty(),
+                    "isolation floor entry {entry} can be met only by per-scope capabilities"
+                );
+                retained.push(serde_json::json!({ "any_of": kept }));
+            }
+            other => anyhow::bail!("isolation floor entry {other} has an unknown shape"),
+        }
+    }
+    *floor = retained;
+    if let Some(filesystem) = policy
+        .get_mut("filesystem")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if filesystem.get("proc_filesystem").and_then(serde_json::Value::as_str)
+            == Some("pid_namespace_nested")
+        {
+            filesystem.insert(
+                "proc_filesystem".to_owned(),
+                serde_json::Value::String("pid_namespace".to_owned()),
+            );
+        }
+    }
+    let typed: ryeos_engine::isolation::IsolationPolicy =
+        serde_json::from_value(serde_json::Value::Object(policy.clone()))
+            .context("parse direct-host fixture isolation policy")?;
+    ryeos_engine::isolation::IsolationRuntime::validate_policy(&typed)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("validate direct-host fixture isolation policy")?;
+    Ok(())
+}
+
+/// Grant `bundle_name` an explicit (empty) command-registration authority in
+/// the node policy. The policy generation is sealed by initialization, so a
+/// bundle a test installs later must be granted here, before the seal.
+pub fn authorize_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    node: &SigningKey,
+) -> Result<()> {
     let path = state_path
         .join(AI_DIR)
         .join("node")

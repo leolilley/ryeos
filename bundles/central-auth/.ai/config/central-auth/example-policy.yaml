@@ -1,26 +1,26 @@
-# ryeos:signed:2026-07-21T23:12:22Z:6e89d2588d76e1ff29f0296a32f0a5160259f09be3b5d9c4377e873e5a0c39f1:mSBYGAeVNpuaidwog+qHFyXX6CnXB5jqiDxgxmiRB9Q3Kp1Nnz50B/gNKtx7+7d95CBhL16NGmC2mi8X5feUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:16852ede52b05457d08cef2a12fec7704a4a9d194696c788a3cfb88085eb2891:egpec24nTgwfkXXfMp94js2nfDnuc6MiMfGbgm1SxzX8M5mY7096p5YjHqqo6Z3GTpjbpWPgMZ5Tfmo9DN3DAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
-description: "Example central-auth policy for the TV tracker app."
+description: "Example central-auth policy for a sample application."
 
-realm_id: tv-tracker
+realm_id: example-app
 policy:
   roles:
     viewer:
       capabilities:
-        - tv-tracker.ratings.read
+        - example-app.ratings.read
     analyst:
       capabilities:
-        - tv-tracker.ratings.read
-        - tv-tracker.ai.chat
+        - example-app.ratings.read
+        - example-app.ai.chat
     admin:
       capabilities:
-        - tv-tracker.ratings.read
-        - tv-tracker.ratings.write
-        - tv-tracker.ai.chat
-        - tv-tracker.admin
+        - example-app.ratings.read
+        - example-app.ratings.write
+        - example-app.ai.chat
+        - example-app.admin
   allowed_capabilities:
-    - tv-tracker.ratings.read
-    - tv-tracker.ratings.write
-    - tv-tracker.ai.chat
-    - tv-tracker.admin
+    - example-app.ratings.read
+    - example-app.ratings.write
+    - example-app.ai.chat
+    - example-app.admin

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 #[cfg(test)]
 use ryeos_engine::isolation::IsolationDescriptorBoundCommand;
 use ryeos_engine::isolation::{
@@ -168,13 +168,41 @@ impl ScopedProducerAttemptCoordinate {
 /// mount and workspace leases without exposing their implementation to app.
 /// Its destruction cannot itself prove process death; the journal and scope
 /// owner must settle the launched child separately.
+/// Commands promoted together from one root's retained realizations. The
+/// helper variant has one process target: supervisor. Launcher is an input,
+/// and cannot be selected independently by a callback.
+#[derive(Clone)]
+pub enum ScopedProducerScenarioCommands {
+    SubjectMember(IsolationAdmittedCommand),
+    MechanismHelpers {
+        supervisor: IsolationAdmittedCommand,
+        launcher: IsolationAdmittedCommand,
+        probe_source: Arc<
+            crate::operator_external_content::product_qualification::CapturedMechanismProbeSource,
+        >,
+    },
+}
+
+impl ScopedProducerScenarioCommands {
+    fn members(&self) -> Vec<&IsolationAdmittedCommand> {
+        match self {
+            Self::SubjectMember(command) => vec![command],
+            Self::MechanismHelpers {
+                supervisor,
+                launcher,
+                ..
+            } => vec![supervisor, launcher],
+        }
+    }
+}
+
 pub struct ScopedProducerLiveAuthority {
     command: IsolationAdmittedCommand,
     scenario_commands: BTreeMap<
         String,
         (
             ProductProducerRecipeSourceIdentity,
-            IsolationAdmittedCommand,
+            ScopedProducerScenarioCommands,
         ),
     >,
     workspace: lillux::PinnedDirectory,
@@ -245,7 +273,7 @@ impl ScopedProducerLiveAuthority {
             String,
             (
                 ProductProducerRecipeSourceIdentity,
-                IsolationAdmittedCommand,
+                ScopedProducerScenarioCommands,
             ),
         >,
     ) -> Result<Self> {
@@ -255,8 +283,14 @@ impl ScopedProducerLiveAuthority {
                 "scoped producer scenario command has invalid name"
             );
             source.validate()?;
+            if let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = command {
+                probe_source.require_source_identity(scenario, source)?;
+            }
             ensure!(
-                matches!(command, IsolationAdmittedCommand::RealizationMember(_)),
+                command
+                    .members()
+                    .iter()
+                    .all(|member| matches!(member, IsolationAdmittedCommand::RealizationMember(_))),
                 "scoped producer scenario command is not a realization member"
             );
         }
@@ -283,13 +317,72 @@ impl ScopedProducerLiveAuthority {
                     admitted_source == source,
                     "promoted producer command differs from current signed recipe source"
                 );
+                let ScopedProducerScenarioCommands::SubjectMember(command) = command else {
+                    anyhow::bail!("producer subject recipe selected helper authority");
+                };
                 ensure!(
                     command.authority().identity().content_hash == *executable_sha256,
                     "promoted producer command differs from signed executable hash"
                 );
                 Ok(command.clone())
             }
+            ProducerExecutableSource::AdmittedMechanismHelpers {
+                supervisor,
+                launcher,
+            } => {
+                let (admitted_source, commands) = self
+                    .scenario_commands
+                    .get(scenario)
+                    .context("signed mechanism scenario has no promoted helper tuple")?;
+                ensure!(
+                    admitted_source == source,
+                    "promoted helpers differ from signed recipe source"
+                );
+                let ScopedProducerScenarioCommands::MechanismHelpers {
+                    supervisor: admitted_supervisor,
+                    launcher: admitted_launcher,
+                    probe_source,
+                } = commands
+                else {
+                    anyhow::bail!("mechanism recipe selected subject authority");
+                };
+                probe_source.require_source_identity(scenario, source)?;
+                ensure!(
+                    admitted_supervisor.authority().identity().content_hash
+                        == supervisor.executable_sha256
+                        && admitted_launcher.authority().identity().content_hash
+                            == launcher.executable_sha256,
+                    "promoted helpers differ from signed executable hashes"
+                );
+                // A helper tuple is admission only. Trusted bootstrap preparation
+                // must succeed before this command may be released.
+                Ok(admitted_supervisor.clone())
+            }
         }
+    }
+
+    /// Borrow source provenance only. This does not expose a bootstrap,
+    /// native program, input descriptors or a process launch permission.
+    pub fn mechanism_probe_source(
+        &self,
+        scenario: &str,
+        source: &ProductProducerRecipeSourceIdentity,
+    ) -> Result<
+        &crate::operator_external_content::product_qualification::CapturedMechanismProbeSource,
+    > {
+        let (retained_source, commands) = self
+            .scenario_commands
+            .get(scenario)
+            .context("mechanism scenario has no retained source authority")?;
+        ensure!(
+            retained_source == source,
+            "mechanism source differs from signed recipe"
+        );
+        let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = commands else {
+            anyhow::bail!("mechanism source selected a subject command");
+        };
+        probe_source.require_source_identity(scenario, source)?;
+        Ok(probe_source)
     }
 
     pub fn workspace(&self) -> &lillux::PinnedDirectory {
@@ -395,7 +488,10 @@ impl ScopedProducerLiveAuthority {
                 ProducerStdinSource::InteractiveVerifierChannel { .. },
             ) => {
                 let mut retained_member = false;
-                for (_, command) in self.scenario_commands.values() {
+                for (_, commands) in self.scenario_commands.values() {
+                    let ScopedProducerScenarioCommands::SubjectMember(command) = commands else {
+                        continue;
+                    };
                     if command.same_binding_as(selected_command)? {
                         retained_member = true;
                         break;
@@ -514,6 +610,12 @@ impl ScopedProducerAuthorityRegistry {
     ) -> Result<ScopedProducerAuthorityRegistration> {
         // Recheck at insertion, not only when the key was constructed.
         let key = ScopedProducerAuthorityKey::new(key.root_thread_id, key.launch_owner)?;
+        for (_, commands) in authority.scenario_commands.values() {
+            if let ScopedProducerScenarioCommands::MechanismHelpers { probe_source, .. } = commands
+            {
+                probe_source.require_root_key(&key)?;
+            }
+        }
         let mut state = self
             .state
             .lock()
@@ -716,7 +818,7 @@ mod tests {
     fn recipe_request_has_only_signed_arguments_input_and_environment() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v5",
+            "schema": "ryeos.product_producer_recipe.v6",
             "executable_source": {"kind":"admitted_verifier_executable"},
             "argv": ["--scenario-driver"],
             "stdin_source": {"kind":"signed_verifier_parameters"},
@@ -875,6 +977,7 @@ mod tests {
                 std::ffi::OsStr::new("config.toml"),
                 b"model = 'fixture'\n",
                 0o600,
+                crate::APP_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -891,6 +994,7 @@ mod tests {
                 std::ffi::OsStr::new("environments.toml"),
                 b"[commands]\n",
                 0o600,
+                crate::APP_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -986,7 +1090,7 @@ mod tests {
     fn interactive_realization_recipe_refuses_a_verifier_command() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v5",
+            "schema": "ryeos.product_producer_recipe.v6",
             "executable_source": {
                 "kind": "admitted_realization_member",
                 "realization_id": "codex_runtime",
@@ -1043,7 +1147,7 @@ mod tests {
         .unwrap();
         let allocation: lillux::ProcessScopeAllocation =
             serde_json::from_value(serde_json::json!({
-                "version": 2,
+                "version": 3,
                 "control_timeout": {"secs": 1, "nanos": 0},
                 "configuration": {"version": 3, "backend": {
                     "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"

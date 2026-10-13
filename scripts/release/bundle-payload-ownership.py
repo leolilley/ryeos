@@ -18,6 +18,30 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 BUNDLE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MAX_BUNDLES = 256
 MAX_PAYLOADS = 256
+HANDLER_FEATURES_BY_BINARY = {
+    "rye-parser-yaml-document": ["basic-parsers"],
+    "rye-parser-yaml-header-document": ["basic-parsers"],
+    "rye-parser-regex-kv": ["basic-parsers"],
+    "rye-composer-extends-chain": ["extends-composer"],
+    "rye-composer-identity": ["core-handlers"],
+    "ryeos-directive-launch-preparer": ["directive-handlers"],
+    "ryeos-graph-effective-validator": ["graph-handlers"],
+    "ryeos-graph-launch-preparer": ["graph-handlers"],
+    "ryeos-graph-execution-evidence": ["graph-handlers"],
+    "ryeos-direct-execution-evidence": ["core-handlers"],
+    "ryeos-scoped-qualification-execution-evidence": ["core-handlers"],
+}
+
+
+def required_features(package, binary):
+    handler_features = HANDLER_FEATURES_BY_BINARY.get(binary)
+    if handler_features is not None:
+        if package != "ryeos-handler-bins":
+            raise ValueError(f"handler binary {binary!r} has unexpected Cargo package {package!r}")
+        return handler_features
+    if package != "ryeos-handler-bins":
+        return []
+    raise ValueError(f"no explicit Cargo feature composition for owned handler binary {binary!r}")
 
 
 class StrictLoader(yaml.SafeLoader):
@@ -111,7 +135,8 @@ def load(repository_root: Path, config_path=None):
             previous_binary = binary
             seen_binaries.add(binary)
             records.append({"bundle": name, "binary": binary, "cargo_package": package,
-                            "build_class": payload["build_class"], "bundle_sets": sets})
+                            "build_class": payload["build_class"], "bundle_sets": sets,
+                            "required_features": required_features(package, binary)})
     if len(records) > MAX_PAYLOADS:
         raise ValueError("payload ownership exceeds its global payload bound")
     identity = hashlib.sha256(json.dumps(ownership, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

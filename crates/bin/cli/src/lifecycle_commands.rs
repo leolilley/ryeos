@@ -9,7 +9,9 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
+//!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
+//!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
@@ -58,6 +60,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         summary: "Initialize RyeOS with an interactive first-contact ceremony",
         category: "lifecycle",
     },
+    #[cfg(feature = "model-provider-setup")]
     LocalCommandDescriptor {
         tokens: &["setup"],
         summary: "Configure a verified model provider and default model",
@@ -84,8 +87,23 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "allow-restart"],
+        summary: "Clear a node's restart inhibition after resolving why it stopped itself",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "capacity", "reissue"],
+        summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "reset", "execution-history"],
         summary: "Retire the local execution-history epoch",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "reset", "execution-history-scratch"],
+        summary: "Clear execution-history reset scratch the next reset cannot settle",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -166,6 +184,7 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
+        #[cfg(feature = "model-provider-setup")]
         ("setup", _) => {
             run_setup_command(&argv[1..], console)
                 .await
@@ -184,8 +203,22 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("allow-restart")) => {
+            run_node_allow_restart_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
+            run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
             run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("reset"))
+            if argv.get(2).map(String::as_str) == Some("execution-history-scratch") =>
+        {
+            run_execution_history_scratch_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
@@ -260,6 +293,14 @@ struct NodeHostSetupArgs {
     /// association for the current account and node.
     #[arg(long)]
     confirm: bool,
+    /// Finite enclosing memory ceiling for the node and its worker scopes.
+    #[arg(long)]
+    node_memory_bytes: u64,
+
+    /// Finite enclosing task ceiling for the node and its worker scopes.
+    #[arg(long)]
+    node_processes: u32,
+
 }
 
 fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) -> Result<()> {
@@ -269,6 +310,11 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
     if !args.confirm {
         anyhow::bail!("host setup requires --confirm");
     }
+    let node_resources = lillux::ProcessScopeResourceLimits {
+        maximum_memory_bytes: args.node_memory_bytes,
+        maximum_processes: args.node_processes,
+    };
+    node_resources.validate().map_err(anyhow::Error::msg)?;
     let existing = ryeos_node::NodeConfig::load_local(args.app_root)?;
     ryeos_node::require_initialized(&existing.app_root)?;
     let config = ryeos_node::supervision::configure_host_endpoints(
@@ -288,6 +334,8 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
         config.app_root.into_os_string(),
         "--controller-account-json".into(),
         serde_json::to_string(&account)?.into(),
+        "--node-resources-json".into(),
+        serde_json::to_string(&node_resources)?.into(),
     ];
     lillux::run_as_administrator(&daemon, &arguments)
         .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
@@ -333,7 +381,7 @@ impl NodePolicyGenerationResetArgs {
         if !self.confirm {
             anyhow::bail!("replacing the complete node-policy generation requires --confirm");
         }
-        ryeos_app::node_policy::generation::validate_init_profile_name(&self.node_profile)
+        ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
             .context("validate node init profile name")
     }
 }
@@ -346,7 +394,7 @@ fn run_node_policy_generation_reset_command(
         return Ok(());
     };
     args.validate()?;
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
@@ -409,17 +457,17 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let Some(args) = parse_or_render_help::<NodePolicyApplyArgs>(argv, console)? else {
         return Ok(());
     };
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node location for policy apply")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("node policy apply requires the daemon to be stopped")?;
 
-    let table = ryeos_app::node_policy::NodePolicyTable::new();
+    let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     table
         .get(&args.section)
         .with_context(|| format!("unknown node-policy section `{}`", args.section))?;
@@ -437,11 +485,11 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         }
     }
 
-    let identity = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
-    let update = ryeos_app::node_policy::generation::prepare_policy_member_replacement(
+    let update = ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
         &config.app_root,
         &trust_store,
         &table,
@@ -449,7 +497,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         body,
         &args.source,
     )?;
-    let policy_dir = ryeos_app::node_policy::generation::publish_policy_update(
+    let policy_dir = ryeos_node_runtime::node_policy::generation::publish_policy_update(
         &config.app_root,
         &update,
         &identity,
@@ -485,7 +533,7 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
 #[command(
     name = "ryeos node reset replay-indexes",
     about = "Activate the current replay-index contract",
-    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. The immediate predecessor retires dispatch-effect rows only; skipped replay generations retire all replay-index rows, including provider-call rows. Current indexes are unchanged. Credentials, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. A stale epoch retires every replay-index row, including provider-call rows, so provider-call idempotence keys are discarded: an interrupted provider call is not recognized as already made. Run it only with no execution in flight; otherwise use the execution-history reset. Current indexes are unchanged. Credentials, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
     no_binary_name = true
 )]
 struct NodeReplayResetArgs {
@@ -509,26 +557,24 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     if !args.confirm {
         anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node configuration for replay-index reset")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("replay-index reset requires the daemon to be stopped")?;
-    let path = config
-        .runtime_state_dir()
-        .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
-    let (db, report) = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
-        .with_context(|| format!("activate replay indexes in {}", path.display()))?;
-    drop(db);
+    let activation = ryeos_app::offline_native::reset_replay_indexes(&config, &_state_lock)
+        .context("activate current replay indexes through the offline native host")?;
+    let (path, report, facts) = (activation.database, activation.report, activation.facts);
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
             "replay_indexes": report,
+            "native_connections": facts.tickets_issued,
         }))?;
     } else {
         let mut status =
@@ -550,9 +596,6 @@ fn replay_reset_summary(report: ryeos_state::operational::ReplayIndexResetReport
     use ryeos_state::operational::ReplayIndexResetScope;
     let scope = match report.scope {
         ReplayIndexResetScope::Unchanged => "unchanged",
-        ReplayIndexResetScope::DispatchEffects => {
-            "retire dispatch-effect rows; retain provider-call rows"
-        }
         ReplayIndexResetScope::AllReplayRecords => {
             "retire all replay rows, including provider-call rows"
         }
@@ -598,18 +641,28 @@ fn run_node_external_content_reset_command(
     if !args.dry_run && !args.confirm {
         anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node configuration for external-content binding reset")?;
-    let bindings =
-        ryeos_app::operator_external_content::discard_binding_heads_offline(&config, args.dry_run)?;
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("external-content binding reset requires the daemon to be stopped")?;
+    let reset = ryeos_app::offline_native::reset_external_content_bindings(
+        &config,
+        &state_lock,
+        args.dry_run,
+    )
+    .context("reset external-content bindings through the offline native host")?;
+    let bindings = reset.bindings;
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": if args.dry_run { "inspected" } else { "retired" },
             "bindings": bindings,
             "requires_reimport": !args.dry_run,
+            "native_connections": reset.facts.tickets_issued,
         }))?;
     } else if args.dry_run {
         console.text(&format!(
@@ -651,19 +704,19 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     if !args.confirm {
         anyhow::bail!("resetting every authorized key requires --confirm");
     }
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: args.app_root,
         ..Default::default()
     })
     .context("load local node configuration for authorization reset")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
     )
     .context("authorization reset requires the daemon to be stopped")?;
 
-    let node = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for authorization reset")?;
-    let operator = ryeos_app::identity::NodeIdentity::load(&config.operator_signing_key_path)
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(&config.operator_signing_key_path)
         .context("load operator identity for authorization reset")?;
     let parent = config
         .authorized_keys_dir
@@ -691,7 +744,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         &base64::engine::general_purpose::STANDARD,
         operator.verifying_key().as_bytes(),
     );
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &staging,
         operator.fingerprint(),
         &operator_key,
@@ -700,7 +753,7 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         operator.fingerprint(),
         &lillux::time::iso8601_now(),
         node.signing_key(),
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
     lillux::sync_tree_durable(&staging)
         .context("durably flush reset authorized-key namespace before publication")?;
@@ -743,13 +796,111 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     Ok(())
 }
 
+// ── ryeos node reset execution-history-scratch ───────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node reset execution-history-scratch",
+    about = "Clear execution-history reset scratch the next reset cannot settle",
+    long_about = "Remove every offline execution-history reset record, inspection copy, reset temporary and inert staged operation file, and a thread-history discard marker of a retired schema. The daemon must be stopped. An ordinary `ryeos node reset execution-history` settles an interrupted attempt by itself; use this when it refuses and names this command. The staged operation of an operation State still marks active is kept, so the next reset resumes it. Names outside the reset's own grammar in its directories, and entries not of the kind their name declares, are left in place and reported; a reset still refuses while they remain, so remove them by hand. --dry-run only inspects.",
+    no_binary_name = true
+)]
+struct ExecutionHistoryScratchArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that the reset scratch is removed.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Report what would be removed without removing anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_execution_history_scratch_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<ExecutionHistoryScratchArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("clearing execution-history reset scratch requires --confirm");
+    }
+    let report = ryeos_app::execution_history_reset::repair_execution_history_scratch(
+        &ryeos_app::execution_history_reset::ExecutionHistoryScratchRepairOptions {
+            app_root: args.app_root,
+            dry_run: args.dry_run,
+        },
+    )
+    .context("execution-history scratch repair failed")?;
+    if args.json {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    let location = |location: ryeos_app::execution_history_reset::ScratchLocation| match location {
+        ryeos_app::execution_history_reset::ScratchLocation::Ledger => "ledger",
+        ryeos_app::execution_history_reset::ScratchLocation::Inspections => "inspections",
+        ryeos_app::execution_history_reset::ScratchLocation::RuntimeNamespace => "runtime",
+    };
+    let list = |entries: &[ryeos_app::execution_history_reset::ScratchEntry]| {
+        if entries.is_empty() {
+            "none".to_owned()
+        } else {
+            entries
+                .iter()
+                .map(|entry| format!("{}/{}", location(entry.location), entry.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let mut status = crate::tty::StatusBanner::new(
+        if report.left.is_empty() { crate::tty::Tone::Success } else { crate::tty::Tone::Warning },
+        if report.dry_run {
+            "EXECUTION HISTORY SCRATCH PREVIEW"
+        } else {
+            "EXECUTION HISTORY SCRATCH CLEARED"
+        },
+    );
+    status.detail = Some(report.app_root.display().to_string());
+    status.rows = vec![
+        crate::tty::Row::key_value(if report.dry_run { "would remove" } else { "removed" }, list(&report.removed)),
+        crate::tty::Row::key_value(
+            "left in place",
+            if report.left.is_empty() {
+                list(&report.left)
+            } else {
+                format!(
+                    "{}; a reset still refuses while these remain: remove them by hand",
+                    list(&report.left)
+                )
+            },
+        ),
+        crate::tty::Row::key_value(
+            "retired discard marker",
+            report
+                .retired_marker_schema
+                .map_or_else(|| "none".to_owned(), |schema| format!("schema {schema} cleared")),
+        ),
+        crate::tty::Row::key_value(
+            "active operation kept",
+            report.active_operation.clone().unwrap_or_else(|| "none".to_owned()),
+        ),
+    ];
+    console.success(&status)?;
+    Ok(())
+}
+
 // ── ryeos node reset execution-history ───────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos node reset execution-history",
     about = "Retire the local execution-history epoch while the daemon is stopped",
-    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, activate stale replay indexes, and publish an empty current thread projection. Replay activation retires dispatch-effect rows for the immediate predecessor, or all replay rows including provider-call rows for skipped generations. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
+    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, activate stale replay indexes, and publish an empty current thread projection. Replay activation of a stale epoch retires every replay row, including provider-call rows. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
     no_binary_name = true
 )]
 struct ExecutionHistoryResetArgs {
@@ -784,6 +935,14 @@ struct ExecutionHistoryResetArgs {
     /// Exact current runtime schema epoch for an idempotent hosted cut.
     #[arg(long = "schema-cut-to", requires = "schema_cut_from")]
     schema_cut_to: Option<u32>,
+
+    /// Attest that this host has rebooted since the Runtime store's process
+    /// scope lifetime fence was written. A fence this binary cannot read is
+    /// then discarded instead of refusing the reset; where its boot id is
+    /// still readable it must differ from the current boot. Recorded in the
+    /// report.
+    #[arg(long = "discard-unreadable-lifetime-fence-after-reboot")]
+    discard_unreadable_lifetime_fence_after_reboot: bool,
 }
 
 impl ExecutionHistoryResetArgs {
@@ -826,9 +985,23 @@ fn run_execution_history_reset_command(
                     to,
                 },
             ),
+        discard_unreadable_lifetime_fence_after_reboot: args.discard_unreadable_lifetime_fence_after_reboot,
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
+    #[cfg(feature = "scheduling")]
+    let scheduler_reset = ryeos_scheduler_service::SchedulerHistoryReset::new();
+    #[cfg(feature = "scheduling")]
+    let scheduler_participant: Option<
+        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    > = Some(
+        &scheduler_reset
+            as &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    );
+    #[cfg(not(feature = "scheduling"))]
+    let scheduler_participant: Option<
+        &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
+    > = None;
     let report = match progress.as_mut() {
         Some(progress) => {
             let mut observer =
@@ -837,10 +1010,14 @@ fn run_execution_history_reset_command(
                 };
             ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
                 &options,
+                scheduler_participant,
                 &mut observer,
             )
         }
-        None => ryeos_app::execution_history_reset::run_execution_history_reset(&options),
+        None => ryeos_app::execution_history_reset::run_execution_history_reset(
+            &options,
+            scheduler_participant,
+        ),
     }
     .context("offline execution-history reset failed")?;
     if args.json {
@@ -898,6 +1075,47 @@ fn run_execution_history_reset_command(
         crate::tty::Row::key_value(
             "old projection stores",
             report.projection.superseded_instances_deleted.to_string(),
+        ),
+        crate::tty::Row::key_value(
+            "unreadable lifetime fence",
+            match &report.lifetime_fence_discard {
+                None => "none".to_owned(),
+                Some(discard) => match (&discard.stored_boot_id, discard.boot_id_verified) {
+                    (Some(boot_id), true) => format!(
+                        "discarded after attested reboot; stored boot {boot_id} differs from the current boot ({})",
+                        discard.reason
+                    ),
+                    _ => format!(
+                        "discarded on the operator's reboot attestation alone; its boot id is unreadable ({})",
+                        discard.reason
+                    ),
+                },
+            },
+        ),
+        crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
+        crate::tty::Row::key_value(
+            "interrupted attempts settled",
+            if report.recovered.is_empty() {
+                "none".to_owned()
+            } else {
+                report
+                    .recovered
+                    .iter()
+                    .map(|recovered| {
+                        let applied = match recovered.applied {
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::Applied) => ", applied",
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::Resumed) => ", resumed",
+                            Some(ryeos_app::execution_history_reset::RecoveredApplied::NotApplied) | None => "",
+                        };
+                        let outcome = match recovered.outcome {
+                            ryeos_app::execution_history_reset::RecoveredReleaseOutcome::Completed => "completed",
+                            ryeos_app::execution_history_reset::RecoveredReleaseOutcome::Abandoned => "abandoned",
+                        };
+                        format!("{} ({outcome}{applied})", recovered.operation_id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
         ),
     ];
     if report.performed {
@@ -1151,6 +1369,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
 
 // ── ryeos setup ────────────────────────────────────────────────────
 
+#[cfg(feature = "model-provider-setup")]
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos setup",
@@ -1163,6 +1382,7 @@ struct SetupArgs {
     app_root: Option<PathBuf>,
 }
 
+#[cfg(feature = "model-provider-setup")]
 async fn run_setup_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<SetupArgs>(argv, console)? else {
         return Ok(());
@@ -1236,6 +1456,161 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
         render_lifecycle_status(console, &status)?;
     }
     Ok(())
+}
+
+// ── ryeos node allow-restart ────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node allow-restart",
+    about = "Clear the restart inhibition a node records when it stops itself to avoid a \
+             restart loop. Resolve the cause first: `ryeos node doctor` shows it.",
+    no_binary_name = true
+)]
+struct NodeAllowRestartArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_allow_restart_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAllowRestartArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    // A running daemon holds the state lock, so the clear refuses while the
+    // node is up and cannot race a stop that is recording an inhibition.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+    )
+    .context("allow-restart requires the node to be stopped")?;
+    let cleared = ryeos_node::lifecycle_marker::clear_restart_inhibition(
+        &app_root,
+        &state_lock,
+        "ryeos node allow-restart",
+    )?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "cleared": cleared }))?;
+        return Ok(());
+    }
+    let status = match &cleared {
+        Some(record) => {
+            let mut banner =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RESTART ALLOWED");
+            banner.detail = Some(format!(
+                "cleared `{}` recorded at {}; the next start may proceed",
+                record.reason, record.recorded_at
+            ));
+            banner
+        }
+        None => {
+            let mut banner =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "NO RESTART INHIBITION");
+            banner.detail = Some(format!("{} has nothing to clear", app_root.display()));
+            banner
+        }
+    };
+    console.status(&status)?;
+    Ok(())
+}
+
+// ── ryeos node capacity reissue ─────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node capacity reissue",
+    about = "Open the next native-capacity epoch on a stopped node. The signed policy must \
+             pre-authorise operator re-issuance; the operator key signs a document naming \
+             the exact account state it renews. Restart inhibition is not cleared.",
+    no_binary_name = true
+)]
+struct NodeCapacityReissueArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Why the operator opens another epoch; recorded in the signed document
+    /// and the evidence log.
+    #[arg(long)]
+    reason: String,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_capacity_reissue_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeCapacityReissueArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    // A running daemon holds the state lock, so re-issuance refuses while the
+    // node is up: the live account owner is the only writer of a live node.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+    )
+    .context("capacity reissue requires the node to be stopped")?;
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = zeroize::Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)
+            .with_context(|| format!("read operator key {}", operator_key_path.display()))?,
+    )?);
+    let operator_key = {
+        use lillux::crypto::DecodePrivateKey as _;
+        lillux::crypto::SigningKey::from_pkcs8_pem(operator_pem.as_str())
+            .context("decode operator signing key")?
+    };
+    let report = ryeos_node::native_capacity::reissue_capacity(
+        ryeos_node::native_capacity::ReissueRequest {
+            app_root: &app_root,
+            state_lock: &state_lock,
+            operator_key: &operator_key,
+            reason: &args.reason,
+            command: "ryeos node capacity reissue",
+        },
+    )?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "reissue": report }))?;
+        return Ok(());
+    }
+    console.status(&capacity_reissue_banner(&app_root, &report))?;
+    Ok(())
+}
+
+fn capacity_reissue_banner(
+    app_root: &std::path::Path,
+    report: &ryeos_node::native_capacity::ReissueReport,
+) -> crate::tty::StatusBanner {
+    let mut banner = if report.already_applied {
+        let mut banner = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Neutral,
+            format!("ALREADY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+        );
+        banner.detail = Some("the account already carries this re-issuance; nothing new was written".to_owned());
+        banner
+    } else {
+        crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            format!("CAPACITY RE-ISSUED: epoch {} → {}", report.from_epoch, report.to_epoch),
+        )
+    };
+    banner.rows.push(crate::tty::Row::key_value("app root", app_root.display().to_string()));
+    banner.rows.push(crate::tty::Row::key_value("document", report.document_digest.clone()));
+    if let Some(settled) = &report.settled_incarnation {
+        banner.rows.push(crate::tty::Row::key_value("settled incarnation", settled.clone()));
+    }
+    banner.rows.push(crate::tty::Row::text(
+        "restart inhibition is not cleared; run `ryeos node allow-restart` when the cause is resolved",
+    ));
+    banner
 }
 
 // ── ryeos node doctor ───────────────────────────────────────────────
@@ -1455,6 +1830,60 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         }
     }
 
+    // What the node contains and what its host proves, as recorded and
+    // signed by the daemon at its last start, beside a fresh view of the host
+    // from this shell. The shell's own limits (for example locked memory)
+    // can differ from the daemon's, so only the recorded report decides.
+    // A node that stopped itself to avoid a restart loop refuses every start
+    // until an operator clears this record.
+    match ryeos_node::lifecycle_marker::read_restart_inhibition(
+        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
+    ) {
+        Ok(None) => checks.push(check("restart_inhibit", OK, serde_json::json!({}))),
+        Ok(Some(record)) => checks.push(check(
+            "restart_inhibit",
+            FAIL,
+            serde_json::json!({
+                "record": record,
+                "message": record.refusal(),
+                "fix": "resolve the cause, then run: ryeos node allow-restart",
+            }),
+        )),
+        Err(error) => checks.push(check(
+            "restart_inhibit",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "fix": "the record is unreadable; ryeos node allow-restart removes it",
+            }),
+        )),
+    }
+
+    let capability_report = if initialized {
+        let (status, detail, report) = inspect_capability_report(&config.app_root);
+        checks.push(check("capabilities", status, detail));
+        report
+    } else {
+        checks.push(check(
+            "capabilities",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        None
+    };
+
+    // The native-capacity account as its anchor on disk reports it. Reading is
+    // not recovery: a torn or foreign record is reported, never repaired here.
+    if initialized {
+        checks.push(native_capacity_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "native_capacity",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // Use the same policy loader as daemon and offline execution. Disabled is
     // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
     if initialized {
@@ -1523,6 +1952,45 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     } else {
         checks.push(check(
             "bundle_transactions",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
+    // Execution-history reset scratch: an interrupted reset leaves it. The
+    // next reset settles it while the node is stopped; the warning names the
+    // explicit repair for what that reset cannot attribute.
+    if initialized {
+        let repair = ryeos_app::execution_history_reset::execution_history_scratch_repair_command();
+        match ryeos_app::execution_history_reset::inspect_execution_history_scratch(&config.app_root) {
+            Ok(scratch) if scratch.is_empty() => {
+                checks.push(check("reset_scratch", OK, serde_json::json!({})))
+            }
+            Ok(scratch) => checks.push(check(
+                "reset_scratch",
+                WARN,
+                serde_json::json!({
+                    "ledger": scratch.ledger,
+                    "inspections": scratch.inspections,
+                    "runtime": scratch.runtime,
+                    "note": "an interrupted execution-history reset left scratch (or a reset is running now)",
+                    "fix": format!(
+                        "stop the node. To only inspect, run `ryeos node reset execution-history-scratch --dry-run`. To settle, run `ryeos node reset execution-history`: any reset, --dry-run included, settles interrupted attempts. If it refuses, run `{repair}`, or remove by hand the foreign name the refusal names"
+                    ),
+                }),
+            )),
+            Err(error) => checks.push(check(
+                "reset_scratch",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": format!("if the next execution-history reset refuses, run `{repair}`"),
+                }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "reset_scratch",
             NA,
             serde_json::json!({ "note": "not initialized" }),
         ));
@@ -1607,7 +2075,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
-        let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&config.app_root)
+        let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&config.app_root)
             .map_err(|error| error.to_string());
         let snapshot = match &isolation {
             Ok(runtime) => crate::node_descriptors::load_verified_snapshot_with_trust(
@@ -1701,6 +2169,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
             section
                 .rows
                 .push(crate::tty::Row::key_value(&c.name, &c.status).with_tone(tone));
+            if c.name == "capabilities" {
+                continue;
+            }
             if c.status != OK || c.name == "isolation" {
                 section.rows.push(
                     crate::tty::Row::text(format!("{}: {}", c.name, c.detail))
@@ -1711,6 +2182,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         let mut document =
             crate::tty::Document::titled(format!("NODE DOCTOR — {}", config.app_root.display()));
         document.sections.push(section);
+        document.sections.push(capability_section(
+            capability_report.as_ref(),
+            checks.iter().find(|c| c.name == "capabilities"),
+        ));
         console.document(&document)?;
         if ok {
             let mut summary =
@@ -1732,6 +2207,346 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     } else {
         Err(ReportedLocalFailure("node doctor found failing checks".to_string()).into())
     }
+}
+
+/// Recorded, signed capability report plus a fresh probe-free generation
+/// check. A refused floor fails the doctor; a missing or stale report warns.
+/// Doctor row for the native-capacity account: healthy with its summary,
+/// a warning with the cure when the allowance is spent and the signed policy
+/// lets the operator re-issue, a failure when it does not.
+fn native_capacity_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    match ryeos_node::native_capacity::inspect_capacity_account(app_root) {
+        Ok(None) => check(
+            "native_capacity",
+            NA,
+            serde_json::json!({ "note": "no capacity issuance; `ryeos init` issues it" }),
+        ),
+        Ok(Some(summary)) if summary.incarnations_remaining > 0 => {
+            check("native_capacity", OK, serde_json::json!({ "account": summary }))
+        }
+        Ok(Some(summary)) if summary.renewal.operator_reissue => check(
+            "native_capacity",
+            WARN,
+            serde_json::json!({
+                "account": summary,
+                "message": "native capacity account exhausted: no incarnation remains in this epoch",
+                "fix": "ryeos node capacity reissue --reason \"...\" (then ryeos node allow-restart if a restart inhibition is recorded)",
+            }),
+        ),
+        Ok(Some(summary)) => check(
+            "native_capacity",
+            FAIL,
+            serde_json::json!({
+                "account": summary,
+                "message": "native capacity account exhausted and the signed policy forbids operator re-issuance",
+                "fix": "re-provision the node under a policy that pre-authorises renewal",
+            }),
+        ),
+        Err(error) => check(
+            "native_capacity",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "fix": "the account or its anchor is unreadable or foreign; re-provision the node, do not repair records by hand",
+            }),
+        ),
+    }
+}
+
+fn inspect_capability_report(
+    app_root: &std::path::Path,
+) -> (
+    &'static str,
+    serde_json::Value,
+    Option<ryeos_node::capability_report::SignedNodeCapabilityReport>,
+) {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    use ryeos_node::capability_report::SignedNodeCapabilityReport;
+
+    let shell = lillux::process_control::HostFacts::observe(
+        lillux_resident_quote().unwrap_or_default(),
+        app_root,
+    );
+    let shell_view = shell.capabilities();
+    let shell_json = serde_json::json!({
+        "note": "observed from this shell, whose limits can differ from the daemon's",
+        "provided": shell_view.provided,
+        "missing": shell_view.missing,
+        "host": shell,
+    });
+    match SignedNodeCapabilityReport::read_verified(app_root) {
+        Ok(None) => (
+            WARN,
+            serde_json::json!({
+                "note": "no capability report recorded yet; the daemon writes one at each start",
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "shell": shell_json,
+            }),
+            None,
+        ),
+        Err(error) => (
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "shell": shell_json,
+            }),
+            None,
+        ),
+        Ok(Some(signed)) => {
+            // The same policy generation digest the daemon recorded.
+            let policy_generation =
+                ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+                    .ok()
+                    .and_then(|runtime| runtime.digest().map(str::to_owned));
+            let staleness = signed
+                .staleness(policy_generation.as_deref())
+                .map_err(|error| format!("{error:#}"));
+            let status = match (&staleness, signed.report.floor.admitted) {
+                (_, false) => FAIL,
+                (Ok(None), true) => OK,
+                (Ok(Some(_)) | Err(_), true) => WARN,
+            };
+            let detail = serde_json::json!({
+                "path": SignedNodeCapabilityReport::path(app_root),
+                "digest": signed.digest,
+                "signer": signed.signer,
+                "generated_at": signed.report.generated_at,
+                "current": match &staleness {
+                    Ok(None) => serde_json::json!(true),
+                    Ok(Some(reason)) => serde_json::json!({ "stale": reason }),
+                    Err(error) => serde_json::json!({ "error": error }),
+                },
+                "composition": signed.report.composition,
+                "daemon_digest": signed.report.daemon_digest,
+                "exposure": signed.report.exposure,
+                "app_root_storage": app_root_storage_json(&signed.report),
+                "floor": signed.report.floor,
+                "provided": signed.report.provided,
+                "missing": signed.report.missing,
+                "capacity": signed.report.capacity,
+                // The basis the report holds, as of the daemon's start: the
+                // one its reservation established, or else only the plan.
+                "residency_basis": match (&signed.report.established_residency, &signed.report.host.residency) {
+                    (Some(proof), _) => serde_json::json!({
+                        "name": proof.capability_name(),
+                        "stage": "established",
+                    }),
+                    (None, Some(proof)) => serde_json::json!({
+                        "name": proof.capability_name(),
+                        "stage": "planned",
+                    }),
+                    (None, None) => serde_json::Value::Null,
+                },
+                "residency_now": residency_now(&signed.report),
+                "residency_planned": signed.report.host.residency,
+                "enclosure_exit": signed.report.host.enclosure_exit,
+                "enclosure_exit_refusal": signed.report.host.enclosure_exit_refusal,
+                "residency_established": signed.report.established_residency,
+                "report": signed.report,
+                "shell": shell_json,
+            });
+            (status, detail, Some(signed))
+        }
+    }
+}
+
+/// Whether the residency basis the report recorded at the daemon's start
+/// still holds now, checked from this shell: a swap-absent basis ends with
+/// any later `swapon`, and a swap limit can be lifted. The shell's cgroup can
+/// differ from the daemon's, so a swap-limit answer describes this shell.
+fn residency_now(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
+    let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) else {
+        return serde_json::Value::Null;
+    };
+    match proof.confirm_swap_unreachable() {
+        Ok(()) => serde_json::json!({ "holds": true, "name": proof.capability_name() }),
+        Err(reason) => serde_json::json!({ "holds": false, "name": proof.capability_name(), "reason": reason }),
+    }
+}
+
+/// The app root's storage as the report recorded it, with the decision on
+/// durable storage.
+fn app_root_storage_json(report: &ryeos_node::capability_report::NodeCapabilityReport) -> serde_json::Value {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    serde_json::json!({
+        "facts": report.host.app_root_storage,
+        "decision": match (report.provided.get(STORAGE_DURABLE_ROOT), report.missing.get(STORAGE_DURABLE_ROOT)) {
+            (Some(evidence), _) => serde_json::json!({ "provided": evidence }),
+            (None, Some(reason)) => serde_json::json!({ "missing": reason }),
+            (None, None) => serde_json::Value::Null,
+        },
+    })
+}
+
+/// One line for the app root's storage: the grade and basis that prove it
+/// durable, or the reason nothing does.
+fn app_root_storage_line(report: &ryeos_node::capability_report::NodeCapabilityReport) -> (String, crate::tty::Tone) {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    match (report.provided.get(STORAGE_DURABLE_ROOT), report.missing.get(STORAGE_DURABLE_ROOT)) {
+        (Some(evidence), _) => (
+            format!("durable ({}): {}", evidence.source.as_str(), evidence.basis),
+            crate::tty::Tone::Secondary,
+        ),
+        (None, Some(reason)) => (format!("not durable: {reason}"), crate::tty::Tone::Warning),
+        (None, None) => ("not decided".to_owned(), crate::tty::Tone::Warning),
+    }
+}
+
+fn lillux_resident_quote() -> Option<u64> {
+    ryeos_node::capability_report::resident_region_bytes().ok()
+}
+
+fn capability_section(
+    report: Option<&ryeos_node::capability_report::SignedNodeCapabilityReport>,
+    check: Option<&ryeos_core_tools::actions::doctor::CheckResult>,
+) -> crate::tty::Section {
+    let mut section = crate::tty::Section::named("capabilities");
+    let Some(signed) = report else {
+        let note = check
+            .map(|check| check.detail.to_string())
+            .unwrap_or_else(|| "not inspected".to_owned());
+        section.rows.push(
+            crate::tty::Row::text(format!("no verified capability report: {note}"))
+                .with_tone(crate::tty::Tone::Warning),
+        );
+        return section;
+    };
+    let report = &signed.report;
+    let composition = &report.composition;
+    section.rows.push(crate::tty::Row::key_value(
+        "profile",
+        composition.profile.as_deref().unwrap_or("unrecorded"),
+    ));
+    section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
+    section.rows.push(crate::tty::Row::key_value(
+        "compiled features",
+        &if composition.compiled_features.is_empty() {
+            "none".to_owned()
+        } else {
+            composition.compiled_features.join(", ")
+        },
+    ));
+    section.rows.push(crate::tty::Row::key_value("daemon binary", &report.daemon_digest));
+    let (storage, storage_tone) = app_root_storage_line(report);
+    section.rows.push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    let exposure = &report.exposure;
+    section.rows.push(crate::tty::Row::key_value(
+        "listeners",
+        &if exposure.listeners.is_empty() { "none".to_owned() } else { exposure.listeners.join(", ") },
+    ));
+    let ingress = match (&exposure.ingress, &exposure.ingress_unattested) {
+        (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
+        (None, reason) => format!("unattested: {}", reason.as_deref().unwrap_or("no reason recorded")),
+    };
+    section.rows.push(crate::tty::Row::key_value("ingress", &ingress));
+    let generation = match check.map(|check| &check.detail["current"]) {
+        Some(serde_json::Value::Bool(true)) => "current".to_owned(),
+        Some(serde_json::Value::Object(detail)) => match (detail.get("stale"), detail.get("error")) {
+            (Some(reason), _) => format!("stale: {}; start the node to refresh it", reason.as_str().unwrap_or("unknown")),
+            (None, Some(error)) => format!("unknown: {}", error.as_str().unwrap_or("unknown")),
+            (None, None) => "unknown".to_owned(),
+        },
+        _ => "unknown".to_owned(),
+    };
+    section.rows.push(crate::tty::Row::key_value("report", &format!("{} ({generation})", report.generated_at)));
+    let basis_name = |proof: &lillux::process_control::ResidencyProof| {
+        proof.capability_name().unwrap_or("an unknown basis")
+    };
+    // The signed report records the basis as of the daemon's start; whether
+    // it still holds is checked again now.
+    let residency = match (&report.established_residency, &report.host.residency) {
+        (Some(proof), _) => {
+            format!("{} (established, as of startup): {}", basis_name(proof), proof.basis())
+        }
+        (None, Some(proof)) => {
+            format!("{} (planned before reservation, as of startup): {}", basis_name(proof), proof.basis())
+        }
+        (None, None) => report.host.residency_refusal.clone().unwrap_or_else(|| "not proven".to_owned()),
+    };
+    section.rows.push(crate::tty::Row::key_value("residency", &residency));
+    if let Some(proof) = report.established_residency.as_ref().or(report.host.residency.as_ref()) {
+        let (now, tone) = match proof.confirm_swap_unreachable() {
+            Ok(()) => (format!("{} still holds", basis_name(proof)), crate::tty::Tone::Secondary),
+            Err(reason) => (
+                format!("{} no longer holds: {reason}", basis_name(proof)),
+                crate::tty::Tone::Warning,
+            ),
+        };
+        section.rows.push(
+            crate::tty::Row::key_value("residency now", &format!("{now} (checked from this shell)"))
+                .with_tone(tone),
+        );
+    }
+    let host = &report.host;
+    let enclosure_exit = match (&host.enclosure_exit, &host.enclosure_exit_refusal) {
+        (Some(evidence), _) => format!("{}: {}", evidence.source.as_str(), evidence.basis),
+        (None, refusal) => format!(
+            "not proven: {}",
+            refusal.as_deref().unwrap_or("no reason recorded")
+        ),
+    };
+    section.rows.push(crate::tty::Row::key_value("enclosure exit", &enclosure_exit));
+    // What a restart-generation witness recorded by this node can decide.
+    let witness = match (report.generation.cgroup_enclosure, &host.enclosure_exit) {
+        (Some(inode), Some(evidence)) => format!(
+            "boot and container enclosure inode {inode} ({})",
+            evidence.source.as_str()
+        ),
+        (Some(_), None) => "boot only; an enclosure change on the same boot is undecided because \
+                            the node's exit is not proven to end its enclosure"
+            .to_owned(),
+        (None, _) => "boot only; the node is not the whole of a container enclosure".to_owned(),
+    };
+    section.rows.push(crate::tty::Row::key_value("generation witness", &witness));
+    let floor = &report.floor;
+    let floor_tone = if floor.admitted { crate::tty::Tone::Success } else { crate::tty::Tone::Failure };
+    section.rows.push(
+        crate::tty::Row::key_value(
+            "requires",
+            &format!(
+                "{} — {}",
+                floor.requires.iter().map(|entry| entry.label()).collect::<Vec<_>>().join(", "),
+                if floor.admitted { "met" } else { "NOT met" }
+            ),
+        )
+        .with_tone(floor_tone),
+    );
+    for (label, name) in &floor.met_by {
+        // Only an admission on a weaker grade than the entry's strongest
+        // name is worth a warning.
+        let strongest = floor
+            .requires
+            .iter()
+            .find(|entry| entry.label() == *label)
+            .is_some_and(|entry| lillux::process_control::met_by_strongest(entry, name));
+        let (text, tone) = if strongest {
+            (format!("  met {label} by {name}"), crate::tty::Tone::Secondary)
+        } else {
+            (format!("  met {label} by {name}, a weaker grade it names"), crate::tty::Tone::Warning)
+        };
+        section.rows.push(crate::tty::Row::text(text).with_tone(tone));
+    }
+    for (name, reason) in &floor.unmet {
+        section.rows.push(
+            crate::tty::Row::text(format!("  unmet {name}: {reason}")).with_tone(crate::tty::Tone::Failure),
+        );
+    }
+    for (name, evidence) in &report.provided {
+        let source = evidence.source.as_str();
+        section.rows.push(
+            crate::tty::Row::text(format!("  proves {name} ({source}): {}", evidence.basis))
+                .with_tone(crate::tty::Tone::Secondary),
+        );
+    }
+    for (name, reason) in &report.missing {
+        section.rows.push(
+            crate::tty::Row::text(format!("  cannot prove {name}: {reason}"))
+                .with_tone(crate::tty::Tone::Secondary),
+        );
+    }
+    section
 }
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
@@ -1758,7 +2573,7 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
     use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::isolation::IsolationMode;
 
-    let runtime = ryeos_app::engine_init::load_locked_registered_isolation(app_root)?;
+    let runtime = ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)?;
     let inspection = runtime.inspection();
     let enforced = runtime.mode() == IsolationMode::Enforce;
     let open_files_status = match (enforced, inspection.limits.open_files) {
@@ -2072,7 +2887,7 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 .push(crate::tty::Row::key_value("detail", &diagnostics.message));
             banner
         }
-        LifecycleStatus::Stopped { app_root } => {
+        LifecycleStatus::Stopped { app_root, capacity, capacity_error } => {
             let mut banner = crate::tty::StatusBanner::new(
                 crate::tty::Tone::Neutral,
                 "INITIALIZED, STOPPED — RUN: RYEOS START",
@@ -2081,12 +2896,24 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 "app root",
                 app_root.display().to_string(),
             ));
+            for (key, value) in ryeos_node::status::capacity_status_rows(
+                capacity.as_ref(),
+                capacity_error.as_deref(),
+            ) {
+                banner.rows.push(crate::tty::Row::key_value(key, value));
+            }
             banner
         }
         LifecycleStatus::Running {
-            metadata, ready_at, ..
+            metadata, ready_at, capacity, capacity_error, ..
         } => {
             let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
+            for (key, value) in ryeos_node::status::capacity_status_rows(
+                capacity.as_ref(),
+                capacity_error.as_deref(),
+            ) {
+                banner.rows.push(crate::tty::Row::key_value(key, value));
+            }
             if let Some(pid) = metadata.pid {
                 banner
                     .rows
@@ -2238,14 +3065,139 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capacity_reissue_refuses_while_the_state_lock_is_held_and_names_the_operator_key_next() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
+        let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
+        let argv: Vec<String> = ["--app-root", root.path().to_str().unwrap(), "--reason", "unit", "--json"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // What a running daemon holds is exactly this lock: the command refuses
+        // before it reads a key or opens the account.
+        let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("requires the node to be stopped"),
+            "{error:#}"
+        );
+        assert!(!root.path().join(".ai/config/onboarding/native-capacity-reissuance.json").exists());
+        drop(held);
+        // With the lock free, the next refusal is the absent operator key of an
+        // uninitialized root; nothing about capacity has been touched.
+        let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
+        assert!(format!("{error:#}").contains("operator key"), "{error:#}");
+        assert!(!root.path().join(".ai/config/onboarding").exists());
+    }
+
+    #[test]
+    fn capacity_reissue_banner_names_the_epochs_and_keeps_allow_restart_separate() {
+        let report = ryeos_node::native_capacity::ReissueReport {
+            from_epoch: 3,
+            to_epoch: 4,
+            document_digest: "d".repeat(64),
+            settled_incarnation: Some("e".repeat(64)),
+            already_applied: false,
+        };
+        let banner = capacity_reissue_banner(std::path::Path::new("/srv/node"), &report);
+        assert_eq!(banner.heading, "CAPACITY RE-ISSUED: epoch 3 → 4");
+        let value = |key: &str| banner.rows.iter()
+            .find(|row| row.key.as_deref() == Some(key))
+            .map(|row| row.value.clone())
+            .unwrap_or_else(|| panic!("no {key} row"));
+        assert_eq!(value("document"), "d".repeat(64));
+        assert_eq!(value("settled incarnation"), "e".repeat(64));
+        assert!(banner.rows.iter().any(|row| row.key.is_none() && row.value.contains("allow-restart")));
+        let applied = capacity_reissue_banner(std::path::Path::new("/srv/node"),
+            &ryeos_node::native_capacity::ReissueReport { already_applied: true, settled_incarnation: None, ..report });
+        assert_eq!(applied.heading, "ALREADY RE-ISSUED: epoch 3 → 4");
+        assert!(applied.rows.iter().all(|row| row.key.as_deref() != Some("settled incarnation")));
+    }
+
+    #[test]
+    fn doctor_renders_composition_storage_and_exposure_rows() {
+        use lillux::process_control::{CapabilityEvidence, HostFacts, ProofSource, STORAGE_DURABLE_ROOT};
+        use ryeos_node::capability_report::{
+            FloorAdmission, NodeCapabilityReport, NodeComposition, NodeExposure, ReportGeneration,
+            SignedNodeCapabilityReport,
+        };
+        let mut missing = std::collections::BTreeMap::new();
+        missing.insert(
+            STORAGE_DURABLE_ROOT.to_owned(),
+            "the app root /data/app is on overlay (the container's writable layer)".to_owned(),
+        );
+        let report = NodeCapabilityReport {
+            schema: ryeos_node::capability_report::CAPABILITY_REPORT_SCHEMA.to_owned(),
+            node_fingerprint: "fixture".to_owned(),
+            daemon_digest: "sha256:abc".to_owned(),
+            generated_at: "fixture".to_owned(),
+            generation: ReportGeneration { boot_id: "fixture".to_owned(), cgroup_enclosure: None },
+            subject: "node".to_owned(),
+            composition: NodeComposition {
+                profile: Some("hosted-node".to_owned()),
+                bundles: vec!["core".to_owned()],
+                compiled_features: vec!["model-provider-setup".to_owned(), "scheduling".to_owned()],
+                policy_generation: "fixture".to_owned(),
+            },
+            exposure: NodeExposure::unattested(vec!["[::]:8080".to_owned()]),
+            host: HostFacts::observe(0, std::path::Path::new("/")),
+            provided: std::collections::BTreeMap::new(),
+            missing,
+            capacity: std::collections::BTreeMap::new(),
+            floor: FloorAdmission {
+                requires: Vec::new(),
+                admitted: true,
+                met_by: std::collections::BTreeMap::new(),
+                unmet: std::collections::BTreeMap::new(),
+            },
+            established_residency: None,
+        };
+        let row = |section: &crate::tty::Section, key: &str| {
+            section
+                .rows
+                .iter()
+                .find(|row| row.key.as_deref() == Some(key))
+                .map(|row| row.value.clone())
+                .unwrap_or_else(|| panic!("no {key} row in {section:?}"))
+        };
+        let signed = SignedNodeCapabilityReport {
+            report: report.clone(),
+            digest: "sha256:fixture".to_owned(),
+            signer: "fp:fixture".to_owned(),
+            signature: String::new(),
+        };
+        let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "compiled features"), "model-provider-setup, scheduling");
+        assert_eq!(row(&section, "daemon binary"), "sha256:abc");
+        assert!(row(&section, "app root storage").starts_with("not durable: the app root /data/app is on overlay"));
+        assert_eq!(row(&section, "listeners"), "[::]:8080");
+        assert_eq!(row(&section, "ingress"), "unattested: no provider attests what fronts this listener");
+        let json = app_root_storage_json(&report);
+        assert!(json["decision"]["missing"].as_str().unwrap().contains("overlay"), "{json}");
+
+        let mut durable = report;
+        durable.missing.clear();
+        durable.provided.insert(
+            STORAGE_DURABLE_ROOT.to_owned(),
+            CapabilityEvidence { source: ProofSource::Measured, basis: "ext4 at /data, durable by mount".to_owned() },
+        );
+        durable.exposure.listeners.clear();
+        let signed = SignedNodeCapabilityReport {
+            report: durable,
+            digest: signed.digest,
+            signer: signed.signer,
+            signature: signed.signature,
+        };
+        let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "app root storage"), "durable (measured): ext4 at /data, durable by mount");
+        assert_eq!(row(&section, "listeners"), "none");
+    }
+
+    #[test]
     fn replay_reset_reporting_distinguishes_current_and_skipped_epochs() {
         use ryeos_state::operational::{ReplayIndexResetReport, ReplayIndexResetScope};
         for (scope, expected) in [
             (ReplayIndexResetScope::Unchanged, "unchanged"),
-            (
-                ReplayIndexResetScope::DispatchEffects,
-                "retain provider-call rows",
-            ),
             (
                 ReplayIndexResetScope::AllReplayRecords,
                 "retire all replay rows, including provider-call rows",
@@ -2273,6 +3225,7 @@ mod tests {
             json: false,
             schema_cut_from: None,
             schema_cut_to: None,
+            discard_unreadable_lifetime_fence_after_reboot: false,
         }
     }
 

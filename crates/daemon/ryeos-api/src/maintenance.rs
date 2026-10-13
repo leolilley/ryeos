@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 
 use ryeos_state::gc::{self, GcParams, GcResult};
 
+use ryeos_app::scheduler_boundary::SchedulerRetentionGuard;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NodeIdentitySigner;
 
@@ -42,10 +43,10 @@ struct GcRunInput<'a> {
     signer: &'a NodeIdentitySigner,
     params: &'a GcParams,
     external_content_limits:
-        ryeos_app::node_policy::sections::external_content::ExternalContentImportLimits,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     state_store: &'a ryeos_app::state_store::StateStore,
     accounting: Option<&'a ryeos_app::accounting_db::AccountingDb>,
-    scheduler_db: &'a ryeos_scheduler::SchedulerDb,
+    scheduler: &'a mut dyn SchedulerRetentionGuard,
     fire_retention: Option<gc::retention::FireRetentionPolicy>,
     reaped_seats: usize,
     terminal_chain_candidates: usize,
@@ -128,32 +129,25 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     // Every scheduler mutation and dispatch takes this gate. Keep its write
     // side across terminal-chain pin inspection and both fire-history stores,
     // so maintenance observes and publishes one closed scheduler state.
-    let _scheduler_retention_guard =
-        if params.deep || params.prune_runtime_history || fire_retention.is_some() {
-            Some(state.scheduler_runtime_gate.clone().write_owned().await)
-        } else {
-            None
-        };
-    if _scheduler_retention_guard.is_some() && !state.scheduler_db.fire_projection_is_current()? {
-        anyhow::bail!(
-            "maintenance GC requires a current scheduler fire projection before pin inspection"
-        );
-    }
+    // The same owned service guard covers pin inspection, CAS-root gathering,
+    // portable journal pruning, and scheduler projection repair.
+    let mut scheduler_guard = Some(
+        state
+            .scheduler()
+            .ok_or_else(|| {
+                anyhow::anyhow!("maintenance GC requires the selected scheduler recovery owner")
+            })?
+            .acquire_retention()
+            .await?,
+    );
     if params.deep || params.prune_runtime_history {
+        let scheduler = scheduler_guard
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("scheduler retention guard disappeared"))?;
         let retirement = state.state_store.retire_due_terminal_chains(
             &lillux::time::iso8601_now(),
             params.dry_run,
-            |thread_ids| {
-                let mut pins = 0u64;
-                for thread_id in thread_ids {
-                    if state.scheduler_db.find_fire_by_thread(thread_id)?.is_some() {
-                        pins = pins
-                            .checked_add(1)
-                            .ok_or_else(|| anyhow::anyhow!("scheduler pin count overflow"))?;
-                    }
-                }
-                Ok(pins)
-            },
+            |thread_ids| scheduler.count_thread_pins(thread_ids),
         )?;
         terminal_chain_candidates = retirement.candidate_chains;
         retired_terminal_chains = retirement.retired_chains;
@@ -211,12 +205,11 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let params_clone = params.clone();
     let external_content_limits = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
         .limits
         .clone();
     let state_store = state.state_store.clone();
     let accounting = state.accounting.clone();
-    let scheduler_db = state.scheduler_db.clone();
     let state_authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())
@@ -224,6 +217,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let (guard_ready_tx, guard_ready_rx) =
         tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel(1);
+    let mut scheduler_guard = scheduler_guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("scheduler retention guard disappeared before GC"))?;
     let gc_worker = tokio::task::spawn_blocking(move || -> Result<Option<GcResult>> {
         let cas_guard = match state_authority.acquire_exclusive_guard(!params_clone.dry_run) {
             Ok(guard) => guard,
@@ -250,7 +246,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 external_content_limits,
                 state_store: &state_store,
                 accounting: accounting.as_deref(),
-                scheduler_db: &scheduler_db,
+                scheduler: scheduler_guard.as_mut(),
                 fire_retention,
                 reaped_seats,
                 terminal_chain_candidates,
@@ -342,7 +338,7 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         external_content_limits,
         state_store,
         accounting,
-        scheduler_db,
+        scheduler,
         fire_retention,
         reaped_seats,
         terminal_chain_candidates,
@@ -392,7 +388,7 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             .context("failed to collect active runtime snapshot roots")?,
     );
     operational_object_roots.extend(
-        scheduler_db
+        scheduler
             .operational_snapshot_roots()
             .context("failed to collect scheduler snapshot roots")?,
     );
@@ -435,27 +431,10 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         blob_hashes: operational_blob_roots.into_iter().collect(),
     };
     let mut runtime_cleanup = GcResult::default();
-    let retention_started = fire_retention.is_some() && !params.dry_run;
     if fire_retention.is_some() {
-        if params.dry_run {
-            let pending_outbox = scheduler_db
-                .pending_fire_outbox()
-                .context("inspect scheduler fire outbox before retention dry-run")?;
-            if pending_outbox != 0 {
-                anyhow::bail!(
-                    "scheduler fire retention dry-run requires an empty outbox; {pending_outbox} durable snapshot(s) still need publication"
-                );
-            }
-        } else {
-            scheduler_db
-                .drain_fire_outbox_in_directory(runtime_directory)
-                .context("drain scheduler fire outbox before retention")?;
-        }
-    }
-    if retention_started {
-        scheduler_db
-            .begin_fire_retention()
-            .context("invalidate scheduler fire projection before journal retention")?;
+        scheduler
+            .prepare_fire_retention(runtime_directory, params.dry_run)
+            .context("prepare scheduler fire retention")?;
     }
     let retention_result = (|| -> Result<(Vec<gc::retention::FireRetentionTarget>, usize)> {
         let targets = gc::purge_runtime_state_in_directory(
@@ -465,15 +444,10 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             &mut runtime_cleanup,
         )
         .context("runtime-state purge failed")?;
-        let deleted_projection_rows = if retention_started {
-            scheduler_db
+        let deleted_projection_rows = if fire_retention.is_some() {
+            scheduler
                 .finish_fire_retention(&targets)
                 .context("publish exact scheduler fire retention projection")?
-        } else if fire_retention.is_some() && params.dry_run {
-            scheduler_db
-                .verify_fire_retention_targets(&targets)
-                .context("verify exact scheduler fire retention projection for dry-run")?;
-            targets.len()
         } else {
             targets.len()
         };
@@ -481,19 +455,11 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
     })();
     let (_, deleted_fire_projection_rows) = match retention_result {
         Ok(result) => result,
-        Err(error) if retention_started => {
+        Err(error) if fire_retention.is_some() && !params.dry_run => {
             // Do not release the scheduler gate with an invalid projection. The
             // marker makes the crash path safe; this in-process repair gives a
             // failed maintenance call the same convergence before returning.
-            let repair = (|| -> Result<()> {
-                ryeos_scheduler::projection::rebuild_fires_from_runtime_directory(
-                    runtime_directory,
-                    scheduler_db,
-                )?;
-                let specs = scheduler_db.list_specs(false, None)?;
-                scheduler_db.rebuild_cursors_for_specs(&specs, lillux::time::timestamp_millis())?;
-                Ok(())
-            })();
+            let repair = scheduler.repair_fire_retention();
             match repair {
                 Ok(()) => return Err(error),
                 Err(repair_error) => {

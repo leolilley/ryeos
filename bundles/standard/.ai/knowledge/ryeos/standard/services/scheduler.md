@@ -1,16 +1,16 @@
-<!-- ryeos:signed:2026-09-05T01:24:37Z:e512efb005308f91c2f8be24112660fe841c3b2ea19715ee6fc29f65eeb3c7da:1dQQovYGKfLZG2MJ5mpc4FvxKv0JXsCIjRrEk+2Pi+lm4WZjptcHR0mRIa7WxHyHplASkYUUlDnqZ99PUMWZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-10T19:41:38Z:04d44fba6e7384629d93a91c6fae7cd2c464fc775d2dd963d20b00b6f8738785:gV89MS4cNEodYua+NFLvcyzKmXqLUiRQaAYGr/nKZ1TFakrdmvQTWc0SCaRti749NzavLRgwTZwHgtAA1F/qDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
-tags: [service, scheduler, workflows]
+tags: [service, scheduler, scheduling]
 version: "1.0.0"
 description: Scheduler service reference.
 ---
 
 # Services: scheduler
 
-Invariant: scheduler services manage recurring workflow execution specs and fire history in daemon state.
+Invariant: scheduler services manage one-shot and recurring capsule-producing subprocess Tool specs and fire history in daemon state.
 
-Services: `scheduler/register`, `scheduler/list`, `scheduler/deregister`, `scheduler/pause`, `scheduler/resume`, and `scheduler/show_fires`.
+Services: `scheduler/register`, `scheduler/list`, `scheduler/deregister`, `scheduler/pause`, `scheduler/resume`, `scheduler/explain`, and `scheduler/show_fires`.
 
 `scheduler/register` requires an explicit complete schedule contract:
 `schedule_id`, `item_ref`, `schedule_type`, `expression`, object `params`,
@@ -38,4 +38,8 @@ that exact context; a later fire receives a different `fire_id`. External
 observation actions should bind that ID explicitly so recovery replays the same
 fire while a later fire receives a fresh observation coordinate.
 
-Scheduler descriptors live in standard because scheduled work is a workflow-layer feature that launches directives/graphs through the normal execution runner.
+Scheduler service and command descriptors live in the independently selected
+scheduling bundle, which requires Core service support. This reference stays
+with the current Standard knowledge content owner. In-process service and
+method dispatch targets are ineligible under the capsule-producing dispatch
+guard; neither selecting scheduling nor this documentation grants authority.

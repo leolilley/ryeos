@@ -23,6 +23,8 @@ CARGO="${CARGO:-cargo}"
 gate_tty=0
 # shellcheck source=scripts/lib/ryeos-terminal.sh
 source "$ROOT/scripts/lib/ryeos-terminal.sh"
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$ROOT/scripts/pkg/bundle-sets.sh"
 ryeos_term_init
 if ryeos_term_is_tty; then
     gate_tty=1
@@ -47,6 +49,8 @@ skip_crash_qualification=0
 crash_qualification_only=0
 bundle_set="full"
 nextest_args=()
+selected_packages=()
+explicit_workspace=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-tests)
@@ -69,6 +73,27 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { gate_fail "--bundle-set requires a value"; exit 2; }
             bundle_set="$2"
             shift 2
+            ;;
+        -p|--package)
+            [[ $# -ge 2 && -n "$2" ]] || { gate_fail "$1 requires a package"; exit 2; }
+            selected_packages+=("$2")
+            nextest_args+=("$1" "$2")
+            shift 2
+            ;;
+        --package=*)
+            selected_packages+=("${1#--package=}")
+            nextest_args+=("$1")
+            shift
+            ;;
+        -p?*)
+            selected_packages+=("${1#-p}")
+            nextest_args+=("$1")
+            shift
+            ;;
+        --workspace|--all)
+            explicit_workspace=1
+            nextest_args+=("$1")
+            shift
             ;;
         *)
             nextest_args+=("$1")
@@ -118,7 +143,7 @@ if [[ "$refresh_bundles" == "1" ]]; then
     fi
 elif [[ "$skip_tests" == "1" ]]; then
     gate_fail "--no-tests without --refresh-bundles has nothing to do"
-    gate_fail "pass --refresh-bundles --no-tests for the old populate-only behavior"
+    gate_fail "pass --refresh-bundles --no-tests for explicit bundle preparation"
     exit 2
 fi
 
@@ -142,9 +167,37 @@ test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
 if [[ "$crash_qualification_only" != "1" ]]; then
-    gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
-    "$CARGO" nextest run --workspace --no-fail-fast \
-        "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
+    workspace_args=()
+    if [[ ${#selected_packages[@]} -eq 0 && "$explicit_workspace" == 0 ]]; then
+        workspace_args=(--workspace)
+    fi
+    gate_features=""
+    # Cargo --workspace widens even an explicit -p selection. Package-scoped
+    # checks must also avoid features belonging to unselected packages.
+    for package in ryeos-handler-bins ryeosd ryeos-cli ryeos-api; do
+        package_selected=0
+        if [[ ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
+            package_selected=1
+        else
+            for selection in "${selected_packages[@]}"; do
+                # Cargo accepts package globs and name@version selectors.
+                # Match their name component; forward the original unchanged.
+                case "$package" in ${selection%@*}) package_selected=1 ;; esac
+            done
+        fi
+        [[ "$package_selected" == 1 ]] || continue
+        composition_feature="$(ryeos_bundle_set_cargo_features "$bundle_set" "$package")" || {
+            gate_fail "unknown bundle-set composition: $bundle_set"
+            exit 2
+        }
+        [[ -z "$composition_feature" ]] || gate_features+="${gate_features:+,}$composition_feature"
+    done
+    feature_args=()
+    [[ -z "$gate_features" ]] || feature_args=(--features "$gate_features")
+    gate_info "cargo nextest run ${workspace_args[*]:-} --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
+    "$CARGO" nextest run "${workspace_args[@]}" --no-fail-fast \
+        "${feature_args[@]}" \
+        "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]}"
 fi
 
 # A production daemon must not expose the crash-cut endpoint, so this matrix
@@ -155,9 +208,8 @@ if [[ "$refresh_bundles" == "1" \
     && "$bundle_set" == "full" \
     && "$skip_crash_qualification" != "1" \
     && ${#nextest_args[@]} -eq 0 ]]; then
-    crash_qualification_features="crash-qualification-test-support,handoff-test-support"
+    crash_qualification_features="scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support"
     gate_info "qualifying directive native-resume crash cuts"
-    RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
         "$CARGO" nextest run -p ryeosd \
         --features "$crash_qualification_features" \
         --test directive_crash_recovery_e2e \
@@ -173,7 +225,6 @@ if [[ "$refresh_bundles" == "1" \
         rm -f -- "$handoff_report_candidate"
     }
     trap cleanup_handoff_report_candidate EXIT
-    RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
     RYEOS_HANDOFF_QUALIFICATION_REPORT="$handoff_report_candidate" \
         "$CARGO" nextest run -p ryeosd \
         --features "$crash_qualification_features" \

@@ -5,6 +5,9 @@
 //! directory, stages only descriptor-supplied bytes, and launches the real
 //! supervisor/launcher chain. It is never installed by a production bundle.
 
+/// Owner token carried by the secure temporaries this adapter publishes.
+const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
+
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -169,6 +172,7 @@ fn record_lifecycle_contact(
         prior.as_ref(),
         &bytes,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )
 }
 
@@ -403,6 +407,9 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         effective_capabilities: request.declared_capabilities.clone(),
         observed_provider_spec_sha256: request.provider_spec.digest.clone(),
         observed_snapshot_production_spec_sha256: None,
+        // This adapter has no materialized-source bootstrap path, so it
+        // observes no bootstrap profile and cannot authorize one.
+        observed_bootstrap_profile_digest: None,
         artifacts: request.artifacts.clone(),
     };
     response.validate_for(&request)?;
@@ -1051,6 +1058,7 @@ fn fence_staging_for_termination(
             Some(&incumbent),
             &canonical_bytes(activation)?,
             0o600,
+            SYNTHETIC_TEMP_PURPOSE,
         )?;
     }
     Ok(activation.phase == ActivationPhase::FencedBeforeSpawn)
@@ -1082,6 +1090,7 @@ fn author_spawn_intent(
         Some(&incumbent),
         &canonical_bytes(activation)?,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )?;
     Ok(true)
 }
@@ -1595,7 +1604,13 @@ fn ensure_document_bytes(
         );
         return Ok(());
     }
-    directory.atomic_write_pinned_if_same(OsStr::new(name), None, bytes, mode)
+    directory.atomic_write_pinned_if_same(
+        OsStr::new(name),
+        None,
+        bytes,
+        mode,
+        SYNTHETIC_TEMP_PURPOSE,
+    )
 }
 
 fn replace_document<T: Serialize>(
@@ -1611,6 +1626,7 @@ fn replace_document<T: Serialize>(
         Some(&existing),
         &canonical_bytes(value)?,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )
 }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-24T17:47:02Z:f19b734bb06596fa59de7bad77c9f35839c41b6e888b916d3a775dc03e9e71e0:xfuv2colvnyoZHGyppobSvTNlEoFuA9yXXXMRw5SQHMYaj/KxVhV2Ega4MpxfX//Heu9PUUX2D9Q1G3HdDiDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-10T04:34:01Z:ff785056a776a84f19001d975b98ec4393aefc19cd59afa1ae9b31ebe65d20cb:+TAPwzKp9F71z5+2Z46dEyFnN1OctEOustO4skBRpI/JadaxuI1Cg3eT3/p9BZUAp/mxR03NwvxaYFM+7ppnCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -23,7 +23,7 @@ runtime_authority:
   - create
 isolation_backends:
 - id: linux-lillux
-  protocol: ryeos.isolation-adapter/v12
+  protocol: ryeos.isolation-adapter/v14
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu
@@ -46,6 +46,8 @@ isolation_backends:
   - network.isolated
   - process.isolated_pid_namespace
   - process.target_pid_reporting
+  - process.original_namespace_terminal_reporting
   - lifecycle.shared_process_group
   - process.nested_sandbox
+  - process.target_limits
   - ipc.target_unix_stream

@@ -10,6 +10,7 @@ use ryeos_external_execution_contract::LifecycleCapability;
 use serde::{Deserialize, Serialize};
 
 use crate::external_content::products::composition::ResolvedExternalProductSelections;
+use crate::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
 use crate::objects::{
     AdmittedStructuredSessionProfile, EFFECTIVE_SOURCE_BINDING_SCHEMA,
     EXTERNAL_CONTENT_MANIFEST_KIND, EffectiveSourceClosureProjection, ExecutableSearchPathEntry,
@@ -909,6 +910,7 @@ impl AdmittedExternalCandidateProgram {
 )]
 pub enum AdmittedExternalExecutionProgram {
     StructuredSession(AdmittedExternalCandidateProgram),
+    QualificationStructuredSession(AdmittedExternalQualificationSessionProgram),
     DirectCommand(AdmittedExternalDirectProgram),
 }
 
@@ -922,6 +924,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::StructuredSession(program) => program.validate(),
+            Self::QualificationStructuredSession(program) => program.validate(),
             Self::DirectCommand(program) => program.validate(),
         }
     }
@@ -929,6 +932,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn digest(&self) -> Result<String> {
         match self {
             Self::StructuredSession(program) => program.digest(),
+            Self::QualificationStructuredSession(program) => program.digest(),
             Self::DirectCommand(program) => program.digest(),
         }
     }
@@ -936,6 +940,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn runtime_manifest_hash(&self) -> Result<&str> {
         match self {
             Self::StructuredSession(program) => Ok(&program.runtime_manifest_hash),
+            Self::QualificationStructuredSession(program) => Ok(&program.runtime_manifest_hash),
             Self::DirectCommand(program) => program.runtime_manifest_hash(),
         }
     }
@@ -945,6 +950,9 @@ impl AdmittedExternalExecutionProgram {
             Self::StructuredSession(_) => {
                 ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
             }
+            Self::QualificationStructuredSession(_) => {
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            }
             Self::DirectCommand(program) => program.projection.execution_mode,
         }
     }
@@ -952,14 +960,18 @@ impl AdmittedExternalExecutionProgram {
     pub fn worker(&self) -> Result<&AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
     pub fn worker_mut(&mut self) -> Result<&mut AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
@@ -971,6 +983,7 @@ impl AdmittedExternalExecutionProgram {
         inputs.validate()?;
         match self {
             Self::StructuredSession(_) => Ok(()),
+            Self::QualificationStructuredSession(program) => program.validate_guest_inputs(inputs),
             Self::DirectCommand(program) => program.validate_guest_inputs(inputs),
         }
     }
@@ -1057,6 +1070,59 @@ impl ExternalDirectNativeRequirements {
     }
 }
 
+/// Provider-neutral restrictions for the exact guest target. CPU is per
+/// process and address space is virtual memory, not aggregate allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNativeProcessLimits {
+    pub max_open_files: Option<u64>,
+    pub max_address_space_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    /// Real-UID account limit; not a private process-tree counter.
+    pub max_processes: Option<u64>,
+    pub deny_process_creation: bool,
+}
+
+impl ExternalNativeProcessLimits {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+        ] {
+            ensure!(
+                value != Some(0) && value != Some(u64::MAX),
+                "{name} must be positive and finite"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn to_native(self) -> Result<lillux::SubprocessLimits> {
+        self.validate()?;
+        Ok(lillux::SubprocessLimits {
+            max_open_files: self.max_open_files,
+            max_address_space_bytes: self.max_address_space_bytes,
+            max_cpu_seconds: self.max_cpu_seconds,
+            max_processes: self.max_processes,
+            deny_process_creation: self.deny_process_creation,
+            max_stdout_bytes: None,
+            max_stderr_bytes: None,
+        })
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 
 /// Compiler output, not a second user-authored recipe. Only the trusted app
@@ -1064,6 +1130,9 @@ pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalDirectCommandProjection {
+    pub workspace_view: ryeos_external_execution_contract::GuestWorkspaceView,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits: Option<ExternalNativeProcessLimits>,
     pub argv0: String,
     pub arguments: Vec<String>,
     pub cwd: String,
@@ -1078,6 +1147,9 @@ pub struct ExternalDirectCommandProjection {
 
 impl ExternalDirectCommandProjection {
     fn validate(&self) -> Result<()> {
+        if let Some(limits) = self.target_limits {
+            limits.validate()?;
+        }
         ensure!(
             !self.argv0.is_empty()
                 && self.argv0.len() <= 4096
@@ -1340,6 +1412,7 @@ impl AdmittedExternalDirectProgram {
         inputs.validate()?;
         ensure!(
             inputs.workspace_outputs.is_none()
+                && inputs.workspace_view == self.projection.workspace_view
                 && inputs.identity_digest()? == self.guest_input_identity
                 && inputs.environment == self.projection.environment,
             "external direct guest inputs changed their sealed read-only identity"
@@ -1367,7 +1440,7 @@ impl AdmittedExternalDirectProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(
-            &serde_json::json!({"domain":"ryeos.external-direct-program.v1","program":self}),
+            &serde_json::json!({"domain":"ryeos.external-direct-program.v3","program":self}),
         )
     }
 }
@@ -1427,11 +1500,13 @@ pub mod test_support {
         requirement: &ExternalCandidateRequirement,
     ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
         let contract = json!({
+            "schema_version": crate::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
             "external_candidate": requirement,
             "workload_client": null,
             "workload_realization_id": "codex",
             "auxiliary_configs": [],
             "runtime_configs": [],
+            "configuration_absence": {"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         });
         Ok(AdmittedStructuredSessionProfile {
             profile_hash: canonical_value_digest(&contract)?,
@@ -1441,6 +1516,11 @@ pub mod test_support {
             baseline_destination: "config.conf".into(),
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
+            configuration_absence: crate::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
         })
     }
 
@@ -1481,6 +1561,21 @@ pub mod test_support {
         )
     }
 
+    pub fn plan_bound_artifact_identity(
+        execution_plan: &serde_json::Value,
+    ) -> anyhow::Result<crate::objects::AdmittedLaunchArtifactIdentity> {
+        let mut artifact =
+            crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        if let crate::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash, ..
+        } = &mut artifact
+        {
+            *execution_plan_hash =
+                lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
+        }
+        Ok(artifact)
+    }
+
     pub fn qualified_external_candidate_capsule(
         requirement: ExternalCandidateRequirement,
         runtime_manifest_hash: &str,
@@ -1508,7 +1603,7 @@ pub mod test_support {
             (SOURCE_CLOSURE_DERIVED_KEY): source.to_value()?,
             (EXTERNAL_REALIZATIONS_DERIVED_KEY): realizations.to_value()?
         }}}});
-        let artifact = crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        let artifact = plan_bound_artifact_identity(&json!({}))?;
         let executable_blob_hash = "6".repeat(64);
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
@@ -1701,6 +1796,7 @@ pub mod test_support {
                 policy_source: product.policy_source.clone(),
                 consumer_definitions: None,
                 consumer_content: None,
+                consumer_invocation: None,
                 producer_recipe_sources: BTreeMap::new(),
                 remote_verifier_sources: BTreeMap::new(),
                 subject_declaration_id: product.verifier.subject_declaration_id.clone(),
@@ -1760,6 +1856,35 @@ pub mod test_support {
 mod tests {
     use super::*;
 
+    #[test]
+    fn direct_target_limits_are_closed_finite_and_required_nullable() {
+        let (_, _, projection, _) = direct_fixture();
+        let mut wire = serde_json::to_value(&projection).unwrap();
+        wire.as_object_mut().unwrap().remove("target_limits");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
+        let limits = ExternalNativeProcessLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134_217_728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        };
+        limits.validate().unwrap();
+        for invalid in [0, u64::MAX] {
+            assert!(
+                ExternalNativeProcessLimits {
+                    max_cpu_seconds: Some(invalid),
+                    ..limits
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        let mut wire = serde_json::to_value(limits).unwrap();
+        wire["max_stdout_bytes"] = serde_json::json!(1024);
+        assert!(serde_json::from_value::<ExternalNativeProcessLimits>(wire).is_err());
+    }
+
     fn direct_fixture() -> (
         crate::objects::AdmittedExecutionClosure,
         crate::objects::AdmittedLaunchArtifactIdentity,
@@ -1809,6 +1934,7 @@ mod tests {
             admitted_project_root: Some(ADMITTED_DIRECT_PROJECT_ROOT.into()),
         };
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -1839,6 +1965,8 @@ mod tests {
             environment: BTreeMap::new(),
         };
         let projection = ExternalDirectCommandProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+            target_limits: None,
             argv0: "/ryeos/realizations/runtime/bin/evaluate".into(),
             arguments: vec!["--check".into()],
             cwd: "/workspace".into(),
@@ -1856,6 +1984,38 @@ mod tests {
             },
         };
         (closure, artifact, projection, inputs)
+    }
+
+    #[test]
+    fn direct_program_view_must_match_inputs_even_with_recomputed_identity() {
+        let (closure, artifact, projection, inputs) = direct_fixture();
+        let program = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            projection.clone(),
+            &inputs,
+        )
+        .unwrap();
+        let mut strict_inputs = inputs;
+        strict_inputs.workspace_view =
+            ryeos_external_execution_contract::GuestWorkspaceView::CapturedInputs;
+        let mut changed = program.clone();
+        changed.guest_input_identity = strict_inputs.identity_digest().unwrap();
+        assert!(changed.validate_guest_inputs(&strict_inputs).is_err());
+        let mut strict_projection = projection;
+        strict_projection.workspace_view = strict_inputs.workspace_view;
+        let strict = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            strict_projection,
+            &strict_inputs,
+        )
+        .unwrap();
+        strict.validate_guest_inputs(&strict_inputs).unwrap();
+        assert_ne!(program.digest().unwrap(), strict.digest().unwrap());
+        let mut wire = serde_json::to_value(strict.projection()).unwrap();
+        wire.as_object_mut().unwrap().remove("workspace_view");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
     }
 
     #[test]
@@ -2336,7 +2496,10 @@ mod tests {
         ] {
             let mut wire = serde_json::to_value(&program).unwrap();
             wire[field] = serde_json::json!("0".repeat(64));
-            let changed: AdmittedExternalCandidateProgram = serde_json::from_value(wire).unwrap();
+            let Ok(changed) = serde_json::from_value::<AdmittedExternalCandidateProgram>(wire) else {
+                assert_eq!(field, "runtime_source", "{field} must stay wire-decodable");
+                continue;
+            };
             assert!(
                 changed.verify_selections(Some(&selections)).is_err(),
                 "{field}"
@@ -3043,7 +3206,7 @@ mod tests {
             (SOURCE_CLOSURE_DERIVED_KEY):source.to_value().unwrap(),
             (EXTERNAL_REALIZATIONS_DERIVED_KEY):realizations.to_value().unwrap()
         }}}});
-        let artifact = crate::external_content::products::qualification::tests::artifact_identity();
+        let artifact = test_support::plan_bound_artifact_identity(&json!({})).unwrap();
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
             kind: PERSISTENT_SESSION_CAPSULE_KIND.into(),

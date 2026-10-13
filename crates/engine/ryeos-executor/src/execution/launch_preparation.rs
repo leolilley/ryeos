@@ -221,89 +221,7 @@ pub(crate) fn require_prepared_project_result(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedEvidenceAttachment {
-    pub binding_id: String,
-    pub bundle_id: String,
-    pub event_kind: String,
-    pub chain_id: String,
-    pub event_hash: String,
-    pub attachment_name: String,
-    pub blob_hash: String,
-    pub size_bytes: u64,
-    pub media_type: Option<String>,
-    pub target: String,
-    pub destination_path: String,
-    pub access: ryeos_handler_protocol::EvidenceAttachmentAccessWire,
-    pub manifest_hash: String,
-    pub binding_digest: String,
-}
-
-impl PreparedEvidenceAttachment {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if !valid_ref_binding_name(&self.binding_id) {
-            anyhow::bail!("prepared evidence attachment binding_id is not canonical");
-        }
-        for (label, value) in [
-            ("bundle_id", self.bundle_id.as_str()),
-            ("event_kind", self.event_kind.as_str()),
-            ("chain_id", self.chain_id.as_str()),
-            ("attachment_name", self.attachment_name.as_str()),
-        ] {
-            ryeos_state::objects::validate_bundle_identifier(label, value)?;
-        }
-        for (label, value) in [
-            ("event_hash", self.event_hash.as_str()),
-            ("blob_hash", self.blob_hash.as_str()),
-            ("manifest_hash", self.manifest_hash.as_str()),
-            ("binding_digest", self.binding_digest.as_str()),
-        ] {
-            if !lillux::valid_hash(value) {
-                anyhow::bail!("prepared evidence attachment {label} is not a canonical hash");
-            }
-        }
-        if self.size_bytes > ryeos_state::objects::MAX_BUNDLE_EVENT_ATTACHMENT_BYTES {
-            anyhow::bail!("prepared evidence attachment exceeds the bundle-event file bound");
-        }
-        ryeos_state::objects::validate_canonical_project_relative_path(&self.destination_path)?;
-        if self.target.is_empty()
-            || !self.target.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-            })
-        {
-            anyhow::bail!("prepared evidence attachment target is not canonical");
-        }
-        if self.access != ryeos_handler_protocol::EvidenceAttachmentAccessWire::ReadOnly {
-            anyhow::bail!("prepared evidence attachment is not read-only");
-        }
-        if self.binding_digest != self.reproduce_binding_digest()? {
-            anyhow::bail!("prepared evidence attachment binding digest changed");
-        }
-        Ok(())
-    }
-
-    pub fn reproduce_binding_digest(&self) -> anyhow::Result<String> {
-        let value = serde_json::json!({
-            "schema": "ryeos.evidence_attachment_binding.v1",
-            "binding_id": self.binding_id,
-            "bundle_id": self.bundle_id,
-            "event_kind": self.event_kind,
-            "chain_id": self.chain_id,
-            "event_hash": self.event_hash,
-            "attachment_name": self.attachment_name,
-            "blob_hash": self.blob_hash,
-            "size_bytes": self.size_bytes,
-            "media_type": self.media_type,
-            "target": self.target,
-            "destination_path": self.destination_path,
-            "access": self.access,
-            "manifest_hash": self.manifest_hash,
-        });
-        let canonical = lillux::canonical_json(&value)?;
-        Ok(lillux::sha256_hex(canonical.as_bytes()))
-    }
-}
+pub use ryeos_app::prepared_evidence_attachment::PreparedEvidenceAttachment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1084,6 +1002,32 @@ fn launch_config_snapshot_cache() -> &'static crate::resolved_config_cache::Snap
         >,
     > = OnceLock::new();
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
+}
+
+/// Load launch configuration whose project-space inputs are read through an
+/// exact live project-content authority rather than by walking
+/// `project_root`.
+pub(crate) fn load_launch_config_set_under_project_content(
+    declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
+    roots: &ResolutionRoots,
+    parsers: &ParserDispatcher,
+    engine: &ryeos_engine::engine::Engine,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    project_root: &std::path::Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+) -> Result<ryeos_engine::launch_config::LaunchConfigSnapshotSet, DispatchError> {
+    ryeos_engine::launch_config::load_launch_config_snapshots_with_proof_under_project_authority(
+        declarations,
+        roots,
+        parsers,
+        &engine.parser_dispatcher,
+        &engine.kinds,
+        trust_store,
+        &engine.node_trust_store,
+        project_root,
+        project_content,
+    )
+    .map_err(map_launch_config_error)
 }
 
 pub(crate) fn load_launch_config_set_under_current_authority(
@@ -3621,23 +3565,7 @@ pub fn validate_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<
 }
 
 fn valid_ref_binding_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > MAX_REF_BINDING_NAME_BYTES {
-        return false;
-    }
-    let mut segments = name.split('_');
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        && first
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && segments.all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
+    ryeos_app::prepared_evidence_attachment::valid_ref_binding_name(name)
 }
 
 #[derive(Clone, Copy)]

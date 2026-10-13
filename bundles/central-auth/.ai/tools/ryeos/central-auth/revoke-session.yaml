@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T00:45:23Z:d234257392a3fd3af3acc10d3882a06526d039b1ddba613c999d165985b2bcc1:3EjWeP/gQzKNM32O+wkOqP0U3ZR46CzVSoKwvWd5tdAJHyV/eXFqVwfyexiq9DpJmaMXqldiJ5MFSGSqfLrzBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T21:49:53Z:60a52046aed20aac2d454c1bfa0ea7761886472052dd249dc881908d19dc6373:qa3kbe6BwLcR8X7a8VXs+Ot+2BbaRNuOUg7x+slnY8rtADnzhz3Rpo6Zu39xfGd41T2u//mw/Y3ct1GhG1gYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "revoke-session"
@@ -26,7 +26,7 @@ config_schema:
       description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
-      description: "Realm/app namespace, e.g. tv-tracker."
+      description: "Realm/app namespace, e.g. example-app."
     session_token:
       type: string
   required: [realm_id, session_token]

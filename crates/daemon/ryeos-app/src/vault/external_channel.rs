@@ -169,7 +169,7 @@ fn validate_hash(label: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::{NodeVault, SealedEnvelopeVault};
+    use crate::vault::{NodeVault, NodeVaultReadAll as _, SealedEnvelopeVault};
 
     #[test]
     fn authority_is_canonical_distinct_and_bound_to_generation() {

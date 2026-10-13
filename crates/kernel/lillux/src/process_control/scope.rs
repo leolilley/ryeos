@@ -11,8 +11,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const SCOPE_CONFIGURATION_VERSION: u32 = 3;
-const SCOPE_RECOVERY_VERSION: u32 = 4;
-const SCOPE_ALLOCATION_VERSION: u32 = 2;
+const SCOPE_RECOVERY_VERSION: u32 = 5;
+const SCOPE_ALLOCATION_VERSION: u32 = 3;
+const HOST_LIFETIME_VERSION: u32 = 2;
 /// Root owns native supervisor control directories. The selected controller's
 /// primary group gets traversal only, so it can reach its exact `0600` FIFO
 /// without listing or changing the supervisor namespace.
@@ -330,6 +331,14 @@ impl ControllerAccount {
         Self(AccountBackend::Unix { uid, gid })
     }
 
+    /// Exact numeric account coordinates for a native adapter that must name
+    /// the account inside administrator-owned host configuration it renders.
+    pub(crate) fn unix_ids(&self) -> Result<(u32, u32), String> {
+        self.validate()?;
+        let AccountBackend::Unix { uid, gid } = self.0;
+        Ok((uid, gid))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         match self.0 {
             AccountBackend::Unix { uid, gid }
@@ -418,7 +427,18 @@ pub fn require_administrator() -> anyhow::Result<()> {
 /// Coarse host-lifetime witness, never process-control or launch authority.
 /// A durable owner can retain this independently of its execution-row schema
 /// to prove that even an unobserved pre-attachment process cannot still exist.
-/// Same-boot process absence is deliberately NOT claimed by this witness.
+///
+/// A lifetime is one kernel boot, and, when the node is the whole of a
+/// container, that container's enclosure cgroup. The enclosure is recorded
+/// only when the node runs alone in a private cgroup namespace rooted at its
+/// own cgroup and a private pid namespace, and its exit is proven to end
+/// that namespace: the node is pid 1, or its parent is a pid 1 that node
+/// policy trusts to exit with its only child. Otherwise only the boot is
+/// recorded and the enclosure generation stays undecided. Callers decide
+/// lifetimes only while holding the node's state lock, which proves the
+/// recording node has exited; with both, a different enclosure on the same
+/// boot is a container that has ended. Absence of a process within the same
+/// boot and enclosure is deliberately NOT claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessHostLifetime {
@@ -429,18 +449,113 @@ pub struct ProcessHostLifetime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "implementation", rename_all = "snake_case", deny_unknown_fields)]
 enum HostLifetimeBackend {
-    LinuxBoot { boot_id: String },
+    LinuxBoot { boot_id: String, cgroup_enclosure: Option<u64> },
+}
+
+/// Current boot and, when the node is the whole of a container whose
+/// enclosure ends with it, the inode of that enclosure cgroup. `None` means
+/// the boot is the only generation the recording node can vouch for.
+#[cfg(target_os = "linux")]
+fn capture_host_generation() -> Result<(String, Option<u64>), String> {
+    let boot_id = current_boot_id()?;
+    Ok((boot_id, super::host_capability::read_witnessed_enclosure()?))
+}
+
+#[cfg(target_os = "linux")]
+fn current_boot_id() -> Result<String, String> {
+    let boot_id = super::linux::read_boot_id()?;
+    if !valid_boot_id(&boot_id) {
+        return Err("current host lifetime is unavailable".to_owned());
+    }
+    Ok(boot_id)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostGenerationChange {
+    Same,
+    BootEnded,
+    EnclosureChanged,
+}
+
+/// Compare a recorded boot and enclosure with the current ones. The
+/// recorder vouched that its exit ends the recorded enclosure, so the current
+/// side needs only the enclosure it can see. A recording without an
+/// enclosure is decided by boot alone: on the same boot it is never taken as
+/// ended. If a recorded enclosure is no longer visible within one boot, the
+/// generation cannot be decided and the caller must not settle anything
+/// from it.
+#[cfg(target_os = "linux")]
+fn host_generation_change(
+    boot_id: &str,
+    cgroup_enclosure: Option<u64>,
+) -> Result<HostGenerationChange, String> {
+    let current_boot = current_boot_id()?;
+    if current_boot != boot_id {
+        return Ok(HostGenerationChange::BootEnded);
+    }
+    let Some(recorded) = cgroup_enclosure else {
+        return Ok(HostGenerationChange::Same);
+    };
+    compare_enclosure(recorded, super::host_capability::read_cgroup_enclosure()?)
+}
+
+#[cfg(target_os = "linux")]
+fn compare_enclosure(recorded: u64, current: Option<u64>) -> Result<HostGenerationChange, String> {
+    match current {
+        Some(current) if current != recorded => Ok(HostGenerationChange::EnclosureChanged),
+        Some(_) => Ok(HostGenerationChange::Same),
+        None => Err(
+            "the recorded cgroup enclosure is no longer visible within one boot; the host \
+             generation cannot be decided"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Lifetime-witness decision: a different boot, or a different container
+/// enclosure under the conditions documented on `ProcessHostLifetime`.
+#[cfg(target_os = "linux")]
+fn host_generation_ended(boot_id: &str, cgroup_enclosure: Option<u64>) -> Result<bool, String> {
+    Ok(host_generation_change(boot_id, cgroup_enclosure)? != HostGenerationChange::Same)
+}
+
+/// Scope decision. A different enclosure alone never ends a scope: if the
+/// provider still reopens the exact recorded parent, the scope is observed
+/// directly; only a parent replaced under the same path proves the old
+/// enclosure, and every scope beneath it, is gone. An unreopenable parent
+/// leaves the generation undecided.
+#[cfg(target_os = "linux")]
+fn scope_generation_ended(
+    boot_id: &str,
+    cgroup_enclosure: Option<u64>,
+    configuration: &ProcessScopeConfiguration,
+    recorded_parent: &crate::PinnedDirectoryIdentity,
+) -> Result<bool, String> {
+    match host_generation_change(boot_id, cgroup_enclosure)? {
+        HostGenerationChange::Same => Ok(false),
+        HostGenerationChange::BootEnded => Ok(true),
+        HostGenerationChange::EnclosureChanged => {
+            let provider = ProcessScopeProvider::open(configuration).map_err(|error| {
+                format!(
+                    "same boot with a different enclosure, and the recorded scope parent cannot \
+                     be reopened ({error}); the scope generation cannot be decided"
+                )
+            })?;
+            let ProviderBackend::LinuxCgroupV2(parent) = &provider.backend;
+            Ok(parent.identity()? != *recorded_parent)
+        }
+    }
 }
 
 impl ProcessHostLifetime {
     pub fn capture_current() -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
+            let (boot_id, cgroup_enclosure) = capture_host_generation()?;
             let value = Self {
-                version: 1,
-                backend: HostLifetimeBackend::LinuxBoot {
-                    boot_id: super::linux::read_boot_id()?,
-                },
+                version: HOST_LIFETIME_VERSION,
+                backend: HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure },
             };
             value.validate()?;
             Ok(value)
@@ -450,11 +565,11 @@ impl ProcessHostLifetime {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if self.version != HOST_LIFETIME_VERSION {
             return Err("process host-lifetime witness contract is not current".to_owned());
         }
         match &self.backend {
-            HostLifetimeBackend::LinuxBoot { boot_id } if valid_boot_id(boot_id) => Ok(()),
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure: _ } if valid_boot_id(boot_id) => Ok(()),
             _ => Err("process host-lifetime witness is invalid".to_owned()),
         }
     }
@@ -463,12 +578,8 @@ impl ProcessHostLifetime {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            HostLifetimeBackend::LinuxBoot { boot_id } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("current host lifetime is unavailable".to_owned());
-                }
-                Ok(current != *boot_id)
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure } => {
+                host_generation_ended(boot_id, *cgroup_enclosure)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("host lifetime observation is unavailable on this OS".to_owned()),
@@ -481,7 +592,9 @@ impl ProcessHostLifetime {
         self.validate()?;
         process.validate()?;
         match &self.backend {
-            HostLifetimeBackend::LinuxBoot { boot_id } => Ok(process.boot_id == *boot_id),
+            // Birth identity carries the boot only; a process of an ended
+            // enclosure on this boot is excluded by has_ended, not here.
+            HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure: _ } => Ok(process.boot_id == *boot_id),
         }
     }
 }
@@ -498,10 +611,28 @@ pub enum ProcessScopeCapability {
     Recovery,
 }
 
+impl ProcessScopeCapability {
+    pub const ALL: [Self; 3] = [Self::Quiescence, Self::Termination, Self::Recovery];
+
+    /// Open capability name this per-scope guarantee is published under.
+    pub const fn capability_name(self) -> &'static str {
+        match self {
+            Self::Quiescence => "quiescence:scope",
+            Self::Termination => "termination:scope",
+            Self::Recovery => "recovery:scope",
+        }
+    }
+
+    pub fn from_capability_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|capability| capability.capability_name() == name)
+    }
+}
+
 /// Kernel-enforced ceilings for every task in one exact execution scope.
 /// These are scope-wide limits, unlike per-process rlimits or account-wide
 /// process limits. A backend without equivalent enforcement must refuse them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessScopeResourceLimits {
     pub maximum_memory_bytes: u64,
     pub maximum_processes: u32,
@@ -551,6 +682,7 @@ pub struct ProcessScopeAllocation {
 enum BackendAllocation {
     LinuxCgroupV2 {
         boot_id: String,
+        cgroup_enclosure: Option<u64>,
         parent: crate::PinnedDirectoryIdentity,
         name: String,
     },
@@ -581,6 +713,7 @@ enum BackendRecovery {
     // on every OS so a foreign record can be retained without granting control.
     LinuxCgroupV2 {
         boot_id: String,
+        cgroup_enclosure: Option<u64>,
         parent: crate::PinnedDirectoryIdentity,
         directory: crate::PinnedDirectoryIdentity,
         name: String,
@@ -611,6 +744,117 @@ pub struct ProcessScope {
     launch_available: bool,
 }
 
+/// SAME original provider/plan, retained before any creation or bind check.
+/// The native frame may contain an unpinned created directory or partial FDs;
+/// none of those states is positive local settlement or a new launch right.
+#[cfg(target_os = "linux")]
+pub(crate) struct SelectedScopePreparation {
+    provider: std::sync::Arc<ProcessScopeProvider>,
+    allocation: ProcessScopeAllocation,
+    limits: Option<ProcessScopeResourceLimits>,
+    original_service: crate::time::MonotonicDeadline,
+    original_cleanup: crate::time::MonotonicDeadline,
+    native: Option<std::sync::Arc<super::cgroup::SelectedCgroupPreparation>>,
+    started: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SelectedScopePreparation {
+    pub(crate) fn retained(
+        provider: std::sync::Arc<ProcessScopeProvider>,
+        allocation: ProcessScopeAllocation,
+        limits: Option<ProcessScopeResourceLimits>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Self {
+        Self {
+            provider,
+            allocation,
+            limits,
+            original_service,
+            original_cleanup,
+            native: None,
+            started: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn same_provider_and_plan_for_component_test(
+        &self,
+        provider: &std::sync::Arc<ProcessScopeProvider>,
+        allocation: &ProcessScopeAllocation,
+    ) -> bool {
+        std::sync::Arc::ptr_eq(&self.provider, provider) && &self.allocation == allocation
+    }
+
+    pub(crate) fn allocate_into(
+        &mut self,
+        destination: &mut Option<ProcessScope>,
+    ) -> Result<(), String> {
+        if self.started || self.native.is_some() || destination.is_some() {
+            return Err("selected scope allocation cannot replace original owners".into());
+        }
+        self.started = true;
+        if self.original_cleanup.is_before(&self.original_service) || self.original_service.has_elapsed() {
+            return Err("selected allocation original pair unavailable".into());
+        }
+        self.allocation.validate()?;
+        if self.allocation.configuration != self.provider.configuration || self.allocation.host_lifetime_ended()? {
+            return Err("selected allocation provider or host generation changed".into());
+        }
+        let ProviderBackend::LinuxCgroupV2(parent) = &self.provider.backend;
+        let BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent: expected_parent, name } = &self.allocation.backend;
+        if parent.identity()? != *expected_parent {
+            return Err("selected allocation parent incarnation changed".into());
+        }
+        let bound = self.original_service.min(crate::time::MonotonicDeadline::after(self.allocation.control_timeout));
+        // Allocate the stable wrapper BEFORE acquiring parent/child/control
+        // descriptors. Each owner stays in its same frame field thereafter.
+        self.native = Some(std::sync::Arc::new(
+            super::cgroup::SelectedCgroupPreparation::planned_with_limits(name, *expected_parent, bound, self.limits)?,
+        ));
+        let native = self.native.as_mut().ok_or("selected native allocation frame absent")?;
+        let frame = std::sync::Arc::get_mut(native).ok_or("selected native frame unexpectedly shared")?;
+        let allocation_outcome = parent.create_into_selected_slot(frame);
+        let scope = match frame.complete() {
+            Some(scope) => scope,
+            None => return match allocation_outcome {
+                Err(error) => Err(error),
+                Ok(()) => Err("selected complete native scope absent".into()),
+            },
+        };
+        // The SAME complete controls also remain on the preparation frame.
+        // Construct metadata before adopting; post-bind/compiler checks cannot
+        // run until actual scope is already in the destination storage.
+        let launch_available = scope.launch_ready();
+        let identity = scope.identity()?;
+        let recovery = ProcessScopeRecovery {
+            version: SCOPE_RECOVERY_VERSION,
+            configuration: self.provider.configuration.clone(),
+            control_timeout: self.allocation.control_timeout,
+            backend: BackendRecovery::LinuxCgroupV2 {
+                boot_id: boot_id.clone(),
+                cgroup_enclosure: *cgroup_enclosure,
+                parent: identity.parent,
+                directory: identity.directory,
+                name: identity.name.clone(),
+            },
+        };
+        *destination = Some(ProcessScope {
+            recovery,
+            backend: ScopeBackend::LinuxCgroupV2Selected(std::sync::Arc::clone(native)),
+            launch_available,
+        });
+        // Even late completion installs the SAME scope before propagating the
+        // refusal, permitting original no-child observation without recreation.
+        allocation_outcome?;
+        if self.original_service.has_elapsed() || self.allocation.host_lifetime_ended()? {
+            return Err("selected allocated scope generation/expiry changed; scope retained".into());
+        }
+        Ok(())
+    }
+}
+
 /// A one-shot launch handle whose exact scope-wide memory and task ceilings
 /// were installed and read back before any workload could enter the scope.
 #[derive(Debug)]
@@ -628,6 +872,8 @@ pub struct ProcessScopeLaunchError {
 enum ScopeBackend {
     #[cfg(target_os = "linux")]
     LinuxCgroupV2(std::sync::Arc<super::cgroup::ProcessCgroup>),
+    #[cfg(target_os = "linux")]
+    LinuxCgroupV2Selected(std::sync::Arc<super::cgroup::SelectedCgroupPreparation>),
 }
 
 /// A completed kernel barrier. Exclusive workspace owners must consume it by
@@ -694,6 +940,8 @@ impl ProcessScopeConfiguration {
         account: &ControllerAccount,
         intent: &super::OciLifecycleIntent,
         process_root: &super::ExactProcessRoot,
+        node_resources: ProcessScopeResourceLimits,
+        mut observer: impl FnMut(&super::OciPreparationProgress) -> Result<(), String>,
     ) -> Result<(Self, super::OciLifecycleGeneration), String> {
         state.validate_prestart()?;
         super::require_administrator().map_err(|error| error.to_string())?;
@@ -708,7 +956,7 @@ impl ProcessScopeConfiguration {
                 return Err("OCI process-root authority differs from lifecycle intent".to_owned());
             }
             let AccountBackend::Unix { uid, gid } = account.0;
-            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid)?;
+            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid, node_resources, &mut observer)?;
             let lifecycle = (|| {
                 let host_lifetime = intent.host_lifetime().clone();
                 let generation_payload = serde_json::json!({
@@ -717,6 +965,8 @@ impl ProcessScopeConfiguration {
                     "init_process": &prepared.init_process,
                     "lifecycle_scope": &prepared.lifecycle_scope,
                     "controller_scope": &prepared.controller_scope,
+                    "init_scope": &prepared.init_scope,
+                    "node_resources": &prepared.node_resources,
                     "nonce": intent.nonce(),
                 });
                 let generation = format!(
@@ -733,6 +983,8 @@ impl ProcessScopeConfiguration {
                     prepared.init_process.clone(),
                     prepared.lifecycle_scope,
                     prepared.controller_scope,
+                    prepared.init_scope,
+                    prepared.node_resources,
                     prepared.lifecycle_path.clone(),
                     prepared.controller_path.clone(),
                     generation,
@@ -741,10 +993,7 @@ impl ProcessScopeConfiguration {
             let lifecycle = match lifecycle {
                 Ok(lifecycle) => lifecycle,
                 Err(error) => {
-                    let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                    return Err(format!(
-                        "{error}; OCI controller-root rollback: {rollback:?}"
-                    ));
+                    return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
                 }
             };
             let configuration = Self {
@@ -754,17 +1003,11 @@ impl ProcessScopeConfiguration {
                 },
             };
             if let Err(error) = configuration.validate() {
-                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                return Err(format!(
-                    "{error}; OCI controller-root rollback: {rollback:?}"
-                ));
+                return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
             }
             if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, process_root)
             {
-                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
-                return Err(format!(
-                    "{error}; OCI controller-root rollback: {rollback:?}"
-                ));
+                return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
             }
             Ok((configuration, lifecycle))
         }
@@ -868,18 +1111,39 @@ impl ProcessScopeConfiguration {
         Err("controller process-tree observation is unavailable on this OS".to_owned())
     }
 
+    /// Controller-side proof that the current process was placed by the host
+    /// supervisor into this delegation's administrator-owned controller leaf.
+    /// Association alone is not placement: a process started directly on an
+    /// associated app root is refused, naming its cgroup and the expected leaf.
+    pub fn require_current_process_in_controller(
+        &self,
+        account: &ControllerAccount,
+    ) -> Result<(), String> {
+        self.validate()?;
+        account.validate()?;
+        #[cfg(target_os = "linux")]
+        {
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            let AccountBackend::Unix { uid, .. } = account.0;
+            super::cgroup::require_current_process_in_controller(parent, uid)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("controller placement observation is unavailable on this OS".to_owned())
+    }
+
     /// Explicit host-supervisor entry, not worker execution. Replaces this
     /// administrator process with an unprivileged controller after exact
     /// placement. It installs no service and changes no application policy.
     pub fn exec_controller(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
         environment: &[(String, String)],
     ) -> Result<std::convert::Infallible, String> {
-        self.exec_controller_inner(account, executable, arguments, cwd, environment, None, None)
+        self.exec_controller_inner(account, node_resources, executable, arguments, cwd, environment, None, None)
     }
 
     /// External-supervisor entry using one exact administrator-owned launch
@@ -888,6 +1152,7 @@ impl ProcessScopeConfiguration {
     pub fn exec_controller_with_inherited_document(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
@@ -897,6 +1162,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.exec_controller_inner(
             account,
+            node_resources,
             executable,
             arguments,
             cwd,
@@ -912,6 +1178,7 @@ impl ProcessScopeConfiguration {
     pub fn exec_prepared_oci_controller_with_inherited_document(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         lifecycle: &super::OciLifecycleGeneration,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
@@ -922,6 +1189,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.exec_controller_inner(
             account,
+            node_resources,
             executable,
             arguments,
             cwd,
@@ -934,6 +1202,7 @@ impl ProcessScopeConfiguration {
     fn exec_controller_inner(
         &self,
         account: &ControllerAccount,
+        node_resources: ProcessScopeResourceLimits,
         executable: &crate::PinnedRegularFile,
         arguments: &[String],
         cwd: &crate::PinnedDirectory,
@@ -943,6 +1212,7 @@ impl ProcessScopeConfiguration {
     ) -> Result<std::convert::Infallible, String> {
         self.validate()?;
         account.validate()?;
+        node_resources.validate()?;
         if !executable.path().is_absolute() || !cwd.path().is_absolute() {
             return Err("controller executable and cwd must be explicit absolute paths".to_owned());
         }
@@ -999,6 +1269,18 @@ impl ProcessScopeConfiguration {
                 }
                 None => super::cgroup::provision_controller(parent, uid, gid)?,
             };
+            // Enclosing node ceilings dominate controller and worker scopes,
+            // including authorized intra-node placement changes. Install them
+            // before controller placement, privilege drop and daemon exec.
+            bootstrap.install_resource_limits(node_resources)?;
+            // Per-process ceilings survive credential drop and exec. Raise them
+            // while still administrator: the daemon locks its resident region
+            // at startup, and host supervisors commonly inherit a small
+            // RLIMIT_MEMLOCK. A prepared OCI controller keeps its runtime's
+            // configured ceilings.
+            if oci_lifecycle.is_none() {
+                super::cgroup::install_controller_rlimits(node_resources)?;
+            }
             command
                 .args(arguments)
                 .env_clear()
@@ -1009,6 +1291,12 @@ impl ProcessScopeConfiguration {
             bootstrap.configure_command(&mut command)?;
             cwd.configure_command_cwd(&mut command)
                 .map_err(|error| error.to_string())?;
+            // A host supervisor commonly runs this entry inside its own
+            // administrator-owned session and process group. The controller
+            // must lead its own: its exact identity names its group leader,
+            // and group termination must never reach the supervisor. Exec
+            // replaces this process, so the session placement carries over.
+            super::establish_own_process_session()?;
             Err(format!(
                 "exec unprivileged scope controller: {}",
                 command.exec()
@@ -1140,16 +1428,20 @@ impl ProcessScopeProvider {
         validate_allocation_name(allocation)?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            ProviderBackend::LinuxCgroupV2(parent) => Ok(ProcessScopeAllocation {
-                version: SCOPE_ALLOCATION_VERSION,
-                configuration: self.configuration.clone(),
-                control_timeout: timeout,
-                backend: BackendAllocation::LinuxCgroupV2 {
-                    boot_id: super::linux::read_boot_id()?,
-                    parent: parent.identity()?,
-                    name: allocation.to_owned(),
-                },
-            }),
+            ProviderBackend::LinuxCgroupV2(parent) => {
+                let (boot_id, cgroup_enclosure) = capture_host_generation()?;
+                Ok(ProcessScopeAllocation {
+                    version: SCOPE_ALLOCATION_VERSION,
+                    configuration: self.configuration.clone(),
+                    control_timeout: timeout,
+                    backend: BackendAllocation::LinuxCgroupV2 {
+                        boot_id,
+                        cgroup_enclosure,
+                        parent: parent.identity()?,
+                        name: allocation.to_owned(),
+                    },
+                })
+            }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scopes are unavailable on this OS".to_owned()),
         }
@@ -1168,6 +1460,7 @@ impl ProcessScopeProvider {
             ProviderBackend::LinuxCgroupV2(parent) => {
                 let BackendAllocation::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent: expected_parent,
                     name,
                 } = &allocation.backend;
@@ -1183,6 +1476,7 @@ impl ProcessScopeProvider {
                         control_timeout: allocation.control_timeout,
                         backend: BackendRecovery::LinuxCgroupV2 {
                             boot_id: boot_id.clone(),
+                            cgroup_enclosure: *cgroup_enclosure,
                             parent: identity.parent,
                             directory: identity.directory,
                             name: identity.name.clone(),
@@ -1198,6 +1492,34 @@ impl ProcessScopeProvider {
                 Err("process scopes are unavailable on this OS".to_owned())
             }
         }
+    }
+
+    /// Selected lexical allocation mechanics only; this does not issue a root
+    /// loan or authenticate App/Executor admission. Retain SAME Arc provider
+    /// and plan in private storage before the first native creation operation.
+    #[cfg(target_os = "linux")]
+    pub fn allocate_into_selected_slot(
+        self: std::sync::Arc<Self>,
+        allocation: ProcessScopeAllocation,
+        destination: &mut crate::exec::SelectedScopedBorrow<'_>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        destination.allocate_scope_into(self, allocation, None, original_service, original_cleanup)
+    }
+
+    /// Owner-preserving resource variant: limits are installed/read back in
+    /// the original retained allocation frame, never a consuming scope API.
+    #[cfg(target_os = "linux")]
+    pub fn allocate_resource_into_selected_slot(
+        self: std::sync::Arc<Self>,
+        allocation: ProcessScopeAllocation,
+        limits: ProcessScopeResourceLimits,
+        destination: &mut crate::exec::SelectedScopedBorrow<'_>,
+        original_service: crate::time::MonotonicDeadline,
+        original_cleanup: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        destination.allocate_scope_into(self, allocation, Some(limits), original_service, original_cleanup)
     }
 
     /// The caller must already hold its existing placement/recovery fence.
@@ -1216,12 +1538,15 @@ impl ProcessScopeProvider {
                 ProviderBackend::LinuxCgroupV2(parent),
                 BackendRecovery::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent: owner,
                     directory,
                     name,
                 },
             ) => {
-                if super::linux::read_boot_id()? != *boot_id {
+                // validate_recovery above already proved this provider holds
+                // the exact recorded parent, so only a different boot ends it.
+                if host_generation_change(boot_id, *cgroup_enclosure)? == HostGenerationChange::BootEnded {
                     return Err("process scope recovery belongs to another boot".to_owned());
                 }
                 let scope = parent.reopen(
@@ -1256,6 +1581,10 @@ impl ProcessScopeProvider {
             #[cfg(target_os = "linux")]
             (ProviderBackend::LinuxCgroupV2(parent), ScopeBackend::LinuxCgroupV2(scope)) => {
                 parent.retire_empty(scope.identity(), timeout.saturating_sub(started.elapsed()))
+            }
+            #[cfg(target_os = "linux")]
+            (ProviderBackend::LinuxCgroupV2(_), ScopeBackend::LinuxCgroupV2Selected(_)) => {
+                Err("selected frame grants no ordinary retirement".into())
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope retirement is unavailable on this OS".to_owned()),
@@ -1297,10 +1626,11 @@ impl ProcessScopeAllocation {
     pub fn host_lifetime(&self) -> Result<ProcessHostLifetime, String> {
         self.validate()?;
         match &self.backend {
-            BackendAllocation::LinuxCgroupV2 { boot_id, .. } => Ok(ProcessHostLifetime {
-                version: 1,
+            BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent: _, name: _ } => Ok(ProcessHostLifetime {
+                version: HOST_LIFETIME_VERSION,
                 backend: HostLifetimeBackend::LinuxBoot {
                     boot_id: boot_id.clone(),
+                    cgroup_enclosure: *cgroup_enclosure,
                 },
             }),
         }
@@ -1354,12 +1684,8 @@ impl ProcessScopeAllocation {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            BackendAllocation::LinuxCgroupV2 { boot_id, .. } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("current host lifetime is unavailable".to_owned());
-                }
-                Ok(current != *boot_id)
+            BackendAllocation::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent, name: _ } => {
+                scope_generation_ended(boot_id, *cgroup_enclosure, &self.configuration, parent)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope lifetime observation is unavailable on this OS".to_owned()),
@@ -1382,16 +1708,23 @@ impl ProcessScopeRecovery {
             (
                 BackendRecovery::LinuxCgroupV2 {
                     boot_id,
+                    cgroup_enclosure,
                     parent,
                     name,
-                    ..
+                    directory: _,
                 },
                 BackendAllocation::LinuxCgroupV2 {
                     boot_id: expected_boot,
+                    cgroup_enclosure: expected_enclosure,
                     parent: expected_parent,
                     name: expected_name,
                 },
-            ) => boot_id == expected_boot && parent == expected_parent && name == expected_name,
+            ) => {
+                boot_id == expected_boot
+                    && cgroup_enclosure == expected_enclosure
+                    && parent == expected_parent
+                    && name == expected_name
+            }
         }
     }
     /// Original admitted per-operation ceiling; not the worker lifetime or a
@@ -1530,12 +1863,8 @@ impl ProcessScopeRecovery {
         self.validate()?;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            BackendRecovery::LinuxCgroupV2 { boot_id, .. } => {
-                let current = super::linux::read_boot_id()?;
-                if !valid_boot_id(&current) {
-                    return Err("kernel boot identity is unavailable or malformed".to_owned());
-                }
-                Ok(current != *boot_id)
+            BackendRecovery::LinuxCgroupV2 { boot_id, cgroup_enclosure, parent, directory: _, name: _ } => {
+                scope_generation_ended(boot_id, *cgroup_enclosure, &self.configuration, parent)
             }
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope lifetime observation is unavailable on this OS".to_owned()),
@@ -1575,6 +1904,64 @@ fn valid_boot_id(value: &str) -> bool {
 }
 
 impl ProcessScope {
+    /// Component preflight only. This does not authenticate an upper admission.
+    pub(crate) fn require_selected_launch_right(&self) -> Result<(), String> {
+        if self.launch_available {
+            Ok(())
+        } else {
+            Err("selected scope launch right already consumed".into())
+        }
+    }
+
+    pub(crate) fn consume_selected_launch_right(&mut self) -> Result<(), String> {
+        self.require_selected_launch_right()?;
+        self.launch_available = false;
+        Ok(())
+    }
+
+    fn selected_control_bound(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<crate::time::MonotonicDeadline, String> {
+        if original.has_elapsed() || self.recovery.control_timeout.is_zero() {
+            return Err("selected scope control bound unavailable".into());
+        }
+        Ok(original.min(crate::time::MonotonicDeadline::after(
+            self.recovery.control_timeout,
+        )))
+    }
+
+    pub(crate) fn require_held_member_until(
+        &self,
+        pid: u32,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let bound = self.selected_control_bound(original)?;
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.require_member_until(pid, bound),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.require_member_until(pid, bound),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("selected scope membership unavailable".into()),
+        }
+    }
+
+    pub(crate) fn request_selected_termination_until(
+        &self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let bound = self.selected_control_bound(original)?;
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2(scope) => scope.request_termination_until(bound),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.request_termination_until(bound),
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("selected scope termination unavailable".into()),
+        }
+    }
+
     /// Install and read back scope-wide limits while this exact reservation is
     /// still empty. A failure grants no weaker launch path; the owner must
     /// retire the unlaunched reservation through its durable journal.
@@ -1595,6 +1982,8 @@ impl ProcessScope {
         let result = match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.install_resource_limits(limits),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected resource-limit adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope resource limits are unavailable on this OS".to_owned()),
         };
@@ -1614,6 +2003,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.clone_kill_descriptor(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected watchdog adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process-scope lifetime enforcement is unavailable".to_owned()),
         }
@@ -1624,6 +2015,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.require_member(pid, timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected membership requires original endpoint".into()),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope membership is unavailable on this OS".to_owned()),
         }
@@ -1633,6 +2026,10 @@ impl ProcessScope {
     /// consumes its launch right; recovered/control-only scopes cannot invoke
     /// this shortcut. Contacted scopes require the owner's durable settlement.
     pub fn retire_unlaunched(mut self, timeout: Duration) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if matches!(&self.backend, ScopeBackend::LinuxCgroupV2Selected(_)) {
+            return Err("selected frame cannot use consuming unlaunched retirement".into());
+        }
         if !self.launch_available {
             return Err("process scope has already authorized contact".to_owned());
         }
@@ -1644,6 +2041,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.is_empty(),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(scope) => scope.is_empty(),
             #[cfg(not(target_os = "linux"))]
             _ => Err("process scope observation is unavailable on this OS".to_owned()),
         }
@@ -1662,6 +2061,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.probe_lifecycle(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no probe lifecycle".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1681,6 +2082,10 @@ impl ProcessScope {
                 #[cfg(target_os = "linux")]
                 ScopeBackend::LinuxCgroupV2(scope) => {
                     ScopeBackend::LinuxCgroupV2(std::sync::Arc::clone(scope))
+                }
+                #[cfg(target_os = "linux")]
+                ScopeBackend::LinuxCgroupV2Selected(scope) => {
+                    ScopeBackend::LinuxCgroupV2Selected(std::sync::Arc::clone(scope))
                 }
                 #[cfg(not(target_os = "linux"))]
                 _ => unreachable!("no process scope is implemented on this OS"),
@@ -1735,6 +2140,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.configure_command(command),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected command adapter not issued".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = command;
@@ -1751,6 +2158,8 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no generic freeze".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1764,6 +2173,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.terminate_and_wait(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected cleanup requires original endpoint".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1785,6 +2196,8 @@ impl ProcessScope {
                 control_timeout: self.recovery.control_timeout,
                 backend: QuiescedBackend::LinuxCgroupV2(scope.recover_freeze(timeout)?),
             }),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no recovered barrier".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1798,6 +2211,8 @@ impl ProcessScope {
         match &self.backend {
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2(scope) => scope.wait_empty(timeout),
+            #[cfg(target_os = "linux")]
+            ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected scope permits retained observation only".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
                 let _ = timeout;
@@ -1879,6 +2294,17 @@ impl QuiescedProcessScope {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recorded_enclosure_is_compared_only_with_a_visible_one() {
+        assert_eq!(compare_enclosure(4, Some(4)).unwrap(), HostGenerationChange::Same);
+        assert_eq!(compare_enclosure(4, Some(5)).unwrap(), HostGenerationChange::EnclosureChanged);
+        assert!(compare_enclosure(4, None).unwrap_err().contains("cannot be decided"));
+        // A boot-only recording on this boot is never taken as ended.
+        let boot = current_boot_id().unwrap();
+        assert_eq!(host_generation_change(&boot, None).unwrap(), HostGenerationChange::Same);
+    }
+
     #[test]
     fn scope_resource_limits_reject_unbounded_dimensions() {
         let valid = ProcessScopeResourceLimits {
@@ -1908,6 +2334,101 @@ mod tests {
         serde_json::json!({"version": SCOPE_CONFIGURATION_VERSION, "backend": {
             "implementation": "linux_cgroup_v2", "parent": "/explicit/delegation"
         }})
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires separately authorized explicit disposable cgroup delegation; component control only"]
+    fn selected_no_child_retains_consumed_actual_scope_until_local_empty() {
+        let root =
+            std::env::var_os("LILLUX_TEST_CGROUP_PARENT").expect("explicit disposable delegation");
+        let config: ProcessScopeConfiguration = serde_json::from_value(serde_json::json!({
+            "version": SCOPE_CONFIGURATION_VERSION,
+            "backend": {"implementation": "linux_cgroup_v2", "parent": root}
+        }))
+        .unwrap();
+        let provider = ProcessScopeProvider::open(&config).unwrap();
+        let scope = provider
+            .reserve(
+                &format!("selected-nochild-{:032x}", rand::random::<u128>()),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let recovery = scope.recovery().clone();
+        let mut status = crate::exec::supervised_launcher_attachment_status_pipe().unwrap();
+        status
+            .reader
+            .require_applied_launch_receipt("test.selected-scoped/v1")
+            .unwrap();
+        status.reader.require_mount_preparation_receipt().unwrap();
+        let mut request = Some(crate::SubprocessRequest {
+            cmd: "/missing-selected-scoped-component-command".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: vec![status.writer],
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: Some(status.reader),
+        });
+        let mut source_scope = Some(scope);
+        // Synthetic compiler commitments select no admitted caller and yield
+        // no positive native evidence; creation intentionally fails before exec.
+        let mut target = Some(crate::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [0; 32],
+            argv_sha256: [0; 32],
+            environment_sha256: [0; 32],
+            cwd_sha256: [0; 32],
+        });
+        let mut mounts = Some(crate::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 0,
+            destination_access_sha256: [0; 32],
+        });
+        let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
+        let mut storage = crate::exec::SelectedScopedStorage::for_component_test();
+        let mut ledger = storage.borrow_for_component_test();
+        ledger
+            .prepare_from_compiled_slots(
+                &mut request,
+                &mut source_scope,
+                &mut target,
+                &mut mounts,
+                original,
+                original,
+            )
+            .unwrap();
+        assert!(
+            request.is_none() && source_scope.is_none() && target.is_none() && mounts.is_none()
+        );
+        assert_eq!(
+            ledger.create(),
+            crate::exec::SelectedScopedObservation::RefusedWithoutChild
+        );
+        assert!(
+            ledger
+                .require_recorded_local_scope_settlement(&recovery)
+                .is_err()
+        );
+        assert_eq!(
+            ledger.observe_cleanup(),
+            crate::exec::SelectedScopedObservation::LocallySettled
+        );
+        ledger
+            .require_recorded_local_scope_settlement(&recovery)
+            .unwrap();
+        assert_eq!(
+            ledger.create(),
+            crate::exec::SelectedScopedObservation::Refused
+        );
+        // Fixture directory retirement only after actual local proof; not App
+        // reservation clearing, refunded funding or enclosing root qualification.
+        drop(ledger);
+        drop(storage);
+        provider.retire(&recovery, Duration::from_secs(5)).unwrap();
     }
 
     #[test]
@@ -1964,6 +2485,7 @@ mod tests {
             configuration
                 .exec_controller(
                     &ControllerAccount::unix(1000, 1000),
+                    ProcessScopeResourceLimits { maximum_memory_bytes: 268435456, maximum_processes: 64 },
                     &image,
                     &[],
                     &cwd,
@@ -1978,7 +2500,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert!(
             configuration
-                .exec_controller(&ControllerAccount::unix(0, 0), &image, &[], &cwd, &[])
+                .exec_controller(&ControllerAccount::unix(0, 0), ProcessScopeResourceLimits { maximum_memory_bytes: 268435456, maximum_processes: 64 }, &image, &[], &cwd, &[])
                 .unwrap_err()
                 .contains("non-root account")
         );
@@ -2049,7 +2571,7 @@ mod tests {
         let value = serde_json::json!({"version": SCOPE_RECOVERY_VERSION, "configuration": configuration(),
             "control_timeout": {"secs": 1, "nanos": 0}, "backend": {
             "implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
-            "parent": {"containing_device": 1, "inode": 2},
+            "cgroup_enclosure": 7, "parent": {"containing_device": 1, "inode": 2},
             "directory": {"containing_device": 1, "inode": 3}, "name": "existing-allocation"
         }});
         let recovery: ProcessScopeRecovery = serde_json::from_value(value.clone()).unwrap();
@@ -2064,14 +2586,13 @@ mod tests {
         let allocation: ProcessScopeAllocation = serde_json::from_value(planned.clone()).unwrap();
         allocation.validate().unwrap();
         assert!(recovery.matches_allocation(&allocation));
-        for field in ["name", "boot_id"] {
+        for (field, replacement) in [
+            ("name", serde_json::json!("different-slot")),
+            ("boot_id", serde_json::json!("00000000-0000-4000-8000-000000000001")),
+            ("cgroup_enclosure", serde_json::json!(8)),
+        ] {
             let mut changed = planned.clone();
-            changed["backend"][field] = if field == "name" {
-                "different-slot"
-            } else {
-                "00000000-0000-4000-8000-000000000001"
-            }
-            .into();
+            changed["backend"][field] = replacement;
             assert!(!recovery.matches_allocation(&serde_json::from_value(changed).unwrap()));
         }
         let mut changed = planned.clone();
@@ -2438,13 +2959,32 @@ fn host_lifetime_witness_is_strict_and_does_not_claim_same_boot_cleanup() {
     wrong["proof"] = "daemon_exited".into();
     assert!(serde_json::from_value::<ProcessHostLifetime>(wrong).is_err());
     let ended = ProcessHostLifetime {
-        version: 1,
+        version: HOST_LIFETIME_VERSION,
         backend: HostLifetimeBackend::LinuxBoot {
             boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            cgroup_enclosure: None,
         },
     };
     assert_ne!(ended, current);
     assert!(ended.has_ended().unwrap());
+    // Same boot, different enclosure: a restarted container is a new
+    // generation even though the kernel boot did not change.
+    let HostLifetimeBackend::LinuxBoot { boot_id, cgroup_enclosure } = &current.backend;
+    if let Some(inode) = cgroup_enclosure {
+        let restarted = ProcessHostLifetime {
+            version: HOST_LIFETIME_VERSION,
+            backend: HostLifetimeBackend::LinuxBoot {
+                boot_id: boot_id.clone(),
+                cgroup_enclosure: Some(inode.wrapping_add(1)),
+            },
+        };
+        assert!(restarted.has_ended().unwrap());
+        let unobserved = ProcessHostLifetime {
+            version: HOST_LIFETIME_VERSION,
+            backend: HostLifetimeBackend::LinuxBoot { boot_id: boot_id.clone(), cgroup_enclosure: None },
+        };
+        assert!(unobserved.has_ended().is_err());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2455,7 +2995,12 @@ fn readonly_delivery_grant_refuses_writable_modes_without_mutation() {
         .unwrap()
         .unwrap();
     let file = directory
-        .atomic_create_pinned_regular(std::ffi::OsStr::new("input"), b"exact", 0o400)
+        .atomic_create_pinned_regular(
+            std::ffi::OsStr::new("input"),
+            b"exact",
+            0o400,
+            crate::secure_fs::TEST_TEMP_PURPOSE,
+        )
         .unwrap()
         .unwrap();
     let account = ControllerAccount::unix(65534, 65534);
@@ -2477,7 +3022,12 @@ fn readonly_delivery_grant_preserves_read_and_executable_modes() {
     let account = ControllerAccount::unix(65534, 65534);
     for (name, mode) in [("record", 0o400), ("verifier", 0o500)] {
         let file = directory
-            .atomic_create_pinned_regular(std::ffi::OsStr::new(name), b"exact", mode)
+            .atomic_create_pinned_regular(
+                std::ffi::OsStr::new(name),
+                b"exact",
+                mode,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap();
         account.grant_private_readonly_file(&file, mode).unwrap();

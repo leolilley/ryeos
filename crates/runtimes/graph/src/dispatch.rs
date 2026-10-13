@@ -1,3 +1,4 @@
+use ryeos_runtime::graph_result::GraphResult;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -9,7 +10,7 @@ use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 use crate::context::ExecutionContext;
 use crate::model::FanoutItemStatus;
 #[cfg(test)]
-use crate::model::GraphRunStatus;
+use ryeos_runtime::graph_result::GraphRunStatus;
 
 const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
 pub(crate) const GRAPH_ACTION_OCCURRENCE_SCHEMA: &str = "ryeos.runtime_action_occurrence.v1";
@@ -997,7 +998,7 @@ fn native_success_value(
 ) -> Result<Value, String> {
     match projection {
         NativeResultProjection::GraphReturn => {
-            ryeos_graph_definition::project_graph_action_result(result, outputs)
+            ryeos_runtime::graph_result::project_graph_action_result(result, outputs)
         }
         NativeResultProjection::KindDefined => Ok(
             ryeos_runtime::envelope::project_kind_defined_action_result(result, outputs),

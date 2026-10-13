@@ -16,20 +16,25 @@ use ryeos_executor::executor::ServiceAvailability;
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
+    let scheduler = state
+        .extensions
+        .get::<ryeos_scheduler_service::SchedulerService>()
+        .ok_or_else(|| anyhow::anyhow!("selected scheduler service is unavailable"))?;
+    let _read_guard = scheduler.acquire_read().await?;
+    let db = scheduler.scheduler_db();
+
     // Browser session = admin: no owner filtering, include disabled.
-    let specs = state.scheduler_db.list_specs_filtered(false, None, None)?;
+    let specs = db.list_specs_filtered(false, None, None)?;
 
     // Batch-load last fires to avoid N+1 queries
     let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
-    let last_fires = state.scheduler_db.get_last_fires_batch(&schedule_ids)?;
+    let last_fires = db.get_last_fires_batch(&schedule_ids)?;
 
     // Batch-load fire counts
     let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
         .iter()
         .filter_map(|id| {
-            state
-                .scheduler_db
-                .count_fires(id, None)
+            db.count_fires(id, None)
                 .ok()
                 .map(|c| (id.clone(), c))
         })

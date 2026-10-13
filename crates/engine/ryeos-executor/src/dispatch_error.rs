@@ -145,6 +145,16 @@ pub enum DispatchError {
     /// root tools.
     #[error("root executor missing for '{item_ref}': {detail}")]
     RootExecutorMissing { item_ref: String, detail: String },
+    /// A direct tool launch named a predecessor thread. Direct tools have no
+    /// continuation admission, so the launch is refused before resolution or
+    /// any secret access.
+    #[error(
+        "direct tool '{item_ref}' cannot continue thread '{previous_thread_id}': continuations run through the successor launch with the predecessor's sealed root request"
+    )]
+    DirectContinuationUnsupported {
+        item_ref: String,
+        previous_thread_id: String,
+    },
     /// Subprocess run failed — the waited or detached run encountered
     /// an error after resolution succeeded.
     #[error("subprocess run failed for '{item_ref}': {detail}")]
@@ -433,7 +443,8 @@ impl DispatchError {
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
             | Self::SchemaMisconfigured { .. }
-            | Self::RootExecutorMissing { .. } => StatusCode::BAD_REQUEST,
+            | Self::RootExecutorMissing { .. }
+            | Self::DirectContinuationUnsupported { .. } => StatusCode::BAD_REQUEST,
             Self::RefBindingNotApplicable { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
@@ -528,6 +539,7 @@ impl DispatchError {
             Self::ServiceNotInstalled { .. } => "service_not_installed",
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
             Self::RootExecutorMissing { .. } => "root_executor_missing",
+            Self::DirectContinuationUnsupported { .. } => "direct_continuation_unsupported",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::ExecutionNotRestartEligible { .. } => "execution_not_restart_eligible",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
@@ -592,6 +604,18 @@ impl DispatchError {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn direct_continuation_refusal_is_a_typed_client_error() {
+        let err = DispatchError::DirectContinuationUnsupported {
+            item_ref: "tool:test/run".to_owned(),
+            previous_thread_id: "T-prior".to_owned(),
+        };
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "direct_continuation_unsupported");
+        let message = err.to_string();
+        assert!(message.contains("tool:test/run") && message.contains("T-prior"), "{message}");
+    }
 
     #[test]
     fn required_secret_missing_names_all_three_sources() {

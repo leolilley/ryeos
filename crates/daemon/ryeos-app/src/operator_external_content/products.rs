@@ -259,7 +259,7 @@ fn capture_guarded(
         ..
     } = source.clone();
     let product = recipe.declarations.select(&request.product_name)?.clone();
-    let policy = state.node_policy.require::<crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
+    let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
     let capture_policy_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "limits": policy.limits,
         "capture_floor_rules": ryeos_state::project_sync::durable_content_capture_floor_rules(),
@@ -445,10 +445,9 @@ fn load_capture_source(
         bail!("producer terminal result generation changed during product capture");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             &capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     capsule.verify_retained_execution_realization(
@@ -521,7 +520,7 @@ fn import_workspace_output_product(
     capture_hash: &str,
     recipe: &ryeos_state::external_content::products::admission::AdmittedProductRecipeBinding,
     product: &ryeos_state::external_content::products::ProductDeclaration,
-    policy: &crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
 ) -> anyhow::Result<(Option<ImportResponse>, String)> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;

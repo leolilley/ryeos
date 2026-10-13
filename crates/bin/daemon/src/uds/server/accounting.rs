@@ -227,7 +227,7 @@ pub(super) fn handle_provider_attempt_prepare(
         anyhow!("provider attempt requires an admitted effective-definition identity")
     })?;
     let secrets = ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
@@ -440,7 +440,7 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // issue-to-provider-acceptance window beyond the durable Issued boundary.
     let accounting_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::accounting::NodeAccountingPolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::accounting::NodeAccountingPolicy>(
     )?;
     let acceptance_window_ms =
         i64::try_from(accounting_policy.issue_acceptance_window_ms).unwrap_or(i64::MAX);
@@ -452,7 +452,7 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // NOT revocation evidence: it must surface as a retryable RPC error, not
     // durably brand the attempt as released.
     let current_binding = match ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
@@ -1216,6 +1216,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    original_budget: Option<ryeos_app::handler_context::OriginalExecutionBudget>,
 ) -> Result<Value> {
     let request: ProviderAttemptLocalStreamStartParams = serde_json::from_value(params.clone())
         .context("decode provider_attempt_local_stream_start params")?;
@@ -1347,6 +1348,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
             &owned_state,
             &owned_capsule,
             owned_accounting_scope.as_ref(),
+            original_budget.as_ref(),
             &ryeos_app::persistent_session::PersistentSessionRequestIdentity {
                 thread_id: owned_thread_id.clone(),
                 request_digest: ryeos_accounting::HexDigest::new(owned_request_hash.clone())
@@ -1560,10 +1562,10 @@ mod tests {
 
     #[test]
     fn indexed_provider_record_repairs_missing_accounting_publication_proof() {
-        let (tmp, mut state) = super::super::tests::setup_app_state();
-        let ledger = Arc::new(
-            AccountingDb::open_default(&tmp.path().join("accounting-proof-repair")).unwrap(),
-        );
+        let (tmp, _state_owner, mut state) = super::super::tests::setup_app_state();
+        let ledger_owner =
+            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("accounting-proof-repair")).unwrap();
+        let ledger = ledger_owner.shared();
         state.accounting = Some(Arc::clone(&ledger));
 
         let thread_id = "T-publication-repair";
@@ -1725,6 +1727,10 @@ mod tests {
         assert_eq!(proof.record_hash, record_hash);
         verify_provider_call_publication_proof(&state, &proof).unwrap();
         authority_store.ensure_guard(&guard).unwrap();
+        // The ledger closes into the census after every alias is gone.
+        drop(state);
+        drop(ledger);
+        ledger_owner.close().unwrap();
     }
 
     #[test]

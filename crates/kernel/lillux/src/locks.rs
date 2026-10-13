@@ -9,6 +9,72 @@ use std::fs;
 #[cfg(unix)]
 use std::io::Write;
 
+/// Lock an already-open regular file in shared mode until the caller's existing
+/// deadline. This consumes and returns the SAME descriptor: it never opens a
+/// path, creates a sibling anchor, or writes lock contents. The caller must
+/// supply a fresh independently owned file, not an alias of an existing lock.
+/// Keep the caller's fork-sensitive descriptor lease through this acquisition
+/// and the returned file's lifetime. Contention is bounded; filesystem metadata
+/// inspection is not an interruptible operation.
+pub fn acquire_existing_shared_file_until(
+    file: fs::File,
+    deadline: crate::time::MonotonicDeadline,
+) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        let expired = || {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "existing shared file lock deadline elapsed",
+            )
+        };
+        if deadline.has_elapsed() {
+            return Err(expired());
+        }
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "existing shared file lock requires a regular file",
+            ));
+        }
+        loop {
+            if deadline.has_elapsed() {
+                return Err(expired());
+            }
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                // A successful native call after expiry supplies no authority.
+                // Dropping this uniquely owned file releases its acquired lock.
+                if deadline.has_elapsed() {
+                    return Err(expired());
+                }
+                return Ok(file);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    let remaining = deadline.remaining();
+                    if remaining.is_zero() {
+                        return Err(expired());
+                    }
+                    crate::time::sleep(remaining.min(crate::time::Duration::from_millis(10)));
+                }
+                _ => return Err(error),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, deadline);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "interprocess file locking is unavailable on this platform",
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn open_directory_no_follow(path: &Path, create_missing: bool) -> Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -145,6 +211,7 @@ pub struct SharedFileLock {
 /// used for long-lived operational exclusion files such as a node's
 /// `operator.lock`.
 pub struct ExactExclusiveFileLock {
+    process: u32,
     #[cfg(unix)]
     file: crate::exec::ForkChildCloseFile,
     #[cfg(not(unix))]
@@ -153,7 +220,66 @@ pub struct ExactExclusiveFileLock {
     target_name: CString,
 }
 
+/// Refusal of an exact operational lock because another open file
+/// description holds it, as distinct from every other acquisition failure
+/// (an absent lock file, a wrong file type, an I/O error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactLockHeld {
+    /// The holder's pid, or `unknown` when it cannot be read.
+    pub holder: String,
+    /// The bounded wait spent before refusing, if any.
+    pub waited: Option<std::time::Duration>,
+}
+impl std::fmt::Display for ExactLockHeld {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wait = self
+            .waited
+            .map(|timeout| format!(" after waiting {:.1}s", timeout.as_secs_f64()))
+            .unwrap_or_default();
+        write!(
+            formatter,
+            "state lock held by another process (pid: {}){wait}; stop the daemon or other standalone service before proceeding",
+            self.holder
+        )
+    }
+}
+impl std::error::Error for ExactLockHeld {}
+
+/// Identities observed from the SAME retained target and parent descriptors.
+/// This copyable data supplies neither a lock grant nor a close receipt.
+#[derive(Clone, Copy, Debug)]
+pub struct ExactExclusiveFileLockObservation {
+    target: crate::OpenFileIdentity,
+    parent: crate::OpenFileIdentity,
+}
+impl ExactExclusiveFileLockObservation {
+    pub fn target(&self) -> crate::OpenFileIdentity { self.target }
+    pub fn parent(&self) -> crate::OpenFileIdentity { self.parent }
+}
+
 impl ExactExclusiveFileLock {
+    /// Reject copied process-local custody before touching retained descriptor
+    /// coordinates or the fork-child registration. This issues no lock grant.
+    pub fn require_original_process(&self) -> Result<()> {
+        anyhow::ensure!(self.process == std::process::id(),
+            "exact operational lock belongs to another process incarnation");
+        Ok(())
+    }
+    /// Observe the actual retained descriptors without reopening, duplicating
+    /// or exporting them. The original controller funds both observations
+    /// before this call. Returned identities are evidence only, never authority.
+    #[cfg(target_os = "linux")]
+    pub fn observe_retained_descriptors(&self) -> Result<ExactExclusiveFileLockObservation> {
+        self.require_original_process()?;
+        anyhow::ensure!(self.file.is_registered_live(), "operator target no longer live");
+        anyhow::ensure!(self.file.metadata()?.is_file() && self.parent.metadata()?.is_dir(),
+            "original operator descriptor roles changed");
+        Ok(ExactExclusiveFileLockObservation {
+            target: crate::observe_open_file_identity(&self.file)?,
+            parent: crate::observe_open_file_identity(&self.parent)?,
+        })
+    }
+
     /// Open or create `target`, acquire `LOCK_EX | LOCK_NB`, and publish the
     /// current PID as diagnostic content only after the lease is held.
     pub fn acquire(target: &Path) -> Result<Self> {
@@ -195,7 +321,7 @@ impl ExactExclusiveFileLock {
             // until its long-lived child-close registration is visible. A
             // direct-attachment fork can therefore never inherit the lock in
             // the gap between those operations.
-            let fork_sensitive_descriptors = crate::exec::retain_fork_sensitive_descriptors();
+            let fork_sensitive_descriptors = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
             let parent = open_directory_no_follow(parent_path, create_missing)?;
             let target_name = target
@@ -273,12 +399,7 @@ impl ExactExclusiveFileLock {
                 let holder = linux_flock_holder_pid(&file)
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let wait = wait_timeout
-                    .map(|timeout| format!(" after waiting {:.1}s", timeout.as_secs_f64()))
-                    .unwrap_or_default();
-                anyhow::bail!(
-                    "state lock held by another process (pid: {holder}){wait}; stop the daemon or other standalone service before proceeding"
-                );
+                return Err(ExactLockHeld { holder, waited: wait_timeout }.into());
             }
             if create_missing {
                 file.set_len(0)?;
@@ -292,6 +413,7 @@ impl ExactExclusiveFileLock {
             let file = crate::exec::register_fork_child_close_file(file);
             drop(fork_sensitive_descriptors);
             Ok(Self {
+                process: std::process::id(),
                 file,
                 parent,
                 target_name,
@@ -299,9 +421,41 @@ impl ExactExclusiveFileLock {
         }
     }
 
+    /// Close the actual registered lock target once, under its original fork
+    /// barrier. A busy barrier or expired original deadline retains the file.
+    /// The caller must finish durable account work before releasing exclusion.
+    /// Success is physical close evidence only, including a late observation;
+    /// it grants no admission, settlement or renewed cleanup authority.
+    #[cfg(target_os = "linux")]
+    pub fn try_retire_registered_target(
+        &mut self,
+        original: crate::time::MonotonicDeadline,
+    ) -> Result<bool> {
+        self.require_original_process()?;
+        self.file.try_retire_registered(original).map_err(anyhow::Error::msg)
+    }
+
+    /// Move the SAME retained parent after successful explicit target close.
+    /// A refusal returns the complete lock body, including failed-close facts.
+    /// The caller must still physically retire this parent under its original
+    /// funded controller; moving it does not produce a parent-close receipt.
+    #[cfg(target_os = "linux")]
+    pub fn into_retired_target_parent(self) -> std::result::Result<fs::File, (Self, anyhow::Error)> {
+        if let Err(error) = self.require_original_process() {
+            return Err((self, error));
+        }
+        if !self.file.explicitly_retired() {
+            return Err((self, anyhow::anyhow!("registered lock target has no successful close observation")));
+        }
+        Ok(self.parent)
+    }
+
     /// Prove `target` still resolves to the exact parent/name/inode held by
     /// this lease. No path component is followed.
     pub fn ensure_path_binding(&self, target: &Path) -> Result<()> {
+        self.require_original_process()?;
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(self.file.is_registered_live(), "operational lock target no longer live");
         #[cfg(not(unix))]
         {
             let _ = target;
@@ -832,6 +986,150 @@ pub(crate) fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Host close controls only: no native admission or account settlement proof.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_target_close_refusal_preserves_exclusion_then_releases_exact_target() {
+        use std::os::unix::fs::MetadataExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operator.lock");
+        let mut lock = ExactExclusiveFileLock::acquire(&path).unwrap();
+        let parent_identity = lock.parent.metadata().unwrap();
+        let original_observation = lock.observe_retained_descriptors().unwrap();
+        assert_eq!(original_observation.parent().inode(), parent_identity.ino());
+        assert_eq!(original_observation.target().inode(), lock.file.metadata().unwrap().ino());
+        assert!(!lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+        ).unwrap());
+        lock.ensure_path_binding(&path).unwrap();
+        assert!(ExactExclusiveFileLock::acquire(&path).is_err());
+        assert!(lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
+        ).unwrap());
+        assert!(lock.ensure_path_binding(&path).is_err());
+        let replacement = ExactExclusiveFileLock::acquire(&path).unwrap();
+        // Cached physical success must not close the newly acquired descriptor.
+        assert!(lock.try_retire_registered_target(
+            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+        ).unwrap());
+        replacement.ensure_path_binding(&path).unwrap();
+        assert!(ExactExclusiveFileLock::acquire(&path).is_err());
+        let parent = match lock.into_retired_target_parent() {
+            Ok(parent) => parent,
+            Err(_) => panic!("successful registered close must retain its exact parent"),
+        };
+        let observed = parent.metadata().unwrap();
+        assert_eq!((observed.dev(), observed.ino()), (parent_identity.dev(), parent_identity.ino()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_preserves_descriptor_inode_and_bytes() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cas-mutation.lock");
+        fs::write(&target, b"original lock bytes").unwrap();
+        let file = fs::File::open(&target).unwrap();
+        let original_fd = file.as_raw_fd();
+        let original_inode = file.metadata().unwrap().ino();
+        // The native primitive follows the supplied descriptor, not this path.
+        let retained = dir.path().join("original");
+        fs::rename(&target, &retained).unwrap();
+        fs::write(&target, b"replacement").unwrap();
+        let held = acquire_existing_shared_file_until(
+            file,
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(held.as_raw_fd(), original_fd);
+        assert_eq!(held.metadata().unwrap().ino(), original_inode);
+        assert_eq!(fs::read(&retained).unwrap(), b"original lock bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!dir.path().join(".cas-mutation.lock.lock").exists());
+        let contender = fs::File::open(&retained).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        drop(held);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_contention_and_releases_after_owner_drop() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cas-mutation.lock");
+        fs::write(&target, b"unchanged").unwrap();
+        let owner = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let deadline =
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_millis(20));
+        let error = acquire_existing_shared_file_until(fs::File::open(&target).unwrap(), deadline)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(deadline.has_elapsed());
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        drop(owner);
+        let held = acquire_existing_shared_file_until(
+            fs::File::open(&target).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        drop(held);
+        let contender = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_expired_without_locking() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("lock");
+        fs::write(&target, b"unchanged").unwrap();
+        let error = acquire_existing_shared_file_until(
+            fs::File::open(&target).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::ZERO),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let contender = fs::File::open(&target).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_shared_file_until_refuses_nonregular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = acquire_existing_shared_file_until(
+            fs::File::open(dir.path()).unwrap(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -6,7 +6,7 @@
 //! The daemon's auth loader reads these files at startup (and on hot-reload).
 //! Each file must be signed by the node identity key.
 //!
-//! Delegates to the canonical `ryeos_app::identity::write_authorized_key_toml`
+//! Delegates to the canonical `ryeos_node_runtime::identity::write_authorized_key_toml`
 //! so there is exactly one TOML emitter.
 
 use std::path::PathBuf;
@@ -270,7 +270,7 @@ struct AdmissionTokenFile<'a> {
 /// Reconciles an existing fingerprint only within the explicitly selected
 /// same-class or stopped-node semantic-transition contract.
 ///
-/// Delegates to the canonical writer in `ryeos_app::identity` so the
+/// Delegates to the canonical writer in `ryeos_node_runtime::identity` so the
 /// TOML format is identical to what the daemon's own handler produces.
 pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeClientResult> {
     // Explicit pre-node bootstrap entry only. A confined Tool must never
@@ -278,7 +278,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
     // identity/authorize-client service and its retained identity instead.
     let _stopped_node_lock = acquire_semantic_conversion_lock(&params)?;
     let root = ryeos_engine::roots::RuntimeRoot::new(params.app_root.clone());
-    let node_identity = ryeos_app::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+    let node_identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
     run_authorize_client_with_authority(
         params,
         &node_identity,
@@ -291,9 +291,9 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
 /// authority. This is a local operator operation, not a worker permission.
 pub fn run_authorize_client_with_authority(
     params: AuthorizeClientParams,
-    node_identity: &ryeos_app::identity::NodeIdentity,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     auth_dir: &std::path::Path,
-    stopped_node_authority: Option<&ryeos_app::state_lock::StateLock>,
+    stopped_node_authority: Option<&ryeos_node_runtime::state_lock::StateLock>,
 ) -> Result<AuthorizeClientResult> {
     if params.allow_semantic_conversion {
         stopped_node_authority
@@ -305,7 +305,7 @@ pub fn run_authorize_client_with_authority(
 
 fn acquire_semantic_conversion_lock(
     params: &AuthorizeClientParams,
-) -> Result<Option<ryeos_app::state_lock::StateLock>> {
+) -> Result<Option<ryeos_node_runtime::state_lock::StateLock>> {
     // Principal-class and origin changes alter the meaning of an existing
     // fingerprint. Prove stopped-node ownership and retain it through the
     // read/verify/sign/publish transaction instead of treating the CLI flag
@@ -314,8 +314,8 @@ fn acquire_semantic_conversion_lock(
     params
         .allow_semantic_conversion
         .then(|| {
-            let lock_path = ryeos_app::state_lock::default_lock_path(&params.app_root);
-            ryeos_app::state_lock::StateLock::acquire(&lock_path).with_context(
+            let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&params.app_root);
+            ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).with_context(
                 || "semantic authorized-key conversion requires stopped-node authority",
             )
         })
@@ -324,7 +324,7 @@ fn acquire_semantic_conversion_lock(
 
 fn reconcile_client_grant(
     params: AuthorizeClientParams,
-    node_identity: &ryeos_app::identity::NodeIdentity,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     auth_dir: &std::path::Path,
 ) -> Result<AuthorizeClientResult> {
     if params.subject != AuthorizeClientSubject::LocalClient && params.allow_wildcard {
@@ -336,9 +336,9 @@ fn reconcile_client_grant(
     let now = lillux::time::iso8601_now();
 
     let wildcard = if params.allow_wildcard {
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap
     } else {
-        ryeos_app::identity::WildcardPolicy::Reject
+        ryeos_node_runtime::identity::WildcardPolicy::Reject
     };
 
     // Verified load, scope reconciliation, signing, and conditional
@@ -346,17 +346,17 @@ fn reconcile_client_grant(
     // merge can therefore never silently lose scopes.
     let identity_subject = match &params.subject {
         AuthorizeClientSubject::LocalClient => {
-            ryeos_app::identity::AuthorizedKeySubject::LocalClient
+            ryeos_node_runtime::identity::AuthorizedKeySubject::LocalClient
         }
         AuthorizeClientSubject::RemoteNode { origin_site_id } => {
-            ryeos_app::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
         }
         AuthorizeClientSubject::RemoteOperator { origin_site_id } => {
-            ryeos_app::identity::AuthorizedKeySubject::RemoteOperator { origin_site_id }
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteOperator { origin_site_id }
         }
     };
     let (path, dropped_scopes, transition) =
-        ryeos_app::identity::reconcile_authorized_key_toml_scopes_for_subject(
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes_for_subject(
             auth_dir,
             &fp,
             &key_b64,
@@ -401,7 +401,7 @@ pub fn run_mint_admission_token(
 /// state from a confined subprocess Tool.
 pub fn mint_admission_token_with_policy(
     params: MintAdmissionTokenParams,
-    policy: &ryeos_app::node_policy::sections::hosted::HostedNodePolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy,
     policy_source: &std::path::Path,
 ) -> Result<MintAdmissionTokenResult> {
     if params.ttl_secs == 0 {
@@ -488,6 +488,7 @@ pub fn mint_admission_token_with_policy(
             None,
             doc.as_bytes(),
             0o600,
+            crate::TOOLS_TEMP_PURPOSE,
         )
         .with_context(|| format!("failed to install admission token file {}", path.display()))?;
     token_dir.ensure_path_binding()?;
@@ -565,7 +566,7 @@ admission_enabled: {admission_enabled}
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity_path = identity_dir.join("private_key.pem");
         let node_identity = if identity_path.exists() {
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         } else {
             std::fs::write(
                 &identity_path,
@@ -575,7 +576,7 @@ admission_enabled: {admission_enabled}
                     .as_bytes(),
             )
             .unwrap();
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         };
         ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", trust_dir, None)
             .unwrap();
@@ -723,8 +724,8 @@ admission_enabled: {admission_enabled}
         assert_eq!(converted.principal_class, "remote_operator");
         assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
 
-        let lock_path = ryeos_app::state_lock::default_lock_path(tmp.path());
-        let _live_daemon_lock = ryeos_app::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(tmp.path());
+        let _live_daemon_lock = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
         let while_live = run_authorize_client(AuthorizeClientParams {
             app_root: tmp.path().to_path_buf(),
             public_key: client,

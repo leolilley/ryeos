@@ -919,6 +919,7 @@ pub fn pin_key(
             None,
             content.as_bytes(),
             0o600,
+            crate::ENGINE_TEMP_PURPOSE,
         )
         .map_err(|e| {
             EngineError::Internal(format!(

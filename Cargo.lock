@@ -1589,11 +1589,10 @@ dependencies = [
 [[package]]
 name = "libsqlite3-sys"
 version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
 dependencies = [
  "cc",
  "pkg-config",
+ "sha2",
  "vcpkg",
 ]
 
@@ -1621,6 +1620,19 @@ dependencies = [
  "windows-sys 0.59.0",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "lillux-sqlite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "libsqlite3-sys",
+ "lillux",
+ "rusqlite",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -2607,13 +2619,17 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-external-execution-contract",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "ryeos-tracing",
  "serde",
@@ -2645,6 +2661,7 @@ dependencies = [
  "hex",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
  "regex",
@@ -2657,12 +2674,15 @@ dependencies = [
  "ryeos-engine",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
- "ryeos-graph-definition",
+ "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
+ "ryeos-project-capture",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
  "ryeos-state",
  "ryeos-tracing",
  "ryeos-vault",
@@ -2744,7 +2764,9 @@ dependencies = [
  "ryeos-directive-definition",
  "ryeos-engine",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-runtime",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -2834,6 +2856,7 @@ dependencies = [
  "lillux",
  "ryeos-external-execution-contract",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -2848,6 +2871,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-codex-runtime-verifier"
+version = "0.5.102"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "rmp-serde",
+ "ryeos-codex-external-configuration",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "ryeos-project-capture",
+ "ryeos-runtime",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "ryeos-core-tools"
 version = "0.5.102"
 dependencies = [
@@ -2859,10 +2904,10 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "rmp-serde",
- "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-handler-protocol",
+ "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2962,6 +3007,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2982,8 +3028,10 @@ dependencies = [
  "ryeos-engine",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
+ "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
  "ryeos-runtime",
@@ -3038,6 +3086,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "lillux",
+ "lillux-sqlite",
  "rustls",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
@@ -3103,6 +3152,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3116,6 +3166,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "ryeos-gpu-loader-owner-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "ryeos-state",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3165,7 +3226,6 @@ name = "ryeos-handler-bins"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "regex",
  "ryeos-directive-definition",
  "ryeos-effect-contract",
@@ -3198,25 +3258,6 @@ dependencies = [
  "ureq-proto",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "ryeos-independent-runtime-verifier"
-version = "0.5.102"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "lillux",
- "ryeos-external-execution",
- "ryeos-external-execution-contract",
- "ryeos-project-capture",
- "ryeos-runtime",
- "ryeos-state",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
 ]
 
 [[package]]
@@ -3277,12 +3318,15 @@ dependencies = [
  "hkdf",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "rand 0.8.6",
  "rmp-serde",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",
  "ryeos-engine",
+ "ryeos-node-runtime",
+ "ryeos-scheduler",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3295,12 +3339,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-node-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "directories",
+ "lillux",
+ "lillux-sqlite",
+ "rand 0.8.6",
+ "ryeos-accounting",
+ "ryeos-bundle",
+ "ryeos-bundle-publication-contract",
+ "ryeos-engine",
+ "ryeos-isolation-protocol",
+ "ryeos-runtime",
+ "ryeos-scheduler-contract",
+ "ryeos-state",
+ "ryeos-vault",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "ryeos-project-capture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "lillux",
  "ryeos-app",
+ "ryeos-node-runtime",
  "ryeos-state",
  "serde_json",
  "serde_yaml",
@@ -3332,6 +3405,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
+ "ryeos-state",
  "serde",
  "serde_json",
  "signal-hook",
@@ -3375,8 +3449,46 @@ dependencies = [
  "chrono-tz",
  "cron",
  "lillux",
+ "lillux-sqlite",
  "rusqlite",
  "ryeos-engine",
+ "ryeos-scheduler-contract",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ryeos-scheduler-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "cron",
+ "ryeos-engine",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ryeos-scheduler-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "lillux-sqlite",
+ "ryeos-app",
+ "ryeos-engine",
+ "ryeos-executor",
+ "ryeos-node-runtime",
+ "ryeos-scheduler",
+ "ryeos-scheduler-contract",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3400,6 +3512,7 @@ dependencies = [
  "glob",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "rand 0.8.6",
  "regex",
  "rusqlite",
@@ -3449,14 +3562,16 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-codex-external-configuration",
+ "ryeos-codex-runtime-verifier",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-external-candidate-launcher",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
+ "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-state",
  "ryeosd",
@@ -3497,8 +3612,10 @@ dependencies = [
  "ryeos-client-base",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3530,6 +3647,7 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
@@ -3580,6 +3698,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "lillux",
+ "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
  "regex",
@@ -3590,18 +3709,21 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-codex-runtime-verifier",
  "ryeos-core-tools",
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution-contract",
- "ryeos-independent-runtime-verifier",
  "ryeos-isolation-protocol",
  "ryeos-node",
+ "ryeos-node-runtime",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
+ "ryeos-scheduler-contract",
+ "ryeos-scheduler-service",
  "ryeos-state",
  "ryeos-tracing",
  "ryeos-ui",

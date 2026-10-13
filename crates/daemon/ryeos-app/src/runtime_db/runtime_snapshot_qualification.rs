@@ -163,159 +163,169 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<SnapshotQualificationRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     pub fn reserve_snapshot_qualification(
         &self,
         intent: &RuntimeSnapshotQualificationIntent,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "snapshot qualification reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let source = super::runtime_snapshot::read(&tx, &intent.snapshot_operation_id)?
+                .context("snapshot qualification source was not retained")?;
+            let locator = source
+                .locator
+                .as_ref()
+                .context("snapshot qualification source has no locator")?;
             ensure!(
-                existing.intent == *intent,
-                "snapshot qualification reservation replay changed"
+                source.readiness.is_some(),
+                "snapshot qualification source is not ready"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let source = super::runtime_snapshot::read(&tx, &intent.snapshot_operation_id)?
-            .context("snapshot qualification source was not retained")?;
-        let locator = source
-            .locator
-            .as_ref()
-            .context("snapshot qualification source has no locator")?;
-        ensure!(
-            source.readiness.is_some(),
-            "snapshot qualification source is not ready"
-        );
-        intent.validate_for(&source.intent, locator)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "snapshot qualification deadline is outside its admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_qualification
+            intent.validate_for(&source.intent, locator)?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "snapshot qualification deadline is outside its admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_qualification
              (operation_id,snapshot_operation_id,intent_json,phase,occurrence_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
-            params![intent.operation_id, intent.snapshot_operation_id, canonical(intent)?, now],
-        )?;
-        let record = read(&tx, &intent.operation_id)?
-            .context("snapshot qualification reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+                params![intent.operation_id, intent.snapshot_operation_id, canonical(intent)?, now],
+            )?;
+            let record = read(&tx, &intent.operation_id)?
+                .context("snapshot qualification reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_snapshot_qualification_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotQualificationAttemptClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
-        match record.phase {
-            SnapshotQualificationPhase::OccurrenceBound => {
-                tx.commit()?;
-                return Ok(SnapshotQualificationAttemptClaim::OccurrenceBound(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
+            match record.phase {
+                SnapshotQualificationPhase::OccurrenceBound => {
+                    tx.commit()?;
+                    return Ok(SnapshotQualificationAttemptClaim::OccurrenceBound(record));
+                }
+                SnapshotQualificationPhase::AttemptPending
+                | SnapshotQualificationPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(SnapshotQualificationAttemptClaim::Reconcile(record));
+                }
+                SnapshotQualificationPhase::Reserved => {}
             }
-            SnapshotQualificationPhase::AttemptPending
-            | SnapshotQualificationPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(SnapshotQualificationAttemptClaim::Reconcile(record));
-            }
-            SnapshotQualificationPhase::Reserved => {}
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "snapshot qualification deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='attempt_pending',updated_at_ms=?2
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "snapshot qualification deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "snapshot qualification attempt lost durable CAS"
-        );
-        let current =
-            read(&tx, operation_id)?.context("snapshot qualification attempt vanished")?;
-        tx.commit()?;
-        Ok(SnapshotQualificationAttemptClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "snapshot qualification attempt lost durable CAS"
+            );
+            let current =
+                read(&tx, operation_id)?.context("snapshot qualification attempt vanished")?;
+            tx.commit()?;
+            Ok(SnapshotQualificationAttemptClaim::StartAttempt(current))
+        })
     }
 
     pub fn bind_snapshot_qualification_occurrence(
         &self,
         occurrence: &RuntimeSnapshotQualificationOccurrence,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &occurrence.operation_id)?
-            .context("snapshot qualification has no attempt claim")?;
-        occurrence.validate_for(&record.intent)?;
-        if record.phase == SnapshotQualificationPhase::OccurrenceBound {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &occurrence.operation_id)?
+                .context("snapshot qualification has no attempt claim")?;
+            occurrence.validate_for(&record.intent)?;
+            if record.phase == SnapshotQualificationPhase::OccurrenceBound {
+                ensure!(
+                    record.occurrence.as_ref() == Some(occurrence),
+                    "snapshot qualification occurrence replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                record.occurrence.as_ref() == Some(occurrence),
-                "snapshot qualification occurrence replay changed"
+                matches!(
+                    record.phase,
+                    SnapshotQualificationPhase::AttemptPending
+                        | SnapshotQualificationPhase::Quarantined
+                ),
+                "snapshot qualification occurrence did not follow attempt"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                SnapshotQualificationPhase::AttemptPending
-                    | SnapshotQualificationPhase::Quarantined
-            ),
-            "snapshot qualification occurrence did not follow attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='occurrence_bound',occurrence_json=?2,updated_at_ms=?3
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='occurrence_bound',occurrence_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![occurrence.operation_id, canonical(occurrence)?, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "snapshot qualification occurrence bind lost durable CAS"
-        );
-        let current = read(&tx, &occurrence.operation_id)?
-            .context("snapshot qualification occurrence vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![occurrence.operation_id, canonical(occurrence)?, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "snapshot qualification occurrence bind lost durable CAS"
+            );
+            let current = read(&tx, &occurrence.operation_id)?
+                .context("snapshot qualification occurrence vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn quarantine_snapshot_qualification_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, operation_id)?.context("snapshot qualification attempt is absent")?;
-        if record.phase == SnapshotQualificationPhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == SnapshotQualificationPhase::AttemptPending,
-            "snapshot qualification quarantine requires pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, operation_id)?.context("snapshot qualification attempt is absent")?;
+            if record.phase == SnapshotQualificationPhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == SnapshotQualificationPhase::AttemptPending,
+                "snapshot qualification quarantine requires pending attempt"
+            );
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current =
-            read(&tx, operation_id)?.context("snapshot qualification quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current =
+                read(&tx, operation_id)?.context("snapshot qualification quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerRuntimeVerificationCoordinate, RESTORED_OWNER_MEASUREMENT_PROTOCOL,
@@ -329,9 +339,44 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
 
-    #[test]
-    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+    // Shared retained testimony fixture. All snapshot/prerequisite transitions use
+    // their real journal APIs; this does not supply a compiler admission token.
+    pub(crate) fn retained_owner_measurement_fixture() -> (
+        crate::runtime_db::test_native::TestRuntime,
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let (source, locator, readiness, intent, occurrence, verifier, observation) =
+            populate_retained_owner_measurement_fixture(&db);
+        (
+            db,
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    pub(crate) fn populate_retained_owner_measurement_fixture(
+        db: &RuntimeDb,
+    ) -> (
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let mut source = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
@@ -503,7 +548,74 @@ mod tests {
             },
             contact_deadline_exceeded: false,
         };
+        (
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    #[test]
+    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
+        let (db, source, locator, readiness, intent, occurrence, verifier, observation) =
+            retained_owner_measurement_fixture();
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let invocation = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+            scenario_id: "codex-runtime".into(),
+            qualification_operation_id: intent.operation_id.clone(),
+            prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
+        };
+        // Prelaunch selectors require actual observed owner evidence. No
+        // accepted-root/capsule identifiers have been minted at this point.
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+                .is_err()
+        );
         db.bind_restored_verifier_observation(&observation).unwrap();
+        let admitted_occurrence = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap();
+        assert_eq!(admitted_occurrence.intent, intent);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&"0".repeat(64), &invocation)
+                .is_err()
+        );
+        let mut wrong_operation = invocation.clone();
+        wrong_operation.qualification_operation_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &wrong_operation)
+                .is_err()
+        );
+        let mut absent_measurement = invocation.clone();
+        absent_measurement.prerequisite_measurement_attempt_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &absent_measurement
+            )
+            .is_err()
+        );
+        let expires_at =
+            admitted_occurrence.created_at_ms + i64::from(intent.maximum_lifetime_seconds) * 1000;
+        assert!(
+            db.conn.with_sql(|connection| Ok(super::super::restored_verifier_attempt::require_live_occurrence(connection,
+                &admitted_occurrence,
+                expires_at
+            )?))
+            .is_err()
+        );
+        assert!(db.restored_verifier_blob_roots().unwrap().is_empty());
+        assert!(
+            db.restored_verifier_attempt(&verifier.operation_id)
+                .unwrap()
+                .unwrap()
+                .consumer_input_blob_hash
+                .is_none()
+        );
         // A verifier reservation is not permission to contact after a
         // termination intent is retained, even if its own deadline is live.
         let mut racing_qualification = intent.clone();
@@ -564,6 +676,14 @@ mod tests {
         };
         termination.operation_id = termination.derived_operation_id().unwrap();
         db.reserve_qualification_termination(&termination).unwrap();
+        let refused_invocation = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap_err();
+        assert!(
+            refused_invocation
+                .to_string()
+                .contains("retained termination intent")
+        );
         assert!(matches!(
             db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
             super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
@@ -604,10 +724,10 @@ mod tests {
             db.bind_qualification_terminal_observation(&changed_terminal)
                 .is_err()
         );
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
             [&termination.operation_id],
-        ).is_err());
+        )?)).is_err());
         let mut changed = occurrence.clone();
         changed.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
@@ -623,9 +743,7 @@ mod tests {
             subject_digest: "d".repeat(64),
             use_digest: "e".repeat(64),
             prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
-            prerequisite_measurement_observation_digest: hex::encode(Sha256::digest(
-                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
-            )),
+            prerequisite_measurement_observation_digest: observation.digest().unwrap(),
         };
         // Consumer validation is a data join, not contact permission. This
         // occurrence is already terminated; journal admission still refuses.
@@ -641,18 +759,28 @@ mod tests {
             guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
         };
         consumer.operation_id = consumer.derived_operation_id().unwrap();
+        // The owner-measurement entry point supplies neither retained consumer
+        // input nor root admission. The input-lane check refuses first.
+        let refused = db.reserve_restored_verifier_attempt(&consumer).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "verifier reservation requires its matching consumer input lane"
+        );
         assert!(
-            db.reserve_restored_verifier_attempt(&consumer)
-                .unwrap_err()
-                .to_string()
-                .contains("matching admission lane")
+            db.restored_verifier_attempt(&consumer.operation_id)
+                .unwrap()
+                .is_none()
         );
         // A null owner selection is immutable, not an empty slot that may
         // later be converted into consumer placement authority.
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE restored_verifier_attempt SET consumer_selection_json=?2 WHERE operation_id=?1",
             params![verifier.operation_id, serde_json::to_string(&selection).unwrap()],
-        ).is_err());
+        )?)).is_err());
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![verifier.operation_id, "f".repeat(64)],
+        )?)).is_err());
         consumer
             .validate_consumer_for(
                 &source,
@@ -667,14 +795,56 @@ mod tests {
         // admission and does not authorize provider contact or qualification.
         // The already terminated occurrence must remain readable as evidence.
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
-        db.conn.execute(
+        let consumer_input_blob_hash = "f".repeat(64);
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "INSERT INTO restored_verifier_attempt
-             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,phase,observation_json,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,?3,?4,'attempt_pending',NULL,?5,?5)",
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,NULL,'reserved',NULL,?5,?5)",
             params![consumer.operation_id, consumer.qualification_operation_id,
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
                 String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), now],
-        ).unwrap();
+        )?)).is_err());
+        db.conn.with_sql(|connection| Ok(connection.execute(
+            "INSERT INTO restored_verifier_attempt
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,?5,'reserved',NULL,?6,?6)",
+            params![consumer.operation_id, consumer.qualification_operation_id,
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), consumer_input_blob_hash, now],
+        )?)).unwrap();
+        let mut consumer_as_prerequisite = invocation.clone();
+        consumer_as_prerequisite.prerequisite_measurement_attempt_id =
+            consumer.operation_id.clone();
+        let refused_consumer = db
+            .observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &consumer_as_prerequisite,
+            )
+            .unwrap_err();
+        assert!(
+            refused_consumer
+                .to_string()
+                .contains("not owner measurement")
+        );
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.conn.with_sql(|connection| Ok(connection.execute("UPDATE restored_verifier_attempt SET phase='attempt_pending' WHERE operation_id=?1", [&consumer.operation_id])?)).unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.quarantine_restored_verifier_attempt(&consumer.operation_id)
+            .unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![consumer.operation_id, "e".repeat(64)],
+        )?)).is_err());
         let evidence = b"{}";
         let observed_consumer = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation {
             schema: 1,
@@ -691,11 +861,6 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         assert!(
-            db.restored_verifier_evidence_blob_roots()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
             db.bind_consumer_verifier_observation(&observed_consumer, b"{\"changed\":true}")
                 .is_err()
         );
@@ -708,8 +873,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            db.restored_verifier_evidence_blob_roots().unwrap(),
-            vec![observed_consumer.evidence_sha256.clone()]
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![
+                observed_consumer.evidence_sha256.clone(),
+                consumer_input_blob_hash
+            ]
         );
         assert!(
             db.claim_restored_verifier_attempt(&consumer.operation_id)
@@ -781,7 +949,35 @@ mod tests {
                     &occurrence,
                 )
             };
+        // The shared owner, callback author and retained journal reader must
+        // commit the exact typed protocol bytes, not a state CAS object or
+        // the tagged journal envelope.
+        assert_eq!(
+            observation.digest().unwrap(),
+            hex::encode(Sha256::digest(
+                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
+            ))
+        );
         check_prerequisite(&observation, &coordinate).unwrap();
+        let mut object_coordinate = coordinate.clone();
+        object_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(&observation).unwrap(),
+            )
+            .unwrap();
+        assert!(check_prerequisite(&observation, &object_coordinate).is_err());
+        let mut envelope_coordinate = coordinate.clone();
+        envelope_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(
+                    ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierObservation::OwnerMeasurement {
+                        observation: observation.clone(),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(check_prerequisite(&observation, &envelope_coordinate).is_err());
         // Unlike the content-only validator, the journal-owned read refuses
         // this occurrence because termination has already been retained.
         let refusal = db
@@ -804,9 +1000,8 @@ mod tests {
         let mut late_observation = observation.clone();
         late_observation.contact_deadline_exceeded = true;
         let mut late_coordinate = coordinate.clone();
-        late_coordinate.prerequisite_measurement_observation_digest = hex::encode(Sha256::digest(
-            ryeos_external_execution_contract::canonical_json(&late_observation).unwrap(),
-        ));
+        late_coordinate.prerequisite_measurement_observation_digest =
+            late_observation.digest().unwrap();
         assert!(check_prerequisite(&late_observation, &late_coordinate).is_err());
         assert!(matches!(
             db.claim_restored_verifier_attempt(&verifier.operation_id)
@@ -820,10 +1015,10 @@ mod tests {
                 .is_err()
         );
         assert!(
-            db.conn.execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE restored_verifier_attempt SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
                 [&verifier.operation_id],
-            ).is_err()
+            )?)).is_err()
         );
     }
 }

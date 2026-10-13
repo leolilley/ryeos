@@ -19,6 +19,7 @@ pub mod ui_launch_mint;
 pub mod ui_node;
 pub mod ui_projects;
 pub mod ui_remotes;
+#[cfg(feature = "scheduling")]
 pub mod ui_schedules;
 pub mod ui_seat;
 pub mod ui_session_attachments;
@@ -51,6 +52,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_work::CANDIDATE_DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     ui_schedules::DESCRIPTOR,
     ui_gc::DESCRIPTOR,
     ui_seat::OPEN_DESCRIPTOR,

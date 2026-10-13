@@ -6,8 +6,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use ryeos_api::handlers::external_content_import;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
-use ryeos_app::node_policy::sections::external_content::{
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
 };
 use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
@@ -15,23 +15,26 @@ use ryeos_app::state::AppState;
 use ryeos_state::objects::{ExternalContentBinding, ExternalContentConsumerAuthority};
 use serde_json::json;
 
+/// Returns the Store owner ahead of the application, so the caller's bindings
+/// drop the application before the owner closes the Store.
 fn fixture(
     large_tier: bool,
 ) -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     Arc<AppState>,
     HandlerContext,
     String,
     String,
 ) {
-    let (tmp, mut state) = test_state::build_test_state();
+    let (tmp, store_owner, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
@@ -53,7 +56,7 @@ fn fixture(
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/import".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -93,7 +96,7 @@ fn fixture(
             "entry_count":1, "total_bytes":11,
         }))
         .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -130,7 +133,7 @@ fn fixture(
         })
         .unwrap();
     drop(guard);
-    (tmp, Arc::new(state), context, binding_hash, manifest)
+    (tmp, store_owner, Arc::new(state), context, binding_hash, manifest)
 }
 
 fn request(hash: &str, maximum_bytes: u64) -> ImportRequest {
@@ -157,7 +160,7 @@ fn replace_binding_with_remote_owner(
     let remote_origin = format!("site:{}", "c".repeat(64));
     let remote = NodeIdentity::create(&directory.path().join("remote-operator.pem")).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(remote.verifying_key().as_bytes()),
@@ -172,7 +175,7 @@ fn replace_binding_with_remote_owner(
         false,
     )
     .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         remote.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -356,6 +359,7 @@ async fn bind_through_managed_activation_owner(
     manifest_value: &serde_json::Value,
 ) -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     Arc<AppState>,
     String,
     String,
@@ -364,14 +368,14 @@ async fn bind_through_managed_activation_owner(
     let manifest_hash = ryeos_state::objects::canonical_value_digest(manifest_value).unwrap();
     write_managed_activation_fixture_bundle(bundle.path(), publisher, &manifest_hash);
     let engine = fixture_bundle_engine(bundle.path(), publisher);
-    let (state_dir, mut state) = test_state::build_test_state_with_engine(engine);
+    let (state_dir, store_owner, mut state) = test_state::build_test_state_with_engine(engine);
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
                 schema: 1,
@@ -393,7 +397,7 @@ async fn bind_through_managed_activation_owner(
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -510,6 +514,7 @@ async fn bind_through_managed_activation_owner(
         .unwrap();
     (
         state_dir,
+        store_owner,
         state,
         binding.binding_hash,
         manifest_hash,
@@ -543,7 +548,7 @@ async fn managed_bundle_binding_survives_pinned_preview_but_cannot_substitute_pr
         "entry_count": 0,
         "total_bytes": 0,
     });
-    let (_state_dir, state, installed_binding_hash, _manifest_hash, fixed_bundle) =
+    let (_state_dir, _store_owner, state, installed_binding_hash, _manifest_hash, fixed_bundle) =
         bind_through_managed_activation_owner(&bundle, &publisher, &manifest_value).await;
     let policy = portable_policy();
     let generation = SubjectResolutionAuthority::PinnedGeneration {
@@ -645,7 +650,7 @@ fn portable_content_uses_the_admitted_project_generation_for_preview_and_launch(
         KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
     };
 
-    let (_tmp, state, _context, source_binding_hash, manifest_hash) = fixture(false);
+    let (_tmp, _store_owner, state, _context, source_binding_hash, manifest_hash) = fixture(false);
     let resolution = ResolutionOutput {
         root: ResolvedAncestor {
             requested_id: "test/environment".into(),
@@ -793,7 +798,7 @@ fn portable_content_uses_the_admitted_project_generation_for_preview_and_launch(
 #[tokio::test]
 async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() {
     for large_tier in [false, true] {
-        let (_tmp, state, context, binding_hash, manifest_hash) = fixture(large_tier);
+        let (_tmp, _store_owner, state, context, binding_hash, manifest_hash) = fixture(large_tier);
         let first = external_content_import::handle(
             request(&binding_hash, 11),
             context.clone(),
@@ -864,7 +869,7 @@ async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() 
 
 #[tokio::test]
 async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
-    let (directory, state, context, original_hash, manifest_hash) = fixture(false);
+    let (directory, _store_owner, state, context, original_hash, manifest_hash) = fixture(false);
     let (remote_principal, binding_hash) =
         replace_binding_with_remote_owner(&directory, &state, &original_hash);
 
@@ -897,7 +902,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
     let remote_identity =
         NodeIdentity::load(&directory.path().join("remote-operator.pem")).unwrap();
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote_identity.fingerprint(),
         &base64::engine::general_purpose::STANDARD
@@ -941,7 +946,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
 #[tokio::test]
 async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims() {
-    let (_tmp, state, context, hash, _) = fixture(false);
+    let (_tmp, _store_owner, state, context, hash, _) = fixture(false);
     for limit in [0, 10, 4097] {
         assert!(
             external_content_import::handle(
@@ -978,7 +983,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         .is_err()
     );
     let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -999,7 +1004,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
 #[tokio::test]
 async fn binding_reuse_rejects_lying_payloads_in_both_manifest_tiers() {
     for large_tier in [false, true] {
-        let (_tmp, state, context, hash, manifest_hash) = fixture(large_tier);
+        let (_tmp, _store_owner, state, context, hash, manifest_hash) = fixture(large_tier);
         let authority = state.state_store.pinned_state_authority().unwrap();
         let cas = authority.cas_store().unwrap();
         let previous =

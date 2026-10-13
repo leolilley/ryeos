@@ -14,6 +14,11 @@ path = "src/lib.rs"
 name = "lillux"
 path = "src/main.rs"
 
+[features]
+# Arms Lillux interruption hooks from test code; never enable outside
+# [dev-dependencies].
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -39,6 +44,11 @@ tempfile = { workspace = true }
 [[test]]
 name = "invocation_startup"
 path = "tests/invocation_startup.rs"
+harness = false
+
+[[test]]
+name = "environment_capture"
+path = "tests/environment_capture.rs"
 harness = false
 
 [[test]]

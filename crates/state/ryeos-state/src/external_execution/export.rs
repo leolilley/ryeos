@@ -139,13 +139,24 @@ mod tests {
     #[test]
     fn external_export_imports_existing_project_contract_without_publication() {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::StateDb::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         // Store initialization acquires a CAS mutation guard internally.
         // Prepare the independent store before holding the importing guard;
         // never relax the non-reentrant production ownership rule for a test.
+        // A node holds one State at a time: the foreign store is established,
+        // its pinned authority (roots only, no SQL) kept, and it closes before
+        // the importing State opens.
         let foreign_root = tempfile::tempdir().unwrap();
-        let foreign_db =
-            crate::StateDb::open(foreign_root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        let foreign_authority = {
+            let foreign_db = crate::test_support::TestState::open(
+                foreign_root.path(),
+                Arc::new(crate::TrustStore::new()),
+            )
+            .unwrap();
+            let authority = foreign_db.pinned_authority().unwrap();
+            foreign_db.close().unwrap();
+            authority
+        };
+        let db = crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -428,7 +439,6 @@ mod tests {
         drop(assembler);
         drop(guard);
 
-        let foreign_authority = foreign_db.pinned_authority().unwrap();
         let foreign_guard = foreign_authority.acquire_shared_guard().unwrap();
         let foreign_cas = foreign_authority.cas_store().unwrap();
         let (foreign_base_hash, _) = base(&foreign_cas);
@@ -477,7 +487,7 @@ mod tests {
         );
         assert!(
             retained
-                .content_for_store(&foreign_db.pinned_authority().unwrap())
+                .content_for_store(&foreign_authority)
                 .is_err()
         );
         let mut other_binding = binding.clone();
@@ -527,7 +537,7 @@ mod tests {
         assert!(cas.open_blob(&unused).unwrap().is_none());
         drop(db);
         let reopened =
-            crate::StateDb::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         let reopened_authority = reopened.pinned_authority().unwrap();
         let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
         imported
@@ -612,7 +622,7 @@ mod tests {
     #[test]
     fn external_export_rejects_authority_objects_and_stays_failed() {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::StateDb::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        let db = crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let (base_hash, _) = base(&authority.cas_store().unwrap());

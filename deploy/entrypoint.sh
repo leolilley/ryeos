@@ -9,11 +9,28 @@
 #
 # App root (/data/app) lives on the persistent /data volume, so operator
 # trust, signing keys, node identity, and runtime state survive redeploys.
+# A profile whose floor requires storage:durable_root measures this: when
+# /data is the container's own layer rather than a volume, init refuses
+# before any key or identity is created, and each platform restart repeats
+# that refusal at the platform's own backoff.
 #
 # If init fails the container exits immediately — never start ryeosd against
 # an unverified state.
+#
+# Run the container under an always-restart policy (Railway: Restart Policy
+# "Always"; Docker: --restart always; Render restarts every exited service).
+# The node exits 75 at each service-window rollover and expects to be started
+# again, so an on-failure policy with a retry cap would eventually leave it
+# down. A node that stopped itself on a refused fact records a restart
+# inhibition and refuses every later start until an operator runs
+# `ryeos node allow-restart`; this entrypoint waits a bounded time before such
+# a start so an always-restart host retries that refusal slowly rather than in
+# a tight loop, and so an operator can open a shell in the container and clear
+# it while no daemon holds the node's state lock.
 
 set -euo pipefail
+
+RESTART_INHIBITED_HOLD_SECONDS=30
 
 # Fill TRUST_ARGS only after an operator explicitly opts in to trusting
 # publisher documents baked into the image. Release images need no trust
@@ -158,12 +175,38 @@ build_execution_history_schema_cut_args() {
   )
 }
 
+# Seconds to wait before starting ryeosd: the bounded hold while the node's
+# restart inhibition record exists, else 0. ryeosd itself re-reads the record
+# and refuses the start, so this only paces the restart loop.
+restart_inhibition_hold_seconds() {
+  local app_root="$1"
+
+  if [[ -e "$app_root/.ai/state/restart-inhibited.json" ]]; then
+    printf '%s' "$RESTART_INHIBITED_HOLD_SECONDS"
+  else
+    printf '0'
+  fi
+}
+
+# Wait out the bounded hold before any ryeosd start, on every start route.
+hold_while_restart_inhibited() {
+  local app_root="$1"
+  local hold
+
+  hold="$(restart_inhibition_hold_seconds "$app_root")"
+  if [[ "$hold" -gt 0 ]]; then
+    echo "[entrypoint] restart inhibited: ryeosd will refuse this start until 'ryeos node allow-restart --app-root $app_root' runs; waiting ${hold}s first" >&2
+    sleep "$hold"
+  fi
+}
+
 main() {
   local effective_bind
   effective_bind="$(container_bind)"
 
   build_ryeos_daemon_args /data/app
   if [[ "${DAEMON_ARGS[0]}" == "host-runtime" ]]; then
+    hold_while_restart_inhibited /data/app
     echo "[entrypoint] starting with protected external host-runtime authority"
     exec ryeosd "${DAEMON_ARGS[@]}"
   fi
@@ -187,6 +230,8 @@ main() {
     echo "[entrypoint] applying exact idempotent execution-history schema cut ${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT}"
     ryeos "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]}"
   fi
+
+  hold_while_restart_inhibited /data/app
 
   echo "[entrypoint] bootstrap check complete, starting daemon"
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce

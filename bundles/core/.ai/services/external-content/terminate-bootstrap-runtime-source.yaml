@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-10T04:34:13Z:c7ebd9fb0d4f61c5eb4542eaa0d3b1f26081aae10ee8351f598f5d6d876031e1:R2AoiwLy5e7KqJTj+cxeCaHq83QrepSr5bJo4POwiE3fsKcDbE944QDjhF0jNvWYFDjh0RXALFeKxmRqyfAnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.terminate-bootstrap-runtime-source
 required_caps: ["ryeos.execute.service.external-content/terminate-bootstrap-runtime-source"]

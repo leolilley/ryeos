@@ -243,3 +243,25 @@ printf 'installer lifecycle preflight and shutdown refusal: passed\n'
     fi
 )
 printf 'installer supervised upgrade boundary: passed\n'
+
+# The pre-shutdown policy probe must check every selected bundle against the
+# current signed command authority. An explicit schema cut verifies the old
+# occupant without interpreting its retired bundle map.
+(
+    target_dir="$test_dir/policy-release"
+    state_root="$test_dir/policy-node"
+    invoking_user="$(/usr/bin/id -un)"
+    id() { /usr/bin/id "$@"; }
+    mkdir -p "$target_dir" "$state_root/.ai/node/policies"
+    cat > "$target_dir/ryeosd" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" > "$test_dir/policy-argv"
+EOF
+    chmod +x "$target_dir/ryeosd"
+    policy_generation_path="$state_root/.ai/node/policies"
+    preflight_existing_node_policy "$policy_generation_path" 0 core render-sandbox
+    [[ "$(<"$test_dir/policy-argv")" == $'init-policy-preflight\n--app-root\n'"$state_root"$'\n--active-bundle\ncore\n--active-bundle\nrender-sandbox' ]]
+    preflight_existing_node_policy "$policy_generation_path" 1 core render-sandbox
+    [[ "$(<"$test_dir/policy-argv")" == $'init-policy-preflight\n--app-root\n'"$state_root"$'\n--schema-cut' ]]
+)
+printf 'installer selected-bundle policy preflight: passed\n'

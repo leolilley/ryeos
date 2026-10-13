@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-23T12:16:49Z:fd2d3ae1565368168e5f43907f547b8836b1bff364918f150157535794ecfe77:2T3HadJJSiCGIFBgtsWkvfDe/lzksFuyrl6SsqTryVBcLGWoROXRaaH5x6jegkom1yq7G2YW8V/faYrJFw6QBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:cbc5701aedc1200678903e99d4a27c57302db4f60fc0fbfdcd2b5316740f7f3f:JesjQXf3q7U3tkXLk5yaa/GSFchjrNk1xR9qddVe14xqqPlE+CsUIgtcON3SKCnwLEhLrJEvc1sBaI8jOhRGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-calibrate
-version: "1.0.0"
+version: "1.1.0"
 description: Execute the fixed, operator-only portable, native, Core seed, and substrate calibration lanes and retain one node-authenticated calibration run; this service cannot finalize, authorize, compose, or publish a release.
-endpoint: bundle_release.authority_calibrate
+endpoint: bundle-release.authority-calibrate
 ui_read_only: false
 state_access: read_write
 record_thread: true
@@ -21,6 +21,7 @@ required_caps:
   - ryeos.execute.config.bundle-release/signed-capture-products
   - ryeos.execute.config.bundle-release/substrate-build-products
   - ryeos.execute.service.bundle-release/authority-calibrate
+  - ryeos.execute.service.external-content/launch-product-qualification
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify

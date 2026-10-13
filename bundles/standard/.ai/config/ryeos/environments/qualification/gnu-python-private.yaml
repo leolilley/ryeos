@@ -1,0 +1,13 @@
+# ryeos:signed:2026-10-10T19:41:29Z:d5d402b5ba5f91cdb83eab2e2ca9d18f117cf3390b503be2f195f508cb7cadbb:bx7SvJWAo0wdLUtyqUt2USGKc2o6ii7M2PnA0mTuqzrRkmuWTQjtS8lvu3r6he+wFMAFQFT+Kjrcr+ga/pJ8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+version: "1.0.0"
+description: UNSIGNED GNU private-origin verifier policy; source-level only, no activation authority
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v3
+  verifier_ref: tool:ryeos/environments/qualification/gnu-python-private
+  subject_declaration_id: subject
+  allowed_claims:
+    - gnu_python_private_origin_startup_providers_v1
+    - gnu_python_zlib_1_3_2
+  minimum_verifier_process_settlement: trusted_process_group_absent
+  verifier_parameters: {}

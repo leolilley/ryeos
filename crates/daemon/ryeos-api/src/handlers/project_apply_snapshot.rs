@@ -108,7 +108,7 @@ struct ApplyJournal {
     schema: u32,
     operation: ApplyOperation,
     surfaces: Vec<JournalSurface>,
-    schedule_before_images: Vec<crate::project_deploy::schedules::ScheduleRecoveryBeforeImage>,
+    schedule_before_images: Vec<ryeos_scheduler_contract::ScheduleRecoveryBeforeImage>,
     auth_tag: String,
 }
 
@@ -182,7 +182,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let policy = ProjectSnapshotPolicy::from_value(&policy_obj)?;
     let target_ignore = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
+        .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
     if policy.sync_scope != ProjectSyncScope::AiOnly {
         anyhow::bail!(
             "project.apply-snapshot only accepts ai_only snapshots in v1 (got {:?})",
@@ -257,6 +257,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         target_snapshot_hash: req.snapshot_hash.clone(),
         caller_fingerprint: ctx.fingerprint.clone(),
     };
+    let recovery_owners = project_deploy::recovery_owners(&state)?;
+    let mut schedule_owner = Some(ProjectScheduleSessionCustody::reserve_before_acquisition(
+        Arc::clone(&recovery_owners),
+        operation.job_id.clone(),
+    ));
     create_apply_job(&state, &operation)?;
     let staging = match StagingDirectory::create(&project_directory, &transaction_id) {
         Ok(staging) => staging,
@@ -276,6 +281,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 serde_json::json!({"outcome": "not_started"}),
                 true,
             )?;
+            if let Some(owner) = schedule_owner.take() {
+                owner.resolve();
+            }
             return Err(error);
         }
     };
@@ -298,6 +306,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             serde_json::json!({"outcome": "not_started"}),
             true,
         )?;
+        if let Some(owner) = schedule_owner.take() {
+            owner.resolve();
+        }
         return Err(error);
     }
     // The caller-scoped pushed HEAD remains a GC root while we wait for the
@@ -318,19 +329,35 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             state: &state,
         };
 
-        // Serialize only the scheduler-visible window. plan() must see
-        // the same schedule state prepare_commit() mutates, so both sit
-        // under the gate, together with root swaps, ref advancement,
-        // and their rollbacks. Request validation, CAS reads, and
-        // staging materialization scale with project size and run
-        // before the gate so timer/recovery dispatch is not blocked
-        // behind large applies (per-project serialization is handled
-        // by `project_apply_lock` above).
-        let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
-        let deploy_plan = project_deploy::plan(&deploy_ctx)?;
-        let recovery_preparation =
-            project_deploy::prepare_recovery_before_images(&deploy_plan, &deploy_ctx).await?;
-        let schedule_before_images = recovery_preparation.schedule_before_images().to_vec();
+        // The selected service session acquires the shared gate and retains
+        // the pinned schedule lock/partial transaction through finalization,
+        // rollback or recovery. It is acquired before plan so no second DB or
+        // gate can drift between these phases.
+        let session = project_deploy::acquire_session(&state).await?;
+        schedule_owner
+            .as_mut()
+            .expect("project schedule custody is reserved")
+            .attach(session)?;
+        let deploy_plan = project_deploy::plan(
+            &deploy_ctx,
+            schedule_owner
+                .as_mut()
+                .expect("schedule session custody is present")
+                .session_mut(),
+        )?;
+        project_deploy::prepare_recovery(
+            schedule_owner
+                .as_mut()
+                .expect("schedule session custody is present")
+                .session_mut(),
+        )
+        .await?;
+        let schedule_before_images = project_deploy::schedule_before_images(
+            schedule_owner
+                .as_ref()
+                .expect("schedule session custody is present")
+                .session_ref(),
+        )?;
         let mut schedule_restore_required = false;
         // CAS mutation guards are deliberately thread-local. Keep the whole
         // surface/ref transaction synchronous under its guard; schedule
@@ -383,8 +410,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             };
             let mut deploy_tx = match project_deploy::prepare_commit_with_recovery(
                 &deploy_plan,
-                &deploy_ctx,
-                recovery_preparation,
+                schedule_owner
+                    .as_mut()
+                    .expect("schedule session custody is present")
+                    .session_mut(),
             ) {
                 Ok(tx) => tx,
                 Err(err) => {
@@ -409,7 +438,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 project_directory.ensure_path_binding()
         })();
         if let Err(error) = commit_surface_validation {
-            deploy_tx.rollback(&deploy_ctx);
+            deploy_tx.rollback().context("rollback schedule projection after commit fence failure")?;
             surface_swap.retain_for_recovery();
             rollback_journal_surfaces(
                 &project_directory,
@@ -417,7 +446,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &journal_surfaces,
             )
             .context("project apply commit-fence failure also failed surface rollback")?;
-            schedule_restore_required = true;
             return Err(error);
         }
 
@@ -459,7 +487,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             {
                 Ok(head) => head.map(|head| head.target_hash),
                 Err(visibility_error) => {
-                    deploy_tx.retain_for_recovery();
+                    deploy_tx.retain_for_recovery().context("retain schedule recovery after ambiguous ref read")?;
                     surface_swap.retain_for_recovery();
                     return Err(err.context(format!(
                         "deployed-ref publication failed and its durable visibility could not be read: {visibility_error:#}; startup recovery is required"
@@ -467,24 +495,23 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 }
             };
             if visible.as_deref() == Some(req.snapshot_hash.as_str()) {
-                deploy_tx.retain_for_recovery();
+                deploy_tx.retain_for_recovery().context("retain schedule recovery after visible target ref")?;
                 surface_swap.retain_for_recovery();
                 return Err(err.context(
                     "target project ref is visible but publication durability was not proven; startup recovery is required",
                 ));
             }
             if visible == previous_deployed_hash {
-                deploy_tx.rollback(&deploy_ctx);
+                deploy_tx.rollback().context("rollback schedule projection after ref failure")?;
                 surface_swap.retain_for_recovery();
                 rollback_journal_surfaces(
                     &project_directory,
                     &staging,
                     &journal_surfaces,
                 )?;
-                schedule_restore_required = true;
                 return Err(err);
             }
-            deploy_tx.retain_for_recovery();
+            deploy_tx.retain_for_recovery().context("retain schedule recovery after ambiguous deployed ref")?;
             surface_swap.retain_for_recovery();
             return Err(err.context(format!(
                 "deployed project ref has an ambiguous value after publication failure: {visible:?}"
@@ -505,7 +532,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             // rollback after it succeeded; retain the authenticated journal
             // and active job so startup recovery can verify the target under
             // the exact project identity before settlement.
-            deploy_tx.retain_for_recovery();
+            deploy_tx.retain_for_recovery().context("retain schedule recovery after post-publication path change")?;
             surface_swap.retain_for_recovery();
             return Err(error.context(
                 "project path or managed surfaces changed after deployed-ref publication; startup recovery is required",
@@ -513,7 +540,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
 
         let deploy_report = deploy_tx.report.clone();
-        deploy_tx.finalize(&deploy_ctx);
+        deploy_tx.finalize().context("finalize project schedule session")?;
         surface_swap.finalize();
         durable_resolution_complete = true;
         let mut report = surface_swap.report.clone();
@@ -521,14 +548,23 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         Ok(report)
         })();
         if schedule_restore_required {
-            if let Err(rollback_error) = project_deploy::restore_recovery_before_images(
-                &state,
-                &schedule_before_images,
-            ).await {
-                return Err(rollback_error.context(format!(
+            if let Err(rollback_error) = async {
+                let session = schedule_owner
+                    .as_mut()
+                    .expect("schedule session custody is present")
+                    .session_mut();
+                session
+                    .prepare_restoration(&schedule_before_images)
+                    .await?;
+                session.restore()
+            }
+            .await
+            {
+                let failure = rollback_error.context(format!(
                     "project apply failed ({:#}); schedule restoration requires startup recovery",
                     result.as_ref().expect_err("schedule restoration only follows a failed apply"),
-                )));
+                ));
+                return Err(failure);
             }
             durable_resolution_complete = true;
         }
@@ -537,41 +573,73 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     .await;
     let retain_for_recovery =
         apply_result.is_err() && journal_prepared && !durable_resolution_complete;
-    let cleanup = if retain_for_recovery {
-        Ok(())
-    } else {
-        staging.cleanup()
-    };
-    cleanup.with_context(|| {
-        format!(
-            "failed to durably retire project apply transaction {}",
-            staging_root.display()
-        )
-    })?;
+    if retain_for_recovery {
+        let owner = schedule_owner
+            .as_mut()
+            .expect("unresolved schedule session is retained");
+        owner
+            .session_mut()
+            .retain_for_recovery()
+            .context("retain project schedule recovery session")?;
+    }
     let report = match apply_result {
         Ok(report) => {
-            settle_apply_job(
-                &state,
-                &operation,
-                SyncJobState::Completed,
-                "completed",
-                None,
-                serde_json::json!({"outcome": "committed"}),
-                true,
+            settle_then_retire(
+                || {
+                    settle_apply_job(
+                        &state,
+                        &operation,
+                        SyncJobState::Completed,
+                        "completed",
+                        None,
+                        serde_json::json!({"outcome": "committed"}),
+                        true,
+                    )
+                },
+                || {
+                    if let Some(owner) = schedule_owner.take() {
+                        owner.resolve();
+                    }
+                },
+                || {
+                    staging.cleanup().with_context(|| {
+                        format!(
+                            "failed to durably retire settled project apply transaction {}",
+                            staging_root.display()
+                        )
+                    })
+                },
             )?;
             report
         }
         Err(error) if retain_for_recovery => return Err(error),
         Err(error) => {
             let diagnostic = format!("{error:#}");
-            settle_apply_job(
-                &state,
-                &operation,
-                SyncJobState::Failed,
-                "rolled_back",
-                Some(diagnostic),
-                serde_json::json!({"outcome": "rolled_back"}),
-                true,
+            settle_then_retire(
+                || {
+                    settle_apply_job(
+                        &state,
+                        &operation,
+                        SyncJobState::Failed,
+                        "rolled_back",
+                        Some(diagnostic),
+                        serde_json::json!({"outcome": "rolled_back"}),
+                        true,
+                    )
+                },
+                || {
+                    if let Some(owner) = schedule_owner.take() {
+                        owner.resolve();
+                    }
+                },
+                || {
+                    staging.cleanup().with_context(|| {
+                        format!(
+                            "failed to durably retire settled project apply transaction {}",
+                            staging_root.display()
+                        )
+                    })
+                },
             )?;
             return Err(error);
         }
@@ -790,7 +858,10 @@ fn cleanup_transaction_root(
         APPLY_TRANSACTION_ENTRY_LIMIT,
         APPLY_TRANSACTION_DEPTH_LIMIT,
     ))?;
-    if !parent.remove_empty_child_if_same(name, transaction)? {
+    if !parent
+        .remove_empty_child_if_same(name, transaction)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("project apply transaction remained non-empty during cleanup");
     }
     Ok(())
@@ -1097,7 +1168,7 @@ fn write_apply_journal(
     }
     if workspace
         .transaction
-        .atomic_create_regular(OsStr::new("journal.json"), &bytes, 0o600)?
+        .atomic_create_regular(OsStr::new("journal.json"), &bytes, 0o600, crate::API_TEMP_PURPOSE)?
         .is_none()
     {
         anyhow::bail!("project apply journal already exists");
@@ -1251,6 +1322,16 @@ fn create_apply_job(state: &AppState, operation: &ApplyOperation) -> Result<Sync
         return Err(error);
     }
     Ok(job)
+}
+
+fn settle_then_retire(
+    settle: impl FnOnce() -> Result<()>,
+    release_owner: impl FnOnce(),
+    retire_transaction: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    settle()?;
+    release_owner();
+    retire_transaction()
 }
 
 fn settle_apply_job(
@@ -1833,10 +1914,11 @@ fn decide_apply_recovery(
     )
 }
 
-async fn recover_apply_job(state: &AppState, job: &SyncJobRecord) -> Result<()> {
-    if job.state == SyncJobState::Running {
-        anyhow::bail!("project apply recovery observed a running predecessor attempt");
-    }
+async fn recover_apply_job(
+    state: &AppState,
+    job: &SyncJobRecord,
+    try_pending_acquisition: bool,
+) -> Result<bool> {
     let operation = validate_job_operation(job)?;
     let project_path = PathBuf::from(&operation.project_path);
     let project = PinnedDirectory::open(&project_path)?
@@ -1848,19 +1930,18 @@ async fn recover_apply_job(state: &AppState, job: &SyncJobRecord) -> Result<()> 
     let apply_lock = project_apply_lock(&operation.project_hash);
     let _apply_guard = apply_lock.lock_owned().await;
     let _project_guard = crate::project_namespace::acquire_project_mutation_lock(&project).await?;
-    let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
     project.ensure_path_binding()?;
+    let job = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&operation.job_id))?
+        .context("project apply recovery job disappeared while acquiring its locks")?;
+    let current_operation = validate_job_operation(&job)?;
+    if current_operation != operation {
+        anyhow::bail!("project apply operation changed while acquiring recovery locks");
+    }
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
-    let _cas_guard = authority.acquire_shared_guard()?;
-    let cas = authority.cas_store()?;
-    let expected_targets =
-        expected_target_surface_identities_for_snapshot(&cas, &operation.target_snapshot_hash)?;
-    let visible = state
-        .state_store
-        .with_state_db(|db| db.read_deployed_project_ref(&operation.project_hash))?
-        .map(|head| head.target_hash);
     let transaction = open_transaction_root(&project, &operation.transaction_id)?;
     let journal = match transaction.as_ref() {
         Some((_, transaction, _))
@@ -1873,71 +1954,306 @@ async fn recover_apply_job(state: &AppState, job: &SyncJobRecord) -> Result<()> 
             if journal.operation != operation {
                 anyhow::bail!("project apply journal is bound to another operation");
             }
-            verify_journal_target_identities(&journal.surfaces, &expected_targets)?;
             Some(journal)
         }
         _ => None,
     };
-    let outcome = match decide_apply_recovery(
-        visible.as_deref(),
-        operation.previous_deployed_hash.as_deref(),
-        &operation.target_snapshot_hash,
-    )? {
-        ApplyRecoveryDecision::Commit => {
-            if transaction.is_some() && journal.is_none() {
-                anyhow::bail!("committed project apply transaction has no authenticated journal");
-            }
-            verify_live_target_identities(&project, &expected_targets)?;
-            project.ensure_path_binding()?;
-            if let Some((parent, transaction, name)) = transaction.as_ref() {
-                cleanup_transaction_root(parent, transaction, name.as_os_str())?;
-            }
-            project.ensure_path_binding()?;
-            (SyncJobState::Completed, "recovered_committed", "committed")
+    let settled_resolution = match job.state {
+        SyncJobState::Completed
+            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "committed"})) =>
+        {
+            Some(ApplyRecoveryDecision::Commit)
         }
-        ApplyRecoveryDecision::Rollback => {
-            if let Some((parent, transaction, name)) = transaction.as_ref() {
-                if let Some(journal) = journal.as_ref() {
-                    if !live_journal_surfaces_match(&project, &journal.surfaces, false)? {
-                        let workspace =
-                            StagingDirectory::open(&project, &operation.transaction_id)?
-                                .context("prepared project apply has an incomplete transaction")?;
-                        rollback_journal_surfaces(&project, &workspace, &journal.surfaces)?;
-                    }
-                    // Schedule restoration is independently idempotent and
-                    // remains required when a predecessor crashed after
-                    // restoring the filesystem but before retiring the
-                    // transaction.
-                    project_deploy::restore_recovery_before_images(
-                        state,
-                        &journal.schedule_before_images,
-                    )
-                    .await?;
-                    verify_live_journal_surfaces(&project, &journal.surfaces, false)?;
-                    project.ensure_path_binding()?;
-                    cleanup_transaction_root(parent, transaction, name.as_os_str())?;
-                } else {
-                    // Before journal publication no live surface or schedule
-                    // may have changed. The transaction contains only
-                    // disposable materialization bytes.
-                    project.ensure_path_binding()?;
-                    cleanup_transaction_root(parent, transaction, name.as_os_str())?;
-                }
-            }
-            project.ensure_path_binding()?;
-            (SyncJobState::Failed, "recovered_rolled_back", "rolled_back")
+        SyncJobState::Failed
+            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "rolled_back"})) =>
+        {
+            Some(ApplyRecoveryDecision::Rollback)
+        }
+        SyncJobState::Failed
+            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "not_started"}))
+                && journal.is_none() =>
+        {
+            Some(ApplyRecoveryDecision::Rollback)
+        }
+        SyncJobState::Completed | SyncJobState::Failed => {
+            anyhow::bail!("terminal project apply job has no recognized durable resolution")
+        }
+        _ => None,
+    };
+    let recovery_owners = project_deploy::recovery_owners(state)?;
+    let retained_session = recovery_owners.take(&operation.job_id);
+    let was_retained = retained_session.is_some();
+    let mut schedule_owner = match retained_session {
+        Some(project_deploy::ProjectScheduleRecoveryOwner::Session(session)) => {
+            ProjectScheduleSessionCustody::with_session(
+                Arc::clone(&recovery_owners),
+                operation.job_id.clone(),
+                session,
+            )
+        }
+        Some(
+            project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession
+            | project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition,
+        )
+        | None => {
+            let mut owner = ProjectScheduleSessionCustody::reserve_before_acquisition(
+                Arc::clone(&recovery_owners),
+                operation.job_id.clone(),
+            );
+            let session = if try_pending_acquisition {
+                let Some(session) = project_deploy::try_acquire_session(state)? else {
+                    drop(owner);
+                    return Ok(false);
+                };
+                session
+            } else {
+                project_deploy::acquire_session(state).await?
+            };
+            owner.attach(session)?;
+            owner
         }
     };
-    settle_apply_job(
-        state,
-        &operation,
-        outcome.0,
-        outcome.1,
-        (outcome.0 == SyncJobState::Failed)
-            .then(|| "interrupted project apply was rolled back before startup".to_owned()),
-        serde_json::json!({"outcome": outcome.2}),
-        false,
-    )
+    if job.state == SyncJobState::Running && !was_retained {
+        anyhow::bail!(
+            "project apply recovery observed a running attempt without its retained schedule owner"
+        );
+    }
+    if matches!(job.state, SyncJobState::Completed | SyncJobState::Failed) && transaction.is_none()
+    {
+        schedule_owner.resolve();
+        return Ok(true);
+    }
+    if settled_resolution.is_none()
+        && let Some(journal) = journal.as_ref()
+    {
+        schedule_owner
+            .session_mut()
+            .prepare_restoration(&journal.schedule_before_images)
+            .await
+            .context("prepare project schedule restoration before CAS recovery guard")?;
+    }
+    let outcome = {
+        let _cas_guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
+        let expected_targets =
+            expected_target_surface_identities_for_snapshot(&cas, &operation.target_snapshot_hash)?;
+        if let Some(journal) = journal.as_ref() {
+            verify_journal_target_identities(&journal.surfaces, &expected_targets)?;
+        }
+        let visible = state
+            .state_store
+            .with_state_db(|db| db.read_deployed_project_ref(&operation.project_hash))?
+            .map(|head| head.target_hash);
+        let decision = decide_apply_recovery(
+            visible.as_deref(),
+            operation.previous_deployed_hash.as_deref(),
+            &operation.target_snapshot_hash,
+        )?;
+        if settled_resolution.is_some_and(|settled| settled != decision) {
+            anyhow::bail!("settled project apply outcome conflicts with the deployed project ref");
+        }
+        match decision {
+            ApplyRecoveryDecision::Commit => {
+                if journal.is_none() && settled_resolution.is_none() {
+                    anyhow::bail!("committed project apply has no authenticated journal");
+                }
+                verify_live_target_identities(&project, &expected_targets)?;
+                if journal.is_some() && settled_resolution.is_none() {
+                    schedule_owner
+                        .session_mut()
+                        .finalize()
+                        .context("finalize committed project schedule recovery")?;
+                }
+                project.ensure_path_binding()?;
+                (SyncJobState::Completed, "recovered_committed", "committed")
+            }
+            ApplyRecoveryDecision::Rollback => {
+                if let Some((parent, transaction, name)) = transaction.as_ref() {
+                    if let Some(journal) = journal.as_ref() {
+                        if !live_journal_surfaces_match(&project, &journal.surfaces, false)? {
+                            let workspace =
+                                StagingDirectory::open(&project, &operation.transaction_id)?
+                                    .context(
+                                        "prepared project apply has an incomplete transaction",
+                                    )?;
+                            rollback_journal_surfaces(&project, &workspace, &journal.surfaces)?;
+                        }
+                        // Schedule restoration is independently idempotent and
+                        // remains required when a predecessor crashed after
+                        // restoring the filesystem but before retiring the
+                        // transaction.
+                        if settled_resolution.is_none() {
+                            schedule_owner
+                                .session_mut()
+                                .restore()
+                                .context("restore project schedules inside CAS recovery section")?;
+                        }
+                        verify_live_journal_surfaces(&project, &journal.surfaces, false)?;
+                        project.ensure_path_binding()?;
+                    } else if settled_resolution.is_none() {
+                        // Before journal publication no live surface or schedule
+                        // may have changed. The transaction contains only
+                        // disposable materialization bytes.
+                        project.ensure_path_binding()?;
+                    }
+                }
+                project.ensure_path_binding()?;
+                (SyncJobState::Failed, "recovered_rolled_back", "rolled_back")
+            }
+        }
+    };
+    let already_settled = settled_resolution.is_some();
+    if settled_resolution.is_some_and(|settled| {
+        (settled == ApplyRecoveryDecision::Commit) != (outcome.0 == SyncJobState::Completed)
+    }) {
+        anyhow::bail!("project apply recovery outcome conflicts with its settled job state");
+    }
+    // Preserve the authenticated transaction journal until job settlement is
+    // durable. On settlement failure the moved owner is dropped back into the
+    // operation registry; cleanup runs only after settlement and owner release.
+    settle_then_retire(
+        || {
+            if already_settled {
+                return Ok(());
+            }
+            settle_apply_job(
+                state,
+                &operation,
+                outcome.0,
+                outcome.1,
+                (outcome.0 == SyncJobState::Failed)
+                    .then(|| "interrupted project apply was rolled back before startup".to_owned()),
+                serde_json::json!({"outcome": outcome.2}),
+                was_retained && job.state == SyncJobState::Running,
+            )
+        },
+        move || schedule_owner.resolve(),
+        || {
+            if let Some((parent, transaction, name)) = transaction.as_ref() {
+                let _cas_guard = authority.acquire_shared_guard()?;
+                project.ensure_path_binding()?;
+                cleanup_transaction_root(parent, transaction, name.as_os_str())?;
+                project.ensure_path_binding()?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(true)
+}
+
+/// Keeps the exact session under RAII custody from acquisition through durable
+/// job settlement. Cancellation transfers the same session to the registry, or
+/// changes an in-flight acquisition marker to pending after the handler drops.
+struct ProjectScheduleSessionCustody {
+    registry: Arc<project_deploy::ProjectScheduleRecoveryOwners>,
+    job_id: String,
+    owner: Option<project_deploy::ProjectScheduleRecoveryOwner>,
+}
+
+impl ProjectScheduleSessionCustody {
+    fn reserve_before_acquisition(
+        registry: Arc<project_deploy::ProjectScheduleRecoveryOwners>,
+        job_id: String,
+    ) -> Self {
+        registry.reserve_before_acquisition(job_id.clone());
+        Self {
+            registry,
+            job_id,
+            owner: Some(project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession),
+        }
+    }
+
+    fn with_session(
+        registry: Arc<project_deploy::ProjectScheduleRecoveryOwners>,
+        job_id: String,
+        session: Box<dyn ryeos_scheduler_contract::ProjectScheduleSession>,
+    ) -> Self {
+        Self {
+            registry,
+            job_id,
+            owner: Some(project_deploy::ProjectScheduleRecoveryOwner::Session(
+                session,
+            )),
+        }
+    }
+
+    fn attach(
+        &mut self,
+        session: Box<dyn ryeos_scheduler_contract::ProjectScheduleSession>,
+    ) -> Result<()> {
+        match self.owner.take() {
+            Some(project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession) => {
+                match self.registry.take(&self.job_id) {
+                    Some(project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession) => {}
+                    other => {
+                        self.owner = other;
+                        anyhow::bail!("project schedule acquisition reservation changed");
+                    }
+                }
+                self.owner = Some(project_deploy::ProjectScheduleRecoveryOwner::Session(
+                    session,
+                ));
+                Ok(())
+            }
+            other => {
+                self.owner = other;
+                anyhow::bail!("project schedule custody was not awaiting session acquisition")
+            }
+        }
+    }
+
+    fn session_mut(&mut self) -> &mut dyn ryeos_scheduler_contract::ProjectScheduleSession {
+        match self.owner.as_mut() {
+            Some(project_deploy::ProjectScheduleRecoveryOwner::Session(session)) => {
+                session.as_mut()
+            }
+            _ => panic!("project schedule session is not attached"),
+        }
+    }
+
+    fn session_ref(&self) -> &dyn ryeos_scheduler_contract::ProjectScheduleSession {
+        match self.owner.as_ref() {
+            Some(project_deploy::ProjectScheduleRecoveryOwner::Session(session)) => {
+                session.as_ref()
+            }
+            _ => panic!("project schedule session is not attached"),
+        }
+    }
+
+    fn resolve(mut self) {
+        if matches!(
+            &self.owner,
+            Some(
+                project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition
+                    | project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession
+            )
+        ) {
+            let _ = self.registry.take(&self.job_id);
+        }
+        drop(self.owner.take());
+    }
+}
+
+impl Drop for ProjectScheduleSessionCustody {
+    fn drop(&mut self) {
+        match self.owner.take() {
+            Some(project_deploy::ProjectScheduleRecoveryOwner::Session(mut session)) => {
+                if let Err(error) = session.retain_for_recovery() {
+                    tracing::error!(
+                        job_id = %self.job_id,
+                        %error,
+                        "project schedule session could not mark its pending recovery phase"
+                    );
+                }
+                self.registry.retain(self.job_id.clone(), session);
+            }
+            Some(project_deploy::ProjectScheduleRecoveryOwner::AcquiringSession) => {
+                self.registry.mark_acquisition_pending(&self.job_id);
+            }
+            Some(project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition)
+            | None => {}
+        }
+    }
 }
 
 /// Recover every interrupted project materialization before scheduler or
@@ -1955,10 +2271,44 @@ pub async fn recover_durable_project_snapshot_applies(state: &AppState) -> Resul
             return Ok(recovered);
         }
         for job in jobs {
-            recover_apply_job(state, &job).await?;
-            recovered += 1;
+            if recover_apply_job(state, &job, false).await? {
+                recovered += 1;
+            }
         }
     }
+}
+
+/// Retry only operation IDs whose exact schedule session is already retained
+/// in this process. This cannot discover or infer authority from unrelated
+/// project jobs; restart recovery continues through the authenticated journal
+/// scan above.
+pub async fn retry_retained_project_snapshot_applies(state: &AppState) -> Result<usize> {
+    let owners = project_deploy::recovery_owners(state)?;
+    let job_ids = owners.job_ids();
+    let mut recovered = 0usize;
+    for job_id in job_ids {
+        // The original handler still owns this per-project apply lock and may
+        // be waiting for the global scheduler gate. Never queue its recovery
+        // behind that handler; cancellation changes this marker to Pending.
+        if owners.is_acquiring_session(&job_id) {
+            continue;
+        }
+        let job = state
+            .state_store
+            .with_state_db(|db| db.get_sync_job(&job_id))?;
+        let Some(job) = job else {
+            owners.release_pending(&job_id);
+            continue;
+        };
+        match recover_apply_job(state, &job, true).await {
+            Ok(true) => recovered += 1,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%job_id, %error, "retained project schedule recovery remains pending")
+            }
+        }
+    }
+    Ok(recovered)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -1977,7 +2327,312 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    mod shared_test_state {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_state.rs"));
+    }
+
+    struct CustodySessionProbe {
+        retained: Arc<AtomicUsize>,
+        recovered: Arc<AtomicUsize>,
+    }
+
+    impl ryeos_scheduler_contract::ProjectScheduleSession for CustodySessionProbe {
+        fn plan(
+            &mut self,
+            _: ryeos_scheduler_contract::ProjectScheduleDeployRequest,
+        ) -> Result<ryeos_scheduler_contract::ScheduleDeployReport> {
+            Ok(ryeos_scheduler_contract::ScheduleDeployReport::default())
+        }
+
+        fn has_actions(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn prepare_recovery(&mut self) -> ryeos_scheduler_contract::ProjectScheduleFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn before_images(
+            &self,
+        ) -> Result<&[ryeos_scheduler_contract::ScheduleRecoveryBeforeImage]> {
+            Ok(&[])
+        }
+
+        fn prepare(&mut self) -> Result<ryeos_scheduler_contract::ScheduleDeployReport> {
+            Ok(ryeos_scheduler_contract::ScheduleDeployReport::default())
+        }
+
+        fn finalize(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn rollback(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn retain_for_recovery(&mut self) -> Result<()> {
+            self.retained.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn prepare_restoration<'a>(
+            &'a mut self,
+            _: &'a [ryeos_scheduler_contract::ScheduleRecoveryBeforeImage],
+        ) -> ryeos_scheduler_contract::ProjectScheduleFuture<'a, ()> {
+            self.recovered.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn restore(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancellation_while_acquiring_session_leaves_an_operation_marker() {
+        let registry = Arc::new(project_deploy::ProjectScheduleRecoveryOwners::default());
+        let job_id = "project-snapshot-apply:cancelled-acquisition".to_owned();
+        let custody = ProjectScheduleSessionCustody::reserve_before_acquisition(
+            Arc::clone(&registry),
+            job_id.clone(),
+        );
+        assert!(registry.is_acquiring_session(&job_id));
+        drop(custody);
+
+        assert_eq!(registry.job_ids(), vec![job_id.clone()]);
+        assert!(!registry.is_acquiring_session(&job_id));
+        assert!(matches!(
+            registry.take(&job_id),
+            Some(project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition)
+        ));
+        assert!(registry.job_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn settlement_fault_keeps_same_session_and_skips_journal_retirement() {
+        let registry = Arc::new(project_deploy::ProjectScheduleRecoveryOwners::default());
+        let job_id = "project-snapshot-apply:settlement-fault".to_owned();
+        let retained = Arc::new(AtomicUsize::new(0));
+        let recovered = Arc::new(AtomicUsize::new(0));
+        let mut custody = ProjectScheduleSessionCustody::reserve_before_acquisition(
+            Arc::clone(&registry),
+            job_id.clone(),
+        );
+        custody
+            .attach(Box::new(CustodySessionProbe {
+                retained: Arc::clone(&retained),
+                recovered: Arc::clone(&recovered),
+            }))
+            .unwrap();
+        let mut released = false;
+        let mut journal_retired = false;
+        let result = settle_then_retire(
+            || anyhow::bail!("injected durable settlement failure"),
+            || released = true,
+            || {
+                journal_retired = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!released);
+        assert!(!journal_retired);
+
+        drop(custody);
+        let Some(project_deploy::ProjectScheduleRecoveryOwner::Session(mut session)) =
+            registry.take(&job_id)
+        else {
+            panic!("settlement fault must retain the exact session")
+        };
+        assert_eq!(retained.load(Ordering::SeqCst), 1);
+        session.prepare_restoration(&[]).await.unwrap();
+        assert_eq!(recovered.load(Ordering::SeqCst), 1);
+        assert!(registry.job_ids().is_empty());
+    }
+
+    #[cfg(feature = "scheduling")]
+    #[tokio::test]
+    async fn retry_loop_skips_active_and_pending_acquisition_before_later_real_sessions() {
+        let (_state_root, store_owner, mut state) = shared_test_state::build_test_state();
+        let registry = Arc::new(project_deploy::ProjectScheduleRecoveryOwners::default());
+        Arc::get_mut(&mut state.extensions)
+            .expect("test state extension owner is unique")
+            .insert(Arc::clone(&registry));
+
+        let runtime_directory = Arc::new(
+            PinnedDirectory::open(&state.config.runtime_state_dir())
+                .unwrap()
+                .expect("test runtime directory exists"),
+        );
+        // The scheduler store opens natively on the host under the test's
+        // node Store, in the node's runtime directory, and settles into that
+        // host's census once the service has closed it.
+        let db = ryeos_app::test_support::with_store_host(|host| {
+            match ryeos_scheduler::test_native::open_at_on(host, &state.config.runtime_state_dir()) {
+                Ok(db) => Arc::new(db),
+                Err(failure) => {
+                    let error = failure.to_string();
+                    ryeos_scheduler::test_native::settle_refusal_on(host, failure);
+                    panic!("open test scheduler store: {error}");
+                }
+            }
+        });
+        db.finish_fire_projection_rebuild()
+            .expect("publish the fresh test fire projection");
+        let scheduler = Arc::new(
+            ryeos_scheduler_service::SchedulerService::new(
+                state.config.app_root.clone(),
+                runtime_directory,
+                Arc::clone(&db),
+                Arc::new(tokio::sync::RwLock::new(())),
+                Arc::clone(&state.identity),
+                Arc::new(ryeos_engine::trust::TrustStore::empty()),
+            )
+            .unwrap(),
+        );
+        let scheduler_participant: Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant> =
+            scheduler.clone();
+        state
+            .install_scheduler_participant(scheduler_participant)
+            .unwrap();
+
+        let first_project = TempDir::new().unwrap();
+        let second_project = TempDir::new().unwrap();
+        let third_project = TempDir::new().unwrap();
+        let first_operation = test_operation(
+            &first_project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let second_operation = test_operation(
+            &second_project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000002",
+        );
+        let third_operation = test_operation(
+            &third_project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000003",
+        );
+        let first_job_id = first_operation.job_id.clone();
+        let second_job_id = second_operation.job_id.clone();
+        let third_job_id = third_operation.job_id.clone();
+        let insert_running_job = |operation: &ApplyOperation| {
+            let job = ryeos_state::NewSyncJob {
+                job_id: operation.job_id.clone(),
+                operation_type: APPLY_OPERATION_TYPE.to_owned(),
+                operation: serde_json::to_value(operation).unwrap(),
+                peer: None,
+                // Recovery refuses a job that does not root its target.
+                roots: vec![operation.target_snapshot_hash.clone()],
+                heads: Vec::new(),
+                max_attempts: 3,
+            };
+            state
+                .state_store
+                .with_state_db(|db| {
+                    db.create_sync_job_with_initial_progress(
+                        &job,
+                        SyncJobState::Running,
+                        "applying",
+                        None,
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        insert_running_job(&first_operation);
+        insert_running_job(&second_operation);
+        insert_running_job(&third_operation);
+
+        // First prove that an operation whose original producer is still
+        // acquiring is skipped while a later real session settles.
+        let first_acquisition = ProjectScheduleSessionCustody::reserve_before_acquisition(
+            Arc::clone(&registry),
+            first_job_id.clone(),
+        );
+        assert!(registry.is_acquiring_session(&first_job_id));
+        let session = project_deploy::acquire_session(&state).await.unwrap();
+        registry.retain(second_job_id.clone(), session);
+        state
+            .state_store
+            .with_state_db(|db| {
+                db.update_sync_job(
+                    &second_job_id,
+                    &SyncJobUpdate {
+                        state: SyncJobState::Completed,
+                        phase: "committed".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: Vec::new(),
+                        fetched_hashes: Vec::new(),
+                        last_error: None,
+                        result: Some(serde_json::json!({"outcome": "committed"})),
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let retry = retry_retained_project_snapshot_applies(&state);
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), retry)
+            .await
+            .expect("active acquisition must not block a later retained session")
+            .unwrap();
+        assert_eq!(recovered, 1);
+        assert!(registry.is_acquiring_session(&first_job_id));
+        assert_eq!(registry.job_ids(), vec![first_job_id.clone()]);
+
+        // Now settle the producer as cancelled, changing its marker to
+        // PendingSessionAcquisition. A third real session holds the same write
+        // gate while retry probes the pending job and continues to job three.
+        drop(first_acquisition);
+        assert!(!registry.is_acquiring_session(&first_job_id));
+        let session = project_deploy::acquire_session(&state).await.unwrap();
+        registry.retain(third_job_id.clone(), session);
+        state
+            .state_store
+            .with_state_db(|db| {
+                db.update_sync_job(
+                    &third_job_id,
+                    &SyncJobUpdate {
+                        state: SyncJobState::Completed,
+                        phase: "committed".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: Vec::new(),
+                        fetched_hashes: Vec::new(),
+                        last_error: None,
+                        result: Some(serde_json::json!({"outcome": "committed"})),
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let retry = retry_retained_project_snapshot_applies(&state);
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), retry)
+            .await
+            .expect("pending acquisition must not wait for the held scheduler gate")
+            .unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(registry.job_ids(), vec![first_job_id.clone()]);
+        assert!(matches!(
+            registry.take(&first_job_id),
+            Some(project_deploy::ProjectScheduleRecoveryOwner::PendingSessionAcquisition)
+        ));
+        scheduler.close_after_shutdown_drain().unwrap();
+
+        // Settle in drop order: the application and every scheduler alias go
+        // first, then the closed scheduler store files its terminals with the
+        // host, and only then does the Store owner close.
+        drop(state);
+        drop(scheduler);
+        ryeos_app::test_support::with_store_host(|host| {
+            ryeos_scheduler::test_native::settle_on(host, db);
+        });
+        store_owner.close().unwrap();
+    }
 
     fn test_operation(project: &Path, transaction_id: &str) -> ApplyOperation {
         let project_path = project.to_str().unwrap().to_owned();
@@ -2082,7 +2737,7 @@ mod tests {
                     })
                     .collect(),
                 schedule_before_images: vec![
-                    crate::project_deploy::schedules::ScheduleRecoveryBeforeImage {
+                    ryeos_scheduler_contract::ScheduleRecoveryBeforeImage {
                         schedule_id: "test-schedule".to_owned(),
                         signed_yaml: Some("signed: before\n".to_owned()),
                     },
@@ -2437,6 +3092,7 @@ mod tests {
         assert_eq!(mode, 0o755);
     }
 
+    #[cfg(feature = "scheduling")]
     #[test]
     fn preflight_schedule_declarations_accepts_valid_project_intent() {
         let project = TempDir::new().unwrap();
@@ -2496,6 +3152,7 @@ schedules:
         assert_eq!(count, 1);
     }
 
+    #[cfg(feature = "scheduling")]
     #[test]
     fn preflight_schedule_declarations_rejects_duplicate_ids() {
         let project = TempDir::new().unwrap();
@@ -2552,6 +3209,7 @@ schedules:
         assert!(format!("{err:#}").contains("duplicate schedule_id"));
     }
 
+    #[cfg(feature = "scheduling")]
     #[test]
     fn preflight_schedule_declarations_rejects_node_owned_fields() {
         let project = TempDir::new().unwrap();
@@ -2583,6 +3241,7 @@ schedules:
         assert!(format!("{err:#}").contains("unknown field `execution`"));
     }
 
+    #[cfg(feature = "scheduling")]
     #[test]
     fn preflight_schedule_declarations_rejects_other_project_root() {
         let project = TempDir::new().unwrap();
@@ -2642,6 +3301,7 @@ schedules:
         assert!(format!("{err:#}").contains("cannot target another project"));
     }
 
+    #[cfg(feature = "scheduling")]
     #[test]
     fn preflight_schedule_declarations_rejects_projectless_execution() {
         let project = TempDir::new().unwrap();

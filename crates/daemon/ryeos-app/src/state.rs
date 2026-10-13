@@ -2,27 +2,24 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tokio::sync::{RwLock, mpsc};
 
 use ryeos_engine::engine::Engine;
 use ryeos_engine::isolation::{IsolationMode, IsolationRuntime};
 use ryeos_runtime::CommandRegistry;
 use ryeos_runtime::authorizer::Authorizer;
-use ryeos_scheduler::ReloadSignal;
-use ryeos_scheduler::db::SchedulerDb;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
-use crate::config::Config;
+use ryeos_node_runtime::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
-use crate::identity::NodeIdentity;
+use ryeos_node_runtime::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
-use crate::node_policy::NodePolicySnapshot;
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -83,7 +80,7 @@ pub struct AppState {
     /// admitted by this controller may retain it while a blocking host call
     /// settles, preventing a replacement controller from overlapping the old
     /// generation.
-    pub controller_lifetime: Arc<crate::state_lock::StateLockLease>,
+    pub controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
     /// Generic extension state bag for composition-root state that
     /// doesn't belong in core (e.g., UI state). Populated by the
     /// daemon composition root. Use `extensions.get::<T>()` to
@@ -121,12 +118,15 @@ pub struct AppState {
         Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
-    /// Operator-secret store. Read at request-build time and merged
-    /// into the spawned subprocess env via the `vault_bindings`
-    /// pipeline (see `thread_lifecycle::spawn_item`). The daemon stays
-    /// vendor-agnostic — this trait moves opaque `String -> String`
-    /// pairs and never enumerates provider names.
+    /// Operator-secret store. Delivering launches read it only through
+    /// `vault::authorize_secret_delivery` after admission verification. The
+    /// daemon stays vendor-agnostic — this trait moves opaque
+    /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn NodeVault>,
+    /// Provider-delivered environment values taken once at daemon startup
+    /// for exactly the names the node policy declares. Read only through
+    /// authorized secret delivery, alongside the vault.
+    pub provider_env: Arc<crate::vault::ProviderEnvironment>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -134,15 +134,6 @@ pub struct AppState {
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,
-    /// Scheduler projection DB (SQLite, in-memory for tests, file-backed in prod).
-    pub scheduler_db: Arc<SchedulerDb>,
-    /// Runtime gate shared by scheduler mutation paths and the timer.
-    /// Writers hold it across project/schedule mutations; the timer only
-    /// dispatches while it can acquire a read guard.
-    pub scheduler_runtime_gate: Arc<RwLock<()>>,
-    /// Channel to request scheduler reload after register/deregister/pause/resume.
-    /// `None` when the scheduler is not running (e.g. in unit tests).
-    pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
     /// Ingest ignore matcher compiled from the retained node-policy snapshot.
     pub ignore_matcher: Arc<IgnoreMatcher>,
     /// Vault X25519 public key fingerprint. `None` when using
@@ -168,6 +159,11 @@ pub struct AppState {
     /// Empty after restart; callbacks cannot reconstruct process ownership.
     pub scoped_producer_processes:
         Arc<crate::scoped_producer_process::ScopedProducerProcessRegistry>,
+    /// Original Q workspace and pinned state-root guards retained across
+    /// fallible local start/pool binding in this daemon generation. Empty on
+    /// restart; a durable row alone cannot recreate the backend view owner.
+    pub qualification_workspace_custody:
+        Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustodyRegistry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +220,35 @@ pub struct AccountingStatus {
 }
 
 impl AppState {
+    /// Every secret source an authorized delivery may read.
+    pub fn secret_sources(&self) -> crate::vault::SecretSources<'_> {
+        crate::vault::SecretSources {
+            vault: self.vault.as_ref(),
+            provider_env: self.provider_env.as_ref(),
+        }
+    }
+
+    /// The same one-shot participant used by durable lifecycle observations.
+    pub fn scheduler(&self) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.scheduler_participant()
+    }
+
+    /// Install exactly once during composition, before recovery or readiness.
+    pub fn install_scheduler_participant(
+        &self,
+        participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
+    ) -> anyhow::Result<()> {
+        self.threads.install_scheduler_participant(participant)
+    }
+
+    /// Withdraw the same participant after request and scheduler-task drain.
+    /// This is part of native shutdown custody, not ordinary capability removal.
+    pub fn take_scheduler_participant_for_shutdown(
+        &self,
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.take_scheduler_participant_for_shutdown()
+    }
+
     pub fn node_history_policy(
         &self,
     ) -> anyhow::Result<&ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy> {
@@ -298,6 +323,11 @@ impl AppState {
 /// caller owns the directory lifetime. No API handlers, placement binding, or
 /// vault authority is preinstalled; composed tests must add only the exact
 /// production boundary they exercise.
+///
+/// The Store opens through the native test gate. Its owner comes first in the
+/// returned pair so that `let (store_owner, state) = build(..)` drops the
+/// application, and every Store `Arc` it holds, before the owner closes the
+/// Store. The owner stays on the opening thread.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::sync::Arc;
@@ -305,36 +335,78 @@ pub mod test_support {
     use anyhow::Result;
 
     use super::{AppState, CatalogHealth};
+    use crate::state_store::test_native::TestStateStore;
 
-    pub fn build(root: &std::path::Path) -> Result<AppState> {
-        let runtime_state_dir = root.join(".ai/state");
-        let runtime_db_path = root.join("runtime.sqlite3");
-        let key_path = root.join("identity/node-key.pem");
-        let config = crate::config::Config {
-            bind: "127.0.0.1:0".parse()?,
-            db_path: runtime_db_path.clone(),
-            uds_path: root.join("test.sock"),
-            app_root: root.to_path_buf(),
-            node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: root.join("identity/operator-key.pem"),
-            authorized_keys_dir: root.join("auth"),
-        };
-        let identity = crate::identity::NodeIdentity::create(&key_path)?;
-        crate::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+    pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        let (config, identity) = test_identity(root)?;
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = crate::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(crate::state_store::StateStore::new_with_head_trust(
-            root.to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
+        let store_owner = TestStateStore::open_with_barrier(
+            root,
             signer,
             write_barrier.clone(),
             Arc::new(head_trust),
-        )?);
+        )?;
+        let state_store = Arc::clone(store_owner.store());
+        // The owner already holds this App root's operator lock; a second
+        // acquisition would conflict with it.
+        let controller_lifetime = store_owner.controller_lifetime();
+        let state = compose(config, identity, state_store, write_barrier, controller_lifetime)?;
+        Ok((store_owner, state))
+    }
+
+    /// Compose an application over a Store the caller already holds, without
+    /// opening another. A thread holds one test Store at a time, so a test
+    /// that needs an application over an existing Store uses this. `root`
+    /// receives the application's own identity keys and configuration.
+    pub fn build_with_store(
+        root: &std::path::Path,
+        state_store: Arc<crate::state_store::StateStore>,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
+        let (config, identity) = test_identity(root)?;
+        compose(
+            config,
+            identity,
+            state_store,
+            crate::write_barrier::WriteBarrier::new(),
+            controller_lifetime,
+        )
+    }
+
+    fn test_identity(
+        root: &std::path::Path,
+    ) -> Result<(
+        ryeos_node_runtime::config::Config,
+        ryeos_node_runtime::identity::NodeIdentity,
+    )> {
+        let runtime_db_path = TestStateStore::runtime_state_dir(root).join("runtime.sqlite3");
+        let key_path = root.join("identity/node-key.pem");
+        let config = ryeos_node_runtime::config::Config {
+            bind: "127.0.0.1:0".parse()?,
+            db_path: runtime_db_path,
+            uds_path: root.join("test.sock"),
+            app_root: root.to_path_buf(),
+            node_signing_key_path: key_path.clone(),
+            operator_signing_key_path: root.join("identity/operator-key.pem"),
+            authorized_keys_dir: root.join("auth"),
+        };
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
+        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        Ok((config, identity))
+    }
+
+    fn compose(
+        config: ryeos_node_runtime::config::Config,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
+        state_store: Arc<crate::state_store::StateStore>,
+        write_barrier: crate::write_barrier::WriteBarrier,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -363,7 +435,6 @@ pub mod test_support {
             kind_profiles,
             events.clone(),
         ));
-        let controller_lifetime = crate::state_lock::test_controller_lifetime(root)?;
         Ok(AppState {
             config: Arc::new(config),
             daemon_build: crate::build_info::get(),
@@ -408,18 +479,16 @@ pub mod test_support {
             external_candidate_connectors: Arc::new(Default::default()),
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
-            node_policy: Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
+            node_policy: Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
                 Vec::new(),
             )),
             vault: Arc::new(crate::vault::EmptyVault),
+            provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),
             )?),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory()?),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(crate::ignore::IgnoreMatcher::from_config(
                 &crate::ignore::IgnoreConfig {
                     patterns: Vec::new(),
@@ -433,6 +502,7 @@ pub mod test_support {
             ),
             scoped_producer_authorities: Arc::new(Default::default()),
             scoped_producer_processes: Arc::new(Default::default()),
+            qualification_workspace_custody: Arc::new(Default::default()),
         })
     }
 }

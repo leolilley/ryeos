@@ -10,6 +10,18 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod cgroup;
+
+/// Locked-memory ceiling a host supervisor grants a node controller at exec.
+/// The only memory a controller locks is its resident native region, one
+/// fixed compile-time layout of about 64 MiB; four times that leaves room for
+/// layout growth while keeping the lockable memory every spawned worker
+/// inherits far below a node's memory envelope. Locked pages are still
+/// charged to the envelope's memory cgroup.
+pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
+/// Descriptor soft ceiling for a node controller; the inherited hard limit
+/// still bounds it, and no host-wide maximum is raised.
+pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
+mod host_capability;
 mod oci_lifecycle;
 // This is the diagnostic witness that a namespace can outlive a process
 // group. It is not a second production lifecycle backend: membership scans
@@ -17,7 +29,19 @@ mod oci_lifecycle;
 #[cfg(all(test, target_os = "linux"))]
 mod pid_namespace;
 mod scope;
-pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent};
+#[cfg(target_os = "linux")]
+pub(crate) use scope::SelectedScopePreparation;
+pub use host_capability::{
+    ACCOUNTING, AnyOfCapabilities, CapabilityEvidence, CapabilityRequirement, CgroupFacts,
+    CgroupLimit, HOST_FACTS_VERSION, HostCapabilities, HostFacts, MemlockFacts, ProbeOutcome,
+    ProofSource, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES,
+    RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof,
+    RootStorageFacts, STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE,
+    TERMINATION_ENCLOSURE_TRUSTED_INIT, TRUSTED_GRADE_CAPABILITIES, SCOPE_LIMITS,
+    admit_enclosure_inits, current_host_generation, decide_durable_root, floor_entry_refusal,
+    is_scope_capability, is_weaker_grade, met_by_strongest, satisfies_local_requirement,
+};
+pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
@@ -386,6 +410,94 @@ pub fn capture_current_process_identity() -> Result<ExactProcessIdentity, String
     }
 }
 
+/// Check an already captured original current incarnation without constructing
+/// another owned identity. Proc reads and refusals are fixed-size; both pidfds
+/// fence the numeric observations exactly as in the owned capture path.
+pub fn require_current_process_identity_fixed(expected: &ExactProcessIdentity) -> Result<(), &'static str> {
+    #[cfg(not(target_os = "linux"))]
+    { let _ = expected; Err("current process identity check requires Linux") }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        fn read_fixed(path: &[u8], bytes: &mut [u8]) -> Result<usize, &'static str> {
+            let raw = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+            if raw < 0 { return Err("original process input open refused"); }
+            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+            let mut used = 0;
+            loop {
+                if used == bytes.len() {
+                    let mut extra = 0u8;
+                    let result = unsafe { libc::read(fd.as_raw_fd(), (&mut extra as *mut u8).cast(), 1) };
+                    if result == 0 { return Ok(used); }
+                    return Err("original process input exceeds fixed bound");
+                }
+                let result = unsafe { libc::read(fd.as_raw_fd(), bytes[used..].as_mut_ptr().cast(), bytes.len() - used) };
+                if result < 0 { return Err("original process input read refused"); }
+                if result == 0 { return Ok(used); }
+                used += result as usize;
+                // Positive reads consume at least one byte; at most len+1
+                // calls, with no EINTR retry or renewed admission interval.
+            }
+        }
+        fn stat(pid: u32) -> Result<(u8, i64, u64), &'static str> {
+            let mut path = [0u8; 40];
+            path[..6].copy_from_slice(b"/proc/");
+            let mut digits = [0u8; 10];
+            let mut count = 0;
+            let mut value = pid;
+            loop { digits[count] = b'0' + (value % 10) as u8; count += 1; value /= 10; if value == 0 { break; } }
+            for i in 0..count { path[6+i] = digits[count-1-i]; }
+            path[6+count..11+count].copy_from_slice(b"/stat");
+            let mut bytes = [0u8; 4096];
+            let size = read_fixed(&path, &mut bytes)?;
+            let text = std::str::from_utf8(&bytes[..size]).map_err(|_| "original process stat is not UTF-8")?;
+            let end = text.rfind(')').ok_or("original process stat has no comm boundary")?;
+            let mut fields = text[end+1..].split_ascii_whitespace();
+            let state = fields.next().and_then(|v| if v.len() == 1 { Some(v.as_bytes()[0]) } else { None })
+                .ok_or("original process stat has no state")?;
+            fields.next().ok_or("original process stat has no parent")?;
+            let group = fields.next().ok_or("original process stat has no group")?
+                .parse::<i64>().map_err(|_| "original process stat has invalid group")?;
+            let birth = fields.nth(16).ok_or("original process stat has no birth")?
+                .parse::<u64>().map_err(|_| "original process stat has invalid birth")?;
+            if birth == 0 { return Err("original process stat has zero birth"); }
+            Ok((state, group, birth))
+        }
+        fn pin(pid: u32) -> Result<OwnedFd, &'static str> {
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+            if raw < 0 { return Err("original process pidfd refused"); }
+            Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
+        }
+        fn probe(fd: &OwnedFd) -> Result<(), &'static str> {
+            let result = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), 0i32,
+                std::ptr::null::<libc::siginfo_t>(), 0u32) };
+            if result != 0 { return Err("original process pidfd probe refused"); }
+            Ok(())
+        }
+        let pid = unsafe { libc::getpid() };
+        let group = unsafe { libc::getpgrp() };
+        if pid <= 1 || group <= 1 || pid as u32 != expected.target_pid || group as u32 != expected.group_leader_pid {
+            return Err("native admission cannot cross a process incarnation");
+        }
+        let target_fd = pin(expected.target_pid)?;
+        let group_fd = pin(expected.group_leader_pid)?;
+        probe(&target_fd)?; probe(&group_fd)?;
+        let target = stat(expected.target_pid)?;
+        let leader = stat(expected.group_leader_pid)?;
+        let mut boot = [0u8; 128];
+        let size = read_fixed(b"/proc/sys/kernel/random/boot_id\0", &mut boot)?;
+        let boot = std::str::from_utf8(&boot[..size]).map_err(|_| "original boot identity is not UTF-8")?.trim();
+        probe(&target_fd)?; probe(&group_fd)?;
+        if matches!(target.0, b'Z' | b'X') || matches!(leader.0, b'Z' | b'X')
+            || target.1 != i64::from(expected.group_leader_pid) || leader.1 != i64::from(expected.group_leader_pid)
+            || target.2 != expected.target_start_time_ticks || leader.2 != expected.group_leader_start_time_ticks
+            || boot.is_empty() || boot != expected.boot_id {
+            return Err("native admission cannot cross a process incarnation");
+        }
+        Ok(())
+    }
+}
+
 /// Kernel consumers which already retain the exact target descriptor call
 /// this internally; no application imports a pidfd or procfs branch.
 #[cfg(target_os = "linux")]
@@ -486,17 +598,84 @@ impl ExactProcessIdentity {
     /// layers may bind evidence to the digest without interpreting kernel
     /// birth coordinates or reproducing their platform-specific semantics.
     pub fn incarnation_digest(&self) -> Result<String, String> {
-        self.validate()?;
-        let value = serde_json::json!({
-            "version": 1,
-            "boot_identity": self.boot_id,
-            "target_pid": self.target_pid,
-            "target_birth": self.target_start_time_ticks,
-            "group_leader_pid": self.group_leader_pid,
-            "group_leader_birth": self.group_leader_start_time_ticks,
-        });
-        let canonical = crate::canonical_json(&value).map_err(|error| error.to_string())?;
-        Ok(crate::sha256_hex(canonical.as_bytes()))
+        let bytes = self.incarnation_digest_bytes().map_err(str::to_owned)?;
+        let mut text = String::with_capacity(64);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes {
+            text.push(HEX[(byte >> 4) as usize] as char);
+            text.push(HEX[(byte & 15) as usize] as char);
+        }
+        Ok(text)
+    }
+
+    /// The same canonical protocol digest as fixed bytes, for an original
+    /// admission caller that cannot allocate an intermediate Value or string.
+    /// This is identity data, not liveness, resource or execution authority.
+    pub fn incarnation_digest_bytes(&self) -> Result<[u8; 32], &'static str> {
+        use sha2::Digest;
+        if self.boot_id.trim().is_empty() || self.target_pid <= 1
+            || self.group_leader_pid <= 1 || self.target_start_time_ticks == 0
+            || self.group_leader_start_time_ticks == 0 {
+            return Err("exact process identity is incomplete");
+        }
+        // Declaration order is the canonical decoded-key order. Borrow every
+        // string and preserve integer rendering; no field clone or Value tree.
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            boot_identity: &'a str,
+            group_leader_birth: u64,
+            group_leader_pid: u32,
+            target_birth: u64,
+            target_pid: u32,
+            version: u32,
+        }
+        struct HashWriter(sha2::Sha256);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes); Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        // RyeOS canonical strings escape non-ASCII as lowercase UTF-16
+        // units. Compact serde already handles ASCII control/quote escapes.
+        struct CanonicalStrings;
+        impl serde_json::ser::Formatter for CanonicalStrings {
+            fn write_string_fragment<W: ?Sized + std::io::Write>(
+                &mut self, writer: &mut W, fragment: &str,
+            ) -> std::io::Result<()> {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                for ch in fragment.chars() {
+                    if ch.is_ascii() { writer.write_all(&[ch as u8])?; }
+                    else {
+                        let mut units = [0u16; 2];
+                        for unit in ch.encode_utf16(&mut units).iter().copied() {
+                            writer.write_all(&[b'\\', b'u',
+                                HEX[((unit >> 12) & 15) as usize],
+                                HEX[((unit >> 8) & 15) as usize],
+                                HEX[((unit >> 4) & 15) as usize],
+                                HEX[(unit & 15) as usize]])?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+        // Exhaustive destructure makes new identity fields require review of
+        // this persisted digest instead of silently omitting them.
+        let Self { boot_id, target_pid, target_start_time_ticks,
+            group_leader_pid, group_leader_start_time_ticks } = self;
+        let wire = Wire {
+            boot_identity: boot_id,
+            group_leader_birth: *group_leader_start_time_ticks,
+            group_leader_pid: *group_leader_pid,
+            target_birth: *target_start_time_ticks,
+            target_pid: *target_pid, version: 1,
+        };
+        let mut writer = HashWriter(sha2::Sha256::new());
+        let mut serializer = serde_json::Serializer::with_formatter(&mut writer, CanonicalStrings);
+        serde::Serialize::serialize(&wire, &mut serializer)
+            .map_err(|_| "canonical process identity encoding failed")?;
+        Ok(writer.0.finalize().into())
     }
 
     /// Observe whether this exact process incarnation has ended without ever
@@ -558,6 +737,37 @@ pub fn prepare_process_group_controller() -> Result<(), String> {
     #[cfg(not(target_os = "linux"))]
     {
         Err("exact process-group control is unavailable on this OS".to_owned())
+    }
+}
+
+/// Make the calling process lead its own session and therefore its own
+/// process group, detaching it from whatever session and group launched it.
+/// Exact current-process identity names the caller's group leader, and group
+/// termination signals that whole group, so a process left in a launcher's
+/// group would capture a foreign leader and could signal the launcher too.
+///
+/// A process that already leads its session is unchanged. The kernel refuses
+/// a new session to a process that already leads its own group inside another
+/// session; that group is already exactly this process's, so it is accepted
+/// without detaching. Any other refusal fails closed.
+pub fn establish_own_process_session() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let pid = unsafe { libc::getpid() };
+        if unsafe { libc::getsid(0) } != pid && unsafe { libc::setsid() } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EPERM) || unsafe { libc::getpgrp() } != pid {
+                return Err(format!("place process in its own session: {error}"));
+            }
+        }
+        if unsafe { libc::getpgrp() } != pid {
+            return Err("process did not acquire its exact own process group".to_owned());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("process session placement is unavailable on this OS".to_owned())
     }
 }
 
@@ -1106,6 +1316,32 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_process_digest_matches_canonical_protocol() {
+        use sha2::Digest;
+        for boot in ["01234567-89ab-cdef-0123-456789abcdef", "é🚀\n\t\\\"\u{1b}"] {
+            for (pid, ticks) in [(2, 1), (u32::MAX, u64::MAX)] {
+                let identity = super::ExactProcessIdentity {
+                    boot_id: boot.to_owned(), target_pid: pid,
+                    target_start_time_ticks: ticks, group_leader_pid: pid,
+                    group_leader_start_time_ticks: ticks,
+                };
+                let canonical = crate::canonical_json(&serde_json::json!({
+                    "version": 1, "boot_identity": boot,
+                    "target_pid": pid, "target_birth": ticks,
+                    "group_leader_pid": pid, "group_leader_birth": ticks,
+                })).unwrap();
+                let expected: [u8; 32] = sha2::Sha256::digest(canonical.as_bytes()).into();
+                assert_eq!(identity.incarnation_digest_bytes().unwrap(), expected);
+                assert_eq!(identity.incarnation_digest().unwrap(), crate::sha256_hex(canonical.as_bytes()));
+            }
+        }
+        let invalid = super::ExactProcessIdentity {
+            boot_id: " ".into(), target_pid: 2, target_start_time_ticks: 1,
+            group_leader_pid: 2, group_leader_start_time_ticks: 1,
+        };
+        assert!(invalid.incarnation_digest_bytes().is_err());
+    }
     use super::*;
 
     #[test]
@@ -1220,5 +1456,97 @@ mod tests {
             assert!(command.status().unwrap().success(), "{mode}");
             assert_eq!(unsafe { libc::getpgrp() }, caller_group);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_session_placement_leaves_the_launcher_group_and_is_idempotent() {
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "LILLUX_TEST_OWN_SESSION_PLACEMENT";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let pid = std::process::id() as i32;
+            let launcher_group = std::env::var("LILLUX_TEST_LAUNCHER_GROUP")
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
+            match mode.as_str() {
+                "inherited" => {
+                    assert_eq!(unsafe { libc::getpgrp() }, launcher_group);
+                    assert_ne!(unsafe { libc::getsid(0) }, pid);
+                }
+                "group-leader" => {
+                    assert_eq!(unsafe { libc::getpgrp() }, pid);
+                    assert_ne!(unsafe { libc::getsid(0) }, pid);
+                }
+                "session-leader" => assert_eq!(unsafe { libc::getsid(0) }, pid),
+                other => panic!("unknown placement mode {other}"),
+            }
+            let session_before = unsafe { libc::getsid(0) };
+            for _ in 0..2 {
+                establish_own_process_session().unwrap();
+                assert_eq!(unsafe { libc::getpgrp() }, pid);
+                assert_ne!(unsafe { libc::getpgrp() }, launcher_group);
+                if mode == "group-leader" {
+                    assert_eq!(unsafe { libc::getsid(0) }, session_before);
+                } else {
+                    assert_eq!(unsafe { libc::getsid(0) }, pid);
+                }
+            }
+            let identity = capture_current_process_identity().unwrap();
+            assert_eq!(identity.group_leader_pid, pid as u32);
+            return;
+        }
+        let caller_group = unsafe { libc::getpgrp() };
+        let caller_session = unsafe { libc::getsid(0) };
+        for mode in ["inherited", "group-leader", "session-leader"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "process_control::tests::own_session_placement_leaves_the_launcher_group_and_is_idempotent",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CHILD, mode)
+                .env("LILLUX_TEST_LAUNCHER_GROUP", caller_group.to_string());
+            match mode {
+                "group-leader" => {
+                    command.process_group(0);
+                }
+                "session-leader" => unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                },
+                _ => {}
+            }
+            assert!(command.status().unwrap().success(), "{mode}");
+            assert_eq!(unsafe { libc::getpgrp() }, caller_group);
+            assert_eq!(unsafe { libc::getsid(0) }, caller_session);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fixed_current_identity_controls {
+    #[test]
+    fn retained_current_identity_matches_and_rejects_foreign_coordinates() {
+        let original = super::capture_current_process_identity().expect("capture actual current identity");
+        super::require_current_process_identity_fixed(&original).expect("same actual identity");
+        let mut foreign = original.clone();
+        foreign.target_pid = if original.target_pid == 2 { 3 } else { 2 };
+        assert!(super::require_current_process_identity_fixed(&foreign).is_err());
+        let mut foreign = original.clone();
+        foreign.target_start_time_ticks = original.target_start_time_ticks.wrapping_add(1);
+        assert!(super::require_current_process_identity_fixed(&foreign).is_err());
+        let mut foreign = original.clone();
+        foreign.group_leader_start_time_ticks = original.group_leader_start_time_ticks.wrapping_add(1);
+        assert!(super::require_current_process_identity_fixed(&foreign).is_err());
+        let mut foreign = original;
+        foreign.boot_id = "foreign-boot".into();
+        assert!(super::require_current_process_identity_fixed(&foreign).is_err());
     }
 }

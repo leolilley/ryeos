@@ -149,10 +149,27 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    handle_expected_verifier(req, ctx, state, None, None).await
+}
+
+/// A release stage may assert the checker it intends to use. This assertion
+/// only narrows the signed policy's selection; it cannot choose a different
+/// verifier, parameters, purpose or execution route.
+pub(super) async fn handle_expected_verifier(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+    expected_verifier_ref: Option<&str>,
+    expected_product_selections: Option<
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
+) -> Result<Value, HandlerError> {
     handle_source(
         QualificationLaunchSourceRequest::CapturedProduct(req),
         ctx,
         state,
+        expected_verifier_ref,
+        expected_product_selections,
     )
     .await
 }
@@ -161,6 +178,10 @@ async fn handle_source(
     req: QualificationLaunchSourceRequest,
     ctx: HandlerContext,
     state: Arc<AppState>,
+    expected_verifier_ref: Option<&str>,
+    expected_product_selections: Option<
+        &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    >,
 ) -> Result<Value, HandlerError> {
     let required_cap = match &req {
         QualificationLaunchSourceRequest::CapturedProduct(_) => REQUIRED_CAP,
@@ -197,6 +218,22 @@ async fn handle_source(
     if prepared.launch_id() != req.launch_id() || prepared.owner_fingerprint() != ctx.fingerprint {
         return Err(HandlerError::Internal(
             "prepared verifier differs from the reserved launch owner".to_string(),
+        ));
+    }
+    if expected_verifier_ref
+        .is_some_and(|expected| expected != prepared.policy_source().policy.verifier_ref.as_str())
+    {
+        return Err(HandlerError::BadRequest(
+            "signed qualification policy selects a different verifier than the release stage"
+                .into(),
+        ));
+    }
+    if expected_product_selections
+        .is_some_and(|expected| expected != &prepared.product_selections())
+    {
+        return Err(HandlerError::BadRequest(
+            "signed qualification inputs differ from the release stage's composed selections"
+                .into(),
         ));
     }
 
@@ -400,6 +437,7 @@ async fn handle_source(
             &project_binding,
             &project.effective_path,
             provenance.project_authority(),
+            super::qualification_project_context::resolver(state.as_ref()).as_ref(),
         )
         .map_err(|error| HandlerError::BadRequest(format!("pinned verifier identity refused: {error:#}")))?;
         prepared
@@ -470,6 +508,12 @@ async fn handle_source(
     let consumer_definitions = consumer_content
         .as_ref()
         .map(|content| content.definitions.clone());
+    let consumer_invocation = match &prepared {
+        PreparedQualificationLaunch::CapturedProduct(product) => {
+            product.consumer_invocation.clone()
+        }
+        PreparedQualificationLaunch::ActivatedContent { .. } => None,
+    };
     let purpose = QualificationLaunchPurpose {
         schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.to_string(),
         launch_id: prepared.launch_id().to_owned(),
@@ -478,6 +522,7 @@ async fn handle_source(
         policy_source: prepared.policy_source().clone(),
         consumer_definitions,
         consumer_content,
+        consumer_invocation,
         producer_recipe_sources,
         remote_verifier_sources,
         subject_declaration_id: prepared
@@ -647,6 +692,8 @@ pub const CONTENT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
                 QualificationLaunchSourceRequest::ActivatedContent(req),
                 ctx,
                 state,
+                None,
+                None,
             )
             .await
             .map_err(Into::into)

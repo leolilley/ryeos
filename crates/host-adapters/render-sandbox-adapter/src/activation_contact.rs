@@ -167,13 +167,13 @@ impl RenderContact<'_> {
         operation: ProxyOperation<'_>,
         command: Option<&str>,
     ) -> Result<BoundConnectToken> {
-        let (route, upload_path) = match operation {
+        let (route, file_path) = match operation {
             ProxyOperation::UploadFile { remote_path } => {
                 (RouteName::SandboxFileUploadTokenById, Some(remote_path))
             }
             ProxyOperation::RunStream => (RouteName::SandboxRunStreamTokenById, None),
             ProxyOperation::DownloadFile { .. } => {
-                anyhow::bail!("guest activation cannot mint a download token")
+                anyhow::bail!("one-shot activation cannot mint a relay download token")
             }
         };
         let (url, target) = api_url(
@@ -181,13 +181,13 @@ impl RenderContact<'_> {
             route,
             Some(self.occurrence_id),
             self.settings,
-            upload_path,
+            file_path,
         )?;
         validate_api_url(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
         ensure!(
             url == connect_token_url(self.occurrence_id, &self.settings.owner_id, operation)?,
@@ -257,7 +257,7 @@ impl RenderContact<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn proxy_request(
+pub(super) fn proxy_request(
     settings: &Settings,
     occurrence_id: &str,
     token: BoundConnectToken,
@@ -413,7 +413,7 @@ mod tests {
             &schema_digest,
         )
         .unwrap();
-        for (route, operation, upload_path) in [
+        for (route, operation, file_path) in [
             (
                 RouteName::SandboxFileUploadTokenById,
                 ProxyOperation::UploadFile {
@@ -422,18 +422,25 @@ mod tests {
                 Some("/ryeos/activation/guest-package"),
             ),
             (
+                RouteName::SandboxFileDownloadTokenById,
+                ProxyOperation::DownloadFile {
+                    remote_path: "/ryeos/relay/attach-request",
+                },
+                Some("/ryeos/relay/attach-request"),
+            ),
+            (
                 RouteName::SandboxRunStreamTokenById,
                 ProxyOperation::RunStream,
                 None,
             ),
         ] {
             let (url, target) =
-                api_url(&spec, route, Some("sbx-fixture"), &settings, upload_path).unwrap();
+                api_url(&spec, route, Some("sbx-fixture"), &settings, file_path).unwrap();
             validate_api_url(
                 &url,
                 &target.path_segments,
                 target.owner_id_query.as_deref(),
-                target.upload_path_query.as_deref(),
+                target.file_path_query.as_deref(),
             )
             .unwrap();
             assert_eq!(

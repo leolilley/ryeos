@@ -5,6 +5,7 @@
 //! fence, and current local policy have all been checked. The caller must keep
 //! the closure protected until its compare-and-swap head commit is durable.
 
+use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY};
 use anyhow::{Context as _, bail};
 use ryeos_bundle_publication_contract::{
     BundleCatalogPublication, BundleCatalogSnapshot, BundleGeneration, BundleSet,
@@ -13,12 +14,9 @@ use ryeos_state::objects::Attestation;
 
 use super::{
     PublicationObjectReader,
-    attestation::{
-        BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, ReleaseSubjectKind,
-        verify_release_attestation,
-    },
+    attestation::{ReleaseSubjectKind, verify_release_attestation},
 };
-use crate::node_policy::sections::{
+use ryeos_node_runtime::node_policy::sections::{
     bundle_publication::BundlePublicationPolicy, object_closure::NodeObjectClosurePolicy,
 };
 
@@ -900,9 +898,9 @@ mod transport_binding_tests {
     fn trusted_uploader_cannot_sign_publisher_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let publisher =
-            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
         let uploader =
-            crate::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
         let mut trust = ryeos_state::TrustStore::new();
         trust.insert(
             publisher.fingerprint().to_owned(),

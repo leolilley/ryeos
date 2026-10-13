@@ -10,7 +10,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
+use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail};
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
@@ -52,16 +52,17 @@ mod validation;
 #[cfg(test)]
 pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
-    ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemFailure,
-    SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
+    ADMITTED_DIRECT_PROJECT_ROOT, ItemReleaseError, PreparedExternalDirectProjectFile, PreparedItemPlan, RunningItem,
+    SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
     SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
     effective_child_external_content_declarations, external_direct_environment,
-    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan, prepare_item_plan,
-    spawn_item,
+    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
+    prepare_external_direct_project_file, prepare_external_qualification_local_worker_plan,
+    prepare_item_plan, spawn_item, with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
     CompiledExternalDirectProgram, compile_external_direct_program,
-    validate_retained_external_direct_program,
+    prepare_captured_external_member_plan, validate_retained_external_direct_program,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
@@ -73,6 +74,35 @@ const RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD: &str = "admitted_parameters_dige
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
 };
+
+/// Read-only observation issued exclusively by this module after durable
+/// completion. Payload/status are observations, not launch authorization.
+pub struct DurableThreadTerminal<'a> {
+    thread_id: &'a str,
+    terminal_status: &'a str,
+    outcome_code: Option<&'a str>,
+    result: Option<&'a Value>,
+    state_store: &'a StateStore,
+}
+
+impl DurableThreadTerminal<'_> {
+    pub fn thread_id(&self) -> &str {
+        self.thread_id
+    }
+    pub fn terminal_status(&self) -> &str {
+        self.terminal_status
+    }
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code
+    }
+    pub fn result(&self) -> Option<&Value> {
+        self.result
+    }
+    pub fn admitted_launch_capsule_hash(&self) -> Result<Option<String>> {
+        self.state_store
+            .admitted_launch_capsule_hash(self.thread_id)
+    }
+}
 
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
@@ -87,9 +117,7 @@ pub struct ThreadLifecycleService {
     /// re-derived per call site (see `publish_records`).
     event_hub: Arc<ThreadEventHub>,
     current_site_id: String,
-    scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
-    scheduler_runtime_gate: std::sync::RwLock<Option<Arc<tokio::sync::RwLock<()>>>>,
-    app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    scheduler: std::sync::RwLock<SchedulerParticipantSlot>,
     /// Operator live-input staging, shared with `AppState`. Wired once after
     /// construction (`set_live_input_queue`) so the existing constructor call
     /// sites stay unchanged. Finalization closes the per-thread entry after the
@@ -98,6 +126,12 @@ pub struct ThreadLifecycleService {
     /// that don't wire it — the persist-path running-guard still prevents any
     /// `cognition_in` append after terminal regardless.
     live_input: std::sync::RwLock<Option<Arc<crate::live_input_queue::LiveInputQueue>>>,
+}
+
+enum SchedulerParticipantSlot {
+    Available,
+    Installed(Arc<dyn crate::scheduler_boundary::SchedulerParticipant>),
+    Withdrawn,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -2122,6 +2156,43 @@ fn validate_admitted_runtime_route_identity(
     Ok(())
 }
 
+/// Both fresh admission and retained replay preserve the daemon-derived
+/// unqualified subject. Additional Root inputs are supported only in the
+/// pinned lane; their exact declared coverage and proofs are checked by normal
+/// product composition before finalization and bound into the sealed program.
+fn validate_qualification_root_selections(
+    purpose: &QualificationLaunchPurpose,
+    selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    pinned_lane: bool,
+) -> Result<()> {
+    use ryeos_state::external_content::products::composition::{
+        ProductSelectionTarget, validate_product_selection_inputs,
+    };
+    let (product_witness_hash, witness_source, _) = purpose.subject.captured_product()?;
+    validate_product_selection_inputs(selections)?;
+    if selections.is_empty() && !pinned_lane {
+        return Ok(()); // Existing projectless fixed-pin lane.
+    }
+    if (!pinned_lane && selections.len() != 1)
+        || selections
+            .iter()
+            .any(|input| !matches!(input.target, ProductSelectionTarget::Root {}))
+    {
+        bail!("qualification purpose has unsupported Root product selections");
+    }
+    let subject = selections
+        .iter()
+        .find(|input| input.selection.declaration_id == purpose.subject_declaration_id)
+        .context("qualification purpose omits its exact unqualified subject selection")?;
+    if subject.selection.witness_hash.as_str() != product_witness_hash
+        || &subject.selection.witness_source != witness_source
+        || subject.selection.qualification_hash.is_some()
+    {
+        bail!("qualification purpose differs from admitted unqualified subject selection");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum ContentQualificationAttachment {
     Fresh {
@@ -2929,20 +3000,11 @@ impl RootExecutionAdmission {
                     "activated content qualification requires exact fixed-pin projectless admission"
                 );
             } else {
-                let (product_witness_hash, witness_source, _) =
-                    purpose.subject.captured_product()?;
-                match (pinned_lane, self.product_selections.as_slice()) {
-                (false, []) => {}, // Signed fixed pin is checked against the exact subject realization.
-                (_, [selected])
-                    if matches!(
-                        selected.target,
-                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-                    ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                        && selected.selection.witness_hash == product_witness_hash
-                        && &selected.selection.witness_source == witness_source
-                        && selected.selection.qualification_hash.is_none() => {}
-                _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
-            }
+                validate_qualification_root_selections(
+                    purpose,
+                    &self.product_selections,
+                    pinned_lane,
+                )?;
             }
         } else if self.authenticated_content_qualification_digest.is_some() {
             bail!("content qualification attachment has no purpose");
@@ -3768,7 +3830,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)
             .context("node identity produced a non-canonical site id")?;
 
         Ok(Self::new_with_site_id(
@@ -3790,7 +3852,7 @@ impl ThreadLifecycleService {
         event_hub: Arc<ThreadEventHub>,
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
-        crate::identity::validate_canonical_site_id(current_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)?;
         Ok(Self::new_with_site_id(
             state_store,
             engine,
@@ -3816,16 +3878,14 @@ impl ThreadLifecycleService {
             _events: events,
             event_hub,
             current_site_id,
-            scheduler_db: std::sync::RwLock::new(None),
-            scheduler_runtime_gate: std::sync::RwLock::new(None),
-            app_root: std::sync::RwLock::new(None),
+            scheduler: std::sync::RwLock::new(SchedulerParticipantSlot::Available),
             live_input: std::sync::RwLock::new(None),
         }
     }
 
     /// Wire the shared operator live-input queue. Called once after
     /// construction with the same `Arc` held by `AppState`, so finalization can
-    /// close a thread's entry. Mirrors `set_scheduler_db`.
+    /// close a thread's entry. Installed during composition.
     pub fn set_live_input_queue(&self, queue: Arc<crate::live_input_queue::LiveInputQueue>) {
         *self.live_input.write().unwrap() = Some(queue);
     }
@@ -3851,17 +3911,45 @@ impl ThreadLifecycleService {
         self.event_hub.publish_ordered(records);
     }
 
-    /// Wire the scheduler DB for thread completion tracking.
-    /// Called once after construction, once the scheduler DB is available.
-    pub fn set_scheduler_db(
+    pub(crate) fn scheduler_participant(
         &self,
-        db: Arc<ryeos_scheduler::db::SchedulerDb>,
-        runtime_gate: Arc<tokio::sync::RwLock<()>>,
-        app_root: std::path::PathBuf,
-    ) {
-        *self.scheduler_db.write().unwrap() = Some(db);
-        *self.scheduler_runtime_gate.write().unwrap() = Some(runtime_gate);
-        *self.app_root.write().unwrap() = Some(app_root);
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        match &*self.scheduler.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+            SchedulerParticipantSlot::Installed(participant) => Some(Arc::clone(participant)),
+            SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
+        }
+    }
+
+    pub(crate) fn install_scheduler_participant(
+        &self,
+        participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
+    ) -> Result<()> {
+        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*slot {
+            SchedulerParticipantSlot::Available => {
+                *slot = SchedulerParticipantSlot::Installed(participant);
+                Ok(())
+            }
+            SchedulerParticipantSlot::Installed(_) => {
+                anyhow::bail!("scheduler participant already installed")
+            }
+            SchedulerParticipantSlot::Withdrawn => {
+                anyhow::bail!("scheduler participant was withdrawn for finalization")
+            }
+        }
+    }
+
+    /// Withdraw the selected participant only after daemon work and admitted
+    /// scheduler operations have drained, so the composition can transfer its
+    /// closed native DB into finalization custody.
+    pub fn take_scheduler_participant_for_shutdown(
+        &self,
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        let mut slot = self.scheduler.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(&mut *slot, SchedulerParticipantSlot::Withdrawn) {
+            SchedulerParticipantSlot::Installed(participant) => Some(participant),
+            SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
+        }
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -5697,97 +5785,23 @@ impl ThreadLifecycleService {
         outcome_code: Option<&str>,
         result: Option<&Value>,
     ) {
-        let runtime_gate = self
-            .scheduler_runtime_gate
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        let Some(runtime_gate) = runtime_gate else {
+        let Some(participant) = self.scheduler_participant() else {
             return;
         };
-        let Ok(_runtime_guard) = runtime_gate.try_read() else {
-            // An exclusive schedule/project/retention mutation owns the state.
-            // Do not block synchronous thread finalization; the scheduler's
-            // periodic repair sweep will classify this durable terminal thread.
-            tracing::debug!(
-                thread_id = %thread_id,
-                "scheduler: terminal completion hook deferred behind runtime mutation"
-            );
-            return;
+        // All callers have completed their durable write and released the
+        // StateStore inner mutex before issuing this borrowed observation.
+        let observation = DurableThreadTerminal {
+            thread_id,
+            terminal_status,
+            outcome_code,
+            result,
+            state_store: &self.state_store,
         };
-        let db = self
-            .scheduler_db
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-        let app_root = self.app_root.read().ok().and_then(|guard| guard.clone());
-        let scheduler = (db, app_root);
-        if let (Some(db), Some(app_root)) = scheduler
-            && let Ok(Some(fire)) = db.find_fire_by_thread(thread_id)
-        {
-            let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
-            let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
-            let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
-                terminal_status,
-                result_outcome.as_ref(),
-                outcome_code,
-            );
-            let now = lillux::time::timestamp_millis();
-            // A very short execution can terminalize after the launch capsule
-            // is durable but before the scheduler task persists its handoff.
-            // Close that crash window from the exact thread/capsule authority;
-            // never jump directly from `reserved` to a terminal state.
-            let fire = if fire.status == "reserved" {
-                let capsule_hash = match self.state_store.admitted_launch_capsule_hash(thread_id) {
-                    Ok(Some(hash)) if fire.project_authority.is_some() => hash,
-                    Ok(_) => return,
-                    Err(error) => {
-                        tracing::warn!(
-                            thread_id = %thread_id,
-                            %error,
-                            "scheduler: failed to recover launch handoff during terminal completion"
-                        );
-                        return;
-                    }
-                };
-                let dispatched = ryeos_scheduler::types::FireRecord {
-                    status: "dispatched".to_string(),
-                    dispatched_at: Some(now.max(fire.reserved_at)),
-                    admitted_capsule_hash: Some(capsule_hash),
-                    ..fire
-                };
-                if let Err(error) =
-                    ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &dispatched)
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        %error,
-                        "scheduler: failed to persist recovered launch handoff"
-                    );
-                    return;
-                }
-                dispatched
-            } else {
-                fire
-            };
-            if fire.status != "dispatched" {
-                return;
-            }
-            let updated = ryeos_scheduler::types::FireRecord {
-                status: fire_status.to_string(),
-                outcome: Some(outcome_str.to_string()),
-                completed_at: Some(now.max(fire.dispatched_at.unwrap_or(fire.reserved_at))),
-                ..fire
-            };
-            if let Err(e) =
-                ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
-            {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    error = %e,
-                    "scheduler: failed to update fire status on thread completion"
-                );
-            }
+        if let Err(error) = participant.observe_terminal(&observation) {
+            // Durable terminal history is the repair source; scheduler failure
+            // cannot roll back the completed lifecycle write.
+            tracing::warn!(thread_id = %thread_id, %error,
+                "scheduler terminal observation deferred for repair");
         }
     }
 
@@ -6925,6 +6939,50 @@ pub fn resolve_thread_history_policy(
     )
 }
 
+/// [`resolve_thread_history_policy`] for an already verified live-project
+/// subject whose project is read through `project_content`. Composition walks
+/// project candidates from that authority only; `project_root` is the
+/// coordinate it answers for and is never reopened as a pathname.
+fn resolve_thread_history_policy_under_project_authority(
+    engine: &Engine,
+    verified: &VerifiedItem,
+    project_root: &Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+) -> Result<ResolvedThreadHistoryPolicy> {
+    let resolved_item = &verified.resolved;
+    let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
+    let request_snapshot = engine
+        .effective_request_snapshot_under_project_authority(
+            project_root,
+            project_content,
+            &resolved_item.subject_resolution_authority,
+        )
+        .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
+    let (resolution, _probed_absences) =
+        ryeos_engine::resolution::run_effective_item_pipeline_with_probes_under_project_authority(
+            &resolved_item.canonical_ref,
+            &engine.kinds,
+            &request_snapshot.parser_dispatcher,
+            &roots,
+            &request_snapshot.trust_store,
+            &engine.composers,
+            project_root,
+            project_content,
+        )
+        .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
+    Ok(
+        ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
+            verified,
+            &resolution,
+            &engine.kinds,
+            node_history_policy,
+        )
+        .map_err(|error| anyhow!("history-policy resolution failed: {error}"))?
+        .history,
+    )
+}
+
 /// Build the immutable root contract from one engine-attested subject. The
 /// composition pass is bound to the verified root digest by
 /// `resolve_launch_policy_from_resolution`; an in-place edit between verify
@@ -7457,24 +7515,41 @@ fn admit_verified_root_execution_inner(
     Ok(admission)
 }
 
+/// The admission facts of a non-execution root apart from its project:
+/// subject identity, acting principal and its scopes, sites, and protocol
+/// profile are independent and stay explicit at this boundary.
+#[derive(Debug, Clone)]
+pub struct NonExecutionRootRequest<'a> {
+    pub item_ref: &'a str,
+    pub requested_by: &'a str,
+    pub caller_scopes: Vec<String>,
+    pub current_site_id: &'a str,
+    pub origin_site_id: &'a str,
+    pub thread_profile: String,
+}
+
 /// Resolve and capture policy for a non-execution root whose authoritative
 /// subject is still a verified item (for example a UI seat presenting a
 /// surface). This uses the same kind/composition/trust pipeline as execution;
 /// callers never synthesize Durable policy or branch on the subject kind.
-// Subject identity, project authority, acting principal, site, and profile are
-// independent admission facts and remain explicit at this boundary.
-#[allow(clippy::too_many_arguments)]
+///
+/// The project is walked by its canonicalized pathname. A caller that holds
+/// the project as an open directory uses
+/// [`admit_non_execution_root_under_project_authority`] instead.
 pub fn admit_non_execution_root(
     engine: &Arc<Engine>,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
-    item_ref: &str,
     project_path: &Path,
-    requested_by: &str,
-    caller_scopes: Vec<String>,
-    current_site_id: &str,
-    origin_site_id: &str,
-    thread_profile: String,
+    request: NonExecutionRootRequest<'_>,
 ) -> Result<NonExecutionRootAdmission> {
+    let NonExecutionRootRequest {
+        item_ref,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+        thread_profile,
+    } = request;
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
     let canonical_ref = CanonicalRef::parse(item_ref)
         .map_err(|error| anyhow!("invalid root policy item ref `{item_ref}`: {error}"))?;
@@ -7484,12 +7559,109 @@ pub fn admit_non_execution_root(
             project_path.display()
         )
     })?;
+    let (project_authority, plan_context) = live_non_execution_root_context(
+        canonical_project_path,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+    )?;
+    let resolved = engine
+        .resolve(&plan_context, &canonical_ref)
+        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
+    let verified_subject = engine
+        .verify(&plan_context, resolved.clone())
+        .map_err(|error| anyhow!("root policy item verification failed: {error}"))?;
+    let resolved_history_policy =
+        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    seal_live_non_execution_root(
+        engine,
+        verified_subject,
+        plan_context,
+        project_authority,
+        thread_profile,
+        resolved_history_policy,
+    )
+}
+
+/// [`admit_non_execution_root`] for a project held as an exact open
+/// directory. Discovery, source bytes, project trust, the parser overlay and
+/// history-policy composition are all read through `project`'s descriptor;
+/// the project's pathname is never reopened, so a directory substituted at
+/// that pathname after `project` was opened cannot redirect admission.
+/// `project.path()`, the identity the directory was bound to, is the
+/// resolution coordinate and the recorded project root.
+pub fn admit_non_execution_root_under_project_authority(
+    engine: &Arc<Engine>,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    project: &lillux::PinnedDirectory,
+    request: NonExecutionRootRequest<'_>,
+) -> Result<NonExecutionRootAdmission> {
+    let NonExecutionRootRequest {
+        item_ref,
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+        thread_profile,
+    } = request;
+    validate_principal_identifier("non-execution root acting principal", requested_by)?;
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|error| anyhow!("invalid root policy item ref `{item_ref}`: {error}"))?;
+    let project_root = project.path();
+    if !project_root.is_absolute() {
+        bail!(
+            "non-execution root project authority is not bound to an absolute path: {}",
+            project_root.display()
+        );
+    }
+    let (project_authority, plan_context) = live_non_execution_root_context(
+        project_root.to_path_buf(),
+        requested_by,
+        caller_scopes,
+        current_site_id,
+        origin_site_id,
+    )?;
+    let verified_subject = engine
+        .resolve_verified_under_project_authority(
+            &plan_context,
+            &canonical_ref,
+            project_root,
+            project,
+        )
+        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
+    let resolved_history_policy = resolve_thread_history_policy_under_project_authority(
+        engine,
+        &verified_subject,
+        project_root,
+        project,
+        node_history_policy,
+    )?;
+    seal_live_non_execution_root(
+        engine,
+        verified_subject,
+        plan_context,
+        project_authority,
+        thread_profile,
+        resolved_history_policy,
+    )
+}
+
+/// The read-only live project authority and planning context of a
+/// non-execution root rooted at the absolute `project_root`.
+fn live_non_execution_root_context(
+    project_root: PathBuf,
+    requested_by: &str,
+    caller_scopes: Vec<String>,
+    current_site_id: &str,
+    origin_site_id: &str,
+) -> Result<(ryeos_state::objects::ExecutionProjectAuthority, PlanContext)> {
     let mut capability_ceiling = caller_scopes.clone();
     capability_ceiling.sort();
     capability_ceiling.dedup();
     let project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
-        canonical_project_path.clone(),
-        format!("local:{}", canonical_project_path.display()),
+        project_root.clone(),
+        format!("local:{}", project_root.display()),
         ryeos_state::objects::LiveProjectAccess::ReadOnly,
         ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
         ryeos_state::objects::EnvironmentAuthority::None,
@@ -7500,9 +7672,7 @@ pub fn admit_non_execution_root(
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
         }),
-        project_context: ProjectContext::LocalPath {
-            path: canonical_project_path,
-        },
+        project_context: ProjectContext::LocalPath { path: project_root },
         subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: current_site_id.to_string(),
         origin_site_id: origin_site_id.to_string(),
@@ -7510,14 +7680,17 @@ pub fn admit_non_execution_root(
         scheduled_fire: None,
         validate_only: false,
     };
-    let resolved = engine
-        .resolve(&plan_context, &canonical_ref)
-        .map_err(|error| anyhow!("root policy item resolution failed: {error}"))?;
-    let verified_subject = engine
-        .verify(&plan_context, resolved.clone())
-        .map_err(|error| anyhow!("root policy item verification failed: {error}"))?;
-    let resolved_history_policy =
-        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    Ok((project_authority, plan_context))
+}
+
+fn seal_live_non_execution_root(
+    engine: &Arc<Engine>,
+    verified_subject: VerifiedItem,
+    plan_context: PlanContext,
+    project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    thread_profile: String,
+    resolved_history_policy: ResolvedThreadHistoryPolicy,
+) -> Result<NonExecutionRootAdmission> {
     let admission = NonExecutionRootAdmission {
         request_engine: Arc::clone(engine),
         verified_subject,
@@ -7596,6 +7769,16 @@ pub struct PreflightRootExecution {
 pub fn preflight_root_execution(
     params: ResolveRootExecutionParams<'_>,
 ) -> Result<PreflightRootExecution> {
+    // Root admission resolves and composes items, and composition runs a
+    // handler process. A thread that retains fork-sensitive descriptor
+    // authority, such as a CAS mutation guard, can never start that process,
+    // so refuse at this entry rather than deep inside a composer. Callers must
+    // resolve first and take their guard afterwards.
+    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+        bail!(
+            "root execution preflight refused: the calling thread retains fork-sensitive descriptor authority (such as a CAS mutation guard) and resolution must start handler processes"
+        );
+    }
     let ResolveRootExecutionParams {
         engine,
         plan_context,

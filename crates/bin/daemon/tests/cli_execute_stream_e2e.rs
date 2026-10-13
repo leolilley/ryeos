@@ -84,34 +84,6 @@ Say hello.
     Ok(())
 }
 
-fn plant_execute_stream_route(
-    state_path: &Path,
-    signer: &lillux::crypto::SigningKey,
-) -> anyhow::Result<()> {
-    let dir = state_path.join(".ai/node/routes");
-    std::fs::create_dir_all(&dir)?;
-    let body = r#"id: execute/stream
-path: /execute/stream
-methods:
-  - POST
-auth: ryeos_signed
-limits:
-  body_bytes_max: 10485760
-  timeout_ms: 0
-  concurrent_max: 32
-request:
-  body: json
-response:
-  mode: event_stream
-  source: dispatch_launch
-  source_config:
-    keep_alive_secs: 15
-"#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(dir.join("execute-stream.yaml"), signed)?;
-    Ok(())
-}
-
 /// Boot a daemon with the mock provider (given canned responses) + the project
 /// directive. Returns the harness and the project path to pass via `-p`.
 async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
@@ -127,7 +99,8 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            plant_execute_stream_route(state_path, &fixture.publisher)?;
+            // Core ships the signed `/execute/stream` route; a second node
+            // route with the same id is refused at startup.
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             Ok(())
         };

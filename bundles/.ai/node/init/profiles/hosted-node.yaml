@@ -1,7 +1,6 @@
-# ryeos:signed:2026-09-27T22:01:05Z:d99cb28d163ef49780c6e2297c97b286215181c7c9af9c955029ca46a469d768:H+bZVkKROtBF7+3CWINJPpYDAUxW/8taoXqp7xFwDFh53vv9uM6fxuLL5sDAw6ctp+YoIXrVxhy2DLKiY4P5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T18:22:27Z:b8fb6e1cc3129f53e978d38a09a40eb8f2adefead11af1248c28616a89bad25c:SEWB7ssDfZhXUk5csVNlcKdXIJ7UROtJn3T5uyNzcZjj2QiqbcB0VM0PiJjP5bfLDMafYUNSYES664wkCfgSBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
-  - central-auth
   - core
   - hosted-node
 policies:
@@ -9,6 +8,44 @@ policies:
     schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
+
+  # Explicit local capacity issuance; admission/signing and operation proof remain open.
+  # The account is root/node-bound and cannot be reminted by policy refresh.
+  native_capacity:
+    schema: 6
+    issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
+    allowance:
+      # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
+      storage_bytes: 1073815552
+      host_control_storage_bytes: 50331648
+      allocator_steps: 320000000
+      connection_tickets: 1024
+      cleanup_steps: 25600000
+    incarnation:
+      units:
+        storage_bytes: 67108864
+        host_control_storage_bytes: 3145728
+        allocator_steps: 20000000
+        connection_tickets: 64
+        cleanup_steps: 1600000
+      maximum_occupancy_ms: 7200000
+      cleanup_occupancy_ms: 120000
+      rollover_drain_margin_ms: 90000
+      # Finite syscall-attempt allowance; no cleanup-success guarantee.
+      host_release_steps: 64
+      # Explicit share of cleanup_steps; never duplicates the paid envelope.
+      outside_cleanup_steps: 1310720
+    # Burned durably per recovery attempt; never native allocation credit.
+    recovery:
+      maximum_attempts: 32
+      work_per_attempt: 65536
+      control_storage_bytes: 262144
+      maximum_duration_ms: 120000
+    # Each epoch is a fresh allowance under the same issuance; nothing is refunded.
+    renewal:
+      at_orderly_rollover: true
+      operator_reissue: true
+      maximum_epochs: null
 
   accounting:
     schema: 2
@@ -78,7 +115,6 @@ policies:
       - ryeos.register.command.root.stop
       - ryeos.register.command.root.system
     bundle_source_caps:
-      central-auth: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -116,7 +152,56 @@ policies:
     item_authored_retention: allow
     minimum_terminal_for: null
   maintenance:
-    schema: 1
+    schema: 5
+    # Process-scoped native envelopes for stopped-node maintenance, keyed by
+    # operation class. A class absent here is refused.
+    offline_native:
+      external-content-bindings:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
+      replay-indexes:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
+      standalone-state:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 48
+        max_operation_millis: 3600000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+      external-supervisor-journal:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 16
+        max_operation_millis: 4860000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+    offline_reset:
+      max_retained_operations: 4
+      max_source_roles: 13
+      max_copied_bytes: 268435456
+      max_retained_destination_bytes: 536870912
+      max_read_bytes: 2147483648
+      max_sql_vm_steps: 20000000
+      max_memory_bytes: 67108864
+      max_native_storage_bytes: 50331648
+      # Native SQL charges this budget as well as max_sql_vm_steps, so it must
+      # cover the whole SQL ceiling plus the host's allocation and cleanup
+      # quotes for the storage and connections here (about 1.6M together).
+      max_native_allocator_steps: 24000000
+      max_native_connections: 64
+      max_operation_millis: 300000
+      max_cleanup_millis: 60000
+      max_cleanup_steps: 1024
+      max_recovery_record_bytes: 2097152
     schedules: []
   hosted:
     schema: 1
@@ -126,7 +211,22 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 7
+      version: 8
+      # Capabilities this node must prove on its host before it starts.
+      # `ryeos node doctor` shows what the host proves and what is missing.
+      # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
+      # class also accepts a resident region proven only by the absence of
+      # swap at startup (residency:swap_absent), which a later swapon ends.
+      # This disposable class does not require storage:durable_root. On an
+      # ephemeral app root every restart starts a new node identity, and an
+      # always-restart policy relies on the platform's own backoff, since no
+      # restart-inhibit record survives on that root to pace it.
+      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, time]
+      # Inits trusted to exit when their only child exits. When the node's
+      # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
+      # to end its container, so a new container on the same boot proves
+      # the old one's jobs dead. A node that is pid 1 proves this itself.
+      enclosure_inits: [catatonit, dumb-init, tini]
       process_scopes:
         mode: unconfigured
       trusted_process_group_sessions: false
@@ -216,6 +316,9 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  provider_environment:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16

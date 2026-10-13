@@ -9,7 +9,7 @@ use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::MonotonicDeadline;
 use ryeos_external_execution_contract::canonical_json;
 use ryeos_external_execution_contract::restored_runtime_measurement::{
-    CONSUMER_VERIFIER_REMOTE_NAME, RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+    CONSUMER_VERIFIER_REMOTE_NAME, ConsumerVerifierAdapterObservation,
     RESTORATION_VERIFIER_REMOTE_NAME, RemoteVerificationPurpose,
     RestoredVerifierAdapterObservation, RestoredVerifierAdapterRequest,
     RestoredVerifierAdapterResponse,
@@ -22,22 +22,26 @@ use crate::provider_spec::ProviderSpec;
 use crate::proxy_route::ProxyOperation;
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
-const MAX_RUN_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_OWNER_RUN_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_OWNER_COMMAND_BYTES: usize = 8192;
+const MAX_CONSUMER_COMMAND_BYTES: usize = 9 * 1024;
 
 /// Exact provider command framing only. Selection and challenge validation
 /// remain at the shared contract; this grants no contact or qualification.
 pub(crate) fn verifier_command(request: &RestoredVerifierAdapterRequest) -> Result<String> {
     request.validate()?;
-    let (name, flag, challenge) = match &request.intent.purpose {
+    let (name, flag, challenge, command_bound) = match &request.intent.purpose {
         RemoteVerificationPurpose::OwnerMeasurement { .. } => (
             RESTORATION_VERIFIER_REMOTE_NAME,
             "--challenge-b64",
             canonical_json(request.intent.owner_challenge()?)?,
+            MAX_OWNER_COMMAND_BYTES,
         ),
         RemoteVerificationPurpose::ConsumerRuntime { .. } => (
             CONSUMER_VERIFIER_REMOTE_NAME,
             "--consumer-challenge-b64",
-            canonical_json(&request.consumer_challenge()?)?,
+            request.consumer_challenge()?.canonical_bytes()?,
+            MAX_CONSUMER_COMMAND_BYTES,
         ),
     };
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
@@ -46,7 +50,7 @@ pub(crate) fn verifier_command(request: &RestoredVerifierAdapterRequest) -> Resu
         request.intent.remote_upload_directory()?
     );
     ensure!(
-        command.len() <= 8192,
+        command.len() <= command_bound,
         "restored verifier command exceeds bound"
     );
     Ok(command)
@@ -66,10 +70,13 @@ pub(crate) fn first_contact(
     cancellation: &NetworkCancellation,
 ) -> Result<RestoredVerifierAdapterResponse> {
     request.validate()?;
-    // Consumer request decoding is not activation of a guest verifier mode.
-    // Refuse this lane before token minting/upload until its native protocol
-    // and settlement/evidence join are installed.
-    request.intent.owner_challenge()?;
+    let upload_directory = request.intent.remote_upload_directory()?;
+    let run_response_bound = match &request.intent.purpose {
+        RemoteVerificationPurpose::OwnerMeasurement { .. } => MAX_OWNER_RUN_RESPONSE_BYTES,
+        RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+            u64::try_from(crate::snapshot_qualification::MAX_CONSUMER_RUN_STREAM_BYTES)?
+        }
+    };
     // Resolve the entire finite command before any provider contact.
     let command = verifier_command(request)?;
     let contact = RenderContact::new(
@@ -81,7 +88,7 @@ pub(crate) fn first_contact(
         cancellation,
     )?;
     let upload_operation = ProxyOperation::UploadFile {
-        remote_path: RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+        remote_path: &upload_directory,
     };
     let upload_token = contact.mint(upload_operation, None)?;
     let upload_execution_id = upload_token.execution_id.clone();
@@ -121,7 +128,7 @@ pub(crate) fn first_contact(
         RequestBodySource::from_bytes(run_body),
         "application/json",
         "text/event-stream",
-        MAX_RUN_RESPONSE_BYTES,
+        run_response_bound,
     )?;
     ensure!(
         run_response.status == 200
@@ -140,31 +147,61 @@ pub(crate) fn first_contact(
     let mut stream = Vec::new();
     run_response
         .body
-        .take(MAX_RUN_RESPONSE_BYTES + 1)
+        .take(run_response_bound + 1)
         .read_to_end(&mut stream)?;
     ensure!(
-        stream.len() as u64 <= MAX_RUN_RESPONSE_BYTES,
+        stream.len() as u64 <= run_response_bound,
         "restored verifier stream exceeds bound"
     );
-    let parsed = crate::snapshot_qualification::parse_restored_verifier_stream(
-        &stream,
-        request.intent.owner_challenge()?,
-        &request.source_intent,
-        &request.locator,
-        &request.readiness,
-    )?;
-    let result = RestoredVerifierAdapterResponse::Observed {
-        observation: Box::new(RestoredVerifierAdapterObservation {
-            schema: 1,
-            operation_id: request.intent.operation_id.clone(),
-            occurrence_id: request.occurrence.occurrence_id.clone(),
-            upload_token_execution_id: upload_execution_id,
-            run_token_execution_id: run_execution_id,
-            upload_response_sha256: lillux::sha256_hex(&upload_body),
-            run_stream_sha256: parsed.response_sha256,
-            measurement: parsed.measurement,
-            contact_deadline_exceeded: false,
-        }),
+    let result = match &request.intent.purpose {
+        RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+            let parsed = crate::snapshot_qualification::parse_restored_verifier_stream(
+                &stream,
+                request.intent.owner_challenge()?,
+                &request.source_intent,
+                &request.locator,
+                &request.readiness,
+            )?;
+            RestoredVerifierAdapterResponse::Observed {
+                observation: Box::new(RestoredVerifierAdapterObservation {
+                    schema: 1,
+                    operation_id: request.intent.operation_id.clone(),
+                    occurrence_id: request.occurrence.occurrence_id.clone(),
+                    upload_token_execution_id: upload_execution_id,
+                    run_token_execution_id: run_execution_id,
+                    upload_response_sha256: lillux::sha256_hex(&upload_body),
+                    run_stream_sha256: parsed.response_sha256,
+                    measurement: parsed.measurement,
+                    contact_deadline_exceeded: false,
+                }),
+            }
+        }
+        RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+            let challenge = request.consumer_challenge()?;
+            let parsed = crate::snapshot_qualification::parse_consumer_verifier_stream(
+                &stream,
+                &challenge,
+                deadline,
+                cancellation,
+            )?;
+            RestoredVerifierAdapterResponse::ConsumerObserved {
+                observation: Box::new(ConsumerVerifierAdapterObservation {
+                    schema: 1,
+                    operation_id: request.intent.operation_id.clone(),
+                    occurrence_id: request.occurrence.occurrence_id.clone(),
+                    verifier_artifact_hash: request.intent.verifier_artifact_hash.clone(),
+                    challenge_digest: request.intent.consumer_challenge_digest()?,
+                    upload_token_execution_id: upload_execution_id,
+                    run_token_execution_id: run_execution_id,
+                    upload_response_sha256: lillux::sha256_hex(&upload_body),
+                    run_stream_sha256: parsed.response_sha256,
+                    evidence_sha256: parsed.evidence_sha256,
+                    evidence_bytes: parsed.evidence_bytes,
+                    contact_deadline_exceeded: false,
+                }),
+                evidence: parsed.evidence,
+            }
+        }
     };
     result.validate_for(request)?;
     Ok(result)

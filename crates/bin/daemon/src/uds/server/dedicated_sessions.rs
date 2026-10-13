@@ -326,7 +326,10 @@ fn require_structured_session_route_effect_contract(
     authority.ensure_guard(&guard)?;
     let value = authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -722,6 +725,8 @@ pub(super) async fn start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    _publication: Option<&ryeos_executor::SelectedApplicationPublication>,
+    _credentials: Option<ryeos_app::DedicatedWorkerCredentialTransport>,
 ) -> Result<Value> {
     require_start_authority(state, cap)?;
     if cap

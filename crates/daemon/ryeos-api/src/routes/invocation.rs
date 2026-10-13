@@ -37,7 +37,7 @@ pub struct RoutePrincipal {
     pub verified: bool,
     /// Closed node-signed authorized-key class. `None` for non-RyeOS
     /// verifiers; policies must not infer this class from origin presence.
-    pub authorized_key_class: Option<ryeos_app::identity::AuthorizedKeyPrincipalClass>,
+    pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity cryptographically established by a remote-node request,
     /// or by a remote-operator request plus its source-node co-signature.
     /// `None` for local clients and non-RyeOS verifiers. Execute routes must
@@ -144,6 +144,9 @@ pub struct RouteInvocationContext {
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// Shared daemon state.
     pub state: AppState,
+    /// Exact paired application/Executor publication captured at ingress.
+    /// This is process-local authority and is never serialized.
+    pub publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
     /// Process-wide webhook delivery-id dedupe store. Read by HMAC
     /// auth verifiers when a route configures dedupe. Plumbed here
     /// because it lives on `ApiState` (not `AppState`).

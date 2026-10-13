@@ -68,13 +68,14 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
     })
 }
 
-/// Execute a service that deliberately retains the default recorded-thread
-/// behavior and return its durable service thread id.
+/// Execute a service that retains the default recorded-thread behavior
+/// (`system/routes` declares no `record_thread` override) and return its
+/// durable service thread id.
 async fn recorded_service_thread_id(h: &DaemonHarness) -> String {
-    let (status, body) = exec(h, "service:identity/public_key", json!({})).await;
+    let (status, body) = exec(h, "service:system/routes", json!({})).await;
     assert!(
         status.is_success(),
-        "recorded identity.public_key service failed: {body}"
+        "recorded system.routes service failed: {body}"
     );
     let tid = body
         .get("thread")
@@ -142,8 +143,8 @@ async fn service_bundle_list_returns_at_least_core() {
         .get("bundles")
         .and_then(|v| v.as_array())
         .expect("bundles array");
-    // start_fast() registers core + standard bundles, so the list should
-    // contain at least those two. The install→list round-trip is proven
+    // start_fast() selects the authored Standard composition: central-auth,
+    // core, scheduling, and standard. The install→list round-trip is proven
     // in service_data_standalone_e2e.rs.
     for entry in bundles {
         assert!(

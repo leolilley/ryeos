@@ -1627,7 +1627,7 @@ async fn observe_exact_graph_terminal(
     target_chain_root_id: &str,
     compiled: &CompiledWorkflow,
     target_admission: &TargetAdmissionEvidence,
-) -> Result<Option<(String, ryeos_graph_definition::GraphResult, String)>> {
+) -> Result<Option<(String, ryeos_runtime::graph_result::GraphResult, String)>> {
     ryeos_runtime::validate_runtime_thread_id(target_chain_root_id).map_err(anyhow::Error::msg)?;
     let mut current = target_chain_root_id.to_owned();
     for _ in 0..MAX_TARGET_CHAIN_SEGMENTS {
@@ -1670,10 +1670,10 @@ async fn observe_exact_graph_terminal(
             .cloned()
             .context("completed target Graph omitted its result")?;
         let digest = ryeos_state::objects::canonical_value_digest(&value)?;
-        let result: ryeos_graph_definition::GraphResult = serde_json::from_value(value)
+        let result: ryeos_runtime::graph_result::GraphResult = serde_json::from_value(value)
             .map_err(|error| TargetWorkflowTerminalInvalid(error.to_string()))?;
         if !result.success
-            || result.status != ryeos_graph_definition::GraphRunStatus::Completed
+            || result.status != ryeos_runtime::graph_result::GraphRunStatus::Completed
             || result.definition_ref != compiled.driver
             || result.effective_definition_digest != target_admission.effective_definition_digest
         {
@@ -1846,8 +1846,8 @@ fn validate_operation(operation: &Operation) -> Result<()> {
     {
         bail!("remote-worker workflow operator authority is invalid");
     }
-    ryeos_app::identity::validate_canonical_site_id(&operation.source_site_id)?;
-    ryeos_app::identity::validate_canonical_site_id(&operation.target_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(&operation.source_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(&operation.target_site_id)?;
     if !Path::new(&operation.local_project_path).is_absolute() {
         bail!("remote-worker workflow local project path is not absolute");
     }
@@ -2979,23 +2979,16 @@ mod tests {
     use ryeos_state::signer::Signer;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn test_state_store(root: &Path) -> ryeos_app::state_store::StateStore {
+    /// The owner dereferences to the Store and closes it when dropped.
+    fn test_state_store(root: &Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_owned(),
-            root.join(".ai/state"),
-            root.join("runtime.sqlite3"),
-            signer,
-            ryeos_app::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap()
+        ryeos_app::test_support::TestStateStore::open(root, signer, Arc::new(trust)).unwrap()
     }
 
     #[test]
@@ -4024,7 +4017,7 @@ mod tests {
         });
         let directory = tempfile::tempdir().unwrap();
         let identity = Arc::new(
-            ryeos_app::identity::NodeIdentity::create(&directory.path().join("operator.pem"))
+            ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("operator.pem"))
                 .unwrap(),
         );
         let client = RemoteClient::new(&format!("http://{address}"), "fp:peer", identity);

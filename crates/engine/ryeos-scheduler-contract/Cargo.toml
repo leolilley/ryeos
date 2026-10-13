@@ -1,0 +1,16 @@
+[package]
+name = "ryeos-scheduler-contract"
+version = "0.1.0"
+edition = "2024"
+description = "Canonical schedule policy, execution testimony, and pure validation"
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

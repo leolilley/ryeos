@@ -46,6 +46,10 @@ fn admit_recipe_subject(
             realization_id == subject_declaration_id && manifest_hash == subject_manifest_hash,
             "producer executable is not the sealed qualification subject"
         ),
+        ProducerExecutableSource::AdmittedMechanismHelpers { .. } => ensure!(
+            !direct_consumer_target_required,
+            "consumer runtime qualification cannot substitute mechanism helpers for its subject"
+        ),
         ProducerExecutableSource::AdmittedVerifierExecutable => ensure!(
             !direct_consumer_target_required,
             "consumer runtime qualification requires a direct admitted subject executable"
@@ -57,6 +61,23 @@ fn admit_recipe_subject(
 #[cfg(test)]
 mod recipe_subject_tests {
     use super::*;
+
+    #[test]
+    fn mechanism_helpers_cannot_replace_a_consumer_subject() {
+        use ryeos_state::external_content::products::producer_recipe::ProducerRealizationMemberIdentity;
+        let member = |id: &str| ProducerRealizationMemberIdentity {
+            realization_id: id.to_owned(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/helper".to_owned(),
+            executable_sha256: "b".repeat(64),
+        };
+        let helpers = ProducerExecutableSource::AdmittedMechanismHelpers {
+            supervisor: member("supervisor"),
+            launcher: member("launcher"),
+        };
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), false).is_ok());
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), true).is_err());
+    }
 
     #[test]
     fn realization_executable_must_be_the_sealed_subject() {
@@ -153,6 +174,28 @@ pub fn start_scoped_producer(
         &key.root_thread_id,
         &serde_json::to_string(&key.launch_owner)?,
     )?;
+
+    // A signed helper tuple does not prepare the mounted supervisor's finite
+    // controls. Refuse before spending the original root's one-shot key until
+    // the Engine-owned bootstrap carrier is available for this exact attempt.
+    if matches!(
+        selected.recipe.executable_source,
+        ProducerExecutableSource::AdmittedMechanismHelpers { .. }
+    ) {
+        let live = state.scoped_producer_authorities.get_exact(key)?;
+        live.admitted_command_for_recipe(scenario_id, &source, &selected.recipe.executable_source)?;
+        live.mechanism_probe_source(scenario_id, &source)?
+            .require_original_root_for_preparation(
+                state,
+                key,
+                purpose,
+                scenario_id,
+                selected,
+                coordinate,
+                release_deadline,
+            )?;
+        anyhow::bail!("trusted mechanism bootstrap preparation is unavailable");
+    }
 
     // The one-shot authority cut precedes durable reservation. Losing it on
     // any later error is intentional: no callback may re-open this attempt.
@@ -278,6 +321,7 @@ pub fn start_scoped_producer(
             target_channels: &target_channels,
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
+            verbatim_env_names: &[],
         };
         let (
             mut held,

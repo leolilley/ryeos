@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
-use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord, StateStore};
+use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord};
 use ryeos_app::write_barrier::WriteBarrier;
 use tempfile::TempDir;
 
@@ -30,13 +30,11 @@ fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     }
 }
 
-fn setup_state_store() -> (TempDir, Arc<StateStore>) {
+fn setup_state_store() -> (TempDir, ryeos_app::test_support::TestStateStore) {
     let tmpdir = TempDir::new().unwrap();
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
     let test_key_path = tmpdir.path().join("test_key.pem");
-    let identity = ryeos_app::identity::NodeIdentity::create(&test_key_path)
+    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&test_key_path)
         .expect("test identity creation should succeed");
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
@@ -49,17 +47,10 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
 
     let write_barrier = WriteBarrier::new();
 
-    let store = StateStore::new_with_head_trust(
-        tmpdir.path().to_path_buf(),
-        runtime_state_dir,
-        runtime_db_path,
-        signer,
-        write_barrier,
-        Arc::new(head_trust),
-    )
-    .expect("StateStore creation should succeed");
+    let store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
+        .expect("StateStore creation should succeed");
 
-    (tmpdir, Arc::new(store))
+    (tmpdir, store)
 }
 
 fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-pub use ryeos_app::config::{Config, ConfigSources};
+pub use ryeos_node_runtime::config::{Config, ConfigSources};
 
 #[derive(Debug, Parser)]
 #[command(name = "ryeosd", about = "Rust control plane daemon for Rye OS")]
@@ -53,7 +53,7 @@ pub struct Cli {
 
 impl Cli {
     /// Convert the parsed CLI into the plain-data `ConfigSources`
-    /// consumed by `ryeos_app::config::Config::load`.
+    /// consumed by `ryeos_node_runtime::config::Config::load`.
     pub fn to_sources(&self) -> ConfigSources {
         ConfigSources {
             config_file: self.config.clone(),
@@ -76,6 +76,10 @@ pub enum DaemonCommand {
     InitPolicyPreflight {
         #[arg(long)]
         app_root: PathBuf,
+        /// Exact bundle names selected by the installer for the prospective
+        /// init. Each must appear in the current signed command policy.
+        #[arg(long = "active-bundle")]
+        active_bundles: Vec<String>,
         /// Verify only the complete node-signed predecessor occupant when an
         /// explicit clean schema cut has already been selected.
         #[arg(long)]
@@ -89,6 +93,8 @@ pub enum DaemonCommand {
         app_root: PathBuf,
         #[arg(long)]
         controller_account_json: String,
+        #[arg(long)]
+        node_resources_json: String,
     },
     /// Root-only installer transaction bridge. It owns the shared package
     /// namespace lock; it is neither node configuration nor worker authority.
@@ -305,7 +311,32 @@ mod tests {
             Some(DaemonCommand::InitPolicyPreflight {
                 app_root,
                 schema_cut: true,
+                active_bundles,
             }) if app_root == PathBuf::from("/home/example/.local/share/ryeos")
+                && active_bundles.is_empty()
+        ));
+    }
+
+    #[test]
+    fn init_policy_preflight_retains_selected_bundle_names() {
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "init-policy-preflight",
+            "--app-root",
+            "/home/example/.local/share/ryeos",
+            "--active-bundle",
+            "core",
+            "--active-bundle",
+            "render-sandbox",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::InitPolicyPreflight {
+                schema_cut: false,
+                active_bundles,
+                ..
+            }) if active_bundles == ["core", "render-sandbox"]
         ));
     }
 }

@@ -204,6 +204,7 @@ fn plant_marker_tool(
 #   category: "marker"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "Crash-recovery execution marker"
 
 import json

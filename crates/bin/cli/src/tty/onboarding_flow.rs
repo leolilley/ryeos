@@ -1,20 +1,24 @@
+#[cfg(feature = "model-provider-setup")]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(feature = "model-provider-setup")]
 use ryeos_directive_definition::{ProviderSetupModelProjection, ProviderSetupProjection};
 use ryeos_node::{
     InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase, InitProgress, InitReport,
-    LifecycleController, LocalLifecycleEnv, PersistModelRouteOptions,
 };
+#[cfg(feature = "model-provider-setup")]
+use ryeos_node::{LifecycleController, LocalLifecycleEnv, PersistModelRouteOptions};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::interaction::{
-    Event, EventReader, Frame, InputAction, Key, ListItem, ListState, Pager, SecretInput,
-    TerminalGuard, TextInput,
+    Event, EventReader, Frame, InputAction, Key, Pager, SecretInput, TerminalGuard, TextInput,
 };
+#[cfg(feature = "model-provider-setup")]
+use super::interaction::{ListItem, ListState};
 use super::onboarding_journal::{Journal, Phase};
 use super::onboarding_spec::{self, ArtVariant, PageSpec};
 use super::{Console, Row, StatusBanner, Tone};
@@ -91,12 +95,19 @@ pub(crate) async fn run(console: &Console, options: OnboardingOptions) -> Result
             "Core initialization is preserved; optional provider setup was not changed.",
         );
     }
+    #[cfg(feature = "model-provider-setup")]
     let setup = configure_provider(&mut ui, &options.init.app_root, &mut journal).await?;
     journal.mark(Phase::Complete);
     journal.save(&options.init.app_root)?;
+    #[cfg(feature = "model-provider-setup")]
     let open_tui = ui.completion(&journal, setup.as_ref()).await?;
+    #[cfg(not(feature = "model-provider-setup"))]
+    let open_tui = ui.completion(&journal).await?;
     ui.finish()?;
+    #[cfg(feature = "model-provider-setup")]
     render_completion(console, &journal, setup.as_ref())?;
+    #[cfg(not(feature = "model-provider-setup"))]
+    render_completion(console, &journal)?;
     if open_tui {
         let ryeos = std::env::current_exe().context("locate ryeos executable")?;
         let status = std::process::Command::new(ryeos)
@@ -111,6 +122,7 @@ pub(crate) async fn run(console: &Console, options: OnboardingOptions) -> Result
     Ok(())
 }
 
+#[cfg(feature = "model-provider-setup")]
 pub(crate) async fn run_setup(console: &Console, app_root: PathBuf) -> Result<()> {
     let mut journal = Journal::load(&app_root)?;
     journal.reconcile(&app_root)?;
@@ -313,6 +325,7 @@ fn apply_init_report(journal: &mut Journal, report: &InitReport) {
     journal.mark(Phase::CoreInitialized);
 }
 
+#[cfg(feature = "model-provider-setup")]
 #[derive(Debug, Clone)]
 struct SetupOutcome {
     provider: String,
@@ -320,6 +333,7 @@ struct SetupOutcome {
     connected: bool,
 }
 
+#[cfg(feature = "model-provider-setup")]
 async fn configure_provider(
     ui: &mut FlowUi,
     app_root: &Path,
@@ -553,6 +567,7 @@ async fn configure_provider(
     }
 }
 
+#[cfg(feature = "model-provider-setup")]
 async fn persist_model_selection(
     ui: &mut FlowUi,
     app_root: &Path,
@@ -607,6 +622,7 @@ async fn persist_model_selection(
     journal.save(app_root)
 }
 
+#[cfg(feature = "model-provider-setup")]
 enum ValidationChoice {
     Retry,
     Credential,
@@ -641,6 +657,7 @@ impl FlowUi {
         self.height = height;
     }
 
+    #[cfg(feature = "model-provider-setup")]
     async fn await_cancellable<F: std::future::Future>(
         &mut self,
         future: F,
@@ -833,7 +850,10 @@ impl FlowUi {
             lines.push(String::new());
             lines.push("  These keys have distinct roles and are not interchangeable.".to_string());
             lines.push(String::new());
+            #[cfg(feature = "model-provider-setup")]
             lines.push("  enter continue to optional provider setup  ·  esc cancel".to_string());
+            #[cfg(not(feature = "model-provider-setup"))]
+            lines.push("  enter complete initialization  ·  esc cancel".to_string());
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Enter => return Ok(true),
@@ -847,6 +867,7 @@ impl FlowUi {
         }
     }
 
+    #[cfg(feature = "model-provider-setup")]
     async fn provider_selector(
         &mut self,
         providers: &[ProviderSetupProjection],
@@ -952,6 +973,7 @@ impl FlowUi {
         }
     }
 
+    #[cfg(feature = "model-provider-setup")]
     async fn model_selector(
         &mut self,
         provider: &ProviderSetupProjection,
@@ -1048,6 +1070,7 @@ impl FlowUi {
         }
     }
 
+    #[cfg(feature = "model-provider-setup")]
     async fn validation_error(&mut self, error: &str) -> Result<ValidationChoice> {
         let mut pager = super::interaction::Pager::new(
             error,
@@ -1102,7 +1125,7 @@ impl FlowUi {
     async fn completion(
         &mut self,
         journal: &Journal,
-        setup: Option<&SetupOutcome>,
+        #[cfg(feature = "model-provider-setup")] setup: Option<&SetupOutcome>,
     ) -> Result<bool> {
         loop {
             let mut lines = self.header("RyeOS initialized", Some(ArtVariant::PrismCompact));
@@ -1124,6 +1147,7 @@ impl FlowUi {
                 &fingerprint(journal.vault_fingerprint.as_deref()),
                 self.width,
             );
+            #[cfg(feature = "model-provider-setup")]
             lines.push(format!(
                 "  provider  {}",
                 setup
@@ -1134,6 +1158,7 @@ impl FlowUi {
                 "  bundles   {} verified",
                 journal.bundles_verified.unwrap_or_default()
             ));
+            #[cfg(feature = "model-provider-setup")]
             lines.push(format!(
                 "  model     {}",
                 setup
@@ -1157,6 +1182,7 @@ impl FlowUi {
         }
     }
 
+    #[cfg(feature = "model-provider-setup")]
     async fn message(&mut self, title: &str, body: &str) -> Result<()> {
         loop {
             let mut lines = self.header(title, None);
@@ -1244,7 +1270,7 @@ fn cancelled(ui: FlowUi, console: &Console, journal: &Journal, detail: &str) -> 
 fn render_completion(
     console: &Console,
     journal: &Journal,
-    setup: Option<&SetupOutcome>,
+    #[cfg(feature = "model-provider-setup")] setup: Option<&SetupOutcome>,
 ) -> Result<()> {
     let mut status = StatusBanner::new(Tone::Success, "RYEOS INITIALIZED");
     status.rows = vec![
@@ -1258,6 +1284,7 @@ fn render_completion(
             "bundles",
             format!("{} verified", journal.bundles_verified.unwrap_or_default()),
         ),
+        #[cfg(feature = "model-provider-setup")]
         Row::key_value(
             "provider",
             setup
@@ -1274,6 +1301,7 @@ fn render_completion(
                 })
                 .unwrap_or_else(|| "not configured".to_string()),
         ),
+        #[cfg(feature = "model-provider-setup")]
         Row::key_value(
             "model",
             setup

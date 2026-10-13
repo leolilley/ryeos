@@ -5,6 +5,10 @@ use std::ffi::OsStr;
 use std::io::{Read, Seek as _, SeekFrom};
 use std::sync::Arc;
 
+/// Owner token for the secure temporaries managed activation publishes into
+/// its archive cache. Cache reconciliation removes only debris carrying it.
+const CONTENT_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("content");
+
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1070,12 +1074,22 @@ fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
         if lillux::valid_hash(name) {
             continue;
         }
-        if !name.starts_with(".secure.tmp.") {
-            bail!("managed activation cache contains an unexpected entry");
+        match lillux::classify_secure_temp_name(entry.name(), CONTENT_TEMP_PURPOSE) {
+            lillux::SecureTempOwnership::Own => cache
+                .remove_pinned_regular_if_same(&entry)
+                .context("remove managed activation cache crash orphan")?,
+            // Another owner's interrupted publication is not this cache's
+            // to remove, and it does not block reconciliation.
+            lillux::SecureTempOwnership::Foreign => continue,
+            lillux::SecureTempOwnership::Malformed => bail!(
+                "managed activation cache holds a secure temporary without an exact owner token: {}; \
+                 stop the node, remove that entry, then retry the activation",
+                entry.path().display()
+            ),
+            lillux::SecureTempOwnership::NotTemp => {
+                bail!("managed activation cache contains an unexpected entry")
+            }
         }
-        cache
-            .remove_pinned_regular_if_same(&entry)
-            .context("remove managed activation cache crash orphan")?;
     }
     cache.ensure_path_binding()?;
     Ok(())
@@ -1093,7 +1107,7 @@ fn reset_activation_staging(staging: &lillux::PinnedDirectory) -> Result<()> {
 fn require_staging_capacity(
     staging: &lillux::PinnedDirectory,
     activation: &ResolvedManagedExternalContentActivation,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     let component_ceiling = activation
         .components
@@ -1192,7 +1206,8 @@ fn cleanup_staging(directories: ActivationDirectories) -> Result<()> {
         })?;
     if !directories
         .staging
-        .remove_empty_child_if_same(OsStr::new(&directories.job_name), &directories.job)?
+        .remove_empty_child_if_same(OsStr::new(&directories.job_name), &directories.job)
+        .map(|receipt| receipt.is_some())?
     {
         bail!("managed activation staging remained non-empty after bounded cleanup");
     }
@@ -1215,7 +1230,7 @@ fn obtain_archive(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
     mode: AcquisitionMode,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     offline_archive_root: Option<&lillux::PinnedDirectory>,
 ) -> Result<lillux::PinnedRegularFile> {
     let name = OsStr::new(&source.sha256);
@@ -1320,6 +1335,7 @@ fn obtain_archive(
         &mut response,
         source.maximum_compressed_bytes,
         0o600,
+        CONTENT_TEMP_PURPOSE,
     )?;
     let archive = match created {
         Some((archive, _)) => archive,
@@ -1360,7 +1376,7 @@ fn import_offline_archive(
     cache: &lillux::PinnedDirectory,
     root: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<lillux::PinnedRegularFile> {
     let archive_name = offline_archive_name(source)?;
     let archive_name = OsStr::new(&archive_name);
@@ -1396,6 +1412,7 @@ fn import_offline_archive(
         &mut input,
         source.maximum_compressed_bytes,
         0o600,
+        CONTENT_TEMP_PURPOSE,
     )?;
     root.ensure_path_binding()?;
     let archive = match created {
@@ -1435,13 +1452,19 @@ fn offline_archive_name(source: &ManagedActivationSource) -> Result<String> {
 fn reserve_archive_cache(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
     entry_limit: usize,
 ) -> Result<()> {
     if entry_limit == 0 {
         bail!("managed archive cache entry limit is zero");
     }
-    let mut entries = cache.regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)?;
+    // Only verified archives are this cache's to account and evict; another
+    // owner's interrupted publication left by reconciliation stays in place.
+    let mut entries = cache
+        .regular_files_bounded(CACHE_RECONCILIATION_ENTRY_LIMIT)?
+        .into_iter()
+        .filter(|entry| entry.name().to_str().is_some_and(lillux::valid_hash))
+        .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.name().cmp(right.name()));
     let mut retained = entries.iter().try_fold(0u64, |total, entry| {
         total
@@ -1499,7 +1522,7 @@ fn retain_verified_archive(
 
 fn admit_redirect_url(
     url: &reqwest::Url,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -1528,7 +1551,7 @@ fn extract_archive(
     source: &ManagedActivationSource,
     activation: &ResolvedManagedExternalContentActivation,
     staging: &lillux::PinnedDirectory,
-    policy: &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
     archive_file.seek(SeekFrom::Start(0))?;
     let decoder = flate2::read::MultiGzDecoder::new(archive_file);
@@ -1831,6 +1854,7 @@ fn extract_archive(
             &mut entry,
             member.maximum_bytes,
             mode,
+            CONTENT_TEMP_PURPOSE,
         )?;
         let mut file = match created {
             Some((file, _)) => file,
@@ -2105,6 +2129,7 @@ fn stage_whole_tree_entry(
                     &mut digesting,
                     maximum_file_bytes,
                     portable_mode,
+                    CONTENT_TEMP_PURPOSE,
                 )?
             };
             let (observed_size, digest) = digesting.finish();
@@ -2281,22 +2306,22 @@ fn settle_retryable_attempt_failure(
 fn managed_policy(
     state: &AppState,
 ) -> Result<
-    &ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
+    &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
 > {
     state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
         .managed_activation
         .require_enabled()
 }
 
 fn external_content_policy(
     state: &AppState,
-) -> Result<&ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
+) -> Result<&ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
 {
     state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
 }
 
 fn bounded_error(value: &str) -> String {
@@ -2504,7 +2529,10 @@ where
             ryeos_app::managed_external_content::MAX_MANAGED_ACTIVATION_STAGING_ENTRIES,
             ryeos_state::external_content::MAX_CAPTURE_DEPTH,
         ))?;
-        if !staging.remove_empty_child_if_same(&entry.name, &child)? {
+        if !staging
+            .remove_empty_child_if_same(&entry.name, &child)
+            .map(|receipt| receipt.is_some())?
+        {
             bail!("managed activation terminal staging remained non-empty");
         }
         removed += 1;
@@ -2575,9 +2603,9 @@ mod tests {
     }
 
     fn test_policy()
-    -> ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy
+    -> ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy
     {
-        ryeos_app::node_policy::sections::external_content::ManagedExternalContentActivationPolicy {
+        ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy {
             allow_online: false,
             allowed_https_hosts: vec!["releases.example.test".to_owned()],
             max_redirects: 0,
@@ -2753,23 +2781,17 @@ mod tests {
         }
     }
 
-    fn test_state_store(root: &std::path::Path) -> ryeos_app::state_store::StateStore {
+    /// The owner dereferences to the Store and closes it when dropped.
+    fn test_state_store(root: &std::path::Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.to_path_buf(),
-            root.join(".ai/state"),
-            root.join("runtime.sqlite3"),
-            signer,
-            ryeos_app::write_barrier::WriteBarrier::new(),
-            std::sync::Arc::new(trust),
-        )
-        .unwrap()
+        ryeos_app::test_support::TestStateStore::open(root, signer, std::sync::Arc::new(trust))
+            .unwrap()
     }
 
     #[test]
@@ -2920,10 +2942,8 @@ mod tests {
     #[test]
     fn exhausted_interrupted_job_folds_authoritative_receipt_without_acquisition() {
         let root = tempfile::tempdir().unwrap();
-        let runtime_state = root.path().join(".ai/state");
-        let runtime_db = root.path().join("runtime.sqlite3");
         let identity =
-            ryeos_app::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
                 .unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
@@ -2931,15 +2951,7 @@ mod tests {
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = ryeos_app::state_store::StateStore::new_with_head_trust(
-            root.path().to_path_buf(),
-            runtime_state,
-            runtime_db,
-            signer,
-            write_barrier.clone(),
-            std::sync::Arc::new(trust),
-        )
-        .unwrap();
+        let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(root.path(), signer, write_barrier.clone(), std::sync::Arc::new(trust)).unwrap();
 
         let state_authority = state_store.pinned_state_authority().unwrap();
         let guard = state_authority.acquire_shared_guard().unwrap();
@@ -3219,16 +3231,31 @@ mod tests {
     fn cache_reconciliation_removes_crash_orphans_before_retry_accounting() {
         let root = tempfile::tempdir().unwrap();
         let cache = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        let orphan_name = OsStr::new(".secure.tmp.4242.7");
-        let mut orphan = cache
-            .open_regular_create(orphan_name, true, true, 0o600)
-            .unwrap();
-        std::io::Write::write_all(&mut orphan, b"partial archive").unwrap();
-        orphan.sync_all().unwrap();
+        let orphan_name = format!(".secure.tmp.{}.4242.7", CONTENT_TEMP_PURPOSE.as_str());
+        let orphan_name = OsStr::new(&orphan_name);
+        let foreign_name = OsStr::new(".secure.tmp.state.4242.8");
+        for name in [orphan_name, foreign_name] {
+            let mut file = cache.open_regular_create(name, true, true, 0o600).unwrap();
+            std::io::Write::write_all(&mut file, b"partial archive").unwrap();
+            file.sync_all().unwrap();
+        }
 
         reconcile_activation_cache(&cache).unwrap();
 
         assert!(cache.open_regular(orphan_name, false).unwrap().is_none());
+        assert!(cache.open_regular(foreign_name, false).unwrap().is_some());
+
+        let retired_format = OsStr::new(".secure.tmp.4242.9");
+        cache
+            .open_regular_create(retired_format, true, true, 0o600)
+            .unwrap();
+        let error = reconcile_activation_cache(&cache).unwrap_err();
+        assert!(
+            error.to_string().contains("without an exact owner token"),
+            "{error:#}"
+        );
+        assert!(cache.open_regular(retired_format, false).unwrap().is_some());
+        assert!(cache.open_regular(foreign_name, false).unwrap().is_some());
     }
 
     #[test]
@@ -3274,7 +3301,13 @@ mod tests {
         let name = OsStr::new(&digest);
         let mut bytes = b"wrong archive bytes".as_slice();
         let archive = cache
-            .atomic_create_pinned_regular_from_reader(name, &mut bytes, 1024, 0o600)
+            .atomic_create_pinned_regular_from_reader(
+                name,
+                &mut bytes,
+                1024,
+                0o600,
+                CONTENT_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap()
             .0;

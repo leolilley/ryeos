@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ryeos_api::handlers::external_content_activate::{Request, handle};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::AuthorizedKeyPrincipalClass;
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_app::managed_external_content_operation::AcquisitionMode;
 
 fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -> HandlerContext {
@@ -19,7 +19,7 @@ fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -
 
 #[tokio::test]
 async fn managed_activation_admits_an_origin_bound_remote_operator() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let error = handle(
         Request {
             activation_ref: "config:fixture/missing-activation".to_owned(),
@@ -44,7 +44,7 @@ async fn managed_activation_admits_an_origin_bound_remote_operator() {
 
 #[tokio::test]
 async fn managed_activation_rejects_a_remote_node_principal() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let error = handle(
         Request {
             activation_ref: "config:fixture/missing-activation".to_owned(),

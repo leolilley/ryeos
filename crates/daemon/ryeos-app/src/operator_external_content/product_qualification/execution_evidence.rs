@@ -7,11 +7,11 @@
 use anyhow::{Context as _, bail};
 use ryeos_engine::resolution::{ResolutionOutput, TrustClass};
 use ryeos_handler_protocol::{
-    ExecutionEvidenceCandidateCallWire, ExecutionEvidenceDescribeRequest,
-    ExecutionEvidenceDescribeResponse, ExecutionEvidenceEventWire, ExecutionEvidenceLimitsWire,
-    ExecutionEvidenceProgramWire, ExecutionEvidenceProjectRequest,
-    ExecutionEvidenceProjectResponse, ExecutionEvidenceRequiredCallWire,
-    ExecutionEvidenceTerminalWire,
+    ExecutionEvidenceCandidateCallWire, ExecutionEvidenceCandidateScopedAttemptWire,
+    ExecutionEvidenceDescribeRequest, ExecutionEvidenceDescribeResponse,
+    ExecutionEvidenceEventWire, ExecutionEvidenceLimitsWire, ExecutionEvidenceProgramWire,
+    ExecutionEvidenceProjectRequest, ExecutionEvidenceProjectResponse,
+    ExecutionEvidenceRequiredCallWire, ExecutionEvidenceTerminalWire,
 };
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
@@ -20,6 +20,7 @@ use ryeos_state::external_content::products::qualification::{
     VerifierProcessSettlementAuthority,
 };
 use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
+use ryeos_state::external_content::runtime_member::exact_runtime_member_hash;
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, ExternalContentRealizationSet,
     ThreadEvent, ThreadSnapshot, ThreadStatus, canonical_value_digest,
@@ -54,6 +55,8 @@ pub(crate) struct AuthenticatedConsumerRoot {
     coordinate: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
     selection: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
     purpose: ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    accepted_project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    operator_grant_digest: String,
     /// Original callback expiry, absent for independent operator recovery.
     callback_expiry: Option<lillux::time::MonotonicDeadline>,
     callback_admission: Option<ConsumerCallbackAdmission>,
@@ -66,6 +69,10 @@ struct ConsumerCallbackAdmission {
 }
 
 impl AuthenticatedConsumerRoot {
+    pub(crate) fn callback_expiry(&self) -> Option<lillux::time::MonotonicDeadline> {
+        self.callback_expiry
+    }
+
     pub(crate) fn with_live_callback<T>(
         &self,
         admit: impl FnOnce() -> anyhow::Result<T>,
@@ -85,6 +92,24 @@ impl AuthenticatedConsumerRoot {
             .as_ref()
             .map(|callback| callback.grant.launch_owner.as_str())
     }
+    pub(crate) fn qualification_operation_id(&self) -> &str {
+        &self.qualification_operation_id
+    }
+
+    pub(crate) fn owner_principal(&self) -> &str {
+        &self.owner
+    }
+
+    pub(crate) fn operator_grant_digest(&self) -> &str {
+        &self.operator_grant_digest
+    }
+
+    pub(crate) fn accepted_project_authority(
+        &self,
+    ) -> &ryeos_state::objects::ExecutionProjectAuthority {
+        &self.accepted_project_authority
+    }
+
     pub(crate) fn require_attempt(
         &self,
         intent: &ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent,
@@ -253,6 +278,11 @@ fn authenticate_consumer_root_for_owner(
     qualification_operation_id: &str,
 ) -> anyhow::Result<AuthenticatedConsumerRoot> {
     authority.ensure_guard(guard)?;
+    let operator_fingerprint = owner_fingerprint
+        .strip_prefix("fp:")
+        .context("consumer operator principal is not canonical")?;
+    let operator_grant_digest =
+        crate::operator_authority::admitted_operator_authority_digest(state, operator_fingerprint)?;
     let qualified = state
         .state_store
         .snapshot_qualification_operation(qualification_operation_id)?
@@ -313,10 +343,9 @@ fn authenticate_consumer_root_for_owner(
     }
     let cas = authority.cas_store()?;
     let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        ryeos_state::object_closure::load_exact_capsule_object_with_cas(
             &cas,
             &coordinate.accepted_capsule_hash,
-            limits.max_object_bytes,
         )?,
     )?;
     require_terminal_invocation(&root, &capsule)?;
@@ -345,7 +374,25 @@ fn authenticate_consumer_root_for_owner(
     if purpose.owner_fingerprint != owner_fingerprint {
         bail!("consumer verification differs from sealed qualification purpose");
     }
+    purpose.require_consumer_invocation(qualification_operation_id, coordinate)?;
     purpose.validate_remote_consumer_coordinate(coordinate, selection)?;
+    let content = purpose
+        .consumer_content
+        .as_ref()
+        .context("consumer verification has no accepted consumer content")?;
+    super::require_retained_consumer_content_closure(authority, guard, limits, content)?;
+    let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &cas,
+        &content.runtime_realization.manifest_hash,
+        limits
+            .max_object_bytes
+            .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+    )?;
+    if exact_runtime_member_hash(&manifest, &content.runtime_member.relative_path)?
+        != content.runtime_member.executable_sha256
+    {
+        bail!("consumer verification runtime member differs from accepted exact bytes");
+    }
     authority.ensure_guard(guard)?;
     Ok(AuthenticatedConsumerRoot {
         qualification_operation_id: qualified.intent.operation_id.clone(),
@@ -354,6 +401,8 @@ fn authenticate_consumer_root_for_owner(
         coordinate: coordinate.clone(),
         selection: selection.clone(),
         purpose: purpose.clone(),
+        accepted_project_authority: capsule.project_authority.clone(),
+        operator_grant_digest,
         callback_expiry: None,
         callback_admission: None,
     })
@@ -482,23 +531,41 @@ fn require_hookless_participant(resolution: &ResolutionOutput) -> anyhow::Result
     Ok(())
 }
 
+/// Load one exact retained capsule in its own state-only guarded segment.
+fn load_capsule(
+    authority: &ryeos_state::PinnedStateAuthority,
+    capsule_hash: &str,
+) -> anyhow::Result<AdmittedLaunchCapsule> {
+    super::with_state_guard(authority, |_guard| {
+        AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
+                &authority.cas_store()?,
+                capsule_hash,
+            )?,
+        )
+    })
+}
+
+/// Read one exact signed thread history in its own state-only guarded
+/// segment. Callers hold no guard; projection of these events runs later.
 fn history(
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     snapshot: &ThreadSnapshot,
     limits: ExecutionEvidenceLimitsWire,
 ) -> anyhow::Result<Vec<ThreadEvent>> {
     let mut events = Vec::new();
-    let (_, observed) = authority
-        .visit_thread_snapshot_events(
-            &snapshot.chain_root_id,
-            &snapshot.thread_id,
-            u64::from(limits.max_events),
-            u64::from(limits.max_request_bytes),
-            guard,
-            |_, event| events.push(event),
-        )?
-        .context("qualification exact signed thread history is unavailable")?;
+    let (_, observed) = super::with_state_guard(authority, |guard| {
+        authority
+            .visit_thread_snapshot_events(
+                &snapshot.chain_root_id,
+                &snapshot.thread_id,
+                u64::from(limits.max_events),
+                u64::from(limits.max_request_bytes),
+                guard,
+                |_, event| events.push(event),
+            )?
+            .context("qualification exact signed thread history is unavailable")
+    })?;
     if ryeos_state::objects::thread_snapshot::hash_snapshot(snapshot)?
         != ryeos_state::objects::thread_snapshot::hash_snapshot(&observed)?
     {
@@ -598,11 +665,18 @@ fn signed_terminal_process_settlement_digest(events: &[ThreadEvent]) -> anyhow::
     Ok(digest.to_owned())
 }
 
+/// Project and corroborate retained execution evidence. Projection, policy
+/// and verifier re-resolution start handler processes, so the caller must not
+/// hold a CAS guard. CAS reads below (capsules, histories, retained blobs,
+/// transcript chunks) run in their own short guarded segments. Thread
+/// snapshot, action-intent, settlement and attempt-journal reads, including
+/// those in `prove_participant`, go through state-store readers that take no
+/// caller guard and synchronize internally. Publication re-reads the journal
+/// facts this proof names under its own guard.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prove(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     context: &HandlerContext,
     terminal: &ThreadSnapshot,
@@ -616,6 +690,7 @@ pub(super) fn prove(
     ProductQualificationExecutionProof,
     Option<(String, VerifierProcessSettlementAuthority)>,
 )> {
+    super::require_unguarded_resolution("qualification execution evidence proof")?;
     require_terminal_invocation(terminal, capsule)?;
     crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(capsule)?
         .require_qualification_execution_purpose(purpose)?;
@@ -644,7 +719,7 @@ pub(super) fn prove(
     if required != current_required {
         bail!("current execution contract changed its required participants");
     }
-    let events = history(authority, guard, terminal, projector.declaration.limits)?;
+    let events = history(authority, terminal, projector.declaration.limits)?;
     let root_settlement_digest =
         direct_process_settlement(state, terminal, &capsule.artifact_identity, &events)?;
     let response = current.request_engine.project_execution_evidence(
@@ -684,7 +759,7 @@ pub(super) fn prove(
     };
     let remote_proof = match subordinate_attempt.as_ref() {
         Some(candidate @ ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer { .. }) => {
-            Some(corroborate_remote_consumer_references(state, authority, terminal, capsule, purpose, candidate, root_settlement_digest.as_ref().map(|(digest, _)| digest.as_str()))?.0)
+            Some(corroborate_remote_consumer_references(state, authority, terminal, capsule, purpose, candidate, root_settlement_digest.as_ref().map(|(digest, _)| digest.as_str()), &result)?.0)
         },
         _ => None,
     };
@@ -711,7 +786,6 @@ pub(super) fn prove(
             crate::scoped_producer_observe::qualification_scoped_attempt_proof(
                 state,
                 authority,
-                guard,
                 &settlement.launch_owner,
                 purpose,
                 candidate,
@@ -737,7 +811,6 @@ pub(super) fn prove(
         participants.push(prove_participant(
             state,
             authority,
-            guard,
             limits,
             projector.declaration.limits,
             context,
@@ -804,6 +877,7 @@ fn corroborate_remote_consumer_references(
     purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire,
     authenticated_settlement_digest: Option<&str>,
+    projected_result: &Value,
 ) -> anyhow::Result<(
     ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
     Value,
@@ -838,6 +912,34 @@ fn corroborate_remote_consumer_references(
         bail!("remote proof cannot substitute owner measurement");
     };
     purpose.validate_remote_consumer_coordinate(coordinate, &selection)?;
+    let consumer_input_blob_hash = attempt
+        .consumer_input_blob_hash
+        .context("remote proof has no retained canonical input")?;
+    let input_bytes = super::with_state_guard(authority, |_guard| {
+        authority.cas_store()?.get_blob_bounded(
+            &consumer_input_blob_hash,
+            ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES as u64,
+        )?.context("remote proof retained input blob absent")
+    })?;
+    if lillux::sha256_hex(&input_bytes) != consumer_input_blob_hash {
+        bail!("remote proof retained input bytes differ from their journal hash");
+    }
+    let input =
+        ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord::parse(
+            &input_bytes,
+        )?;
+    input.validate_attempt(&attempt.intent)?;
+    input
+        .purpose
+        .require_consumer_invocation(&attempt.intent.qualification_operation_id, coordinate)?;
+    if !input
+        .purpose
+        .execution_view()?
+        .has_same_enclosing_purpose(purpose)
+        || input.selection != selection
+    {
+        bail!("remote proof input differs from the exact accepted purpose or selection");
+    }
     if coordinate.accepted_root_id != terminal.thread_id
         || terminal.admitted_launch_capsule_hash.as_deref()
             != Some(coordinate.accepted_capsule_hash.as_str())
@@ -882,16 +984,213 @@ fn corroborate_remote_consumer_references(
     if authenticated_settlement_digest != Some(settlement.digest()?.as_str()) {
         bail!("remote proof enclosing settlement differs from authenticated verifier settlement");
     }
-    let bytes = authority
-        .cas_store()?
-        .get_blob_bounded(evidence_sha256, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?
-        .context("remote proof evidence blob is absent")?;
+    let bytes = super::with_state_guard(authority, |_guard| {
+        authority
+            .cas_store()?
+            .get_blob_bounded(evidence_sha256, MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?
+            .context("remote proof evidence blob is absent")
+    })?;
     let evidence = observation.verify_evidence_bytes(&bytes)?;
+    corroborate_qualification_worker_transcript(
+        state,
+        authority,
+        &input,
+        &attempt.intent.qualification_operation_id,
+        projected_result,
+    )?;
     Ok((ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
         launch_owner_digest: canonical_value_digest(&serde_json::to_value(&settlement.launch_owner)?)?,
+        consumer_input_blob_hash,
         intent: attempt.intent, selection, observation,
         termination_intent: termination.intent, terminal_observation,
     }, evidence))
+}
+
+/// Join the independent verifier's Q reference to the daemon-owned completed
+/// transport and exact accepted program. This grants neither fresh execution
+/// nor callback access. Product-language interpretation remains in the signed
+/// verifier; these checks authenticate its actual input, bytes and settlement.
+fn corroborate_qualification_worker_transcript(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    input: &ryeos_state::external_content::qualification_consumer_record::ConsumerInputRecord,
+    qualification_operation_id: &str,
+    projected_result: &Value,
+) -> anyhow::Result<()> {
+    use ryeos_state::external_content::products::qualification::ProductQualificationResult;
+    use ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
+
+    input.validate()?;
+    let result = ProductQualificationResult::from_value(projected_result)?;
+    if result.subject_manifest_hash != input.purpose.subject_manifest_hash {
+        bail!("Q result changed the authenticated input subject");
+    }
+    let content = input
+        .purpose
+        .consumer_content
+        .as_ref()
+        .context("Q proof has no accepted consumer content")?;
+    let limits = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let (witness_hash, witness_source, _) = input.purpose.subject.captured_product()?;
+    // Retained Worker bytes and the retained product are state-only reads.
+    // The current-generation joins below resolve signed items and run with no
+    // guard; the retained transport and transcript are read in a later segment.
+    let (profile, source_owner, product) = super::with_state_guard(authority, |guard| {
+        let (profile, source_owner) =
+            crate::source_closure_admission::compile_retained_structured_worker_profile(
+                authority,
+                guard,
+                &content.worker_source,
+            )?;
+        let product = super::super::product_receipt::load_product_source(
+            state,
+            authority,
+            guard,
+            limits,
+            &input.purpose.owner_fingerprint,
+            witness_hash,
+            witness_source,
+            super::super::product_receipt::ProductSourceVerification::Retained,
+        )?;
+        Ok((profile, source_owner, product))
+    })?;
+    let expected_program = AdmittedExternalQualificationSessionProgram::from_authenticated_inputs(
+        &input.purpose,
+        &profile,
+        &product,
+    )?;
+    // All current Worker/environment/execution, producer and independent
+    // verifier source joins share one checked generation. This establishes
+    // current selection, without requiring callback/contact eligibility.
+    let purpose = input.purpose.execution_view()?;
+    let contract = state.engine.with_checked_bundle_generation(|generation| {
+        let (_, contract) = super::derive_qualification_worker_resolution(
+            &input.purpose,
+            &expected_program,
+            &profile,
+            &source_owner,
+            &input.coordinate,
+            generation,
+        )?;
+        super::resolve_current_bundle_producer_recipe_for_purpose_in_generation(
+            state,
+            generation,
+            &purpose,
+            &input.coordinate.scenario_id,
+        )?;
+        let verifier = super::prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
+            state,
+            generation,
+            purpose.policy_source(),
+            purpose.producer_recipe_sources(),
+            purpose.subject_manifest_hash(),
+            &input.coordinate.scenario_id,
+        )?;
+        if Some(
+            &verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?,
+        ) != purpose.remote_verifier_source(&input.coordinate.scenario_id)
+        {
+            bail!("Q proof changed the accepted independent verifier source");
+        }
+        verifier.require_protected_selection(&input.selection)?;
+        Ok(contract)
+    })?;
+    let operation = qualification_operation_id;
+    super::with_state_guard(authority, |guard| {
+        let retained = state
+            .state_store
+            .qualification_historical_transport_evidence_admitted(
+                guard,
+                &input.coordinate,
+                operation,
+                &input.purpose.owner_fingerprint,
+            )?;
+        if retained.owner.program != expected_program {
+            bail!("Q applied program differs from exact accepted consumer/runtime inputs");
+        }
+        let local = state
+            .state_store
+            .qualification_local_start(&retained.placement_thread_id)?
+            .context("Q proof lost its original local credential custody")?;
+        let credential = local
+            .credential_custody
+            .as_ref()
+            .context("Q proof lost its selected credential profile")?;
+        if credential.profile_id != contract.credential_profile_id
+            || credential.owner_principal != input.purpose.owner_fingerprint
+            || credential.contract_digest != contract.digest()?
+            || credential.released_at_ms.is_none()
+        {
+            bail!("Q proof changed its accepted credential use or lacks exact release");
+        }
+        let reference = crate::qualification_consumer_observation::read_retained_reference(
+            state,
+            authority,
+            guard,
+            &input.coordinate,
+            operation,
+            &input.purpose.owner_fingerprint,
+        )?;
+        let request = input
+            .purpose
+            .policy_source
+            .policy
+            .producer_scenarios
+            .get(&input.coordinate.scenario_id)
+            .and_then(|scenario| scenario.consumer_worker_request.as_ref())
+            .context("Q proof has no original signed Worker setup/turn")?;
+        require_qualification_worker_request(
+            request,
+            &reference.manifest.setup_request_digest,
+            &reference.manifest.request_digest,
+            reference.manifest.controller_canary.as_ref(),
+        )?;
+        if reference.manifest_hash != result.q_transcript_manifest_hash()?
+            || reference.manifest.controller_canary != local.controller_canary_terminal
+            || local.worker_incarnation_digest.as_deref()
+                != Some(reference.manifest.process_incarnation_digest.as_str())
+        {
+            bail!("Q proof substituted its manifest, process incarnation or signed request bytes");
+        }
+        // Use the shared bounded structural decoder on every retained chunk.
+        // The finite verifier separately interprets these same canonical bytes.
+        let cas = authority.cas_store()?;
+        let chunks = reference
+            .manifest
+            .chunks
+            .iter()
+            .map(|chunk| {
+                cas.get_blob_bounded(&chunk.blob_hash, chunk.size_bytes)?
+                    .context("Q proof lost a manifest-owned transcript chunk")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        reference.manifest.verify_chunks(&chunks)?;
+        Ok(())
+    })
+}
+
+/// Compare the sent setup/turn to the sealed request and the exact retained
+/// adapter binding. Template bytes are not the actual turn when a canary was
+/// selected. This checks commitments only; no provider grammar is interpreted.
+fn require_qualification_worker_request(
+    request: &ryeos_state::external_content::products::qualification::ProductQualificationConsumerWorkerRequest,
+    setup_digest: &str,
+    turn_digest: &str,
+    canary: Option<&ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryEvidence>,
+) -> anyhow::Result<()> {
+    if let Some(canary) = canary {
+        canary.validate()?;
+    }
+    let body = request.bound_controller_canary_body(canary.map(|value| &value.binding))?;
+    if setup_digest != canonical_value_digest(&request.session_setup)?
+        || turn_digest != canonical_value_digest(&body)?
+    {
+        bail!("Q proof substituted its signed setup or actual bound request bytes");
+    }
+    Ok(())
 }
 
 fn subordinate_authority(
@@ -914,22 +1213,15 @@ fn subordinate_authority(
 fn verify_retained_remote_consumer(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     evidence: &ProductQualificationEvidence,
     remote: &ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof,
     history_limits: ExecutionEvidenceLimitsWire,
 ) -> anyhow::Result<()> {
     let limits = state
         .node_policy
-        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
-            &authority.cas_store()?,
-            &evidence.verifier.admitted_launch_capsule_hash,
-            limits.max_object_bytes,
-        )?,
-    )?;
+    let capsule = load_capsule(authority, &evidence.verifier.admitted_launch_capsule_hash)?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
@@ -949,7 +1241,7 @@ fn verify_retained_remote_consumer(
     {
         bail!("remote retained verifier differs from its successful terminal");
     }
-    let events = history(authority, guard, &terminal, history_limits)?;
+    let events = history(authority, &terminal, history_limits)?;
     let settlement =
         direct_process_settlement(state, &terminal, &capsule.artifact_identity, &events)?;
     if settlement.as_ref().map(|(digest, _)| digest.as_str())
@@ -979,9 +1271,17 @@ fn verify_retained_remote_consumer(
         &purpose,
         &candidate,
         settlement.as_ref().map(|(digest, _)| digest.as_str()),
+        &serde_json::to_value(&evidence.result)?,
     )?;
     if &reconstructed != remote {
         bail!("remote retained proof differs from full historical corroboration");
+    }
+    if evidence
+        .qualification_worker_transcript_manifest_hash
+        .as_deref()
+        != Some(evidence.result.q_transcript_manifest_hash()?)
+    {
+        bail!("remote retained proof changed its qualification Worker transcript");
     }
     Ok(())
 }
@@ -1009,7 +1309,6 @@ fn require_zero_participant_lane(
 fn prove_participant(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     history_limits: ExecutionEvidenceLimitsWire,
     context: &HandlerContext,
@@ -1037,7 +1336,6 @@ fn prove_participant(
         || intent.child_project_authority.is_some()
         || intent.admitted_launch_capsule_hash.is_some()
         || intent.launch_metadata.is_some()
-        || intent.incompatible_launch_metadata.is_some()
         || intent.initial_events.is_some()
         || intent.workspace_operation.is_some()
     {
@@ -1072,18 +1370,18 @@ fn prove_participant(
         .admitted_launch_capsule_hash
         .as_deref()
         .context("qualification participant has no capsule")?;
-    let capsule = AdmittedLaunchCapsule::from_current_value(
-        ryeos_state::object_closure::load_exact_cas_object_with_cas(
-            &authority.cas_store()?,
-            capsule_hash,
-            limits.max_object_bytes,
-        )?,
-    )?;
-    let realization = capsule.verify_retained_execution_realization(
-        &authority.cas_store()?,
-        &authority.large_object_store()?,
-        authority.trust_store(),
-    )?;
+    let (capsule, realization) = super::with_state_guard(authority, |_guard| {
+        let cas = authority.cas_store()?;
+        let capsule = AdmittedLaunchCapsule::from_current_value(
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(&cas, capsule_hash)?,
+        )?;
+        let realization = capsule.verify_retained_execution_realization(
+            &cas,
+            &authority.large_object_store()?,
+            authority.trust_store(),
+        )?;
+        Ok((capsule, realization))
+    })?;
     require_terminal_invocation(&child, &capsule)?;
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
@@ -1119,7 +1417,6 @@ fn prove_participant(
     let current = super::resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
-        guard,
         context,
         &action.item_id,
         &action.params,
@@ -1160,7 +1457,7 @@ fn prove_participant(
         current.request_engine.as_ref(),
         resolution,
     )?;
-    let child_events = history(authority, guard, &child, history_limits)?;
+    let child_events = history(authority, &child, history_limits)?;
     let process_settlement =
         direct_process_settlement(state, &child, &capsule.artifact_identity, &child_events)?;
     Ok(ProductQualificationParticipant {
@@ -1212,15 +1509,19 @@ fn require_inline_child_root(
 
 /// Fresh consumption rechecks current handler and participant identities. It
 /// does not reopen historical threads or reinterpret a retained attestation.
+///
+/// Callers must not hold a CAS guard: projector description and participant
+/// re-resolution start handler processes. Retained capsules, histories and
+/// observations are read in their own short guarded segments.
 pub(in crate::operator_external_content) fn verify_current(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     context: &HandlerContext,
     evidence: &ProductQualificationEvidence,
     current: &CurrentBundleVerifierIdentity,
     project_context_resolver: Option<&dyn super::QualificationProjectContextResolver>,
 ) -> anyhow::Result<()> {
+    super::require_unguarded_resolution("current qualification evidence check")?;
     let proof = &evidence.execution_proof;
     let projector = current
         .request_engine
@@ -1261,7 +1562,6 @@ pub(in crate::operator_external_content) fn verify_current(
         verify_retained_remote_consumer(
             state,
             authority,
-            guard,
             evidence,
             remote,
             projector.declaration.limits,
@@ -1296,11 +1596,7 @@ pub(in crate::operator_external_content) fn verify_current(
             .get(&scoped.scenario_id)
             .context("current scoped qualification scenario disappeared")?;
         let current_recipe = state.engine.with_checked_bundle_generation(|generation| {
-            super::resolve_bundle_producer_recipe_in_generation(
-                state,
-                generation.request_engine_generation_identity(),
-                &scenario.recipe_ref,
-            )
+            super::resolve_bundle_producer_recipe_in_generation(generation, &scenario.recipe_ref)
         })?;
         if current_recipe.source_identity()? != scoped.producer_source {
             bail!("current scoped qualification recipe source changed");
@@ -1310,6 +1606,75 @@ pub(in crate::operator_external_content) fn verify_current(
             &current_recipe,
             &evidence.result.subject_manifest_hash,
         )?;
+
+        // The signed qualification carries the daemon's historical proof, but
+        // fresh admission must still find the exact settled local attempt and
+        // committed observation. Reuse issuance corroboration so a copied
+        // proof cannot stand in for a missing or different journal record.
+        let limits = state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .closure_limits()?;
+        let capsule = load_capsule(authority, &evidence.verifier.admitted_launch_capsule_hash)?;
+        let sealed =
+            crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                &capsule,
+            )?;
+        let purpose = sealed
+            .qualification_purpose()
+            .context("scoped qualification verifier lost its sealed launch purpose")?;
+        let (subject_witness_hash, subject_witness_source, _) = purpose
+            .subject
+            .captured_product()
+            .context("scoped qualification verifier has no captured product subject")?;
+        if purpose.policy_source != evidence.policy_source
+            || subject_witness_hash != evidence.product_witness_hash.as_str()
+            || subject_witness_source != &evidence.witness_source
+            || purpose.subject_manifest_hash != evidence.result.subject_manifest_hash
+            || purpose.subject_declaration_id
+                != evidence.policy_source.policy.subject_declaration_id
+            || purpose.consumer_content != evidence.consumer_content
+            || purpose.verifier_ref != evidence.verifier.canonical_ref
+            || purpose.verifier_realized_definition_digest
+                != evidence.verifier.effective_definition_digest
+            || purpose.admitted_parameters_digest != evidence.verifier.admitted_parameters_digest
+        {
+            bail!("scoped qualification evidence differs from sealed launch purpose");
+        }
+        let settlement = state
+            .state_store
+            .latest_thread_process_settlement(&evidence.verifier.thread_id)?
+            .context("scoped qualification verifier lost its exact process settlement")?;
+        let settlement_digest = settlement.digest()?;
+        if settlement.thread_id != evidence.verifier.thread_id
+            || Some(settlement_digest.as_str())
+                != evidence
+                    .verifier
+                    .process_settlement_witness_digest
+                    .as_deref()
+            || matches!(
+                settlement.kind,
+                crate::runtime_db::ThreadProcessSettlementKind::RecoveryDeath
+            )
+        {
+            bail!("scoped qualification verifier settlement differs from retained proof");
+        }
+        let candidate = ExecutionEvidenceCandidateScopedAttemptWire {
+            attempt_id: scoped.attempt_id.clone(),
+            scenario_id: scoped.scenario_id.clone(),
+            observation_object_hash: scoped.observation_object_hash.clone(),
+        };
+        let purpose_view = purpose.execution_view()?;
+        let observed = crate::scoped_producer_observe::qualification_scoped_attempt_proof(
+            state,
+            authority,
+            &settlement.launch_owner,
+            &purpose_view,
+            &candidate,
+        )?;
+        if observed != *scoped {
+            bail!("scoped qualification proof differs from settled daemon observation");
+        }
     }
     for required in required {
         let retained = proof
@@ -1327,15 +1692,10 @@ pub(in crate::operator_external_content) fn verify_current(
         }
         let limits = state
             .node_policy
-            .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
-        let child_capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
-                &authority.cas_store()?,
-                &retained.verifier.admitted_launch_capsule_hash,
-                limits.max_object_bytes,
-            )?,
-        )?;
+        let child_capsule =
+            load_capsule(authority, &retained.verifier.admitted_launch_capsule_hash)?;
         let child_sealed =
             crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
                 &child_capsule,
@@ -1348,7 +1708,6 @@ pub(in crate::operator_external_content) fn verify_current(
         let child = super::resolve_current_bundle_verifier_identity_against_admitted(
             state,
             authority,
-            guard,
             context,
             &action.item_id,
             &action.params,

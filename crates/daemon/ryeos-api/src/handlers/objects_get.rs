@@ -11,7 +11,7 @@
 use std::io::{Read as _, Seek as _};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
@@ -99,18 +99,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut entries = Vec::with_capacity(req.object_hashes.len() + req.blob_hashes.len());
 
     for hash in &req.object_hashes {
-        match cas.open_object(hash)? {
-            Some((mut source, size)) => {
-                if size > MAX_INLINE_OBJECT_BYTES {
-                    anyhow::bail!("object {hash} exceeds the inline response limit");
-                }
-                let mut bytes = vec![0_u8; usize::try_from(size)?];
-                source.read_exact(&mut bytes)?;
-                if lillux::sha256_hex(&bytes) != *hash {
-                    anyhow::bail!("CAS object {hash} failed content-address verification");
-                }
+        match cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+            hash,
+            MAX_INLINE_OBJECT_BYTES,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )? {
+            Some(bytes) => {
                 let value: Value = serde_json::from_slice(&bytes)?;
-                if lillux::canonical_json(&value)?.as_bytes() != bytes {
+                let maximum = usize::try_from(MAX_INLINE_OBJECT_BYTES)
+                    .context("inline object ceiling exceeds this platform")?;
+                if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != bytes {
                     anyhow::bail!("CAS object {hash} is not canonical JSON");
                 }
                 entries.push(serde_json::json!({

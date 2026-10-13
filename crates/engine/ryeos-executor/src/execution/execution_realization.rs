@@ -10,7 +10,7 @@ use ryeos_engine::isolation::{
 };
 use ryeos_state::objects::{
     ADMITTED_EXECUTION_REALIZATION_KIND, AdmittedExecutionRealization,
-    EXECUTION_REALIZATION_SCHEMA_VERSION, ExecutionComponentReference, ExecutionComponentStorage,
+    EXECUTION_REALIZATION_SCHEMA_VERSION, ExecutionComponentReference,
 };
 
 pub(crate) struct ExecutionRealizationAdmission {
@@ -290,33 +290,14 @@ pub(crate) fn verify_persistent_session(
     contract_ref: &str,
     contract_digest: &str,
 ) -> Result<()> {
-    capsule.validate()?;
-    let authority = capsule.authority();
-    let existing = load_realization(state, &capsule.execution_realization_hash)?;
-    let (filesystem, network, target, resource_authority) =
-        persistent_session_execution_authority(&authority.execution_closure)?;
-    let selected_resources = state.execution_resources.select(target.as_ref())?;
-    let properties = execution_properties(
+    ryeos_app::execution_realization::verify_persistent_session(
         state,
-        filesystem,
-        network,
-        target.as_ref(),
-        resource_authority,
-        selected_resources.selections(),
-    )?;
-    if existing.launch_authority_digest != authority.digest()?
-        || existing.effective_definition_digest != effective_definition_digest
-        || existing.artifact_identity_digest != authority.artifact_identity_digest()?
-        || existing.execution_closure_digest != authority.execution_closure_digest()?
-        || existing.contract_ref != contract_ref
-        || existing.contract_digest != contract_digest
-        || existing.components != execution_components(state, resolution)?
-        || existing.properties != properties
-    {
-        anyhow::bail!("persistent-session execution realization contradicts its admitted capsule");
-    }
-    verify_realization_node_evidence(state, &existing)?;
-    verify_realization_components(state, &existing)
+        capsule,
+        resolution,
+        effective_definition_digest,
+        contract_ref,
+        contract_digest,
+    )
 }
 
 fn persistent_session_execution_authority(
@@ -327,24 +308,7 @@ fn persistent_session_execution_authority(
     Option<ryeos_engine::contracts::ExecutionTargetRequirement>,
     ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
 )> {
-    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
-        execution_plan, ..
-    } = closure
-    else {
-        anyhow::bail!("persistent session requires an admitted direct execution plan");
-    };
-    let plan: ryeos_engine::contracts::ExecutionPlan =
-        serde_json::from_value(execution_plan.clone())
-            .context("decode persistent-session retained isolation ceilings")?;
-    // This owner is the existing controller-local persistent process. An
-    // external candidate workload is not permission to relocate that process.
-    plan.require_local_endpoint_for_dispatch()?;
-    Ok((
-        plan.filesystem_authority_ceiling,
-        plan.network_authority_ceiling,
-        plan.target_requirement,
-        plan.resource_authority_ceiling,
-    ))
+    ryeos_app::execution_realization::persistent_session_execution_authority(closure)
 }
 
 /// Rebind an exact retained execution realization to the one authority field
@@ -499,10 +463,8 @@ fn execution_properties(
     resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
-    let inspection = state.isolation.inspection();
-    execution_properties_from_inspection(
-        inspection,
-        state.isolation.is_enforced(),
+    ryeos_app::execution_realization::execution_properties(
+        state,
         filesystem_authority_ceiling,
         network_authority_ceiling,
         target_requirement,
@@ -579,30 +541,15 @@ fn execution_properties_from_inspection(
     resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
-    let mut properties = execution_authority_properties(
+    ryeos_app::execution_realization::execution_properties_from_inspection(
+        inspection,
+        isolation_enforced,
         filesystem_authority_ceiling,
         network_authority_ceiling,
         target_requirement,
         resource_authority_ceiling,
         selected_resources,
-    )?;
-    properties.insert(
-        "isolation_enforced".to_owned(),
-        serde_json::Value::Bool(isolation_enforced),
-    );
-    properties.insert(
-        "isolation_policy_digest".to_owned(),
-        inspection
-            .digest
-            .clone()
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
-    );
-    properties.insert(
-        "isolation_backend_inspection_digest".to_owned(),
-        serde_json::Value::String(isolation_backend_inspection_digest(&inspection.backend)?),
-    );
-    Ok(properties)
+    )
 }
 
 /// Parent/workload ceilings and requested suitability are requirements, not
@@ -616,27 +563,13 @@ fn execution_authority_properties(
     resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
-    let mut properties =
-        authority_ceiling_properties(filesystem_authority_ceiling, network_authority_ceiling);
-    properties.insert(
-        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
-        serde_json::to_value(resource_authority_ceiling)?,
-    );
-    properties.insert(
-        ryeos_engine::contracts::ExecutionTargetRequirement::REALIZATION_PROPERTY.to_owned(),
-        target_requirement
-            .map(|target| {
-                lillux::canonical_json(&serde_json::to_value(target)?).map_err(anyhow::Error::from)
-            })
-            .transpose()?
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
-    );
-    properties.insert(
-        ryeos_engine::contracts::ExecutionResourceSelection::REALIZATION_PROPERTY.to_owned(),
-        resource_selection_property(selected_resources)?,
-    );
-    Ok(properties)
+    ryeos_app::execution_realization::execution_authority_properties(
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        target_requirement,
+        resource_authority_ceiling,
+        selected_resources,
+    )
 }
 
 // Keep structured evidence in the owning execution contract, using the same
@@ -645,40 +578,14 @@ fn execution_authority_properties(
 fn resource_selection_property(
     selections: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<serde_json::Value> {
-    for selection in selections {
-        selection.validate()?;
-    }
-    Ok(serde_json::Value::String(lillux::canonical_json(
-        &serde_json::to_value(selections)?,
-    )?))
+    ryeos_app::execution_realization::resource_selection_property(selections)
 }
 
 fn authority_ceiling_properties(
     filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
 ) -> BTreeMap<String, serde_json::Value> {
-    let filesystem = match filesystem {
-        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => "node_policy",
-        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
-            "captured_execution"
-        }
-    };
-    let network = match network {
-        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy => "node_policy",
-        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated => "isolated",
-    };
-    [
-        (
-            IsolationFilesystemAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
-            serde_json::Value::String(filesystem.to_owned()),
-        ),
-        (
-            IsolationNetworkAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
-            serde_json::Value::String(network.to_owned()),
-        ),
-    ]
-    .into_iter()
-    .collect()
+    ryeos_app::execution_realization::authority_ceiling_properties(filesystem, network)
 }
 
 /// Path-free identity of the complete backend observation that can affect a
@@ -687,90 +594,32 @@ fn authority_ceiling_properties(
 fn isolation_backend_inspection_digest(
     inspection: &ryeos_engine::isolation::IsolationBackendInspection,
 ) -> Result<String> {
-    let value = serde_json::to_value(inspection)?;
-    Ok(lillux::sha256_hex(
-        lillux::canonical_json(&value)?.as_bytes(),
-    ))
+    ryeos_app::execution_realization::isolation_backend_inspection_digest(inspection)
 }
 
 fn verify_realization_components(
     state: &AppState,
     realization: &AdmittedExecutionRealization,
 ) -> Result<()> {
-    let authority = state.state_store.pinned_state_authority()?;
-    realization
-        .verify_retained_components(&authority.cas_store()?, &authority.large_object_store()?)
+    ryeos_app::execution_realization::verify_realization_components(state, realization)
 }
 
 fn load_realization(state: &AppState, hash: &str) -> Result<AdmittedExecutionRealization> {
-    let authority = state.state_store.pinned_state_authority()?;
-    let value = authority
-        .cas_store()?
-        .get_object(hash)?
-        .ok_or_else(|| anyhow::anyhow!("admitted execution realization {hash} is missing"))?;
-    let realization = AdmittedExecutionRealization::from_current_value(&value)?;
-    if realization.content_hash()? != hash {
-        anyhow::bail!("admitted execution realization {hash} has the wrong content hash");
-    }
-    Ok(realization)
+    ryeos_app::execution_realization::load_realization(state, hash)
 }
 
 fn verify_node_evidence(
     state: &AppState,
     node: &ryeos_app::execution_identity_probe::NodeExecutionIdentity,
 ) -> Result<()> {
-    let authority = state.state_store.pinned_state_authority()?;
-    let cas = authority.cas_store()?;
-    let identity_value = cas
-        .get_object(&node.identity_hash)?
-        .ok_or_else(|| anyhow::anyhow!("node execution substrate identity is missing"))?;
-    let identity = ryeos_state::objects::ExecutionIdentity::from_current_value(&identity_value)?;
-    if identity != node.identity || identity.identity_digest()? != node.digest {
-        anyhow::bail!("published node execution substrate identity contradicts boot evidence");
-    }
-    verify_attestation(&authority, &node.attestation_hash, &node.identity_hash)?;
-    let head = state
-        .state_store
-        .with_state_db(|db| {
-            db.read_generic_head_ref(
-                ryeos_app::execution_identity_probe::EXECUTION_IDENTITY_HEAD_NAMESPACE,
-                ryeos_app::execution_identity_probe::EXECUTION_IDENTITY_HEAD_NAME,
-            )
-        })?
-        .ok_or_else(|| anyhow::anyhow!("node execution substrate head is absent"))?;
-    if head.target_hash != node.attestation_hash {
-        anyhow::bail!("node execution substrate head does not root the boot attestation");
-    }
-    Ok(())
+    ryeos_app::execution_realization::verify_node_evidence(state, node)
 }
 
 fn verify_realization_node_evidence(
     state: &AppState,
     realization: &AdmittedExecutionRealization,
 ) -> Result<()> {
-    let current = state
-        .extensions
-        .get::<ryeos_app::execution_identity_probe::NodeExecutionIdentity>()
-        .ok_or_else(|| anyhow::anyhow!("current node execution substrate is unavailable"))?;
-    verify_node_evidence(state, &current)?;
-    if realization.substrate_identity_hash != current.identity_hash
-        || realization.substrate_attestation_hash != current.attestation_hash
-    {
-        anyhow::bail!(
-            "admitted execution realization belongs to a different node execution substrate"
-        );
-    }
-    let authority = state.state_store.pinned_state_authority()?;
-    let value = authority
-        .cas_store()?
-        .get_object(&realization.substrate_identity_hash)?
-        .ok_or_else(|| anyhow::anyhow!("realization substrate identity is missing"))?;
-    ryeos_state::objects::ExecutionIdentity::from_current_value(&value)?;
-    verify_attestation(
-        &authority,
-        &realization.substrate_attestation_hash,
-        &realization.substrate_identity_hash,
-    )
+    ryeos_app::execution_realization::verify_realization_node_evidence(state, realization)
 }
 
 fn verify_attestation(
@@ -778,88 +627,14 @@ fn verify_attestation(
     attestation_hash: &str,
     identity_hash: &str,
 ) -> Result<()> {
-    let value = authority
-        .cas_store()?
-        .get_object(attestation_hash)?
-        .ok_or_else(|| anyhow::anyhow!("execution substrate attestation is missing"))?;
-    let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
-    if attestation.subject_hash != identity_hash
-        || attestation.claim != ryeos_app::execution_identity_probe::EXECUTION_IDENTITY_CLAIM
-        || attestation.policy != ryeos_app::execution_identity_probe::EXECUTION_IDENTITY_POLICY
-    {
-        anyhow::bail!("execution substrate attestation has the wrong subject or policy");
-    }
-    attestation.verify_with_trust_store(authority.trust_store())?;
-    if attestation.is_expired_at(&lillux::time::iso8601_now())? {
-        anyhow::bail!("execution substrate attestation is expired");
-    }
-    Ok(())
+    ryeos_app::execution_realization::verify_attestation(authority, attestation_hash, identity_hash)
 }
 
 fn execution_components(
     state: &AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> Result<Vec<ExecutionComponentReference>> {
-    let external = resolution
-        .composed
-        .derived
-        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
-        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
-        .transpose()?;
-    let source = resolution
-        .composed
-        .derived
-        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
-        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
-        .transpose()?;
-    let authority = state.state_store.pinned_state_authority()?;
-    let cas = authority.cas_store()?;
-    let mut components = Vec::new();
-    if let Some(set) = external.as_ref() {
-        for external in set.iter() {
-            let object = cas.get_object(&external.manifest_hash)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "external realization `{}` manifest {} is missing",
-                    external.id,
-                    external.manifest_hash
-                )
-            })?;
-            let kind = object
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("external realization manifest has no kind"))?;
-            if !ryeos_state::object_closure::current_object_kinds().contains(&kind) {
-                anyhow::bail!("external realization manifest kind `{kind}` is unsupported");
-            }
-            components.push(ExecutionComponentReference {
-                role: format!("external/{}", external.id),
-                content_digest: external.manifest_hash.clone(),
-                material: ExecutionComponentStorage::CasObject {
-                    hash: external.manifest_hash.clone(),
-                    expected_kind: kind.to_owned(),
-                },
-            });
-        }
-    }
-    if let Some(source) = source {
-        let value = cas
-            .get_object(&source.binding_hash)?
-            .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
-        let binding = ryeos_state::objects::EffectiveSourceBinding::from_value(&value)?;
-        if binding.digest()? != source.binding_hash || binding.owner_key()? != source.owner_key {
-            anyhow::bail!("admitted source binding contradicts its effective projection");
-        }
-        components.push(ExecutionComponentReference {
-            role: format!("source/{}", source.owner_key),
-            content_digest: source.binding_hash.clone(),
-            material: ExecutionComponentStorage::CasObject {
-                hash: source.binding_hash,
-                expected_kind: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_KIND.to_owned(),
-            },
-        });
-    }
-    components.sort_by(|left, right| left.role.cmp(&right.role));
-    Ok(components)
+    ryeos_app::execution_realization::execution_components(state, resolution)
 }
 
 #[cfg(test)]
@@ -891,7 +666,7 @@ mod tests {
             "external_endpoint_binding": if external { serde_json::json!({
                 "binding_id":"evaluate", "binding_digest":"9".repeat(64)
             }) } else { serde_json::Value::Null },
-            "resource_authority_ceiling":"node_policy", "cache_key":"properties",
+            "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"properties",
             "executor_authorities":[]
         }))
         .unwrap()

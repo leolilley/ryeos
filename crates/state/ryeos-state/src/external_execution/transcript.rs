@@ -76,6 +76,16 @@ impl ChannelPhase {
             // retained after a racing cancellation, but never restores input
             // or success authority once the channel is stopping.
             RuntimeApplied { .. } if matches!(self, Self::Running | Self::Stopping) => self,
+            QualificationComplete { .. } if self == Self::Running && before_execution_deadline => {
+                Self::Stopping
+            }
+            QualificationScopeSettled { observation }
+                if self == Self::Stopping
+                    && completion
+                        == Some(observation.observation.completion_request_digest.as_str()) =>
+            {
+                Self::Stopped
+            }
             ProtocolBytes { .. } if self == Self::Running && before_execution_deadline => {
                 Self::Running
             }

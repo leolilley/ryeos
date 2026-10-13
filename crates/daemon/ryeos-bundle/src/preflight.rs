@@ -890,6 +890,7 @@ enum PreflightRawRequestBody {
     Raw,
     Text,
     Json,
+    ObjectsPutV1,
 }
 
 #[derive(Debug, Deserialize)]

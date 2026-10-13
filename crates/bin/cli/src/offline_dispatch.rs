@@ -57,13 +57,13 @@ pub async fn try_offline_dispatch(
     // Freeze one registered generation before consuming command or bundle
     // records. The caller's earlier snapshot is only a fast dispatch hint; a
     // standalone execution re-verifies it with the retained trust snapshot.
-    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+    let node_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })
     .map_err(local_err)?;
     let isolation =
-        ryeos_app::engine_init::load_locked_registered_definition_isolation(&node_config.app_root)
+        ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&node_config.app_root)
             .map_err(|error| CliError::Local {
                 detail: format!("load node isolation policy: {error:#}"),
             })?;
@@ -88,7 +88,7 @@ pub async fn try_offline_dispatch(
         crate::node_descriptors::load_verified_policy_snapshot_with_trust(app_root, node_trust)
             .map_err(local_err)?;
     let command_registration = node_policy
-        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()
         .map_err(local_err)?;
 
     // 1. Consume bundle and command records from that same generation.
@@ -142,7 +142,7 @@ pub async fn try_offline_dispatch(
         &bundle_roots,
         std::sync::Arc::clone(&isolation),
         node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
             .map_err(local_err)?,
     )?;
 
@@ -176,14 +176,14 @@ pub async fn try_offline_dispatch(
             .is_some()
     {
         let execution_isolation =
-            ryeos_app::engine_init::load_locked_registered_isolation(&node_config.app_root)
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&node_config.app_root)
                 .map_err(local_err)?;
         let execution_engine = boot_engine(
             &node_config,
             project_path,
             &bundle_roots,
             std::sync::Arc::clone(&execution_isolation),
-            node_policy.require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            node_policy.require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
                 .map_err(local_err)?,
         )?;
         let execution_item = effective_item(
@@ -263,11 +263,11 @@ pub async fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    config: &ryeos_app::config::Config,
+    config: &ryeos_node_runtime::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
     isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
-    execution_policy: &ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+    execution_policy: &ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -275,7 +275,7 @@ fn boot_engine(
         Some(PathBuf::from(project_path))
     };
 
-    ryeos_app::engine_init::build_registered_engine_for_roots(
+    ryeos_node_runtime::engine_init::build_registered_engine_for_roots(
         config,
         bundle_roots,
         project_root.as_deref(),
@@ -644,10 +644,13 @@ fn exec_tool(
                 expand_template(&template, &params_json, project_path)
             }
             ryeos_engine::runtime::RuntimeArgument::Literal(literal) => Ok(literal.literal),
-            ryeos_engine::runtime::RuntimeArgument::SourceMember(_) => Err(CliError::Local {
-                detail: "offline execution cannot redeem admitted source member arguments"
-                    .to_owned(),
-            }),
+            ryeos_engine::runtime::RuntimeArgument::SourceMember(_)
+            | ryeos_engine::runtime::RuntimeArgument::ExecutionProjectFile(_) => {
+                Err(CliError::Local {
+                    detail: "offline execution cannot redeem admitted source member arguments"
+                        .to_owned(),
+                })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -768,6 +771,7 @@ fn exec_tool(
                 target_channels: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
+                verbatim_env_names: &[],
             },
         )
         .map_err(|error| CliError::Local {
@@ -966,8 +970,8 @@ fn run_standalone_service(
 }
 
 fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(app_root);
-    match ryeos_app::state_lock::StateLock::acquire(&lock_path) {
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(app_root);
+    match ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path) {
         Ok(lock) => {
             drop(lock);
             Ok(())
@@ -1377,7 +1381,7 @@ mod tests {
                 .join("../../../bundles/.ai/node/init/profiles/full.yaml");
             let raw = std::fs::read_to_string(&source).unwrap();
             let body = lillux::signature::strip_signature_lines(&raw);
-            let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+            let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                 serde_yaml::from_str(&body).unwrap();
             for (name, source_policy) in profile.policies() {
                 let mut policy = source_policy.clone();
@@ -1714,7 +1718,7 @@ else:
     fn registered_definition_discovery_retains_generation_fencing() {
         let fixture = Fixture::new();
         let definitions =
-            ryeos_app::engine_init::load_locked_registered_definition_isolation(&fixture.system)
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&fixture.system)
                 .unwrap();
         let guard = definitions.begin_registered_generation_operation().unwrap();
         assert!(definitions.registered_generation_node_trust().is_some());
@@ -1730,7 +1734,7 @@ else:
                 .is_err()
         );
         let execution =
-            ryeos_app::engine_init::load_locked_registered_isolation(&fixture.system).unwrap();
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&fixture.system).unwrap();
         assert_eq!(definitions.digest(), execution.digest());
         definitions.ensure_registered_generation_current().unwrap();
         drop(guard);

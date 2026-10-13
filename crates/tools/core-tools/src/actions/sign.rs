@@ -112,7 +112,7 @@ pub fn run_sign_batch(
             .map(|d| d.join("ryeos"))
             .expect("could not determine XDG data directory"),
     };
-    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root)
         .context("load retained node isolation generation")?;
     let bundle_roots = isolation
         .registered_generation_bundle_roots()

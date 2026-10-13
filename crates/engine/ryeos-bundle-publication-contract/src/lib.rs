@@ -30,6 +30,18 @@ pub const BUNDLE_CATALOG_PUBLICATION_KIND: &str = "bundle_catalog_publication";
 pub const BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA: &str = "ryeos.bundle_payload_ownership.v1";
 pub const BUNDLE_PAYLOAD_OWNERSHIP_KIND: &str = "bundle_payload_ownership";
 
+/// Closed release and qualification identities shared by policy and producers.
+pub const BUNDLE_GENERATION_RELEASE_CLAIM: &str = "ryeos.bundle-generation.release.v1";
+pub const BUNDLE_SET_RELEASE_CLAIM: &str = "ryeos.bundle-set.release.v1";
+pub const SUBSTRATE_RELEASE_CLAIM: &str = "ryeos.substrate-release.v1";
+pub const BUNDLE_CATALOG_RELEASE_CLAIM: &str = "ryeos.bundle-catalog-publication.v1";
+pub const BUNDLE_PUBLICATION_POLICY: &str = "ryeos.bundle-publication.v1";
+pub const PORTABLE_QUALIFIER: &str = "tool:ryeos/bundle-release/portable-qualify";
+pub const SUBSTRATE_QUALIFIER: &str = "tool:ryeos/bundle-release/substrate-qualify";
+pub const CORE_SEED_QUALIFIER: &str = "tool:ryeos/bundle-release/core-seed-qualify";
+pub const CORE_SEED_QUALIFICATION_POLICY: &str = "config:bundle-release/core-seed-qualification";
+pub const CORE_SEED_QUALIFICATION_CLAIM: &str = "substrate_core_seed_checks_v1";
+
 pub const MAX_WIRE_BYTES: usize = 64 * 1024;
 pub const MAX_EVIDENCE: usize = 64;
 pub const MAX_BUNDLES: usize = 1024;

@@ -13,6 +13,7 @@ use crate::{
 };
 
 const RECORDS: &str = "lillux-host-service";
+const HOST_SERVICE_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("host-service");
 const LAUNCH_RECORD: &str = "launch.json";
 const MANAGER_RECORD: &str = "manager.json";
 const STATE_DIRECTORY: &str = "state";
@@ -23,6 +24,22 @@ const NATIVE_SCRIPT_INTERPRETER: &str = "/bin/sh";
 // `sv` probes `ok` before submitting its request through `control`. Both are
 // native runit IPC endpoints, deliberately contained in this adapter.
 const OPERATOR_SUPERVISOR_FIFOS: [&str; 2] = ["ok", CONTROL];
+const SUPERVISE_DIRECTORY: &str = "supervise";
+// runsv supervises `<service>/log` as the service's logger and feeds it the
+// service's stdout. `sv status` also probes the logger's `ok`, so the account
+// gets that probe only; logger control stays with the administrator.
+const LOG_SERVICE: &str = "log";
+const LOGGER_STATUS_FIFOS: [&str; 1] = ["ok"];
+// Logger output lives outside the service definition, under a base named for
+// this adapter rather than for any client: one directory per service name,
+// owned by the service's account, beneath an administrator-owned base.
+const LOG_ROOT: &str = "/var/log/lillux-host-service";
+const LOG_DIRECTORY_TOOL: &str = "/usr/bin/install";
+const LOG_CREDENTIAL_TOOL: &str = "/usr/bin/chpst";
+const LOG_WRITER_TOOL: &str = "/usr/bin/svlogd";
+// Every association now carries an adapter-rendered logger. Associations
+// published under an earlier contract are refused and must be re-provisioned.
+const RUNIT_INTEGRATION_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,6 +172,11 @@ impl HostServiceController for RunitService {
     fn request_down(&self) -> Result<()> {
         self.control("down")
     }
+    fn inhibit_restart(&self) -> Result<()> {
+        // runsv `o` marks the service wanted down without sending TERM/CONT
+        // to the running process; `down` would signal it mid-exit.
+        self.control("once")
+    }
     fn capture_upgrade_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(RunitUpgradeState {
             schema_version: 1,
@@ -172,6 +194,7 @@ impl HostServiceController for RunitService {
                 None,
                 b"",
                 0o644,
+                HOST_SERVICE_TEMP_PURPOSE,
             ),
             (false, Some(file)) => self.directory.remove_pinned_regular_if_same(&file),
             _ => Ok(()),
@@ -254,7 +277,7 @@ fn validate_root_executable(path: &Path, label: &str) -> Result<()> {
 fn manager_bytes() -> Result<Vec<u8>> {
     Ok(
         crate::canonical_json(&serde_json::to_value(RunitConfiguration {
-            schema_version: 1,
+            schema_version: RUNIT_INTEGRATION_VERSION,
             control_executable: PathBuf::from("/usr/bin/sv"),
         })?)?
         .into_bytes(),
@@ -277,7 +300,10 @@ fn run_program(launch: &HostServiceLaunch) -> Result<Vec<u8>> {
         .executable
         .to_str()
         .context("host executable is not UTF-8")?;
-    let mut body = format!("#!{NATIVE_SCRIPT_INTERPRETER}\n");
+    // runsv pipes only stdout to the service's log; join stderr to it so a
+    // refusal written before the daemon's own logging starts is captured
+    // rather than surviving only in the supervisor's process title.
+    let mut body = format!("#!{NATIVE_SCRIPT_INTERPRETER}\nexec 2>&1\n");
     for (name, value) in &launch.environment {
         if name.is_empty()
             || !name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
@@ -301,6 +327,32 @@ fn run_program(launch: &HostServiceLaunch) -> Result<Vec<u8>> {
     Ok(body.into_bytes())
 }
 
+/// Logger program for the service's `log` sub-service. It runs as root under
+/// runsv only long enough to establish the exact log directories, then drops
+/// to the service account for the log writer. Account ids and paths are fixed
+/// at provisioning so the rendered bytes are part of the association contract.
+fn log_program(name: &str, launch: &HostServiceLaunch) -> Result<Vec<u8>> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        bail!("host service name must be one exact path component");
+    }
+    let (uid, gid) = launch.account.unix_ids().map_err(anyhow::Error::msg)?;
+    let root = shell_quote(LOG_ROOT)?;
+    let directory = shell_quote(&format!("{LOG_ROOT}/{name}"))?;
+    Ok(format!(
+        "#!{NATIVE_SCRIPT_INTERPRETER}\nexec 2>&1\n\
+         {LOG_DIRECTORY_TOOL} -d -o 0 -g 0 -m 0755 {root}\n\
+         {LOG_DIRECTORY_TOOL} -d -o {uid} -g {gid} -m 0750 {directory}\n\
+         exec {LOG_CREDENTIAL_TOOL} -u :{uid}:{gid} {LOG_WRITER_TOOL} -tt {directory}\n"
+    )
+    .into_bytes())
+}
+
+fn validate_logger_tools() -> Result<()> {
+    validate_root_executable(Path::new(LOG_DIRECTORY_TOOL), "logger directory tool")?;
+    validate_root_executable(Path::new(LOG_CREDENTIAL_TOOL), "logger credential tool")?;
+    validate_root_executable(Path::new(LOG_WRITER_TOOL), "logger writer")
+}
+
 fn ensure_root_regular(
     directory: &PinnedDirectory,
     name: &str,
@@ -308,7 +360,13 @@ fn ensure_root_regular(
     mode: u32,
 ) -> Result<()> {
     let Some(existing) = directory.open_pinned_regular(OsStr::new(name), false)? else {
-        return directory.atomic_write_pinned_if_same(OsStr::new(name), None, bytes, mode);
+        return directory.atomic_write_pinned_if_same(
+            OsStr::new(name),
+            None,
+            bytes,
+            mode,
+            HOST_SERVICE_TEMP_PURPOSE,
+        );
     };
     existing.require_owner(0)?;
     let current = existing.read_stable_bounded(&existing.observation()?, 64 * 1024)?;
@@ -360,6 +418,14 @@ fn require_root_regular(directory: &PinnedDirectory, name: &str, expected: &[u8]
     Ok(())
 }
 
+fn require_logger(directory: &PinnedDirectory, name: &str, launch: &HostServiceLaunch) -> Result<()> {
+    let logger = directory
+        .open_child_directory(OsStr::new(LOG_SERVICE))?
+        .context("configured host service has no adapter logger")?;
+    logger.require_owner(0)?;
+    require_root_regular(&logger, RUN_PROGRAM, &log_program(name, launch)?)
+}
+
 fn records(directory: &PinnedDirectory) -> Result<PinnedDirectory> {
     let records = directory
         .open_child_directory(OsStr::new(RECORDS))?
@@ -372,6 +438,7 @@ fn records(directory: &PinnedDirectory) -> Result<PinnedDirectory> {
 
 fn require_published_service(
     directory: &PinnedDirectory,
+    name: &str,
     launch: &HostServiceLaunch,
 ) -> Result<()> {
     directory.require_owner(0)?;
@@ -380,6 +447,9 @@ fn require_published_service(
     require_matching_launch_record(&records, launch)?;
     ensure_root_regular(&records, MANAGER_RECORD, &manager_bytes()?, 0o644)?;
     ensure_root_regular(directory, RUN_PROGRAM, &run_program(launch)?, 0o755)?;
+    // runsv selects its logger only when it starts the service, so a logger
+    // added to a live association would not run. It must already be exact.
+    require_logger(directory, name, launch)?;
     // `down` is native desired state, not realization content. Recreating it
     // during an idempotent provision would silently stop an already-running
     // service, so only first publication creates this marker.
@@ -394,13 +464,22 @@ fn require_published_service(
     Ok(())
 }
 
-fn build_staged_service(directory: &PinnedDirectory, launch: &HostServiceLaunch) -> Result<()> {
+fn build_staged_service(
+    directory: &PinnedDirectory,
+    name: &str,
+    launch: &HostServiceLaunch,
+) -> Result<()> {
     directory.require_owner(0)?;
     let records = directory.open_or_create_child(OsStr::new(RECORDS), 0o755)?;
     records.require_owner(0)?;
     ensure_root_regular(&records, LAUNCH_RECORD, &canonical_launch(launch)?, 0o644)?;
     ensure_root_regular(&records, MANAGER_RECORD, &manager_bytes()?, 0o644)?;
     ensure_root_regular(directory, RUN_PROGRAM, &run_program(launch)?, 0o755)?;
+    // The logger must exist before activation: runsv decides whether the
+    // service has one only when it starts supervising the directory.
+    let logger = directory.open_or_create_child(OsStr::new(LOG_SERVICE), 0o755)?;
+    logger.require_owner(0)?;
+    ensure_root_regular(&logger, RUN_PROGRAM, &log_program(name, launch)?, 0o755)?;
     // This is the native *boot* disposition, not RyeOS's desired lifecycle
     // state. It leaves a newly associated service inert across a host reboot;
     // `sv up` may start the current supervisor instance without removing the
@@ -438,16 +517,20 @@ fn require_activation_link(name: &str, service_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn await_and_grant_operator_fifos(
+/// Wait for runsv's IPC endpoints beneath `service/supervise` and grant the
+/// account exactly `fifos`. The grant gives the `supervise` directory group
+/// traversal only; endpoints not named here stay administrator-only.
+fn await_and_grant_supervisor_fifos(
     service: &PinnedDirectory,
+    fifos: &[&str],
     account: &crate::ControllerAccount,
 ) -> Result<()> {
     let deadline = crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(5));
     loop {
-        if let Some(supervise) = service.open_child_directory(OsStr::new("supervise"))? {
+        if let Some(supervise) = service.open_child_directory(OsStr::new(SUPERVISE_DIRECTORY))? {
             supervise.require_owner(0)?;
             let mut ready = true;
-            for name in OPERATOR_SUPERVISOR_FIFOS {
+            for &name in fifos {
                 match supervise.entry_no_follow(OsStr::new(name))? {
                     Some(entry) if entry.entry_type == PinnedEntryType::Fifo => {}
                     Some(_) => bail!("runit supervisor {name} endpoint is not a FIFO"),
@@ -455,7 +538,7 @@ fn await_and_grant_operator_fifos(
                 }
             }
             if ready {
-                for name in OPERATOR_SUPERVISOR_FIFOS {
+                for &name in fifos {
                     account.grant_private_control_fifo(&supervise, OsStr::new(name))?;
                 }
                 return Ok(());
@@ -470,18 +553,21 @@ fn await_and_grant_operator_fifos(
 
 pub(super) fn provision(name: &str, launch: &HostServiceLaunch) -> Result<()> {
     crate::require_administrator()?;
+    // A logger whose tools are absent would only fail later, in a runsv
+    // restart loop. Refuse the association before publishing anything.
+    validate_logger_tools()?;
     let service_root = service_directory().context("runit is unavailable on this platform")?;
     let parent = PinnedDirectory::open_owned_hierarchy(&service_root, 0)?
         .context("runit service directory is absent")?;
     let service = match parent.open_child_directory(OsStr::new(name))? {
         Some(existing) => {
-            require_published_service(&existing, launch)?;
+            require_published_service(&existing, name, launch)?;
             existing
         }
         None => {
             let (staging_name, staging) =
                 parent.create_unique_child(".lillux-host-service-stage", 0o755)?;
-            build_staged_service(&staging, launch)?;
+            build_staged_service(&staging, name, launch)?;
             parent
                 .rename_child_directory_noreplace(&staging_name, OsStr::new(name), &staging)
                 .map_err(anyhow::Error::from)?;
@@ -491,7 +577,12 @@ pub(super) fn provision(name: &str, launch: &HostServiceLaunch) -> Result<()> {
         }
     };
     publish_activation_link(name, service.path())?;
-    await_and_grant_operator_fifos(&service, &launch.account)
+    await_and_grant_supervisor_fifos(&service, &OPERATOR_SUPERVISOR_FIFOS, &launch.account)?;
+    let logger = service
+        .open_child_directory(OsStr::new(LOG_SERVICE))?
+        .context("published runit service has no adapter logger")?;
+    logger.require_owner(0)?;
+    await_and_grant_supervisor_fifos(&logger, &LOGGER_STATUS_FIFOS, &launch.account)
 }
 
 pub(super) fn discover(name: &str) -> Result<Option<HostServiceInstallation>> {
@@ -509,7 +600,7 @@ pub(super) fn discover(name: &str) -> Result<Option<HostServiceInstallation>> {
     let configuration: RunitConfiguration = serde_json::from_slice(
         &configuration.read_stable_bounded(&configuration.observation()?, 16 * 1024)?,
     )?;
-    if configuration.schema_version != 1 {
+    if configuration.schema_version != RUNIT_INTEGRATION_VERSION {
         bail!("runit host integration contract is not current");
     }
     let launch_file = records
@@ -521,6 +612,7 @@ pub(super) fn discover(name: &str) -> Result<Option<HostServiceInstallation>> {
     )?;
     let _ = canonical_launch(&launch)?;
     require_root_regular(&directory, RUN_PROGRAM, &run_program(&launch)?)?;
+    require_logger(&directory, name, &launch)?;
     require_activation_link(name, directory.path())?;
     if let Some(marker) = directory.open_pinned_regular(OsStr::new(DOWN_MARKER), false)? {
         marker.require_owner(0)?;
@@ -570,7 +662,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rendered,
-            "#!/bin/sh\nexport HOME='/home/example/it'\"'\"'s-safe'\nexport PATH='/usr/bin:/bin'\nexec '/usr/bin/ryeosd' 'host-service' '--app-root' '/home/example/.local/share/ryeos'\n"
+            "#!/bin/sh\nexec 2>&1\nexport HOME='/home/example/it'\"'\"'s-safe'\nexport PATH='/usr/bin:/bin'\nexec '/usr/bin/ryeosd' 'host-service' '--app-root' '/home/example/.local/share/ryeos'\n"
         );
     }
 
@@ -624,5 +716,56 @@ mod tests {
     #[test]
     fn operator_delegation_covers_runit_probe_before_control() {
         assert_eq!(OPERATOR_SUPERVISOR_FIFOS, ["ok", "control"]);
+    }
+
+    #[test]
+    fn logger_delegation_is_status_probe_only() {
+        assert_eq!(LOGGER_STATUS_FIFOS, ["ok"]);
+        assert!(!LOGGER_STATUS_FIFOS.contains(&CONTROL));
+    }
+
+    #[test]
+    fn log_program_embeds_exact_account_and_directory_without_parsing_records() {
+        let rendered =
+            String::from_utf8(log_program("ryeos-4b17", &launch(serde_json::json!({}))).unwrap())
+                .unwrap();
+        assert_eq!(
+            rendered,
+            "#!/bin/sh\nexec 2>&1\n\
+             /usr/bin/install -d -o 0 -g 0 -m 0755 '/var/log/lillux-host-service'\n\
+             /usr/bin/install -d -o 1000 -g 1000 -m 0750 '/var/log/lillux-host-service/ryeos-4b17'\n\
+             exec /usr/bin/chpst -u :1000:1000 /usr/bin/svlogd -tt '/var/log/lillux-host-service/ryeos-4b17'\n"
+        );
+
+        let mut other = serde_json::to_value(launch(serde_json::json!({}))).unwrap();
+        other["account"]["uid"] = 1001.into();
+        other["account"]["gid"] = 1002.into();
+        let other: HostServiceLaunch = serde_json::from_value(other).unwrap();
+        let other = String::from_utf8(log_program("ryeos-4b17", &other).unwrap()).unwrap();
+        assert!(other.contains("-o 1001 -g 1002 -m 0750"));
+        assert!(other.contains("chpst -u :1001:1002 "));
+        assert_ne!(other, rendered);
+    }
+
+    #[test]
+    fn log_program_quotes_the_service_name_and_rejects_non_components() {
+        let rendered =
+            String::from_utf8(log_program("it's", &launch(serde_json::json!({}))).unwrap())
+                .unwrap();
+        assert!(rendered.contains("'/var/log/lillux-host-service/it'\"'\"'s'"));
+        for name in ["", ".", "..", "a/b", "nul\0name", "line\nbreak"] {
+            assert!(log_program(name, &launch(serde_json::json!({}))).is_err(), "{name:?}");
+        }
+        let mut root = serde_json::to_value(launch(serde_json::json!({}))).unwrap();
+        root["account"]["uid"] = 0.into();
+        let root: HostServiceLaunch = serde_json::from_value(root).unwrap();
+        assert!(log_program("ryeos-4b17", &root).is_err());
+    }
+
+    #[test]
+    fn integration_contract_records_the_adapter_logger_generation() {
+        let manager: serde_json::Value = serde_json::from_slice(&manager_bytes().unwrap()).unwrap();
+        assert_eq!(manager["schema_version"], RUNIT_INTEGRATION_VERSION);
+        assert_eq!(RUNIT_INTEGRATION_VERSION, 2);
     }
 }

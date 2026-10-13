@@ -17,10 +17,15 @@ fn session_launch_context(
     )
 }
 
+/// A minted, activated browser session: its `session:` context and the
+/// launch attachment its UI services are dispatched under.
 fn mint_session(
     state: &ryeos_app::state::AppState,
     project_path: Option<String>,
-) -> HandlerContext {
+) -> (
+    HandlerContext,
+    Arc<ryeos_ui::browser_session::AdmittedBindingAttachment>,
+) {
     let (session_id, token) = test_state::mint_launch(state, session_launch_context(project_path));
     assert_eq!(
         get_ui_state(state)
@@ -29,71 +34,99 @@ fn mint_session(
             .consume_launch_token(&token),
         Some(session_id.clone())
     );
-    HandlerContext::new(
-        format!("session:{session_id}"),
-        vec!["ui.read".into()],
-        false,
+    let session = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .expect("live browser session");
+    let attachment = session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("launch attachment")
+        .clone();
+    (
+        HandlerContext::new(
+            format!("session:{session_id}"),
+            vec!["ui.read".into()],
+            false,
+        ),
+        attachment,
     )
 }
 
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn browser_boot_sequence_endpoints_accept_same_session() {
-    let (_tmp, state) = test_state::build_test_state_with_live_bundles();
-    let ctx = mint_session(&state, None);
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let (ctx, attachment) = mint_session(&state, None);
     let state = Arc::new(state);
 
-    let session = (ryeos_ui::handlers::ui_session_current::DESCRIPTOR.handler)(
-        json!(null),
-        ctx.clone(),
-        state.clone(),
+    let session = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_session_current::DESCRIPTOR.handler)(
+            json!(null),
+            ctx.clone(),
+            state.clone(),
+        ),
     )
     .await
     .expect("session/current should succeed");
     assert_eq!(session["surface_ref"], "surface:ryeos/ui/base");
 
-    let items = (ryeos_ui::handlers::ui_items::ITEMS_LIST_DESCRIPTOR.handler)(
-        json!({
-            "kind": "surface",
-            "query": "ryeos/ryeos-ui/base",
-            "limit": 1
-        }),
-        ctx.clone(),
-        state.clone(),
+    let items = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_items::ITEMS_LIST_DESCRIPTOR.handler)(
+            json!({
+                "kind": "surface",
+                "query": "ryeos/ryeos-ui/base",
+                "limit": 1
+            }),
+            ctx.clone(),
+            state.clone(),
+        ),
     )
     .await
     .expect("items list should succeed");
     assert_eq!(items["items"][0]["canonical_ref"], "surface:ryeos/ui/base");
 
-    let effective = (ryeos_api::handlers::items_effective::DESCRIPTOR.handler)(
-        json!({
-            "canonical_ref": session["surface_ref"],
-            "expected_kind": "surface"
-        }),
-        ctx.clone(),
-        state.clone(),
+    let effective = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_api::handlers::items_effective::DESCRIPTOR.handler)(
+            json!({
+                "canonical_ref": session["surface_ref"],
+                "expected_kind": "surface"
+            }),
+            ctx.clone(),
+            state.clone(),
+        ),
     )
     .await
     .expect("items/effective should resolve RyeOS UI surface");
     assert_eq!(effective["canonical_ref"], "surface:ryeos/ui/base");
 
-    let dimension = (ryeos_ui::handlers::ui_dimension::DESCRIPTOR.handler)(
-        json!(null),
-        ctx.clone(),
-        state.clone(),
+    let dimension = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_dimension::DESCRIPTOR.handler)(
+            json!(null),
+            ctx.clone(),
+            state.clone(),
+        ),
     )
     .await
     .expect("RyeOS UI dimension should succeed");
     assert_eq!(dimension["schema_version"], "ryeos.ui.dimension.v1");
 
-    let inspection = (ryeos_ui::handlers::ui_items::ITEM_INSPECT_DESCRIPTOR.handler)(
-        json!({
-            "canonical_ref": "surface:ryeos/ui/base",
-            "include_raw": true,
-            "include_effective": true
-        }),
-        ctx,
-        state,
+    let inspection = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_items::ITEM_INSPECT_DESCRIPTOR.handler)(
+            json!({
+                "canonical_ref": "surface:ryeos/ui/base",
+                "include_raw": true,
+                "include_effective": true
+            }),
+            ctx,
+            state,
+        ),
     )
     .await
     .expect("item inspect should succeed");
@@ -113,7 +146,7 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
 
 #[tokio::test]
 async fn ryeos_admin_lists_reject_unknown_session_ids() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let ctx = HandlerContext::new("session:missing".into(), vec!["ui.read".into()], false);
 
@@ -128,16 +161,19 @@ async fn ryeos_admin_lists_reject_unknown_session_ids() {
         "threads list must reject invalid sessions"
     );
 
-    let schedules = (ryeos_ui::handlers::ui_schedules::DESCRIPTOR.handler)(
-        json!({}),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await;
-    assert!(
-        schedules.is_err(),
-        "schedules list must reject invalid sessions"
-    );
+    #[cfg(feature = "scheduling")]
+    {
+        let schedules = (ryeos_ui::handlers::ui_schedules::DESCRIPTOR.handler)(
+            json!({}),
+            ctx.clone(),
+            state.clone(),
+        )
+        .await;
+        assert!(
+            schedules.is_err(),
+            "schedules list must reject invalid sessions"
+        );
+    }
 
     let gc = (ryeos_ui::handlers::ui_gc::DESCRIPTOR.handler)(json!({}), ctx, state).await;
     assert!(gc.is_err(), "gc status must reject invalid sessions");
@@ -145,15 +181,18 @@ async fn ryeos_admin_lists_reject_unknown_session_ids() {
 
 #[tokio::test]
 async fn files_read_returns_lossy_utf8_for_invalid_bytes() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let project = tempfile::TempDir::new().unwrap();
     std::fs::write(project.path().join("bad.bin"), [b'a', 0xff, b'b']).unwrap();
 
-    let ctx = mint_session(&state, Some(project.path().display().to_string()));
-    let result = (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
-        json!({"root": "project", "path": "bad.bin"}),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.path().display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
+            json!({"root": "project", "path": "bad.bin"}),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("files.read should succeed");
@@ -165,7 +204,7 @@ async fn files_read_returns_lossy_utf8_for_invalid_bytes() {
 
 #[tokio::test]
 async fn files_read_blocks_parent_traversal_outside_project_root() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = tempfile::TempDir::new().unwrap();
     let project = root.path().join("project");
     let outside = root.path().join("outside");
@@ -173,11 +212,14 @@ async fn files_read_blocks_parent_traversal_outside_project_root() {
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("secret.txt"), "secret").unwrap();
 
-    let ctx = mint_session(&state, Some(project.display().to_string()));
-    let result = (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
-        json!({"root": "project", "path": "../outside/secret.txt"}),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
+            json!({"root": "project", "path": "../outside/secret.txt"}),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await;
 
@@ -187,7 +229,7 @@ async fn files_read_blocks_parent_traversal_outside_project_root() {
 #[cfg(unix)]
 #[tokio::test]
 async fn files_read_blocks_symlink_escape_from_project_root() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = tempfile::TempDir::new().unwrap();
     let project = root.path().join("project");
     let outside = root.path().join("outside");
@@ -196,11 +238,14 @@ async fn files_read_blocks_symlink_escape_from_project_root() {
     std::fs::write(outside.join("secret.txt"), "secret").unwrap();
     std::os::unix::fs::symlink(outside.join("secret.txt"), project.join("secret-link")).unwrap();
 
-    let ctx = mint_session(&state, Some(project.display().to_string()));
-    let result = (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
-        json!({"root": "project", "path": "secret-link"}),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
+            json!({"root": "project", "path": "secret-link"}),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await;
 
@@ -209,15 +254,18 @@ async fn files_read_blocks_symlink_escape_from_project_root() {
 
 #[tokio::test]
 async fn files_read_truncates_large_files() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let project = tempfile::TempDir::new().unwrap();
     std::fs::write(project.path().join("large.txt"), vec![b'a'; 256 * 1024 + 7]).unwrap();
 
-    let ctx = mint_session(&state, Some(project.path().display().to_string()));
-    let result = (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
-        json!({"root": "project", "path": "large.txt"}),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.path().display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_files::FILES_READ_DESCRIPTOR.handler)(
+            json!({"root": "project", "path": "large.txt"}),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("files.read should return truncated content");
@@ -229,17 +277,20 @@ async fn files_read_truncates_large_files() {
 
 #[tokio::test]
 async fn files_list_truncates_large_directories() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let project = tempfile::TempDir::new().unwrap();
     for i in 0..2005 {
         std::fs::write(project.path().join(format!("file-{i:04}.txt")), "x").unwrap();
     }
 
-    let ctx = mint_session(&state, Some(project.path().display().to_string()));
-    let result = (ryeos_ui::handlers::ui_files::FILES_LIST_DESCRIPTOR.handler)(
-        json!({"root": "project", "path": ""}),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.path().display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_files::FILES_LIST_DESCRIPTOR.handler)(
+            json!({"root": "project", "path": ""}),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("files.list should return truncated listing");
@@ -250,7 +301,7 @@ async fn files_list_truncates_large_directories() {
 
 #[tokio::test]
 async fn item_inspect_raw_is_bounded_and_lossy() {
-    let (_tmp, state) = test_state::build_test_state_with_live_bundles();
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_live_bundles();
     let project = tempfile::TempDir::new().unwrap();
     let tool_dir = project.path().join(".ai/tools/test");
     std::fs::create_dir_all(&tool_dir).unwrap();
@@ -258,15 +309,18 @@ async fn item_inspect_raw_is_bounded_and_lossy() {
     bytes[10] = 0xff;
     std::fs::write(tool_dir.join("huge.py"), bytes).unwrap();
 
-    let ctx = mint_session(&state, Some(project.path().display().to_string()));
-    let result = (ryeos_ui::handlers::ui_items::ITEM_INSPECT_DESCRIPTOR.handler)(
-        json!({
-            "canonical_ref": "tool:test/huge",
-            "include_raw": true,
-            "include_effective": false
-        }),
-        ctx,
-        Arc::new(state),
+    let (ctx, attachment) = mint_session(&state, Some(project.path().display().to_string()));
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_items::ITEM_INSPECT_DESCRIPTOR.handler)(
+            json!({
+                "canonical_ref": "tool:test/huge",
+                "include_raw": true,
+                "include_effective": false
+            }),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("item.inspect should succeed");
@@ -283,18 +337,21 @@ async fn item_inspect_raw_is_bounded_and_lossy() {
 
 #[tokio::test]
 async fn items_list_applies_filters_and_accepts_include_shadowed() {
-    let (_tmp, state) = test_state::build_test_state_with_live_bundles();
-    let ctx = mint_session(&state, None);
-    let result = (ryeos_ui::handlers::ui_items::ITEMS_LIST_DESCRIPTOR.handler)(
-        json!({
-            "kind": "tool",
-            "space": "bundle",
-            "query": "core/sign",
-            "limit": 1,
-            "include_shadowed": true
-        }),
-        ctx,
-        Arc::new(state),
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let (ctx, attachment) = mint_session(&state, None);
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment.clone(),
+        (ryeos_ui::handlers::ui_items::ITEMS_LIST_DESCRIPTOR.handler)(
+            json!({
+                "kind": "tool",
+                "space": "bundle",
+                "query": "core/sign",
+                "limit": 1,
+                "include_shadowed": true
+            }),
+            ctx,
+            Arc::new(state),
+        ),
     )
     .await
     .expect("items.list should succeed");

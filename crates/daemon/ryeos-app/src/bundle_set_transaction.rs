@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::path::{Path, PathBuf};
 
-use crate::bundle_transaction::BundleRegistryMutationLock;
+use ryeos_node_runtime::registry::BundleRegistryMutationLock;
 
 const JOURNAL_MAX_BYTES: u64 = 1024 * 1024;
 const COMPLETION_MAX_BYTES: usize = 256 * 1024;

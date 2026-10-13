@@ -149,6 +149,8 @@ fn ensure_handler_bins_built() -> PathBuf {
                 "-p",
                 "ryeos-handler-bins",
                 "--bins",
+                "--features",
+                "ryeos-handler-bins/directive-handlers,ryeos-handler-bins/graph-handlers",
                 "-p",
                 "ryeos-core-tools",
                 "-p",

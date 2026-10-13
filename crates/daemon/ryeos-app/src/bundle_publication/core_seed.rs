@@ -2,6 +2,7 @@
 //! No image digest or substrate receipt is an input: those are measured only
 //! after this exact signed/qualified Core generation is packaged.
 
+use ryeos_bundle_publication_contract::{CORE_SEED_QUALIFIER, CORE_SEED_QUALIFICATION_POLICY, CORE_SEED_QUALIFICATION_CLAIM};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,9 +11,6 @@ pub const BUILD_GRAPH: &str = "graph:ryeos/bundle-release/core-seed-build";
 pub const CAPTURE_GRAPH: &str = "graph:ryeos/bundle-release/core-seed-capture";
 pub const BUILD_RECIPE: &str = "config:bundle-release/core-seed-build-products";
 pub const CAPTURE_RECIPE: &str = "config:bundle-release/core-seed-capture-products";
-pub const QUALIFIER: &str = "tool:ryeos/bundle-release/core-seed-qualify";
-pub const QUALIFICATION_POLICY: &str = "config:bundle-release/core-seed-qualification";
-pub const QUALIFICATION_CLAIM: &str = "substrate_core_seed_checks_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,9 +149,9 @@ impl CoreSeedRecipeRequest {
                 "signed_core_seed",
                 "products/signed-core-seed",
                 "signed_core_seed_to_qualification",
-                QUALIFIER,
+                CORE_SEED_QUALIFIER,
                 "subject",
-                json!({"policy_ref":QUALIFICATION_POLICY,"required_claims":[QUALIFICATION_CLAIM]}),
+                json!({"policy_ref":CORE_SEED_QUALIFICATION_POLICY,"required_claims":[CORE_SEED_QUALIFICATION_CLAIM]}),
             ),
         };
         let bounds = json!({"maximum_entries":4096,"maximum_depth":32,
@@ -256,13 +254,13 @@ mod tests {
             catalog_namespace: "official".into(),
             bundle_publication_policy_section_digest: "a".repeat(64),
             trust_epoch: 1,
-            release_input: json!({"schema":"ryeos.bundle_release_input_plan.v1","project_path":"/source","bundle_name":"core",
+            release_input: json!({"schema":"ryeos.bundle_release_input_plan.v2","project_path":"/source","bundle_name":"core",
                 "authored_manifest":{"name":"core","version":"1.0.0","provides_kinds":[],"requires_kinds":[]},
                 "source_snapshot_hash":"b".repeat(64),"predecessor_generation_hash":null,
                 "target":{"kind":"triple","triple":"x86_64-unknown-linux-gnu"},"build_profile":"release",
                 "payload_ownership_item_ref":"config:bundle-release/payload-ownership","payload_ownership_content_hash":"c".repeat(64),
-                "payloads":[{"bundle":"core","binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools","build_class":"release","bundle_sets":["core"]}],
-                "cargo_packages":["ryeos-core-tools"],"build_classes":["release"],"requires_binary_build":true,
+                "payloads":[{"bundle":"core","binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools","build_class":"release","bundle_sets":["core"],"required_features":[]}],
+                "cargo_packages":["ryeos-core-tools"],"cargo_feature_selections":[{"cargo_package":"ryeos-core-tools","features":[]}],"build_classes":["release"],"requires_binary_build":true,
                 "clean_output_required":true,"ambient_target_reuse_allowed":false}),
             child_product_selections: vec![],
         }
@@ -321,7 +319,7 @@ mod tests {
         assert_eq!(relation["producer"]["canonical_ref"], CAPTURE_GRAPH);
         assert_eq!(
             relation["qualification"],
-            json!({"policy_ref":QUALIFICATION_POLICY,"required_claims":[QUALIFICATION_CLAIM]})
+            json!({"policy_ref":CORE_SEED_QUALIFICATION_POLICY,"required_claims":[CORE_SEED_QUALIFICATION_CLAIM]})
         );
         assert_eq!(relation["producer"]["parameters"], recipe.parameters());
         let qualifier_input = &body["product_relationships"]["relationships"][1];

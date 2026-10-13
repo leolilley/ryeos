@@ -3,10 +3,10 @@
 # ryeosd-hosted-workflow — hosted remote-node image that also runs
 # workflow workloads.
 #
-# Bakes the exact hosted-workflow bundle set: core + central-auth + standard +
-# hosted-node + codex + opencode. This is the remote
+# Bakes the exact hosted-workflow bundle set: core + scheduling + standard +
+# hosted-node + codex + render-sandbox + opencode. This is the remote
 # admission/execution substrate of the hosted-node image PLUS the
-# standard bundle's scheduler/graph/directive/knowledge services,
+# selected scheduling and Standard graph/directive/knowledge services,
 # kind schemas, and runtimes. Use this when a hosted node owns
 # schedules or runs graph/directive work; use ryeosd-hosted-node when
 # it should stay a lean control plane.
@@ -67,7 +67,7 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 
 COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex

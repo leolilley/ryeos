@@ -200,8 +200,9 @@ impl RuntimeDb {
     /// reserved. Unsettled snapshot work prevents early cleanup but cannot
     /// extend the provider lifetime indefinitely.
     pub fn recoverable_bootstrap_sources(&self, now_ms: i64) -> Result<Vec<String>> {
-        ensure!(now_ms > 0, "bootstrap recovery clock is invalid");
-        const DUE_SOURCE_SQL: &str = "FROM runtime_snapshot_bootstrap b
+        self.conn.with_sql(|conn| {
+            ensure!(now_ms > 0, "bootstrap recovery clock is invalid");
+            const DUE_SOURCE_SQL: &str = "FROM runtime_snapshot_bootstrap b
              WHERE b.occurrence_id IS NOT NULL
                AND NOT EXISTS (
                  SELECT 1 FROM runtime_snapshot_bootstrap_termination t
@@ -226,266 +227,279 @@ impl RuntimeDb {
                    )
                  )
                )";
-        // Persist the scan position with the selection itself. A wall-clock
-        // window can repeatedly skip later sources when one provider pass
-        // exceeds the recovery beat; a retained cursor cannot.
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let cursor: String = tx.query_row(
-            "SELECT last_operation_id FROM runtime_snapshot_bootstrap_recovery_cursor WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            cursor.is_empty() || lillux::valid_hash(&cursor),
-            "bootstrap recovery cursor is invalid"
-        );
-        let mut ids = {
-            let mut statement = tx.prepare(&format!(
-                "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id > ?2 ORDER BY b.operation_id LIMIT ?3"
-            ))?;
-            let selected = statement
-                .query_map(params![now_ms, &cursor, 64_i64], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            selected
-        };
-        if ids.len() < 64 && !cursor.is_empty() {
-            let remaining = 64_i64 - i64::try_from(ids.len())?;
-            let mut statement = tx.prepare(&format!(
-                "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id <= ?2 ORDER BY b.operation_id LIMIT ?3"
-            ))?;
-            ids.extend(
-                statement
-                    .query_map(params![now_ms, &cursor, remaining], |row| {
+            // Persist the scan position with the selection itself. A wall-clock
+            // window can repeatedly skip later sources when one provider pass
+            // exceeds the recovery beat; a retained cursor cannot.
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let cursor: String = tx.query_row(
+                "SELECT last_operation_id FROM runtime_snapshot_bootstrap_recovery_cursor WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                cursor.is_empty() || lillux::valid_hash(&cursor),
+                "bootstrap recovery cursor is invalid"
+            );
+            let mut ids = {
+                let mut statement = tx.prepare(&format!(
+                    "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id > ?2 ORDER BY b.operation_id LIMIT ?3"
+                ))?;
+                let selected = statement
+                    .query_map(params![now_ms, &cursor, 64_i64], |row| {
                         row.get::<_, String>(0)
                     })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-        }
-        for id in &ids {
-            let source = super::runtime_snapshot_bootstrap::read(&tx, id)?
-                .context("recoverable bootstrap source disappeared")?;
-            ensure!(
-                source.occurrence.is_some(),
-                "recoverable source lost occurrence"
-            );
-        }
-        if let Some(last) = ids.last() {
-            tx.execute(
-                "UPDATE runtime_snapshot_bootstrap_recovery_cursor SET last_operation_id=?1,updated_at_ms=?2 WHERE singleton=1",
-                params![last, now_ms],
-            )?;
-        }
-        tx.commit()?;
-        Ok(ids)
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                selected
+            };
+            if ids.len() < 64 && !cursor.is_empty() {
+                let remaining = 64_i64 - i64::try_from(ids.len())?;
+                let mut statement = tx.prepare(&format!(
+                    "SELECT b.operation_id {DUE_SOURCE_SQL} AND b.operation_id <= ?2 ORDER BY b.operation_id LIMIT ?3"
+                ))?;
+                ids.extend(
+                    statement
+                        .query_map(params![now_ms, &cursor, remaining], |row| {
+                            row.get::<_, String>(0)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+            }
+            for id in &ids {
+                let source = super::runtime_snapshot_bootstrap::read(&tx, id)?
+                    .context("recoverable bootstrap source disappeared")?;
+                ensure!(
+                    source.occurrence.is_some(),
+                    "recoverable source lost occurrence"
+                );
+            }
+            if let Some(last) = ids.last() {
+                tx.execute(
+                    "UPDATE runtime_snapshot_bootstrap_recovery_cursor SET last_operation_id=?1,updated_at_ms=?2 WHERE singleton=1",
+                    params![last, now_ms],
+                )?;
+            }
+            tx.commit()?;
+            Ok(ids)
+        })
     }
 
     pub fn bootstrap_has_unsettled_snapshot(&self, bootstrap_operation_id: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
-            [bootstrap_operation_id],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
+        self.conn.with_sql(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
+                [bootstrap_operation_id],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        })
     }
 
     pub fn bootstrap_termination_operation(
         &self,
         operation_id: &str,
     ) -> Result<Option<BootstrapTerminationRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| {
+            read(&conn, operation_id)
+        })
     }
 
     pub fn reserve_bootstrap_termination(
         &self,
         intent: &RuntimeSnapshotBootstrapTerminationIntent,
     ) -> Result<BootstrapTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
-            if existing.intent != *intent {
-                let mut same_core = existing.intent.clone();
-                same_core.attempt_deadline_ms = intent.attempt_deadline_ms;
-                ensure!(
-                    same_core == *intent,
-                    "bootstrap termination reservation changed authority"
-                );
-                ensure!(
-                    existing.phase == BootstrapTerminationPhase::Reserved,
-                    "contacted bootstrap termination cannot renew its deadline"
-                );
-                let now = i64::try_from(lillux::time::timestamp_millis())?;
-                ensure!(
-                    intent.attempt_deadline_ms > existing.intent.attempt_deadline_ms
-                        && intent.attempt_deadline_ms > now
-                        && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-                    "bootstrap termination renewal exceeds its pre-contact bound"
-                );
-                tx.execute(
-                    "UPDATE runtime_snapshot_bootstrap_termination SET intent_json=?2,updated_at_ms=?3
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                if existing.intent != *intent {
+                    let mut same_core = existing.intent.clone();
+                    same_core.attempt_deadline_ms = intent.attempt_deadline_ms;
+                    ensure!(
+                        same_core == *intent,
+                        "bootstrap termination reservation changed authority"
+                    );
+                    ensure!(
+                        existing.phase == BootstrapTerminationPhase::Reserved,
+                        "contacted bootstrap termination cannot renew its deadline"
+                    );
+                    let now = i64::try_from(lillux::time::timestamp_millis())?;
+                    ensure!(
+                        intent.attempt_deadline_ms > existing.intent.attempt_deadline_ms
+                            && intent.attempt_deadline_ms > now
+                            && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                        "bootstrap termination renewal exceeds its pre-contact bound"
+                    );
+                    tx.execute(
+                        "UPDATE runtime_snapshot_bootstrap_termination SET intent_json=?2,updated_at_ms=?3
                      WHERE operation_id=?1 AND phase='reserved'",
-                    params![intent.operation_id, canonical(intent)?, now],
-                )?;
-                let renewed = read(&tx, &intent.operation_id)?
-                    .context("renewed bootstrap termination disappeared")?;
+                        params![intent.operation_id, canonical(intent)?, now],
+                    )?;
+                    let renewed = read(&tx, &intent.operation_id)?
+                        .context("renewed bootstrap termination disappeared")?;
+                    tx.commit()?;
+                    return Ok(renewed);
+                }
                 tx.commit()?;
-                return Ok(renewed);
+                return Ok(existing);
             }
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let bootstrap =
-            super::runtime_snapshot_bootstrap::read(&tx, &intent.bootstrap_operation_id)?
-                .context("bootstrap termination source was not retained")?;
-        let occurrence = bootstrap
-            .occurrence
-            .as_ref()
-            .context("bootstrap termination source has no occurrence")?;
-        intent.validate_for(&bootstrap.intent, occurrence)?;
-        let unsettled_snapshots: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
-            [&intent.bootstrap_operation_id],
-            |row| row.get(0),
-        )?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        match intent.mode {
-            BootstrapCleanupMode::TerminateOnce => ensure!(
-                unsettled_snapshots == 0,
-                "bootstrap source has an unsettled snapshot upload"
-            ),
-            BootstrapCleanupMode::ObserveOnly => {
-                let created_at = occurrence.provider_creation_observation["created_at"]
-                    .as_str()
-                    .context("read-only cleanup has no exact creation timestamp")?;
-                let created = chrono::DateTime::parse_from_rfc3339(created_at)?.timestamp_millis();
-                let timeout_seconds = occurrence.provider_creation_observation["timeout_seconds"]
-                    .as_u64()
-                    .context("read-only cleanup has no exact lifetime")?;
-                let lifetime_ms = i64::try_from(timeout_seconds)?
-                    .checked_mul(1_000)
-                    .context("bootstrap lifetime overflow")?;
-                ensure!(
-                    occurrence.creation_attributes_verified
-                        && now >= created.saturating_add(lifetime_ms),
-                    "read-only cleanup requires the exact source lifetime to elapse"
-                );
+            let bootstrap =
+                super::runtime_snapshot_bootstrap::read(&tx, &intent.bootstrap_operation_id)?
+                    .context("bootstrap termination source was not retained")?;
+            let occurrence = bootstrap
+                .occurrence
+                .as_ref()
+                .context("bootstrap termination source has no occurrence")?;
+            intent.validate_for(&bootstrap.intent, occurrence)?;
+            let unsettled_snapshots: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM runtime_snapshot_operation WHERE source_bootstrap_operation_id=?1 AND phase!='bound'",
+                [&intent.bootstrap_operation_id],
+                |row| row.get(0),
+            )?;
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            match intent.mode {
+                BootstrapCleanupMode::TerminateOnce => ensure!(
+                    unsettled_snapshots == 0,
+                    "bootstrap source has an unsettled snapshot upload"
+                ),
+                BootstrapCleanupMode::ObserveOnly => {
+                    let created_at = occurrence.provider_creation_observation["created_at"]
+                        .as_str()
+                        .context("read-only cleanup has no exact creation timestamp")?;
+                    let created = chrono::DateTime::parse_from_rfc3339(created_at)?.timestamp_millis();
+                    let timeout_seconds = occurrence.provider_creation_observation["timeout_seconds"]
+                        .as_u64()
+                        .context("read-only cleanup has no exact lifetime")?;
+                    let lifetime_ms = i64::try_from(timeout_seconds)?
+                        .checked_mul(1_000)
+                        .context("bootstrap lifetime overflow")?;
+                    ensure!(
+                        occurrence.creation_attributes_verified
+                            && now >= created.saturating_add(lifetime_ms),
+                        "read-only cleanup requires the exact source lifetime to elapse"
+                    );
+                }
             }
-        }
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "bootstrap termination deadline outside admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_bootstrap_termination
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "bootstrap termination deadline outside admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_bootstrap_termination
              (operation_id,bootstrap_operation_id,intent_json,phase,observation_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
-            params![intent.operation_id, intent.bootstrap_operation_id, canonical(intent)?, now],
-        )?;
-        let record = read(&tx, &intent.operation_id)?
-            .context("bootstrap termination reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+                params![intent.operation_id, intent.bootstrap_operation_id, canonical(intent)?, now],
+            )?;
+            let record = read(&tx, &intent.operation_id)?
+                .context("bootstrap termination reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_bootstrap_termination_attempt(
         &self,
         operation_id: &str,
     ) -> Result<BootstrapTerminationClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("bootstrap termination was not reserved")?;
-        match record.phase {
-            BootstrapTerminationPhase::Terminal => {
-                tx.commit()?;
-                return Ok(BootstrapTerminationClaim::Terminal(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("bootstrap termination was not reserved")?;
+            match record.phase {
+                BootstrapTerminationPhase::Terminal => {
+                    tx.commit()?;
+                    return Ok(BootstrapTerminationClaim::Terminal(record));
+                }
+                BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(BootstrapTerminationClaim::Reconcile(record));
+                }
+                BootstrapTerminationPhase::Reserved => {}
             }
-            BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(BootstrapTerminationClaim::Reconcile(record));
-            }
-            BootstrapTerminationPhase::Reserved => {}
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms
-                && record.intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "bootstrap termination deadline is outside its contact window"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_bootstrap_termination SET phase='attempt_pending',updated_at_ms=?2
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            ensure!(
+                now < record.intent.attempt_deadline_ms
+                    && record.intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "bootstrap termination deadline is outside its contact window"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_bootstrap_termination SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(changed == 1, "bootstrap termination lost durable CAS");
-        let current = read(&tx, operation_id)?.context("bootstrap termination attempt vanished")?;
-        tx.commit()?;
-        Ok(BootstrapTerminationClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(changed == 1, "bootstrap termination lost durable CAS");
+            let current = read(&tx, operation_id)?.context("bootstrap termination attempt vanished")?;
+            tx.commit()?;
+            Ok(BootstrapTerminationClaim::StartAttempt(current))
+        })
     }
 
     pub fn quarantine_bootstrap_termination_attempt(
         &self,
         operation_id: &str,
     ) -> Result<BootstrapTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("bootstrap termination attempt absent")?;
-        ensure!(
-            matches!(
-                record.phase,
-                BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined
-            ),
-            "bootstrap termination attempt is not uncertain"
-        );
-        if record.phase == BootstrapTerminationPhase::AttemptPending {
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
-            tx.execute(
-                "UPDATE runtime_snapshot_bootstrap_termination SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, operation_id)?.context("bootstrap termination attempt absent")?;
+            ensure!(
+                matches!(
+                    record.phase,
+                    BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined
+                ),
+                "bootstrap termination attempt is not uncertain"
+            );
+            if record.phase == BootstrapTerminationPhase::AttemptPending {
+                let now = i64::try_from(lillux::time::timestamp_millis())?;
+                tx.execute(
+                    "UPDATE runtime_snapshot_bootstrap_termination SET phase='quarantined',updated_at_ms=?2
                  WHERE operation_id=?1 AND phase='attempt_pending'",
-                params![operation_id, now],
-            )?;
-        }
-        let current =
-            read(&tx, operation_id)?.context("bootstrap termination quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                    params![operation_id, now],
+                )?;
+            }
+            let current =
+                read(&tx, operation_id)?.context("bootstrap termination quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn bind_bootstrap_terminal_observation(
         &self,
         observation: &RuntimeSnapshotBootstrapTerminalObservation,
     ) -> Result<BootstrapTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("bootstrap termination attempt absent")?;
-        observation.validate_for(&record.intent)?;
-        if record.phase == BootstrapTerminationPhase::Terminal {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("bootstrap termination attempt absent")?;
+            observation.validate_for(&record.intent)?;
+            if record.phase == BootstrapTerminationPhase::Terminal {
+                ensure!(
+                    record.observation.as_ref() == Some(observation),
+                    "bootstrap terminal observation changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                record.observation.as_ref() == Some(observation),
-                "bootstrap terminal observation changed"
+                matches!(
+                    record.phase,
+                    BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined
+                ),
+                "bootstrap termination was not contacted"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                BootstrapTerminationPhase::AttemptPending | BootstrapTerminationPhase::Quarantined
-            ),
-            "bootstrap termination was not contacted"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_bootstrap_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
+            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_bootstrap_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![observation.operation_id, canonical(observation)?, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "bootstrap terminal observation lost durable CAS"
-        );
-        let current = read(&tx, &observation.operation_id)?
-            .context("bootstrap terminal observation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![observation.operation_id, canonical(observation)?, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "bootstrap terminal observation lost durable CAS"
+            );
+            let current = read(&tx, &observation.operation_id)?
+                .context("bootstrap terminal observation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
@@ -635,7 +649,7 @@ mod tests {
 
     #[test]
     fn snapshot_upload_and_source_termination_exclude_each_other() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (first_source, first_occurrence) = source(&db, false);
         let snapshot = ready_snapshot(&db, &first_source, &first_occurrence);
         db.reserve_runtime_snapshot(&snapshot).unwrap();
@@ -644,7 +658,7 @@ mod tests {
                 .is_err()
         );
 
-        let other = RuntimeDb::new_in_memory().unwrap();
+        let other = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&other, false);
         let snapshot = ready_snapshot(&other, &source, &occurrence);
         other
@@ -655,7 +669,7 @@ mod tests {
 
     #[test]
     fn recovery_selects_only_due_or_already_reserved_exact_sources() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         assert!(db.recoverable_bootstrap_sources(now).unwrap().is_empty());
@@ -676,7 +690,7 @@ mod tests {
 
     #[test]
     fn recovery_rotates_past_permanently_uncertain_oldest_sources() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let created = chrono::Utc::now().to_rfc3339();
         let mut all = std::collections::BTreeSet::new();
@@ -697,7 +711,7 @@ mod tests {
 
     #[test]
     fn materialized_parent_window_is_bounded_by_retained_source_expiry() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
         let created =
@@ -716,7 +730,7 @@ mod tests {
 
     #[test]
     fn uncertain_upload_allows_only_read_only_cleanup_after_exact_lifetime() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let created_at = (chrono::Utc::now() - chrono::Duration::seconds(898)).to_rfc3339();
         let (source, occurrence) = source_with_created_at(&db, false, &created_at);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
@@ -767,7 +781,7 @@ mod tests {
         mutation.mode = BootstrapCleanupMode::TerminateOnce;
         assert!(db.reserve_bootstrap_termination(&mutation).is_err());
 
-        let other = RuntimeDb::new_in_memory().unwrap();
+        let other = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let created_at = chrono::Utc::now().to_rfc3339();
         let (source, occurrence) = source_with_created_at(&other, false, &created_at);
         let mut early = termination(&source, &occurrence);
@@ -780,13 +794,13 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let snapshot = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             let (source, occurrence) = source(&db, false);
             let snapshot = ready_snapshot(&db, &source, &occurrence);
             db.reserve_runtime_snapshot(&snapshot).unwrap();
             snapshot
         };
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert_eq!(
             db.runtime_snapshot_operation(&snapshot.operation_id)
                 .unwrap()
@@ -794,10 +808,10 @@ mod tests {
                 .intent,
             snapshot
         );
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_operation SET source_bootstrap_operation_id=?2 WHERE operation_id=?1",
             params![snapshot.operation_id, "0".repeat(64)],
-        ).is_err());
+        )?)).is_err());
     }
 
     #[test]
@@ -805,11 +819,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let (intent, occurrence) = {
-            let db = RuntimeDb::open(&path).unwrap();
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
             source(&db, true)
         };
         let termination = termination(&intent, &occurrence);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         db.reserve_bootstrap_termination(&termination).unwrap();
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&termination.operation_id)
@@ -817,7 +831,7 @@ mod tests {
             BootstrapTerminationClaim::StartAttempt(_)
         ));
         drop(db);
-        let db = RuntimeDb::open(&path).unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&termination.operation_id)
                 .unwrap(),
@@ -840,10 +854,10 @@ mod tests {
                 .unwrap(),
             bound
         );
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_bootstrap_termination SET phase='reserved',observation_json=NULL WHERE operation_id=?1",
             [&termination.operation_id],
-        ).is_err());
+        )?)).is_err());
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&termination.operation_id)
                 .unwrap(),
@@ -853,7 +867,7 @@ mod tests {
 
     #[test]
     fn expired_uncontacted_deadline_renews_without_reminting_termination() {
-        let db = RuntimeDb::new_in_memory().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source_intent, occurrence) = source(&db, false);
         let mut original = termination(&source_intent, &occurrence);
         original.attempt_deadline_ms =
@@ -873,19 +887,19 @@ mod tests {
         );
         let record = db.reserve_bootstrap_termination(&renewed).unwrap();
         assert_eq!(record.intent, renewed);
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_bootstrap_termination SET intent_json=json_set(intent_json,'$.provider_id','other') WHERE operation_id=?1",
             [&original.operation_id],
-        ).is_err());
+        )?)).is_err());
         assert!(matches!(
             db.claim_bootstrap_termination_attempt(&original.operation_id)
                 .unwrap(),
             BootstrapTerminationClaim::StartAttempt(_)
         ));
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_bootstrap_termination SET intent_json=json_set(intent_json,'$.attempt_deadline_ms',9999999999999) WHERE operation_id=?1",
             [&original.operation_id],
-        ).is_err());
+        )?)).is_err());
         let mut after_contact = renewed;
         after_contact.attempt_deadline_ms += 1_000;
         assert!(db.reserve_bootstrap_termination(&after_contact).is_err());

@@ -3,8 +3,11 @@
 //! This module is meaning-blind about tools, workers, Python, and projects.
 //! It consumes an already-authorized logical file view, builds the exact
 //! content-only manifest, and produces a proof that the binding can be
-//! redeemed from retained storage. Filesystem/root acquisition and CAS
-//! publication remain daemon responsibilities.
+//! redeemed from retained storage. Callers select filesystem/root authority;
+//! read-only view helpers can pin those selected directories. CAS publication
+//! remains a daemon responsibility.
+
+pub mod source_view;
 
 use std::path::{Path, PathBuf};
 

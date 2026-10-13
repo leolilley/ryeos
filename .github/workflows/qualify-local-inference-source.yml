@@ -126,7 +126,7 @@ jobs:
           RYEOS_TEST_SKIP_BUNDLE_REFRESH: "1"
         run: |
           cargo test -p ryeosd \
-            --features crash-qualification-test-support \
+            --features scheduling,model-provider-setup,crash-qualification-test-support \
             --test directive_crash_recovery_e2e
           rm -rf -- "$CARGO_TARGET_DIR"
           df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"

@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
+use ryeos_state::external_execution::transport::{
+    ExternalControllerTransportContract, ExternalControllerTransportSelection,
+    ExternalNetworkInputPolicy,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,6 +26,7 @@ pub struct ExternalExecutionSection;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ExternalWorkloadBinding {
     StructuredSession(ExternalStructuredSessionBinding),
+    QualificationStructuredSession(ExternalQualificationStructuredSessionBinding),
     DirectCommand {},
 }
 
@@ -40,40 +44,148 @@ pub(crate) struct ExternalStructuredSessionBinding {
     pub(crate) connector_artifact_bytes: u64,
 }
 
+/// A signed, zero-export placement choice for proving one captured runtime
+/// through its Worker recipe before that runtime has a qualification. The
+/// accepted root and current occurrence supply the use and contact authority;
+/// this binding only selects exact executable and Worker identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalQualificationStructuredSessionBinding {
+    pub(crate) provider_declaration_id: String,
+    pub(crate) provider_configuration_destination: String,
+    pub(crate) requirement_digest: String,
+    pub(crate) worker_profile_hash: String,
+    pub(crate) runtime_manifest_hash: String,
+    pub(crate) runtime_member_sha256: String,
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: String,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
+/// Shared signed artifact coordinates for the two distinct session lanes.
+/// Workload admission still checks the exact ordinary or qualification
+/// program separately before these executables may be used.
+pub(crate) struct ExternalSessionArtifactSelection<'a> {
+    pub(crate) provider_declaration_id: &'a str,
+    pub(crate) provider_configuration_destination: &'a str,
+    pub(crate) configuration_adapter_artifact_hash: &'a str,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: &'a str,
+    pub(crate) connector_artifact_hash: &'a str,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
 impl ExternalWorkloadBinding {
     pub(crate) fn structured_session(&self) -> Result<&ExternalStructuredSessionBinding> {
         match self {
             Self::StructuredSession(session) => Ok(session),
+            Self::QualificationStructuredSession(_) => anyhow::bail!(
+                "qualification-only binding cannot authorize an ordinary structured session"
+            ),
             Self::DirectCommand {} => anyhow::bail!(
                 "external direct-command binding cannot authorize a structured session"
             ),
         }
     }
 
-    fn validate(&self) -> Result<()> {
-        let Self::StructuredSession(session) = self else {
-            return Ok(());
+    pub(crate) fn qualification_structured_session(
+        &self,
+    ) -> Result<&ExternalQualificationStructuredSessionBinding> {
+        match self {
+            Self::QualificationStructuredSession(session) => Ok(session),
+            _ => anyhow::bail!("external binding has no qualification-only session authority"),
+        }
+    }
+
+    pub(crate) fn session_artifacts(&self) -> Result<ExternalSessionArtifactSelection<'_>> {
+        let selection = match self {
+            Self::StructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::QualificationStructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::DirectCommand {} => {
+                anyhow::bail!("external direct command has no session artifact selection")
+            }
         };
-        ryeos_state::external_content::products::validate_name(&session.provider_declaration_id)?;
+        Ok(selection)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let (
+            provider_declaration_id,
+            provider_configuration_destination,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_protocol,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+        ) = match self {
+            Self::StructuredSession(session) => (
+                &session.provider_declaration_id,
+                &session.provider_configuration_destination,
+                &session.runtime_manifest_hash,
+                &session.configuration_adapter_artifact_hash,
+                session.configuration_adapter_artifact_bytes,
+                &session.connector_protocol,
+                &session.connector_artifact_hash,
+                session.connector_artifact_bytes,
+            ),
+            Self::QualificationStructuredSession(session) => {
+                validate_content_identity(&session.requirement_digest)?;
+                validate_content_identity(&session.worker_profile_hash)?;
+                validate_content_identity(&session.runtime_member_sha256)?;
+                (
+                    &session.provider_declaration_id,
+                    &session.provider_configuration_destination,
+                    &session.runtime_manifest_hash,
+                    &session.configuration_adapter_artifact_hash,
+                    session.configuration_adapter_artifact_bytes,
+                    &session.connector_protocol,
+                    &session.connector_artifact_hash,
+                    session.connector_artifact_bytes,
+                )
+            }
+            Self::DirectCommand {} => return Ok(()),
+        };
+        ryeos_state::external_content::products::validate_name(provider_declaration_id)?;
         ryeos_state::objects::validate_session_configuration_destination(
-            &session.provider_configuration_destination,
+            provider_configuration_destination,
         )?;
         for value in [
-            &session.runtime_manifest_hash,
-            &session.runtime_selection_identity,
-            &session.configuration_adapter_artifact_hash,
-            &session.connector_artifact_hash,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            connector_artifact_hash,
         ] {
             validate_content_identity(value)?;
         }
+        if let Self::StructuredSession(session) = self {
+            validate_content_identity(&session.runtime_selection_identity)?;
+        }
         for bytes in [
-            session.configuration_adapter_artifact_bytes,
-            session.connector_artifact_bytes,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_bytes,
         ] {
             validate_artifact_bytes(bytes)?;
         }
         ensure!(
-            session.connector_protocol
+            connector_protocol.as_str()
                 == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
             "placement binding requires the exact bounded connector contract"
         );
@@ -200,7 +312,10 @@ struct BindingDocument {
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
-    controller_transport: ExternalControllerTransportContract,
+    /// Host adapter contact inputs are signed independently of the guest's
+    /// controller transport. A file-relay guest has no network authority.
+    provider_network_inputs: ExternalNetworkInputPolicy,
+    controller_transport: ExternalControllerTransportSelection,
     controller_tls_root_certificates_der_base64: Vec<String>,
     max_active: u16,
     timeout_seconds: u32,
@@ -225,8 +340,17 @@ where
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 15,
-            "unsupported external placement binding schema"
+            self.kind == "node"
+                && self.schema
+                    == match &self.controller_transport {
+                        ExternalControllerTransportSelection::HttpJson(_) => 17,
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) => match &self.workload {
+                            ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
+                            ExternalWorkloadBinding::StructuredSession(_) => 19,
+                            ExternalWorkloadBinding::DirectCommand {} => 0,
+                        },
+                    },
+            "unsupported external placement binding schema for selected transport"
         );
         self.workload.validate()?;
         ensure!(
@@ -285,8 +409,7 @@ impl BindingDocument {
             "placement binding lifecycle deadlines exceed bounds"
         );
         ensure!(
-            self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
-                && self.storage_policy == "ephemeral_private_candidate_v1"
+            self.storage_policy == "ephemeral_private_candidate_v1"
                 && self.cleanup_proof == "provider_terminal_occurrence_v1",
             "placement binding requests an unsupported lifecycle contract"
         );
@@ -309,18 +432,40 @@ impl BindingDocument {
                     && self.max_transfer_bytes >= self.max_export_bytes,
                 "structured-session placement export budgets exceed bounds"
             ),
+            ExternalWorkloadBinding::QualificationStructuredSession(_) => ensure!(
+                self.max_export_bytes == 0
+                    && self.runtime_qualification.is_none()
+                    && self.runtime_content_qualification.is_none(),
+                "qualification-only placement cannot authorize export or borrow ordinary runtime qualification"
+            ),
             ExternalWorkloadBinding::DirectCommand {} => ensure!(
                 self.max_export_bytes == 0,
                 "direct-command placement cannot authorize candidate export"
             ),
         }
         self.controller_transport.validate()?;
-        ensure!(
-            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                &self.controller_tls_root_certificates_der_base64,
-            )? == self.controller_transport.tls_root_bundle_digest,
-            "external controller TLS roots changed their signed identity"
-        );
+        self.provider_network_inputs.validate()?;
+        match &self.controller_transport {
+            ExternalControllerTransportSelection::HttpJson(http) => ensure!(
+                self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
+                    && ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &self.controller_tls_root_certificates_der_base64,
+                    )? == http.tls_root_bundle_digest,
+                "external controller TLS roots changed their signed identity"
+            ),
+            ExternalControllerTransportSelection::ControllerFileRelay(relay) => ensure!(
+                matches!(
+                    &self.workload,
+                    ExternalWorkloadBinding::QualificationStructuredSession(_)
+                        | ExternalWorkloadBinding::StructuredSession(_)
+                ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
+                    && self.backend == "render-sandbox-early-access"
+                    && self.controller_tls_root_certificates_der_base64.is_empty()
+                    && self.settings.get("owner_id").and_then(Value::as_str)
+                        == Some(relay.owner_workspace_id.as_str()),
+                "external controller file relay requires signed Render Q owner and no TLS roots"
+            ),
+        }
         Ok(())
     }
 
@@ -345,6 +490,7 @@ impl BindingDocument {
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
+            provider_network_inputs: self.provider_network_inputs.clone(),
             controller_transport: self.controller_transport.clone(),
             controller_tls_root_certificates_der_base64: self
                 .controller_tls_root_certificates_der_base64
@@ -386,7 +532,8 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
-    pub(crate) controller_transport: ExternalControllerTransportContract,
+    pub(crate) provider_network_inputs: ExternalNetworkInputPolicy,
+    pub(crate) controller_transport: ExternalControllerTransportSelection,
     pub(crate) controller_tls_root_certificates_der_base64: Vec<String>,
     pub(crate) max_active: u16,
     pub(crate) timeout_seconds: u32,
@@ -474,7 +621,7 @@ impl RetainedExternalExecutionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len() <= crate::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len() <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained placement signed source is invalid"
         );
         self.document.validate()?;
@@ -561,6 +708,16 @@ impl RetainedExternalExecutionBinding {
     ) -> Result<()> {
         check_program(&self.document, program)
     }
+    /// Signed selection only. The accepted root, bound occurrence and current
+    /// launch owner must be checked again before any provider contact.
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    ) -> Result<()> {
+        self.validate()?;
+        check_qualification_program(&self.document, program, purpose)
+    }
     /// Rejoin a compiled ordinary command to this exact retained generation.
     /// This is a content/limit check, not guest capability evidence or contact
     /// permission; the born-thread owner and backend must still be admitted.
@@ -589,27 +746,47 @@ impl RetainedExternalExecutionBinding {
         Ok(())
     }
 
+    /// The fixture binding's document as JSON, for a loader test that signs
+    /// it as a node item.
+    #[cfg(test)]
+    pub(crate) fn test_fixture_document_value() -> Value {
+        serde_json::to_value(&Self::test_fixture().document).expect("fixture binding document")
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fixture() -> Self {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
 
         let controller_tls_root_certificates_der_base64 =
             vec![STANDARD.encode(b"fixture controller TLS root")];
+        let provider_network_inputs = ExternalNetworkInputPolicy {
+            resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/resolv.conf".into(),
+                max_bytes: 64 * 1024,
+            },
+            hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/hosts".into(),
+                max_bytes: 64 * 1024,
+            },
+        };
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 15,
+            schema: 17,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-            workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
-                provider_declaration_id: "codex-hosted".into(),
-                provider_configuration_destination: "environments.toml".into(),
-                runtime_manifest_hash: "b".repeat(64),
-                runtime_selection_identity: "c".repeat(64),
-                configuration_adapter_artifact_hash: "2".repeat(64),
-                configuration_adapter_artifact_bytes: 4096,
-                connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                connector_artifact_hash: "f".repeat(64),
-                connector_artifact_bytes: 4096,
-            }),
+            workload: ExternalWorkloadBinding::StructuredSession(
+                ExternalStructuredSessionBinding {
+                    provider_declaration_id: "codex-hosted".into(),
+                    provider_configuration_destination: "environments.toml".into(),
+                    runtime_manifest_hash: "b".repeat(64),
+                    runtime_selection_identity: "c".repeat(64),
+                    configuration_adapter_artifact_hash: "2".repeat(64),
+                    configuration_adapter_artifact_bytes: 4096,
+                    connector_protocol:
+                        ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                    connector_artifact_hash: "f".repeat(64),
+                    connector_artifact_bytes: 4096,
+                },
+            ),
             backend: "fixture".into(),
             account: "account".into(),
             capacity_group: "candidate-workers".into(),
@@ -634,31 +811,25 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport: ExternalControllerTransportContract {
-                schema: 2,
-                https_origin: "https://controller.example:7443".into(),
-                route_contract:
-                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
-                        .into(),
-                tls_root_bundle_digest:
-                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                        &controller_tls_root_certificates_der_base64,
-                    )
-                    .unwrap(),
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 10_000,
-                maximum_response_bytes: 1024 * 1024,
-                network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
-                    resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/resolv.conf".into(),
-                        max_bytes: 64 * 1024,
-                    },
-                    hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/hosts".into(),
-                        max_bytes: 64 * 1024,
-                    },
+            provider_network_inputs: provider_network_inputs.clone(),
+            controller_transport: ExternalControllerTransportSelection::HttpJson(
+                ExternalControllerTransportContract {
+                    schema: 2,
+                    https_origin: "https://controller.example:7443".into(),
+                    route_contract:
+                        ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
+                            .into(),
+                    tls_root_bundle_digest:
+                        ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                            &controller_tls_root_certificates_der_base64,
+                        )
+                        .unwrap(),
+                    connect_timeout_ms: 5_000,
+                    request_timeout_ms: 10_000,
+                    maximum_response_bytes: 1024 * 1024,
+                    network_inputs: provider_network_inputs,
                 },
-            },
+            ),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
@@ -750,6 +921,7 @@ impl RetainedExternalExecutionBinding {
     ) -> Result<Self> {
         program.validate()?;
         controller_transport.validate()?;
+        let provider_network_inputs = controller_transport.network_inputs.clone();
         ensure!(
             ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
                 &controller_tls_root_certificates_der_base64,
@@ -758,7 +930,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 15,
+            schema: 17,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -795,7 +967,8 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport,
+            provider_network_inputs,
+            controller_transport: controller_transport.into(),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
@@ -875,7 +1048,7 @@ pub fn provision_installed_test_placement_credential(
     // Reverify the exact signed source, including its document, capacity owner
     // and digest, before opening a vault that may perform recovery writes.
     binding.retained_generation()?;
-    let identity = crate::identity::NodeIdentity::load(
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(
         &app_root
             .join(ryeos_engine::AI_DIR)
             .join("node/identity/private_key.pem"),
@@ -987,6 +1160,14 @@ impl InstalledExternalExecutionBinding {
         check_program(&self.document, program)
     }
 
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    ) -> Result<()> {
+        check_qualification_program(&self.document, program, purpose)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_fixture() -> Self {
         let retained = RetainedExternalExecutionBinding::test_fixture();
@@ -1075,6 +1256,31 @@ fn check_program(
     Ok(())
 }
 
+fn check_qualification_program(
+    document: &BindingDocument,
+    program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+) -> Result<()> {
+    let session = document.workload.qualification_structured_session()?;
+    program.validate_against_purpose(purpose)?;
+    ensure!(
+        document.max_export_bytes == 0
+            && document.runtime_content_qualification.is_none()
+            && program.requirement.protocol == document.protocol
+            && program.requirement.provider_declaration_id == session.provider_declaration_id
+            && program.requirement.provider_configuration_destination
+                == session.provider_configuration_destination
+            && program.requirement.connector_protocol == session.connector_protocol
+            && program.requirement.qualification_requirement_digest()?
+                == session.requirement_digest
+            && program.qualification_use.profile_hash == session.worker_profile_hash
+            && program.runtime_manifest_hash == session.runtime_manifest_hash
+            && program.runtime_member.executable_sha256 == session.runtime_member_sha256,
+        "qualification-only program contradicts its signed zero-export placement binding"
+    );
+    Ok(())
+}
+
 struct ParsedBinding {
     id: String,
     document: BindingDocument,
@@ -1151,6 +1357,104 @@ mod workload_binding_tests {
 
     fn document() -> BindingDocument {
         RetainedExternalExecutionBinding::test_fixture().document
+    }
+
+    fn ordinary_relay_document() -> BindingDocument {
+        let mut document = document();
+        document.schema = 19;
+        document.backend = "render-sandbox-early-access".into();
+        document.settings = serde_json::json!({"owner_id":"render-owner"});
+        document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
+        document.network_policy = "controller_file_relay_guest_deny_all_v1".into();
+        document.controller_tls_root_certificates_der_base64.clear();
+        document.controller_transport = ExternalControllerTransportSelection::ControllerFileRelay(
+            ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract: ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                owner_workspace_id: "render-owner".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+            },
+        );
+        document
+    }
+
+    #[test]
+    fn ordinary_relay_binding_uses_schema_19_and_refuses_cross_pairs() {
+        let document = ordinary_relay_document();
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_ok());
+
+        let mut q_schema = document.clone();
+        q_schema.schema = 18;
+        assert!(q_schema.validate().is_err());
+
+        let mut http_schema_19 = document.clone();
+        let mut http = RetainedExternalExecutionBinding::test_fixture().document;
+        http.schema = 19;
+        http_schema_19.controller_transport = http.controller_transport;
+        http_schema_19.controller_tls_root_certificates_der_base64 =
+            http.controller_tls_root_certificates_der_base64;
+        http_schema_19.network_policy = "supervisor_pinned_owner_only_candidate_denied_v1".into();
+        assert!(http_schema_19.validate().is_err());
+    }
+
+    #[test]
+    fn qualification_binding_has_exact_identity_and_no_export_or_ordinary_session_authority() {
+        let mut document = document();
+        let ExternalWorkloadBinding::StructuredSession(ordinary) = &document.workload else {
+            unreachable!("fixture has an ordinary session")
+        };
+        let ordinary = ordinary.clone();
+        document.workload = ExternalWorkloadBinding::QualificationStructuredSession(
+            ExternalQualificationStructuredSessionBinding {
+                provider_declaration_id: ordinary.provider_declaration_id.clone(),
+                provider_configuration_destination: ordinary
+                    .provider_configuration_destination
+                    .clone(),
+                requirement_digest: "a".repeat(64),
+                worker_profile_hash: "b".repeat(64),
+                runtime_manifest_hash: ordinary.runtime_manifest_hash.clone(),
+                runtime_member_sha256: "c".repeat(64),
+                configuration_adapter_artifact_hash: ordinary
+                    .configuration_adapter_artifact_hash
+                    .clone(),
+                configuration_adapter_artifact_bytes: ordinary.configuration_adapter_artifact_bytes,
+                connector_protocol: ordinary.connector_protocol.clone(),
+                connector_artifact_hash: ordinary.connector_artifact_hash.clone(),
+                connector_artifact_bytes: ordinary.connector_artifact_bytes,
+            },
+        );
+        assert!(document.validate().is_err());
+        document.max_export_bytes = 0;
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_err());
+        assert!(document.workload.qualification_structured_session().is_ok());
+        document.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+        });
+        assert!(document.validate().is_err());
+        document.runtime_content_qualification = None;
+        document.runtime_qualification = Some(ExternalRuntimeQualificationBinding {
+            attestation_hash: "4".repeat(64),
+            owner_principal: format!("fp:{}", "5".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:render/snapshot-qualification".into()),
+                required_claims: vec!["render_snapshot_v1".into()],
+            },
+        });
+        assert!(document.validate().is_err());
+        let mut ordinary_binding = document.clone();
+        ordinary_binding.workload = ExternalWorkloadBinding::StructuredSession(ordinary);
+        ordinary_binding.max_export_bytes = 1;
+        ordinary_binding.validate().unwrap();
     }
 
     #[test]
@@ -1325,6 +1629,8 @@ mod workload_binding_tests {
         let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
         let retained = binding.retained_generation().unwrap();
         let projection = ExternalDirectCommandProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+            target_limits: None,
             argv0: "/runtime/bin/check".into(),
             arguments: Vec::new(),
             cwd: "/workspace".into(),
@@ -1378,12 +1684,28 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 15);
+        assert_eq!(value["schema"], 17);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());
         let decoded: BindingDocument = serde_json::from_value(value.clone()).unwrap();
         assert!(decoded == session);
+        let mut independent_host_policy = session.clone();
+        independent_host_policy
+            .provider_network_inputs
+            .resolver
+            .source = "/etc/ryeos-provider-resolver".into();
+        independent_host_policy.validate().unwrap();
+        assert_eq!(
+            independent_host_policy
+                .backend_contract()
+                .provider_network_inputs,
+            independent_host_policy.provider_network_inputs
+        );
+        assert_eq!(
+            independent_host_policy.controller_transport, session.controller_transport,
+            "host provider network inputs must not change guest controller transport"
+        );
 
         let mut direct = session.clone();
         direct.workload = ExternalWorkloadBinding::DirectCommand {};
@@ -1399,6 +1721,22 @@ mod workload_binding_tests {
         assert!(direct.workload.structured_session().is_err());
 
         for original in [value, direct_value] {
+            let mut missing_provider_inputs = original.clone();
+            missing_provider_inputs
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_network_inputs");
+            assert!(serde_json::from_value::<BindingDocument>(missing_provider_inputs).is_err());
+            for predecessor_schema in [15, 16] {
+                let mut predecessor = original.clone();
+                predecessor["schema"] = serde_json::json!(predecessor_schema);
+                assert!(
+                    serde_json::from_value::<BindingDocument>(predecessor)
+                        .unwrap()
+                        .validate()
+                        .is_err()
+                );
+            }
             let mut unknown = original.clone();
             unknown["workload"]["unexpected"] = serde_json::json!(true);
             assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
@@ -1513,11 +1851,13 @@ mod workload_binding_tests {
 #[cfg(test)]
 mod persistent_placement_credential_tests {
     use super::*;
-    use crate::vault::{NodeVault as _, SealedEnvelopeVault, default_sealed_store_path};
+    use crate::vault::{
+        NodeVault as _, NodeVaultReadAll as _, SealedEnvelopeVault, default_sealed_store_path,
+    };
 
     fn fixture() -> (tempfile::TempDir, InstalledExternalExecutionBinding) {
         let root = tempfile::tempdir().unwrap();
-        let identity = crate::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();

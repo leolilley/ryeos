@@ -57,7 +57,7 @@ pub async fn update_stopped_bundle_set(
 struct RemoteAuthority {
     app_root: PathBuf,
     remote: config::RemoteConfig,
-    identity: Arc<ryeos_app::identity::NodeIdentity>,
+    identity: Arc<ryeos_node_runtime::identity::NodeIdentity>,
     policy: consumer::CurrentConsumerPublicationPolicy,
     closure_options: NodeAdmittedObjectsClosureRequestOptions,
     completion: ryeos_node::InitCompletionReport,
@@ -71,7 +71,7 @@ impl RemoteAuthority {
         let substrate = ryeos_node::load_verified_substrate_identity(app_root)?;
         let remotes = config::load_remotes_layered(app_root, None)?;
         let remote = config::get_remote(&remotes, &request.catalog_remote)?;
-        let identity = Arc::new(ryeos_app::identity::NodeIdentity::load(
+        let identity = Arc::new(ryeos_node_runtime::identity::NodeIdentity::load(
             &request.operator_signing_key,
         )?);
         if identity.fingerprint() != completion.operator_fingerprint {
@@ -81,16 +81,16 @@ impl RemoteAuthority {
             None,
             &app_root.join(ryeos_engine::AI_DIR).join("config"),
         )?;
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let generation =
-            ryeos_app::node_policy::generation::load_policy_generation(app_root, &trust, &table)?;
-        let snapshot = ryeos_app::node_policy::compile_generation(
+            ryeos_node_runtime::node_policy::generation::load_policy_generation(app_root, &trust, &table)?;
+        let snapshot = ryeos_node_runtime::node_policy::compile_generation(
             app_root,
             &table,
             &generation,
             &completion.node_fingerprint,
         )?;
-        let closure_policy = snapshot.require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        let closure_policy = snapshot.require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
         let closure_options = NodeAdmittedObjectsClosureRequestOptions::for_policy(
             closure_policy,
             ObjectsClosureRequestOptions::default(),
@@ -349,7 +349,7 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             .join("transactions/bundle-set-prepared")
             .join(&transaction_id);
         std::fs::create_dir_all(&prep_root)?;
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
             app_root: Some(app_root.to_owned()),
             ..Default::default()
         })?;

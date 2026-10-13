@@ -15,6 +15,53 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+fn sync_transfer_limits() -> crate::object_closure::ObjectClosureLimits {
+    crate::object_closure::ObjectClosureLimits {
+        max_objects: crate::object_closure::REMOTE_CLOSURE_MAX_OBJECTS,
+        max_blobs: crate::object_closure::REMOTE_CLOSURE_MAX_BLOBS,
+        max_object_bytes: crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES,
+        max_total_object_bytes: crate::object_closure::REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES,
+        max_blob_bytes: crate::object_closure::REMOTE_CLOSURE_MAX_BLOB_BYTES,
+        max_total_blob_bytes: crate::object_closure::REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES,
+        max_links_per_object: crate::object_closure::REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT,
+    }
+}
+
+fn load_export_object_bytes(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Vec<u8>> {
+    let raw = cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+        hash,
+        crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES,
+        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+    )?.ok_or_else(|| anyhow::anyhow!("exported chain object {hash} disappeared"))?;
+    let value: serde_json::Value = serde_json::from_slice(&raw)?;
+    let maximum = usize::try_from(crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES)
+        .context("transfer object ceiling exceeds this platform")?;
+    if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != raw {
+        anyhow::bail!("CAS object {hash} is not canonical JSON");
+    }
+    Ok(raw)
+}
+
+fn load_export_blob_bytes(
+    cas: &lillux::CasStore,
+    hash: &str,
+    maximum_bytes: u64,
+) -> anyhow::Result<Vec<u8>> {
+    cas.get_blob_bounded(hash, maximum_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("exported chain blob {hash} disappeared"))
+}
+
+fn account_export_payload_bytes(total_bytes: &mut usize, entry_bytes: usize) -> Result<()> {
+    *total_bytes = total_bytes
+        .checked_add(entry_bytes)
+        .context("sync export payload size overflow")?;
+    let total = u64::try_from(*total_bytes).context("sync export payload size exceeds u64")?;
+    if total > crate::object_closure::REMOTE_CLOSURE_MAX_RESPONSE_BYTES {
+        anyhow::bail!("sync export payload exceeds the protocol response ceiling");
+    }
+    Ok(())
+}
+
 /// Fully verified operands for the one chain-head publication that changes
 /// node writers. The attested evidence is immutable; `target_chain_head_hash`
 /// is the locally verified result of applying that exact grant.
@@ -156,22 +203,29 @@ pub fn export_chain_pinned(
         );
     }
 
-    let mut entries =
-        Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
+    let limits = sync_transfer_limits();
+    let entry_count = reachable.object_hashes.len().checked_add(reachable.blob_hashes.len())
+        .context("exported closure entry count overflow")?;
+    if reachable.object_hashes.len() > limits.max_objects || reachable.blob_hashes.len() > limits.max_blobs {
+        anyhow::bail!("exported closure exceeds admitted object or blob count");
+    }
+    let mut entries = Vec::with_capacity(entry_count);
     let mut total_bytes = 0usize;
+    let mut total_object_bytes = 0_u64;
 
     // Collect JSON objects
     let mut object_hashes = reachable.object_hashes.into_iter().collect::<Vec<_>>();
     object_hashes.sort();
     for hash in object_hashes {
-        let value = cas
-            .get_object(&hash)
-            .with_context(|| format!("read exported chain object {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("exported chain object {hash} disappeared"))?;
-        let data = lillux::canonical_json(&value)
-            .with_context(|| format!("canonicalize exported chain object {hash}"))?
-            .into_bytes();
-        total_bytes += data.len();
+        let data = load_export_object_bytes(cas, &hash)
+            .with_context(|| format!("read bounded exported chain object {hash}"))?;
+        let object_bytes = u64::try_from(data.len()).context("exported object size exceeds u64")?;
+        total_object_bytes = total_object_bytes.checked_add(object_bytes)
+            .context("exported object byte count overflow")?;
+        if total_object_bytes > limits.max_total_object_bytes {
+            anyhow::bail!("exported object bytes exceed their aggregate ceiling");
+        }
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: false,
@@ -182,12 +236,23 @@ pub fn export_chain_pinned(
     // Collect blobs
     let mut blob_hashes = reachable.blob_hashes.into_iter().collect::<Vec<_>>();
     blob_hashes.sort();
+    let mut total_blob_bytes = 0_u64;
     for hash in blob_hashes {
-        let data = cas
-            .get_blob(&hash)
-            .with_context(|| format!("read exported chain blob {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("exported chain blob {hash} disappeared"))?;
-        total_bytes += data.len();
+        let remaining_total = limits
+            .max_total_blob_bytes
+            .checked_sub(total_blob_bytes)
+            .context("exported chain blob bytes exceed the default closure total")?;
+        let data = load_export_blob_bytes(
+            cas,
+            &hash,
+            limits.max_blob_bytes.min(remaining_total),
+        )
+        .with_context(|| format!("read bounded exported chain blob {hash}"))?;
+        let blob_bytes = u64::try_from(data.len()).context("exported chain blob size exceeds u64")?;
+        total_blob_bytes = total_blob_bytes
+            .checked_add(blob_bytes)
+            .context("exported chain blob byte count overflow")?;
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: true,
@@ -240,29 +305,34 @@ pub fn export_exact_chain_head_cas_payload_pinned(
 ) -> Result<(ExportPayload, Vec<String>)> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
-    let reachable =
-        crate::rebuild::verified_repair_closure_with_cas(&cas, chain_root_id, head_hash, true)?;
+    let limits = sync_transfer_limits();
+    let reachable = crate::rebuild::verified_repair_closure_with_cas_and_limits(
+        &cas, chain_root_id, head_hash, true, limits,
+    )?;
     let mut large_object_requirements = reachable
         .large_object_hashes
         .into_iter()
         .collect::<Vec<_>>();
     large_object_requirements.sort();
-    let mut entries =
-        Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
+    let entry_count = reachable.object_hashes.len().checked_add(reachable.blob_hashes.len())
+        .context("staged closure entry count overflow")?;
+    if reachable.object_hashes.len() > limits.max_objects || reachable.blob_hashes.len() > limits.max_blobs {
+        anyhow::bail!("staged closure exceeds admitted object or blob count");
+    }
+    let mut entries = Vec::with_capacity(entry_count);
     let mut total_bytes = 0usize;
+    let mut total_object_bytes = 0_u64;
     let mut object_hashes = reachable.object_hashes.into_iter().collect::<Vec<_>>();
     object_hashes.sort();
     for hash in object_hashes {
-        let value = cas
-            .get_object(&hash)
-            .with_context(|| format!("read staged chain object {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("staged chain object {hash} disappeared"))?;
-        let data = lillux::canonical_json(&value)
-            .with_context(|| format!("canonicalize staged chain object {hash}"))?
-            .into_bytes();
-        total_bytes = total_bytes
-            .checked_add(data.len())
-            .context("staged chain payload size overflow")?;
+        let data = load_export_object_bytes(&cas, &hash)
+            .with_context(|| format!("read bounded staged chain object {hash}"))?;
+        total_object_bytes = total_object_bytes.checked_add(u64::try_from(data.len())?)
+            .context("staged object byte count overflow")?;
+        if total_object_bytes > limits.max_total_object_bytes {
+            anyhow::bail!("staged object bytes exceed their aggregate ceiling");
+        }
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: false,
@@ -271,14 +341,23 @@ pub fn export_exact_chain_head_cas_payload_pinned(
     }
     let mut blob_hashes = reachable.blob_hashes.into_iter().collect::<Vec<_>>();
     blob_hashes.sort();
+    let mut total_blob_bytes = 0_u64;
     for hash in blob_hashes {
-        let data = cas
-            .get_blob(&hash)
-            .with_context(|| format!("read staged chain blob {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("staged chain blob {hash} disappeared"))?;
-        total_bytes = total_bytes
-            .checked_add(data.len())
-            .context("staged chain payload size overflow")?;
+        let remaining_total = limits
+            .max_total_blob_bytes
+            .checked_sub(total_blob_bytes)
+            .context("staged chain blob bytes exceed the default closure total")?;
+        let data = load_export_blob_bytes(
+            &cas,
+            &hash,
+            limits.max_blob_bytes.min(remaining_total),
+        )
+        .with_context(|| format!("read bounded staged chain blob {hash}"))?;
+        let blob_bytes = u64::try_from(data.len()).context("staged chain blob size exceeds u64")?;
+        total_blob_bytes = total_blob_bytes
+            .checked_add(blob_bytes)
+            .context("staged chain blob byte count overflow")?;
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: true,
@@ -305,12 +384,13 @@ pub fn verify_chain_closure_anchored_pinned(
     head_hash: &str,
     expected_ancestor: &str,
 ) -> Result<()> {
-    crate::rebuild::verify_repair_closure_anchored_with_cas(
+    crate::rebuild::verify_repair_closure_anchored_with_cas_and_limits(
         cas,
         chain_root_id,
         head_hash,
         true,
         Some(expected_ancestor),
+        sync_transfer_limits(),
     )
 }
 
@@ -363,18 +443,26 @@ pub fn reconcile_export_pinned(
         .collect();
     missing_blobs.sort();
 
-    let mut entries = Vec::with_capacity(missing_objects.len() + missing_blobs.len());
+    let limits = sync_transfer_limits();
+    if missing_objects.len() > limits.max_objects || missing_blobs.len() > limits.max_blobs {
+        anyhow::bail!("reconciled closure exceeds admitted object or blob count");
+    }
+    let entry_count = missing_objects.len().checked_add(missing_blobs.len())
+        .context("reconciled closure entry count overflow")?;
+    let mut entries = Vec::with_capacity(entry_count);
     let mut total_bytes = 0usize;
+    let mut total_object_bytes = 0_u64;
+    let mut total_blob_bytes = 0_u64;
 
     for hash in missing_objects {
-        let value = cas
-            .get_object(&hash)
-            .with_context(|| format!("read reconciled chain object {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("reconciled chain object {hash} disappeared"))?;
-        let data = lillux::canonical_json(&value)
-            .with_context(|| format!("canonicalize reconciled chain object {hash}"))?
-            .into_bytes();
-        total_bytes += data.len();
+        let data = load_export_object_bytes(&cas, &hash)
+            .with_context(|| format!("read bounded reconciled chain object {hash}"))?;
+        total_object_bytes = total_object_bytes.checked_add(u64::try_from(data.len())?)
+            .context("reconciled object byte count overflow")?;
+        if total_object_bytes > limits.max_total_object_bytes {
+            anyhow::bail!("reconciled object bytes exceed their aggregate ceiling");
+        }
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: false,
@@ -383,11 +471,21 @@ pub fn reconcile_export_pinned(
     }
 
     for hash in missing_blobs {
-        let data = cas
-            .get_blob(&hash)
-            .with_context(|| format!("read reconciled chain blob {hash}"))?
-            .ok_or_else(|| anyhow::anyhow!("reconciled chain blob {hash} disappeared"))?;
-        total_bytes += data.len();
+        let remaining_total = limits
+            .max_total_blob_bytes
+            .checked_sub(total_blob_bytes)
+            .context("reconciled chain blob bytes exceed the default closure total")?;
+        let data = load_export_blob_bytes(
+            cas,
+            &hash,
+            limits.max_blob_bytes.min(remaining_total),
+        )
+        .with_context(|| format!("read bounded reconciled chain blob {hash}"))?;
+        let blob_bytes = u64::try_from(data.len()).context("reconciled chain blob size exceeds u64")?;
+        total_blob_bytes = total_blob_bytes
+            .checked_add(blob_bytes)
+            .context("reconciled chain blob byte count overflow")?;
+        account_export_payload_bytes(&mut total_bytes, data.len())?;
         entries.push(SyncEntry {
             hash,
             is_blob: true,
@@ -500,11 +598,12 @@ fn stage_chain_import_with_pinned_authority(
     // CAS mutation guard still excludes sweep. Incremental payloads may omit
     // descendants already present locally, so lease the verified closure—not
     // merely the entries transported in this payload—before releasing it.
-    let closure = crate::rebuild::verified_repair_closure_with_cas(
+    let closure = crate::rebuild::verified_repair_closure_with_cas_and_limits(
         cas,
         &payload.chain_root_id,
         &payload.chain_head_hash,
         true,
+        sync_transfer_limits(),
     )?;
     roots.protect_cas_closure_admitted(
         guard,
@@ -702,11 +801,12 @@ fn finalize_import_with_writer_transition(
         // ChainState transition again at the publication boundary, including
         // hashes of already-local descendants. StateDb repeats this under the
         // chain lock and anchors it to any current signed head before publication.
-        crate::rebuild::verified_repair_closure_with_cas(
+        crate::rebuild::verified_repair_closure_with_cas_and_limits(
             &cas,
             &staged.chain_root_id,
             &staged.chain_head_hash,
             true,
+            sync_transfer_limits(),
         )?;
 
         // Step 2: publish through StateDb's journaled chain namespace path,
@@ -717,12 +817,14 @@ fn finalize_import_with_writer_transition(
                 transition,
                 signer,
                 cas_mutation_guard,
+                sync_transfer_limits(),
             )?,
             None => state_db.write_chain_head_ref_admitted(
                 &staged.chain_root_id,
                 &staged.chain_head_hash,
                 signer,
                 cas_mutation_guard,
+                sync_transfer_limits(),
             )?,
         }
 
@@ -797,10 +899,11 @@ fn verified_chain_reachability_pinned(
     )?
     .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))?;
     let chain_head_hash = signed_ref.target_hash;
-    let reachable = reachability::collect_chain_reachable_from_head_with_cas(
+    let reachable = reachability::collect_chain_reachable_from_head_with_cas_and_limits(
         cas,
         chain_root_id,
         &chain_head_hash,
+        sync_transfer_limits(),
     )?;
     Ok((chain_head_hash, reachable))
 }
@@ -1164,7 +1267,7 @@ mod tests {
     #[test]
     fn import_objects_staged_records_attribution() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(tmp.path(), test_trust_store()).unwrap();
 
         let data = b"{\"kind\":\"test\",\"value\":42}";
         let hash = lillux::sha256_hex(data);
@@ -1373,11 +1476,9 @@ mod tests {
     /// H6: finalize_import signs a local chain head ref and catches up projection.
     #[test]
     fn finalize_import_signs_local_ref() {
-        use crate::StateDb;
-
         let tmp = tempfile::tempdir().unwrap();
         let runtime_state_dir = tmp.path();
-        let db = StateDb::open(runtime_state_dir, test_trust_store()).unwrap();
+        let db = crate::test_support::TestState::open(runtime_state_dir, test_trust_store()).unwrap();
         let signer = TestSigner::default();
 
         let cas_root = db.cas_root();

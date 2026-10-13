@@ -7,24 +7,28 @@ use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_state::external_execution::guest_journal::AuthenticatedLauncherReady;
 use ryeos_state::external_execution::guest_journal::{
-    DurableNativeCandidateCapture, LauncherOccurrenceEvidence, PreparedGuestJournal,
+    DurableNativeCandidateCapture, LauncherOccurrenceEvidence, LiveGuestJournal,
+    PreparedGuestJournal,
 };
+use ryeos_state::external_execution::native_journal::settle_journal_refusal;
 use ryeos_state::external_execution::{
     AuthenticatedExecutionFrame, ExecutionChannelBinding, ExecutionChannelPayload,
     ExternalCommandOutputCommitment, ExternalCommandOutputStream, ExternalCommandTermination,
     ExternalCommandTerminationReason, ExternalExecutionMode, ExternalTargetExit,
-    SignedExecutionFrame,
+    NativeNamespaceExit, SignedExecutionFrame,
 };
+use ryeos_state::operational::{CarriedOwners, RetainTerminal};
 use serde::{Deserialize, Serialize};
 
 use crate::backends::linux::NativeExternalCandidate;
+use crate::backends::linux::{CapturedQualificationFixture, NativeQualificationCompletion};
 use crate::launcher::{LAUNCHER_CONTROL_FD, PreparedExternalCandidateLauncherRequest};
 use crate::supervisor::{
     CandidateExecutionOutput, ExternalCandidateLauncherClient,
     SerializedExternalCandidateSupervisor, SupervisorApplicationOutcome,
 };
 
-const PROTOCOL_SCHEMA: u32 = 1;
+const PROTOCOL_SCHEMA: u32 = 2;
 const MAX_MESSAGE_BYTES: usize = ryeos_state::external_execution::MAX_FRAME_BYTES + 16 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +53,13 @@ enum LauncherMessage {
         schema: u32,
         frame_digest: String,
         written_bytes: Option<usize>,
+    },
+    QualificationSettled {
+        schema: u32,
+        frame_digest: String,
+        exit: NativeNamespaceExit,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        fixture_capture: Option<QualificationFixtureCapturedWire>,
     },
     Captured {
         schema: u32,
@@ -96,6 +107,63 @@ enum LauncherMessage {
     },
 }
 
+/// Inherited-channel content only. The protected journal independently joins
+/// the admitted contract and native predecessor before retaining CAS testimony.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualificationFixtureCapturedWire {
+    bytes_base64: String,
+    blob_hash: String,
+    normalized_mode: u32,
+}
+
+impl QualificationFixtureCapturedWire {
+    fn from_capture(capture: CapturedQualificationFixture) -> Result<Self> {
+        ensure!(
+            capture.bytes.len() as u64
+                <= ryeos_external_execution_contract::qualification_fixture::MAX_Q_FIXTURE_BYTES
+                && capture.blob_hash == lillux::sha256_hex(&capture.bytes)
+                && capture.normalized_mode == ryeos_state::objects::ProjectFile::REGULAR_MODE,
+            "native Q fixture capture exceeds its immutable content bounds"
+        );
+        Ok(Self {
+            bytes_base64: STANDARD.encode(&capture.bytes),
+            blob_hash: capture.blob_hash,
+            normalized_mode: capture.normalized_mode,
+        })
+    }
+
+    fn decode_for(
+        self,
+        contract: &ryeos_external_execution_contract::qualification_fixture::QFixtureContract,
+    ) -> Result<CapturedQualificationFixture> {
+        contract.validate()?;
+        let maximum_encoded = contract.max_bytes.div_ceil(3) * 4;
+        ensure!(
+            self.bytes_base64.len() as u64 <= maximum_encoded
+                && self.normalized_mode == ryeos_state::objects::ProjectFile::REGULAR_MODE,
+            "launcher Q fixture capture exceeds its admitted encoded bound or mode"
+        );
+        // The inherited message is bounded before deserialization. Decode into
+        // the signed raw ceiling so padding cannot allocate extra decoded bytes.
+        let mut bytes = vec![0; usize::try_from(contract.max_bytes)?];
+        let length = STANDARD
+            .decode_slice(&self.bytes_base64, &mut bytes)
+            .context("decode bounded launcher Q fixture capture")?;
+        bytes.truncate(length);
+        ensure!(
+            STANDARD.encode(&bytes) == self.bytes_base64
+                && self.blob_hash == lillux::sha256_hex(&bytes),
+            "launcher Q fixture capture changed canonical encoding or raw bytes"
+        );
+        Ok(CapturedQualificationFixture {
+            bytes,
+            blob_hash: self.blob_hash,
+            normalized_mode: self.normalized_mode,
+        })
+    }
+}
+
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
 ) -> std::result::Result<Option<T>, D::Error>
@@ -110,6 +178,8 @@ pub struct InheritedExternalCandidateLauncherClient {
     channel: lillux::InheritedDuplexChannel,
     binding: ExecutionChannelBinding,
     deadline: lillux::time::MonotonicDeadline,
+    fixture_contract:
+        Option<ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
 }
 
 /// Exact live composition retained after launch intent, held-process binding,
@@ -117,14 +187,62 @@ pub struct InheritedExternalCandidateLauncherClient {
 pub struct LiveInheritedExternalCandidateSupervisor {
     supervisor: SerializedExternalCandidateSupervisor<InheritedExternalCandidateLauncherClient>,
     launcher_process: lillux::RunningProcess,
+    measured_launcher: Option<crate::launcher::MeasuredLauncherExecutable>,
     process_identity: lillux::ExactProcessIdentity,
     occurrence_digest: String,
     authority: ryeos_state::PinnedStateAuthority,
     supervisor_signing_key: lillux::crypto::SigningKey,
     bootstrap_digest: String,
+    candidate_program: ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram,
     ready_frame: String,
     applied_runtime_recorded: bool,
     runtime_applied_frame_authored: bool,
+    qualification_settled: bool,
+}
+
+/// Launcher readiness observed through this executor's live process and
+/// authenticated inherited channel. State journal testimony alone cannot
+/// construct this value. It is not applied-exec or terminal qualification.
+#[derive(Debug)]
+pub struct ObservedLauncherReady {
+    retained: ryeos_state::external_execution::guest_journal::RetainedLauncherReady,
+}
+
+impl ObservedLauncherReady {
+    pub fn binding_digest(&self) -> &str {
+        self.retained.binding_digest()
+    }
+    pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
+        self.retained.process_identity()
+    }
+    pub fn retained_launcher_artifact_digest(&self) -> &str {
+        self.retained.retained_launcher_artifact_digest()
+    }
+    pub fn channel_challenge_digest(&self) -> &str {
+        self.retained.channel_challenge_digest()
+    }
+    pub fn occurrence_digest(&self) -> &str {
+        self.retained.occurrence_digest()
+    }
+    pub fn handshake_transcript_digest(&self) -> &str {
+        self.retained.handshake_transcript_digest()
+    }
+}
+
+/// Measured descriptor custody joined to this live launcher's readiness.
+/// It does not assert applied exec, terminal settlement or qualification.
+pub struct ObservedMeasuredLauncherReady<'a> {
+    measured: &'a crate::launcher::MeasuredLauncherExecutable,
+    ready: ObservedLauncherReady,
+}
+
+impl ObservedMeasuredLauncherReady<'_> {
+    pub fn launcher_digest(&self) -> &str {
+        self.measured.digest()
+    }
+    pub fn ready(&self) -> &ObservedLauncherReady {
+        &self.ready
+    }
 }
 
 pub enum ExternalOwnerFrameOutcome {
@@ -141,6 +259,34 @@ pub struct ExternalOwnerFrameDispatch {
 }
 
 impl LiveInheritedExternalCandidateSupervisor {
+    /// Observe this live launcher's retained held occurrence and authenticated
+    /// readiness. This does not assert applied exec or terminal settlement.
+    pub fn observed_launcher_ready(&self) -> Result<ObservedLauncherReady> {
+        let observed = self.supervisor.journal().retained_launcher_ready()?;
+        ensure!(
+            observed.process_identity() == &self.process_identity
+                && observed.occurrence_digest() == self.occurrence_digest
+                && observed.binding_digest() == self.binding().digest()?,
+            "launcher readiness observation lost its original live occurrence"
+        );
+        Ok(ObservedLauncherReady { retained: observed })
+    }
+
+    /// Join exact executable custody and readiness at the use site. A generic
+    /// caller-authored request has no measured-artifact authority.
+    pub fn observed_measured_launcher_ready(&self) -> Result<ObservedMeasuredLauncherReady<'_>> {
+        let measured = self
+            .measured_launcher
+            .as_ref()
+            .context("generic launcher request has no measured executable custody")?;
+        let ready = self.observed_launcher_ready()?;
+        ensure!(
+            ready.retained_launcher_artifact_digest() == measured.digest(),
+            "launcher readiness differs from its measured executable custody"
+        );
+        Ok(ObservedMeasuredLauncherReady { measured, ready })
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.supervisor.journal().binding()
     }
@@ -159,6 +305,49 @@ impl LiveInheritedExternalCandidateSupervisor {
 
     pub fn has_durable_capture(&self) -> Result<bool> {
         self.supervisor.journal().has_retained_export()
+    }
+
+    /// Immutable relay slots cannot refresh a previously accepted response.
+    /// Advance with another truthful acknowledgement of the same retained peer;
+    /// this consumes the existing signed transcript budget and grants no input.
+    pub fn author_idle_poll(&mut self, previous_poll: &[u8]) -> Result<Vec<u8>> {
+        let previous = SignedExecutionFrame::decode_and_verify(
+            previous_poll,
+            self.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        let ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence,
+            peer_frame_digest,
+            ..
+        } = &previous.frame().payload
+        else {
+            anyhow::bail!("fresh relay poll requires a delivered supervisor acknowledgement")
+        };
+        ensure!(
+            previous.frame().direction
+                == ryeos_state::external_execution::ChannelDirection::SupervisorToOwner,
+            "fresh relay poll changed its supervisor direction"
+        );
+        let current = self
+            .supervisor
+            .ensure_supervisor_acknowledgement(
+                &self.supervisor_signing_key,
+                *peer_frame_sequence,
+                peer_frame_digest,
+            )?
+            .context("fresh relay poll lost its retained peer application")?;
+        // A changed durable application can already have authored a successor.
+        // Otherwise repeat the same evidence in a new signed transcript slot.
+        let fresh = if current.frame().sequence > previous.frame().sequence {
+            current
+        } else {
+            self.supervisor.journal().author_supervisor_frame(
+                &self.supervisor_signing_key,
+                current.frame().payload.clone(),
+            )?
+        };
+        Ok(fresh.canonical().as_bytes().to_vec())
     }
 
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -203,6 +392,16 @@ impl LiveInheritedExternalCandidateSupervisor {
         );
         let sequence = verified.frame().sequence;
         let digest = verified.digest().to_owned();
+        ensure!(
+            !matches!(
+                self.binding().execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ) || !matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::Quiesce { .. }
+            ),
+            "qualification session cannot quiesce or export a candidate"
+        );
         let outcome = match &verified.frame().payload {
             ExecutionChannelPayload::Release => {
                 ExternalOwnerFrameOutcome::Application(self.dispatch_release(wire)?)
@@ -215,6 +414,21 @@ impl LiveInheritedExternalCandidateSupervisor {
             }
             ExecutionChannelPayload::Quiesce { .. } => {
                 ExternalOwnerFrameOutcome::Capture(self.dispatch_quiesce(wire)?)
+            }
+            ExecutionChannelPayload::QualificationComplete { .. } => {
+                ensure!(
+                    self.applied_runtime_recorded && self.runtime_applied_frame_authored,
+                    "qualification completion precedes retained applied runtime"
+                );
+                let result = self.supervisor.dispatch_qualification_complete(
+                    wire,
+                    &self.supervisor_signing_key,
+                    &self.occurrence_digest,
+                    &self.authority,
+                    &self.candidate_program,
+                )?;
+                self.qualification_settled = true;
+                ExternalOwnerFrameOutcome::Application(result)
             }
             ExecutionChannelPayload::Acknowledge { .. } => {
                 self.supervisor.record_owner_acknowledgement(wire)?;
@@ -233,6 +447,9 @@ impl LiveInheritedExternalCandidateSupervisor {
     }
 
     pub fn poll_execution_output(&mut self) -> Result<Option<String>> {
+        if self.qualification_settled {
+            return Ok(None);
+        }
         // Transport may poll before the controller has released the target.
         // Do not ask Lillux for a pre-exec receipt until release is durably
         // applied, and do not forward any output before the exact local
@@ -295,92 +512,210 @@ impl LiveInheritedExternalCandidateSupervisor {
             .map(|frame| frame.wire().to_vec()))
     }
 
-    /// Authoritative local cleanup. Returning `Ok` proves the exact launcher
-    /// wrapper and all descendants owned by Lillux were reaped.
-    pub fn abort_and_reap(self) -> Result<()> {
-        match self
-            .launcher_process
-            .wait_for_natural_exit(lillux::time::Duration::from_millis(200))
-        {
-            Ok(settled) if settled.success => Ok(()),
-            Ok(settled) => anyhow::bail!(
-                "dedicated launcher exited before cleanup; exit={}; timed_out={}; stderr={:?}",
-                settled.exit_code,
-                settled.timed_out,
-                bounded_diagnostic_tail(&settled.stderr)
-            ),
-            Err(running) => {
-                let stderr = running.stderr_diagnostic_tail();
-                let cleanup = running.abort_and_reap_checked();
-                if stderr.is_some() {
-                    anyhow::bail!(
-                        "dedicated launcher reported stderr before cleanup; stderr={stderr:?}; cleanup={cleanup:?}"
-                    );
-                }
-                cleanup.map_err(anyhow::Error::msg)
+    /// Authoritative local cleanup. An `Ok` cleanup proves the exact launcher
+    /// wrapper and all descendants owned by Lillux were reaped. The live guest
+    /// journal is handed back on every outcome, so its owner can close it
+    /// into the native census.
+    pub fn abort_and_reap(self) -> (LiveGuestJournal, Result<()>) {
+        let Self {
+            supervisor,
+            launcher_process,
+            measured_launcher,
+            process_identity,
+            occurrence_digest,
+            authority,
+            supervisor_signing_key,
+            bootstrap_digest,
+            candidate_program,
+            ready_frame,
+            applied_runtime_recorded: _,
+            runtime_applied_frame_authored: _,
+            qualification_settled: _,
+        } = self;
+        let cleanup = reap_launcher(launcher_process);
+        // The launcher channel and the remaining authority end only after the
+        // launcher was reaped.
+        let (journal, client) = supervisor.into_parts();
+        drop((
+            client,
+            measured_launcher,
+            process_identity,
+            occurrence_digest,
+            authority,
+            supervisor_signing_key,
+            bootstrap_digest,
+            candidate_program,
+            ready_frame,
+        ));
+        (journal, cleanup)
+    }
+}
+
+fn reap_launcher(launcher_process: lillux::RunningProcess) -> Result<()> {
+    match launcher_process.wait_for_natural_exit(lillux::time::Duration::from_millis(200)) {
+        Ok(settled) if settled.success => Ok(()),
+        Ok(settled) => anyhow::bail!(
+            "dedicated launcher exited before cleanup; exit={}; timed_out={}; stderr={:?}",
+            settled.exit_code,
+            settled.timed_out,
+            bounded_diagnostic_tail(&settled.stderr)
+        ),
+        Err(running) => {
+            let stderr = running.stderr_diagnostic_tail();
+            let cleanup = running.abort_and_reap_checked();
+            if stderr.is_some() {
+                anyhow::bail!(
+                    "dedicated launcher reported stderr before cleanup; stderr={stderr:?}; cleanup={cleanup:?}"
+                );
             }
+            cleanup.map_err(anyhow::Error::msg)
         }
     }
 }
 
+/// Close a guest journal stage that `error` abandons and hand its terminal to
+/// `retain`. A close or a retention that is refused keeps its owner inside the
+/// returned error, which says so.
+fn refuse_with_journal<J, C>(
+    error: anyhow::Error,
+    closed: std::result::Result<C, (J, anyhow::Error)>,
+    retain: RetainTerminal<'_>,
+) -> anyhow::Error
+where
+    J: Send + 'static,
+    C: Send + 'static,
+{
+    let carried = match closed {
+        Ok(terminal) => CarriedOwners::carry(error, terminal),
+        Err((journal, close)) => CarriedOwners::carry(
+            error.context(format!(
+                "guest journal close refused; the journal is retained: {close:#}"
+            )),
+            journal,
+        ),
+    };
+    settle_journal_refusal(carried, retain)
+}
+
+/// Launch, bind and authenticate one dedicated launcher on `prepared_journal`.
+/// Every refusal closes the guest journal stage it abandons and settles that
+/// terminal through `retain` before the refusal is returned.
 pub fn launch_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     mut request: lillux::SubprocessRequest,
     authority: ryeos_state::PinnedStateAuthority,
     bootstrap_digest: String,
+    candidate_program: ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram,
     supervisor_signing_key: lillux::crypto::SigningKey,
     launcher_artifact_digest: &str,
     channel_env_name: &str,
     channel_target_fd: u32,
     deadline: lillux::time::MonotonicDeadline,
+    retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
-    ensure!(
-        prepared_journal.bootstrap_digest() == bootstrap_digest,
-        "launcher request changed guest bootstrap identity"
-    );
-    let binding = prepared_journal.binding().clone();
-    let challenge = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
-    let challenge_digest = lillux::sha256_hex(challenge.as_bytes());
-    let (parent_channel, child_channel) =
-        lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
-    child_channel
-        .bind_to_subprocess_request(&mut request, channel_env_name, channel_target_fd)
-        .map_err(anyhow::Error::msg)?;
-    // The request now owns the only parent-side launch retention for the child
-    // endpoint. Keeping this construction handle alive would mask EOF when a
-    // launcher exits before authentication and strand the supervisor until
-    // its full execution deadline.
-    drop(child_channel);
-    let pending = lillux::spawn_awaiting_attachment(request).map_err(|failure| {
-        anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
-    })?;
-    let process_identity = pending
-        .exact_process_identity()
-        .map_err(anyhow::Error::msg)?;
-    let evidence = LauncherOccurrenceEvidence::from_held_launcher(
-        process_identity.clone(),
-        launcher_artifact_digest,
-        &challenge_digest,
-    )?;
-    let occurrence_digest = evidence.digest()?;
+    let launch = (|| -> Result<_> {
+        ensure!(
+            prepared_journal.bootstrap_digest() == bootstrap_digest,
+            "launcher request changed guest bootstrap identity"
+        );
+        let binding = prepared_journal.binding().clone();
+        candidate_program.validate()?;
+        ensure!(
+            candidate_program.digest()? == binding.candidate_program_digest
+                && candidate_program.execution_mode() == binding.execution_mode
+                && candidate_program.runtime_manifest_hash()? == binding.supervisor_runtime_hash,
+            "live supervisor changed its originally admitted program"
+        );
+        let fixture_contract = match &candidate_program {
+            ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => program.fixture().cloned(),
+            _ => None,
+        };
+        let challenge = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
+        let challenge_digest = lillux::sha256_hex(challenge.as_bytes());
+        let (parent_channel, child_channel) =
+            lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+        child_channel
+            .bind_to_subprocess_request(&mut request, channel_env_name, channel_target_fd)
+            .map_err(anyhow::Error::msg)?;
+        // The request now owns the only parent-side launch retention for the
+        // child endpoint. Keeping this construction handle alive would mask
+        // EOF when a launcher exits before authentication and strand the
+        // supervisor until its full execution deadline.
+        drop(child_channel);
+        // Capture and measurement cannot renew the original launch window.
+        // Refuse at the final reversible cut before creating any held process.
+        ensure!(
+            !deadline.has_elapsed(),
+            "launcher original deadline expired before held spawn"
+        );
+        // The open guest journal holds no fork-sensitive descriptor lease, so
+        // the held spawn's fork custody admits it. Its descriptors are
+        // close-on-exec: the held child keeps them only until its exec.
+        let pending =
+            lillux::spawn_awaiting_attachment_until(request, deadline).map_err(|failure| {
+                anyhow::anyhow!("dedicated launcher spawn failed: {}", failure.stderr)
+            })?;
+        Ok((
+            binding,
+            fixture_contract,
+            challenge,
+            challenge_digest,
+            parent_channel,
+            pending,
+        ))
+    })();
+    let (binding, fixture_contract, challenge, challenge_digest, parent_channel, pending) =
+        match launch {
+            Ok(launch) => launch,
+            Err(error) => return Err(refuse_with_journal(error, prepared_journal.close(), retain)),
+        };
+    let occurrence = (|| -> Result<_> {
+        let process_identity = pending
+            .exact_process_identity()
+            .map_err(anyhow::Error::msg)?;
+        let evidence = LauncherOccurrenceEvidence::from_held_launcher(
+            process_identity.clone(),
+            launcher_artifact_digest,
+            &challenge_digest,
+        )?;
+        let occurrence_digest = evidence.digest()?;
+        Ok((process_identity, evidence, occurrence_digest))
+    })();
+    let (process_identity, evidence, occurrence_digest) = match occurrence {
+        Ok(occurrence) => occurrence,
+        Err(error) => {
+            let cleanup = pending.abort_and_reap();
+            let error = error.context(format!(
+                "observe held launcher occurrence; held cleanup={cleanup:?}"
+            ));
+            return Err(refuse_with_journal(error, prepared_journal.close(), retain));
+        }
+    };
     let bound_journal = match prepared_journal.bind_launcher(evidence) {
         Ok(bound) => bound,
         Err(error) => {
             let cleanup = pending.abort_and_reap();
-            return Err(error.context(format!(
+            // The refused stage already closed; its terminal rides `error`
+            // and is settled before any context is added around it.
+            return Err(settle_journal_refusal(error, retain).context(format!(
                 "persist exact launcher occurrence; held cleanup={cleanup:?}"
             )));
         }
     };
-    let running = pending
-        .release_after_attachment()
-        .map_err(|error| anyhow::anyhow!("release attached dedicated launcher: {error}"))?;
+    let running = match pending.release_after_attachment() {
+        Ok(running) => running,
+        Err(error) => {
+            let error = anyhow::anyhow!("release attached dedicated launcher: {error}");
+            return Err(refuse_with_journal(error, bound_journal.close(), retain));
+        }
+    };
     let (client, ready) = match InheritedExternalCandidateLauncherClient::authenticate(
         parent_channel,
         binding,
         &challenge,
         &occurrence_digest,
         deadline,
+        fixture_contract,
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -389,28 +724,29 @@ pub fn launch_external_candidate_supervisor(
             // window so its refusal reaches the bounded capture. Interrupting
             // immediately would race teardown and replace the actual cause
             // with our own observation-cancel diagnostic.
-            return match running.wait_for_natural_exit(lillux::time::Duration::from_secs(1)) {
-                Ok(settled) => Err(error.context(format!(
+            let error = match running.wait_for_natural_exit(lillux::time::Duration::from_secs(1)) {
+                Ok(settled) => error.context(format!(
                     "authenticate dedicated launcher; settled_exit={}; timed_out={}; stderr={:?}",
                     settled.exit_code,
                     settled.timed_out,
                     bounded_diagnostic_tail(&settled.stderr)
-                ))),
+                )),
                 Err(running) => {
                     let stderr = running.stderr_diagnostic_tail();
                     let cleanup = running.abort_and_reap_checked();
-                    Err(error.context(format!(
+                    error.context(format!(
                         "authenticate dedicated launcher; natural settlement absent; stderr={stderr:?}; cleanup={cleanup:?}"
-                    )))
+                    ))
                 }
             };
+            return Err(refuse_with_journal(error, bound_journal.close(), retain));
         }
     };
     let live_journal = match bound_journal.mark_launcher_ready(ready) {
         Ok(live) => live,
         Err(error) => {
             let cleanup = running.abort_and_reap_checked();
-            return Err(error.context(format!(
+            return Err(settle_journal_refusal(error, retain).context(format!(
                 "persist authenticated launcher readiness; cleanup={cleanup:?}"
             )));
         }
@@ -420,22 +756,28 @@ pub fn launch_external_candidate_supervisor(
         Ok(ready) => ready.canonical().to_owned(),
         Err(error) => {
             let cleanup = running.abort_and_reap_checked();
-            return Err(error.context(format!(
+            let error = error.context(format!(
                 "publish dedicated launcher readiness; cleanup={cleanup:?}"
-            )));
+            ));
+            let (live_journal, client) = supervisor.into_parts();
+            drop(client);
+            return Err(refuse_with_journal(error, live_journal.close(), retain));
         }
     };
     Ok(LiveInheritedExternalCandidateSupervisor {
         supervisor,
         launcher_process: running,
+        measured_launcher: None,
         process_identity,
         occurrence_digest,
         authority,
         supervisor_signing_key,
         bootstrap_digest,
+        candidate_program,
         ready_frame,
         applied_runtime_recorded: false,
         runtime_applied_frame_authored: false,
+        qualification_settled: false,
     })
 }
 
@@ -450,24 +792,37 @@ fn bounded_diagnostic_tail(value: &str) -> String {
     format!("… (bounded stderr tail; earlier bytes omitted)\n{tail}")
 }
 
+/// Launch on a measured launcher request. Every refusal closes the guest
+/// journal stage it abandons and settles that terminal through `retain`.
 pub fn launch_prepared_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     prepared: PreparedExternalCandidateLauncherRequest,
     supervisor_signing_key: lillux::crypto::SigningKey,
-    launcher_artifact_digest: &str,
     deadline: lillux::time::MonotonicDeadline,
+    retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
-    launch_external_candidate_supervisor(
+    if let Err(error) = prepared
+        .measured_launcher
+        .require_request(&prepared.request, prepared.measured_launcher.digest())
+    {
+        return Err(refuse_with_journal(error, prepared_journal.close(), retain));
+    }
+    let measured_launcher = prepared.measured_launcher;
+    let mut live = launch_external_candidate_supervisor(
         prepared_journal,
         prepared.request,
         prepared.authority,
         prepared.bootstrap_digest,
+        prepared.candidate_program,
         supervisor_signing_key,
-        launcher_artifact_digest,
+        measured_launcher.digest(),
         "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
         LAUNCHER_CONTROL_FD,
         deadline,
-    )
+        retain,
+    )?;
+    live.measured_launcher = Some(measured_launcher);
+    Ok(live)
 }
 
 impl InheritedExternalCandidateLauncherClient {
@@ -500,6 +855,9 @@ impl InheritedExternalCandidateLauncherClient {
         challenge: &str,
         occurrence_digest: &str,
         deadline: lillux::time::MonotonicDeadline,
+        fixture_contract: Option<
+            ryeos_external_execution_contract::qualification_fixture::QFixtureContract,
+        >,
     ) -> Result<(Self, AuthenticatedLauncherReady)> {
         ensure!(
             challenge.len() == 64
@@ -509,6 +867,13 @@ impl InheritedExternalCandidateLauncherClient {
             "launcher challenge is not a canonical 256-bit value"
         );
         binding.validate()?;
+        if let Some(fixture) = &fixture_contract {
+            fixture.validate()?;
+            ensure!(
+                binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {},
+                "only a Q launcher handshake may receive fixture decoding bounds"
+            );
+        }
         ensure!(
             occurrence_digest.len() == 64
                 && occurrence_digest
@@ -550,6 +915,7 @@ impl InheritedExternalCandidateLauncherClient {
                 channel,
                 binding,
                 deadline,
+                fixture_contract,
             },
             authenticated,
         ))
@@ -583,6 +949,57 @@ impl InheritedExternalCandidateLauncherClient {
             _ => anyhow::bail!("dedicated launcher returned a mismatched action response"),
         }
     }
+
+    fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<NativeQualificationCompletion> {
+        ensure!(
+            self.binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && matches!(
+                    frame.frame().payload,
+                    ExecutionChannelPayload::QualificationComplete { .. }
+                )
+                && frame.frame().binding_digest == self.binding.digest()?,
+            "launcher qualification completion changed its bound command"
+        );
+        write_message(
+            &mut self.channel,
+            self.deadline,
+            &LauncherMessage::Apply {
+                schema: PROTOCOL_SCHEMA,
+                frame_json: frame.canonical().to_owned(),
+            },
+        )?;
+        match read_message(&mut self.channel, self.deadline)
+            .context("read dedicated launcher qualification settlement")?
+        {
+            LauncherMessage::QualificationSettled {
+                schema: PROTOCOL_SCHEMA,
+                frame_digest,
+                exit,
+                fixture_capture,
+            } if frame_digest == frame.digest() => {
+                let fixture_capture = match (fixture_capture, &self.fixture_contract) {
+                    (Some(capture), Some(contract)) => Some(capture.decode_for(contract)?),
+                    (None, None) => None,
+                    _ => anyhow::bail!("launcher Q capture changed its admitted fixture presence"),
+                };
+                Ok(NativeQualificationCompletion {
+                    exit,
+                    fixture_capture,
+                })
+            }
+            LauncherMessage::Failed {
+                schema: PROTOCOL_SCHEMA,
+                frame_digest,
+                detail,
+            } if frame_digest == frame.digest() => {
+                anyhow::bail!("dedicated launcher qualification completion failed: {detail}")
+            }
+            _ => anyhow::bail!("dedicated launcher changed qualification settlement response"),
+        }
+    }
 }
 
 impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClient {
@@ -609,6 +1026,13 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
             "launcher cancellation returned protocol progress"
         );
         Ok(())
+    }
+
+    fn complete_qualification(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<NativeQualificationCompletion> {
+        InheritedExternalCandidateLauncherClient::complete_qualification(self, frame)
     }
 
     fn capture(
@@ -702,11 +1126,23 @@ fn decode_execution_output(
                 "dedicated launcher output changed its bounded canonical bytes"
             );
             match (bytes.is_empty(), closed) {
-                (false, false) if mode == (ExternalExecutionMode::StructuredSession {}) => {
+                (false, false)
+                    if matches!(
+                        mode,
+                        ExternalExecutionMode::StructuredSession {}
+                            | ExternalExecutionMode::QualificationStructuredSession {}
+                    ) =>
+                {
                     Ok(CandidateExecutionOutput::Bytes(bytes))
                 }
                 (true, false) => Ok(CandidateExecutionOutput::Idle),
-                (true, true) if mode == (ExternalExecutionMode::StructuredSession {}) => {
+                (true, true)
+                    if matches!(
+                        mode,
+                        ExternalExecutionMode::StructuredSession {}
+                            | ExternalExecutionMode::QualificationStructuredSession {}
+                    ) =>
+                {
                     Ok(CandidateExecutionOutput::Closed)
                 }
                 _ => anyhow::bail!("launcher output changed execution mode or EOF framing"),
@@ -1125,10 +1561,13 @@ pub fn serve_native_candidate_launcher(
     let result = (|| -> Result<()> {
         let stdout = BoundedCandidateExecutionOutput::new(protocol_output, maximum_output_bytes)?;
         let mut output = match expected_binding.execution_mode {
-            ExternalExecutionMode::StructuredSession {} => NativeCandidateOutputOwner::Structured {
-                stdout,
-                stderr: BoundedCandidateStderr::new(candidate_stderr, maximum_stderr_bytes)?,
-            },
+            ExternalExecutionMode::StructuredSession {}
+            | ExternalExecutionMode::QualificationStructuredSession {} => {
+                NativeCandidateOutputOwner::Structured {
+                    stdout,
+                    stderr: BoundedCandidateStderr::new(candidate_stderr, maximum_stderr_bytes)?,
+                }
+            }
             ExternalExecutionMode::DirectCommand {
                 stdout_max_bytes,
                 stderr_max_bytes,
@@ -1207,6 +1646,11 @@ pub fn serve_native_candidate_launcher(
                         decoded.frame().payload,
                         ExecutionChannelPayload::Quiesce { .. }
                     ) {
+                        ensure!(
+                            expected_binding.execution_mode
+                                == ExternalExecutionMode::StructuredSession {},
+                            "qualification session cannot capture or export a candidate"
+                        );
                         let guard = authority.acquire_shared_guard()?;
                         let publication_key =
                             ryeos_state::DurableCasPublicationKey::external_candidate_occurrence(
@@ -1274,6 +1718,31 @@ pub fn serve_native_candidate_launcher(
                         ExecutionChannelPayload::Cancel => {
                             output.cancelled();
                             candidate.cancel(&decoded, deadline).map(|_| None)
+                        }
+                        ExecutionChannelPayload::QualificationComplete { .. } => {
+                            let response =
+                                match candidate.complete_qualification(&decoded, deadline) {
+                                    Ok(settled) => LauncherMessage::QualificationSettled {
+                                        schema: PROTOCOL_SCHEMA,
+                                        frame_digest: digest,
+                                        exit: settled.exit,
+                                        fixture_capture: settled
+                                            .fixture_capture
+                                            .map(QualificationFixtureCapturedWire::from_capture)
+                                            .transpose()?,
+                                    },
+                                    Err(error) => LauncherMessage::Failed {
+                                        schema: PROTOCOL_SCHEMA,
+                                        frame_digest: digest,
+                                        detail: format!("{error:#}"),
+                                    },
+                                };
+                            write_message(
+                                &mut channel,
+                                candidate.control_io_deadline(deadline),
+                                &response,
+                            )?;
+                            continue;
                         }
                         _ => anyhow::bail!("dedicated launcher received a non-native action"),
                     };
@@ -1538,6 +2007,55 @@ mod tests {
     }
 
     #[test]
+    fn qualification_fixture_wire_refuses_noncanonical_or_unbounded_content() {
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_CONTRACT_SCHEMA, Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let contract = QFixtureContract {
+            schema: Q_FIXTURE_CONTRACT_SCHEMA,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 1,
+        };
+        let wire = |bytes: &[u8]| QualificationFixtureCapturedWire {
+            bytes_base64: STANDARD.encode(bytes),
+            blob_hash: lillux::sha256_hex(bytes),
+            normalized_mode: ryeos_state::objects::ProjectFile::REGULAR_MODE,
+        };
+        assert_eq!(wire(b"x").decode_for(&contract).unwrap().bytes, b"x");
+        assert!(wire(b"xy").decode_for(&contract).is_err());
+        let mut changed = wire(b"x");
+        changed.blob_hash = lillux::sha256_hex(b"y");
+        assert!(changed.decode_for(&contract).is_err());
+        let mut executable = wire(b"x");
+        executable.normalized_mode = 0o755;
+        assert!(executable.decode_for(&contract).is_err());
+        let mut unpadded = wire(b"x");
+        unpadded.bytes_base64 = "eA".into();
+        assert!(unpadded.decode_for(&contract).is_err());
+        let mut oversized = wire(b"x");
+        oversized.bytes_base64 = "A".repeat(8);
+        assert!(oversized.decode_for(&contract).is_err());
+        let mut extra = serde_json::to_value(wire(b"x")).unwrap();
+        extra["path"] = serde_json::json!("/caller-selected");
+        assert!(serde_json::from_value::<QualificationFixtureCapturedWire>(extra).is_err());
+
+        let message = serde_json::to_value(LauncherMessage::QualificationSettled {
+            schema: PROTOCOL_SCHEMA,
+            frame_digest: "a".repeat(64),
+            exit: NativeNamespaceExit::Code(0),
+            fixture_capture: None,
+        })
+        .unwrap();
+        assert!(message["fixture_capture"].is_null());
+        let mut missing = message;
+        missing.as_object_mut().unwrap().remove("fixture_capture");
+        assert!(serde_json::from_value::<LauncherMessage>(missing).is_err());
+    }
+
+    #[test]
     fn direct_command_output_is_fair_exact_and_requires_actual_status() {
         fn stream(bytes: &[u8]) -> BoundedCandidateExecutionOutput {
             let mut file = tempfile::tempfile().unwrap();
@@ -1691,6 +2209,7 @@ mod tests {
             stderr_max_bytes: 8,
         };
         let protocol = ExternalExecutionMode::StructuredSession {};
+        let qualification = ExternalExecutionMode::QualificationStructuredSession {};
         let chunk = |offset| LauncherMessage::CommandOutput {
             schema: PROTOCOL_SCHEMA,
             stream: ExternalCommandOutputStream::Stderr,
@@ -1698,7 +2217,32 @@ mod tests {
             bytes_base64: STANDARD.encode(b"err"),
         };
         assert!(decode_execution_output(chunk(0), protocol).is_err());
+        assert!(decode_execution_output(chunk(0), qualification).is_err());
         assert!(decode_execution_output(chunk(6), direct).is_err());
+        assert_eq!(
+            decode_execution_output(
+                LauncherMessage::Output {
+                    schema: PROTOCOL_SCHEMA,
+                    bytes_base64: STANDARD.encode(b"reply"),
+                    closed: false,
+                },
+                qualification,
+            )
+            .unwrap(),
+            CandidateExecutionOutput::Bytes(b"reply".to_vec())
+        );
+        assert_eq!(
+            decode_execution_output(
+                LauncherMessage::Output {
+                    schema: PROTOCOL_SCHEMA,
+                    bytes_base64: String::new(),
+                    closed: true,
+                },
+                qualification,
+            )
+            .unwrap(),
+            CandidateExecutionOutput::Closed
+        );
         assert_eq!(
             decode_execution_output(chunk(5), direct).unwrap(),
             CandidateExecutionOutput::CommandOutput {
@@ -1959,6 +2503,7 @@ mod tests {
             &challenge,
             &occurrence_digest,
             deadline,
+            None,
         );
         let (mut client, _ready) = match authenticated {
             Ok(authenticated) => authenticated,

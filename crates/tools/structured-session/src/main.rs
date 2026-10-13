@@ -8,6 +8,7 @@ use lillux::time::{Duration, MonotonicDeadline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod configuration_absence;
 mod workload_client_broker;
 
 const WIRE_PROTOCOL: &str = "ryeos.structured-session";
@@ -279,6 +280,7 @@ struct StructuredSessionProfile {
     baseline_destination: String,
     auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
     runtime_configs: Vec<ryeos_state::objects::SessionRuntimeConfigurationFile>,
+    configuration_absence: ryeos_state::objects::ConfigurationAbsence,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
@@ -693,6 +695,9 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         &profile.auxiliary_configs,
     )?;
     ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    profile
+        .configuration_absence
+        .validate_runtime_configs(&profile.runtime_configs)?;
     if let Some(requirement) = &profile.external_candidate {
         // The controller's exclusive-session start owner admits and prepares
         // the exact connector, configuration adapter, capability, and contact
@@ -2111,6 +2116,13 @@ impl StructuredWorkload {
             .as_ref()
             .map(|requirement| requirement.runtime_recipe.cwd.clone())
             .unwrap_or_else(|| workspace.to_owned());
+        // Inspect the actual local startup and route filesystem before the
+        // workload can bootstrap or select a thread configuration loader.
+        configuration_absence::require_absent(
+            &profile.configuration_absence,
+            workspace,
+            &route_workspace,
+        )?;
         let mut process_environment = BTreeMap::from([
             ("LANG".to_owned(), "C".to_owned()),
             ("LC_ALL".to_owned(), "C".to_owned()),
@@ -4454,6 +4466,386 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
 
+    fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"
+        ))
+        .unwrap();
+        let route = serde_json::from_value(
+            profile["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|route| route["id"] == route_id)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let schemas = [
+            (
+                "schema/ExternalThreadStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadStartParams.json"),
+            ),
+            (
+                "schema/ExternalThreadResumeParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadResumeParams.json"),
+            ),
+            (
+                "schema/ExternalTurnStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnStartParams.json"),
+            ),
+            (
+                "schema/ExternalTurnSteerParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnSteerParams.json"),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name.to_owned(), serde_json::from_str(bytes).unwrap()))
+        .collect();
+        (route, schemas)
+    }
+
+    /// The real stdio route order immediately before call_raw; no process or
+    /// upstream request is created by these contract tests.
+    fn admit_external_request(
+        route_id: &str,
+        mut payload: Value,
+        bound_thread: Option<&str>,
+    ) -> Result<Value> {
+        let (route, schemas) = external_request_contract(route_id);
+        prepare_session_binding(
+            route.session_binding.as_ref(),
+            &bound_thread.map(str::to_owned),
+            &mut payload,
+            true,
+        )?;
+        // A local startup workspace is not the fixed external environment cwd.
+        apply_route_parameters(&route, &mut payload, "/owner/project")?;
+        validate_schema_from_map(&schemas, &route.request_schema, &payload)?;
+        Ok(payload)
+    }
+
+    #[test]
+    fn external_request_language_preserves_owner_injection_and_bound_plain_text() {
+        for payload in [
+            json!({}),
+            json!({"experimentalRawEvents":true}),
+            json!({"experimentalRawEvents":false,"model":null}),
+            json!({"experimentalRawEvents":true,"model":"gpt-5.3-codex"}),
+        ] {
+            let admitted = admit_external_request("session.start", payload, None).unwrap();
+            let (route, _) = external_request_contract("session.start");
+            assert_eq!(admitted["environments"], route.fixed_params["environments"]);
+            assert_eq!(admitted["cwd"], "/owner/project");
+            assert_eq!(admitted["approvalsReviewer"], "user");
+        }
+        let resumed =
+            admit_external_request("session.resume", json!({"threadId":"original"}), None).unwrap();
+        assert_eq!(resumed["threadId"], "original");
+        assert_eq!(resumed["cwd"], "/owner/project");
+        assert_eq!(resumed["approvalsReviewer"], "user");
+        for input in [
+            json!([{"type":"text","text":"Solve the retained task."}]),
+            json!([{"type":"text","text":"first","text_elements":[]},
+                   {"type":"text","text":"second"}]),
+        ] {
+            for (route, mut payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active-turn"}),
+                ),
+            ] {
+                let admitted =
+                    admit_external_request(route, payload.clone(), Some("original")).unwrap();
+                assert_eq!(admitted["threadId"], "original");
+                assert_eq!(admitted["input"], input);
+                payload["threadId"] = json!("original");
+                assert!(admit_external_request(route, payload.clone(), Some("original")).is_ok());
+                payload["threadId"] = json!("different");
+                assert!(admit_external_request(route, payload, Some("original")).is_err());
+            }
+        }
+        assert!(admit_external_request("session.start", json!({}), Some("original")).is_err());
+        assert!(admit_external_request("session.resume", json!({}), None).is_err());
+        assert!(
+            admit_external_request(
+                "session.resume",
+                json!({"threadId":"original"}),
+                Some("original")
+            )
+            .is_err()
+        );
+        assert!(admit_external_request("turn.start", json!({"input":[]}), None).is_err());
+        assert!(
+            admit_external_request(
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_unknown_null_and_sticky_overrides() {
+        for (route, baseline, bound) in [
+            ("session.start", json!({}), None),
+            ("session.resume", json!({"threadId":"original"}), None),
+            (
+                "turn.start",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original"),
+            ),
+            (
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}],"expectedTurnId":"active"}),
+                Some("original"),
+            ),
+        ] {
+            assert!(admit_external_request(route, baseline.clone(), bound).is_ok());
+            for field in [
+                "config",
+                "baseInstructions",
+                "developerInstructions",
+                "permissions",
+                "collaborationMode",
+                "environments",
+                "runtimeWorkspaceRoots",
+                "cwd",
+                "approvalPolicy",
+                "approvalsReviewer",
+                "sandbox",
+                "sandboxPolicy",
+                "modelProvider",
+                "dynamicTools",
+                "selectedCapabilityRoots",
+                "serviceName",
+                "ephemeral",
+                "allowProviderModelFallback",
+                "historyMode",
+                "multiAgentMode",
+                "personality",
+                "serviceTier",
+                "sessionStartSource",
+                "threadSource",
+                "effort",
+                "summary",
+                "outputSchema",
+                "clientUserMessageId",
+                "responsesapiClientMetadata",
+                "additionalContext",
+                "mockExperimentalField",
+                "unknownFutureField",
+            ] {
+                for value in [Value::Null, json!({"enabled":true})] {
+                    let mut payload = baseline.clone();
+                    payload[field] = value;
+                    assert!(
+                        admit_external_request(route, payload, bound).is_err(),
+                        "{route}/{field}"
+                    );
+                }
+            }
+            if route != "session.start" {
+                for field in ["model", "experimentalRawEvents"] {
+                    for value in [Value::Null, json!("changed")] {
+                        let mut payload = baseline.clone();
+                        payload[field] = value;
+                        assert!(
+                            admit_external_request(route, payload, bound).is_err(),
+                            "{route}/{field}"
+                        );
+                    }
+                }
+            }
+        }
+        for model in [
+            json!(""),
+            json!(" spaced"),
+            json!("two models"),
+            json!("line\n"),
+            json!("é"),
+            json!("x".repeat(257)),
+            json!({}),
+        ] {
+            assert!(admit_external_request("session.start", json!({"model":model}), None).is_err());
+        }
+        assert!(
+            admit_external_request("session.start", json!({"model":"x".repeat(256)}), None).is_ok()
+        );
+        assert!(
+            admit_external_request("session.start", json!({"experimentalRawEvents":null}), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_nested_inputs_and_injected_environment_drift() {
+        let plain = json!({"type":"text","text":"retained task"});
+        let mut refused = vec![Value::Null, json!([]), json!([null]), json!([{}])];
+        for field in [
+            "path",
+            "url",
+            "permissions",
+            "environments",
+            "runtimeWorkspaceRoots",
+            "model",
+            "unknown",
+        ] {
+            for value in [Value::Null, json!({"enabled":true})] {
+                let mut item = plain.clone();
+                item[field] = value;
+                refused.push(json!([item]));
+            }
+        }
+        for spans in [
+            Value::Null,
+            json!([{}]),
+            json!([{"byteRange":{"start":0,"end":1},"placeholder":"x"}]),
+        ] {
+            let mut item = plain.clone();
+            item["text_elements"] = spans;
+            refused.push(json!([item]));
+        }
+        for kind in [
+            "image",
+            "localImage",
+            "audio",
+            "localAudio",
+            "skill",
+            "mention",
+        ] {
+            let mut item = plain.clone();
+            item["type"] = json!(kind);
+            refused.push(json!([item]));
+        }
+        for input in refused {
+            for (route, payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active"}),
+                ),
+            ] {
+                assert!(
+                    admit_external_request(route, payload, Some("original")).is_err(),
+                    "{route}"
+                );
+            }
+        }
+        let admitted = admit_external_request("session.start", json!({}), None).unwrap();
+        let (route, schemas) = external_request_contract("session.start");
+        for (pointer, value) in [
+            ("/environments/0/environmentId", json!("local")),
+            ("/environments/0/cwd", json!("/controller")),
+            ("/environments/0/runtimeWorkspaceRoots", json!(["/"])),
+        ] {
+            let mut changed = admitted.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+        }
+        let mut changed = admitted;
+        changed["environments"][0]["unknown"] = Value::Null;
+        assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+    }
+
+    fn original_configuration_schema_fixtures() -> (HashMap<String, Value>, Value) {
+        let schemas = HashMap::from([
+            (
+                "QNoManagedRequirements.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QNoManagedRequirements.json"
+                )).unwrap(),
+            ),
+            (
+                "QOriginalConfigGate.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QOriginalConfigGate.json"
+                )).unwrap(),
+            ),
+        ]);
+        let fixtures = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/fixtures/external-original-config-responses.json"
+        ))
+        .unwrap();
+        (schemas, fixtures)
+    }
+
+    #[test]
+    fn original_configuration_responses_follow_the_admitted_schema_validator() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        assert_eq!(fixtures["schema"], json!(1));
+        let cases = fixtures["cases"].as_array().unwrap();
+        assert_eq!(
+            cases.len(),
+            31,
+            "review the complete source-derived fixture inventory"
+        );
+        let mut ids = HashSet::new();
+        let mut accepted = 0;
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            assert!(ids.insert(id), "duplicate fixture {id}");
+            let schema = case["schema"].as_str().unwrap();
+            assert!(
+                schemas.contains_key(schema),
+                "unadmitted fixture schema {schema}"
+            );
+            let expected = case["accept"].as_bool().unwrap();
+            let result = validate_schema_from_map(&schemas, schema, &case["response"]);
+            assert_eq!(result.is_ok(), expected, "fixture {id}: {result:?}");
+            accepted += usize::from(expected);
+        }
+        assert_eq!(accepted, 5);
+    }
+
+    #[test]
+    fn original_configuration_refusals_do_not_echo_private_mcp_or_endpoint_values() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        let baseline = &fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "pinned_baseline")
+            .unwrap()["response"];
+        validate_schema_from_map(&schemas, "QOriginalConfigGate.json", baseline).unwrap();
+        for (field, value, sensitive_values) in [
+            (
+                "mcp_servers",
+                json!({"private-service": {"url": "https://private-mcp.invalid/hidden-endpoint", "bearer_token": "private-mcp-token-marker"}}),
+                vec![
+                    "private-service",
+                    "https://private-mcp.invalid/hidden-endpoint",
+                    "private-mcp-token-marker",
+                ],
+            ),
+            (
+                "experimental_thread_config_endpoint",
+                json!("https://private-thread-config.invalid/secret-marker"),
+                vec!["https://private-thread-config.invalid/secret-marker"],
+            ),
+        ] {
+            let mut response = baseline.clone();
+            response["config"][field] = value;
+            let error = validate_schema_from_map(&schemas, "QOriginalConfigGate.json", &response)
+                .expect_err("unadmitted effect input must refuse");
+            let message = format!("{error:#}");
+            assert!(message.contains("value failed schema"));
+            assert!(message.contains("instance digest"));
+            assert!(
+                !message.contains(field),
+                "refusal exposed raw field {field}"
+            );
+            for sensitive in sensitive_values {
+                assert!(
+                    !message.contains(sensitive),
+                    "refusal exposed private input"
+                );
+            }
+        }
+    }
+
     #[test]
     fn admitted_profile_file_accepts_new_bound_and_refuses_oversize() {
         let root = tempfile::tempdir().unwrap();
@@ -4684,6 +5076,7 @@ mod tests {
             "baseline_destination":"config.toml",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -5180,6 +5573,7 @@ server.serve_forever()
             "baseline_destination":"fixture.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -5248,6 +5642,45 @@ server.serve_forever()
             "ceremony_clear":false
         }]);
         serde_json::from_value(profile).unwrap()
+    }
+
+    #[test]
+    fn configuration_absence_refuses_before_any_workload_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let forbidden = root.path().join("ambient-config");
+        std::fs::write(&forbidden, b"private input must not be read").unwrap();
+        let mut profile = gating_approval_profile();
+        profile.configuration_absence.absolute_paths = vec![forbidden.to_str().unwrap().into()];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let mut lifecycle = BridgeLifecycle::default();
+        let error = StructuredWorkload::start(
+            &mut lifecycle,
+            "/deliberately-absent-executable",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".into(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(EventQueue::default())),
+            controls,
+            results,
+            "unused",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .err()
+        .expect("present ambient configuration must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("configuration absence requires an absent entry")
+        );
+        assert!(lifecycle.process.is_none());
+        assert!(lifecycle.diagnostics.is_none());
+        assert!(lifecycle.executable_authorities.is_empty());
     }
 
     #[test]

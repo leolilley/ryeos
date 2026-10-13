@@ -1828,9 +1828,6 @@ fn retained_contact_budget_refusal(
 pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
     for mut record in state.state_store.dedicated_command_outbox_records()? {
         let session = current_session(state, &record.placement_thread_id)?;
-        if terminal_session_retains_predecessor_capsule(state, &session, &record)? {
-            continue;
-        }
         let fenced_uncontacted = json!({
             "error":"worker epoch ended before contact",
             "retryable_uncontacted":true,
@@ -3360,55 +3357,19 @@ fn admitted_session_capsule(
     state
         .state_store
         .admitted_persistent_session_capsule(capsule_hash)
-}
-
-/// An already-terminal, detached placement has no command recovery authority.
-/// Retain its predecessor capsule and outbox as opaque history, not a decoded
-/// current protocol, successful settlement, or permission to retry. Live or
-/// still-attached placements must continue through the ordinary cleanup/recovery
-/// fences; a nonappendable handoff alone is not terminal history.
-fn terminal_session_retains_predecessor_capsule(
-    state: &AppState,
-    session: &DedicatedSessionRecord,
-    record: &crate::runtime_db::DedicatedSessionCommandRecord,
-) -> Result<bool> {
-    if session.state != "terminal"
-        || session.worker_instance_id.is_some()
-        || session.worker_boot_epoch.is_some()
-        || state
-            .state_store
-            .placement_has_unsettled_worker(&session.placement_thread_id)?
-        || state
-            .state_store
-            .get_thread_terminal_authority(&session.placement_thread_id)?
-            .is_none()
-    {
-        return Ok(false);
-    }
-    match admitted_session_capsule(state, &session.admitted_capsule_hash) {
-        Ok(_) => Ok(false),
-        Err(error)
-            if error
+        .map_err(|error| {
+            let predecessor = error
                 .downcast_ref::<ryeos_state::IncompatibleCurrentObjectSchema>()
-                .is_some_and(ryeos_state::IncompatibleCurrentObjectSchema::is_predecessor) =>
-        {
-            // The projection cannot choose an unrelated old capsule to evade
-            // replay validation. Its immutable command fact must independently
-            // name this exact capsule and canonical invocation. This does not
-            // decode the predecessor protocol or confer settlement authority.
-            if retained_committed_command_fact(state, session, record)?.is_none() {
-                bail!("terminal predecessor command has no immutable capsule association");
+                .is_some_and(ryeos_state::IncompatibleCurrentObjectSchema::is_predecessor);
+            if predecessor {
+                error.context(format!(
+                    "admitted session capsule {capsule_hash} predates the current schema; stop the daemon and run `{}` before restarting",
+                    crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+                ))
+            } else {
+                error
             }
-            tracing::warn!(
-                placement_thread_id = %session.placement_thread_id,
-                admitted_capsule_hash = %session.admitted_capsule_hash,
-                %error,
-                "preserving terminal predecessor session command outbox as opaque history"
-            );
-            Ok(true)
-        }
-        Err(error) => Err(error),
-    }
+        })
 }
 
 /// Select from already-compiled launch authority; this is not another profile

@@ -84,7 +84,7 @@ fn values<'a>(entries: &'a [Value], kind: &str) -> Vec<&'a Value> {
 
 #[tokio::test]
 async fn closure_describe_reports_objects_and_blobs() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, blob_hash, _blob) = store_fixture(&state);
 
     let value =
@@ -100,7 +100,7 @@ async fn closure_describe_reports_objects_and_blobs() {
 
 #[tokio::test]
 async fn closure_get_returns_present_entries() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, blob_hash, blob) = store_fixture(&state);
 
     let value = objects_closure_get::handle(request(snapshot_hash, 16), Arc::new(state))
@@ -125,7 +125,7 @@ async fn closure_get_returns_present_entries() {
 
 #[tokio::test]
 async fn closure_get_enforces_blob_byte_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
     req.max_blob_bytes = Some(1);
@@ -139,7 +139,7 @@ async fn closure_get_enforces_blob_byte_budget() {
 
 #[tokio::test]
 async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_transport() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     let state = Arc::new(state);
     let large_hash = "ab".repeat(32);
@@ -193,7 +193,7 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
 
 #[tokio::test]
 async fn closure_get_enforces_object_byte_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
     req.max_total_object_bytes = Some(1);
@@ -202,12 +202,17 @@ async fn closure_get_enforces_object_byte_budget() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("exceeds max_total_object_bytes"));
+    // The walk bounds each read by the aggregate bytes that remain, so the
+    // first object larger than that refuses before its bytes are read.
+    assert!(
+        err.to_string().contains("exceeds byte limit 1"),
+        "unexpected refusal: {err:#}"
+    );
 }
 
 #[tokio::test]
 async fn closure_get_rejects_incomplete_by_default() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let missing = "12".repeat(32);
 
     let err = objects_closure_get::handle(request(missing, 16), Arc::new(state))
@@ -219,7 +224,7 @@ async fn closure_get_rejects_incomplete_by_default() {
 
 #[tokio::test]
 async fn closure_describe_enforces_max_objects() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
 
     let err = objects_closure_describe::handle(request(snapshot_hash, 2), Arc::new(state))
@@ -231,7 +236,7 @@ async fn closure_describe_enforces_max_objects() {
 
 #[tokio::test]
 async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root.clone(), 16);
     req.max_total_blob_bytes = Some(128 * 1024 * 1024 + 1);
@@ -244,7 +249,7 @@ async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
 
 #[tokio::test]
 async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root.clone(), 16);
     req.roots = vec![root; 257];
@@ -256,7 +261,7 @@ async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
 
 #[tokio::test]
 async fn closure_describe_enforces_exact_serialized_response_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root, 16);
     req.max_response_bytes = Some(1);

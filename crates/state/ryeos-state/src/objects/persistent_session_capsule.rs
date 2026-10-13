@@ -5,6 +5,7 @@
 //! realization.  The daemon may pool a process admitted by this capsule; the
 //! owning adapter assigns meaning to request and response bodies.
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +36,12 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // executable product selection is not a substitute for placement qualification.
 // v18 also binds the published product owner's principal, so retained proof
 // authentication never guesses the owner from a later node configuration.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 20;
+// v21 retains the signed finite configuration-absence inventory.
+// Missing predecessor inventory is never interpreted as an empty policy.
+// v22 requires the same byte-bounded BundleExecutor member-source proof as
+// admitted launch capsules; signed init-v2 remains an independent wire contract.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 23;
+pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -640,6 +646,27 @@ impl PersistentSessionAuthority {
         self.wire.validate()?;
         self.artifact_identity.validate()?;
         self.execution_closure.validate()?;
+        if let (
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                execution_plan_hash,
+                executable_identity,
+                ..
+            },
+            AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. },
+        ) = (&self.artifact_identity, &self.execution_closure)
+        {
+            let canonical_plan = lillux::canonical_json_bounded(
+                execution_plan,
+                MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
+            )?;
+            if lillux::sha256_hex(&canonical_plan) != *execution_plan_hash {
+                anyhow::bail!("persistent-session execution plan contradicts artifact identity");
+            }
+            super::admitted_launch_capsule::validate_bundle_executor_plan_proof(
+                execution_plan,
+                executable_identity,
+            )?;
+        }
         if self.artifact_identity.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
             || self.execution_closure.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
         {
@@ -869,16 +896,19 @@ impl AdmittedPersistentSessionCapsule {
         if !self.exact_program.is_object() {
             anyhow::bail!("persistent-session exact program must be an object");
         }
-        let canonical = lillux::canonical_json(&self.exact_program)?;
+        let canonical = lillux::canonical_json_bounded(
+            &self.exact_program,
+            MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+        )?;
         if canonical.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
             anyhow::bail!("persistent-session exact program exceeds its retained byte bound");
         }
-        let observed = lillux::sha256_hex(canonical.as_bytes());
+        let observed = lillux::sha256_hex(&canonical);
         if observed != self.exact_program_hash {
             anyhow::bail!("persistent-session exact program hash mismatch");
         }
         let retained = self.retained_exact_program()?;
-        if lillux::canonical_json(&retained)?.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
+        if lillux::canonical_json_bounded(&retained, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES).is_err() {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
@@ -1040,10 +1070,16 @@ impl AdmittedPersistentSessionCapsule {
                 );
             }
         }
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("persistent-session capsule exceeds bounded canonical byte ceiling")?;
         Ok(())
     }
 
     pub fn from_current_value(value: &Value) -> anyhow::Result<Self> {
+        let canonical = lillux::canonical_json_bounded(value, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)?;
+        if canonical.len() > MAX_PERSISTENT_SESSION_CAPSULE_BYTES {
+            anyhow::bail!("persistent-session capsule exceeds its raw canonical byte ceiling");
+        }
         let object = value
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("persistent-session capsule must be an object"))?;
@@ -1076,10 +1112,14 @@ impl AdmittedPersistentSessionCapsule {
         Ok(serde_json::to_value(self)?)
     }
 
+    pub fn to_canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        self.validate()?;
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("serialize persistent-session capsule under byte ceiling")
+    }
+
     pub fn content_hash(&self) -> anyhow::Result<String> {
-        Ok(lillux::sha256_hex(
-            lillux::canonical_json(&self.to_value()?)?.as_bytes(),
-        ))
+        Ok(lillux::sha256_hex(&self.to_canonical_bytes()?))
     }
 }
 
@@ -1098,6 +1138,8 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// Leaves room for the 96 KiB external runtime recipe and other signed policy
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
+/// Current signed source and retained compiled profile vocabulary.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 11;
 pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
 
 /// Immutable data from captured worker source, mounted at an exact path in
@@ -1213,6 +1255,87 @@ pub fn validate_session_auxiliary_configs(
     Ok(())
 }
 
+/// Signed candidates whose absence is checked in the actual workload filesystem
+/// before bootstrap. This is inert policy data, not a filesystem observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationAbsence {
+    pub absolute_paths: Vec<String>,
+    pub startup_ancestor_paths: Vec<String>,
+    pub route_ancestor_paths: Vec<String>,
+}
+
+pub const MAX_CONFIGURATION_ABSENCE_ENTRIES: usize = 16;
+pub const MAX_CONFIGURATION_ABSENCE_PATH_BYTES: usize = 4096;
+pub const MAX_CONFIGURATION_ABSENCE_ANCESTORS: usize = 64;
+pub const MAX_CONFIGURATION_ABSENCE_INSPECTIONS: usize = 1024;
+
+impl ConfigurationAbsence {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let count = self
+            .absolute_paths
+            .len()
+            .checked_add(self.startup_ancestor_paths.len())
+            .and_then(|count| count.checked_add(self.route_ancestor_paths.len()))
+            .ok_or_else(|| anyhow::anyhow!("configuration absence inventory overflows"))?;
+        if count > MAX_CONFIGURATION_ABSENCE_ENTRIES {
+            anyhow::bail!("configuration absence inventory exceeds its entry bound");
+        }
+        for (paths, absolute) in [
+            (&self.absolute_paths, true),
+            (&self.startup_ancestor_paths, false),
+            (&self.route_ancestor_paths, false),
+        ] {
+            let mut previous: Option<&str> = None;
+            for path in paths {
+                let components = if absolute {
+                    path.strip_prefix('/')
+                } else {
+                    Some(path.as_str())
+                };
+                if path.is_empty()
+                    || path.len() > MAX_CONFIGURATION_ABSENCE_PATH_BYTES
+                    || path.chars().any(char::is_control)
+                    || path.contains(['\\', '*', '?', '[', ']', '$', '`'])
+                    || components.is_none_or(|value| {
+                        value
+                            .split('/')
+                            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                    })
+                    || previous.is_some_and(|prior| prior >= path.as_str())
+                {
+                    anyhow::bail!(
+                        "configuration absence paths must be bounded, canonical, sorted and unique"
+                    );
+                }
+                previous = Some(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Only absolute runtime-file destinations share a statically known root.
+    /// HOME baseline/auxiliary files and cwd-relative ancestry candidates must
+    /// instead be compared after expansion by the workload owner.
+    pub fn validate_runtime_configs(
+        &self,
+        configs: &[SessionRuntimeConfigurationFile],
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        validate_session_runtime_configs(configs)?;
+        for absent in &self.absolute_paths {
+            let absent = std::path::Path::new(absent);
+            for config in configs {
+                let present = std::path::Path::new(&config.destination);
+                if absent.starts_with(present) || present.starts_with(absent) {
+                    anyhow::bail!("configuration absence contradicts a positive runtime file");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedStructuredSessionProfile {
@@ -1225,6 +1348,7 @@ pub struct AdmittedStructuredSessionProfile {
     pub baseline_destination: String,
     pub auxiliary_configs: Vec<SessionConfigurationFile>,
     pub runtime_configs: Vec<SessionRuntimeConfigurationFile>,
+    pub configuration_absence: ConfigurationAbsence,
 }
 
 impl AdmittedStructuredSessionProfile {
@@ -1254,8 +1378,12 @@ impl AdmittedStructuredSessionProfile {
             .contract
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("structured-session contract is not an object"))?;
-        if contract.is_empty() {
-            anyhow::bail!("structured-session contract is empty");
+        if contract
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
+        {
+            anyhow::bail!("structured-session retained profile schema is not current");
         }
         let workload_client = contract.get("workload_client").ok_or_else(|| {
             anyhow::anyhow!("structured-session workload client contract is missing")
@@ -1295,6 +1423,14 @@ impl AdmittedStructuredSessionProfile {
             anyhow::bail!("structured-session runtime configuration contradicts its contract");
         }
         validate_session_runtime_configs(&self.runtime_configs)?;
+        let absence: ConfigurationAbsence =
+            serde_json::from_value(contract.get("configuration_absence").cloned().ok_or_else(
+                || anyhow::anyhow!("structured-session configuration absence inventory is missing"),
+            )?)?;
+        if absence != self.configuration_absence {
+            anyhow::bail!("structured-session configuration absence contradicts its contract");
+        }
+        absence.validate_runtime_configs(&self.runtime_configs)?;
         if let Some(contract) = self.portable_state_contract()? {
             contract.validate_configuration_exclusions(&self.auxiliary_configs)?;
             if let Some(external_candidate) = external_candidate.as_ref() {
@@ -1680,6 +1816,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_absence_refuses_missing_open_noncanonical_and_unbounded_inputs() {
+        let empty = serde_json::json!({"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]});
+        let decode = |value| serde_json::from_value::<ConfigurationAbsence>(value);
+        decode(empty.clone()).unwrap().validate().unwrap();
+        for key in [
+            "absolute_paths",
+            "startup_ancestor_paths",
+            "route_ancestor_paths",
+        ] {
+            let mut missing = empty.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(decode(missing).is_err());
+            let mut null = empty.clone();
+            null[key] = serde_json::Value::Null;
+            assert!(decode(null).is_err());
+        }
+        let mut extra = empty.clone();
+        extra["ignore_errors"] = true.into();
+        assert!(decode(extra).is_err());
+        for path in [
+            "", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\\b", "/a\0b", "/a/*",
+            "/a/$HOME",
+        ] {
+            let mut value = empty.clone();
+            value["absolute_paths"] = serde_json::json!([path]);
+            assert!(decode(value).unwrap().validate().is_err(), "{path:?}");
+        }
+        for path in [
+            "/absolute",
+            "../config",
+            "a/../config",
+            "./config",
+            "a//config",
+        ] {
+            let mut value = empty.clone();
+            value["startup_ancestor_paths"] = serde_json::json!([path]);
+            assert!(decode(value).unwrap().validate().is_err(), "{path:?}");
+        }
+        for paths in [vec!["/b", "/a"], vec!["/a", "/a"]] {
+            let mut value = empty.clone();
+            value["absolute_paths"] = serde_json::json!(paths);
+            assert!(decode(value).unwrap().validate().is_err());
+        }
+        let mut value = empty.clone();
+        value["absolute_paths"] = serde_json::json!([format!("/{}", "x".repeat(4095))]);
+        decode(value.clone()).unwrap().validate().unwrap();
+        value["absolute_paths"] = serde_json::json!([format!("/{}", "x".repeat(4096))]);
+        assert!(decode(value).unwrap().validate().is_err());
+        let mut full = decode(empty).unwrap();
+        full.absolute_paths = (0..8).map(|n| format!("/a{n}")).collect();
+        full.startup_ancestor_paths = (0..8).map(|n| format!("b{n}")).collect();
+        full.validate().unwrap();
+        full.route_ancestor_paths.push("c".into());
+        assert!(full.validate().is_err());
+    }
+
+    #[test]
+    fn configuration_absence_only_compares_proven_common_roots() {
+        let mut absence = ConfigurationAbsence {
+            absolute_paths: vec!["/etc/fixture/policy".into()],
+            startup_ancestor_paths: vec!["config.toml".into()],
+            route_ancestor_paths: vec!["config.toml".into()],
+        };
+        for destination in [
+            "/etc/fixture/policy",
+            "/etc/fixture",
+            "/etc/fixture/policy/child",
+        ] {
+            assert!(
+                absence
+                    .validate_runtime_configs(&[SessionRuntimeConfigurationFile {
+                        source: "policy".into(),
+                        destination: destination.into(),
+                    }])
+                    .is_err()
+            );
+        }
+        absence
+            .validate_runtime_configs(&[SessionRuntimeConfigurationFile {
+                source: "policy".into(),
+                destination: "/etc/fixture/policy-other".into(),
+            }])
+            .unwrap();
+        // Same filename under HOME is not an ancestry-path alias by itself.
+        absence.absolute_paths.clear();
+        absence.validate_runtime_configs(&[]).unwrap();
+    }
+
+    #[test]
     fn lifecycle_refuses_unimplemented_process_multiplexing() {
         let contract = PersistentSessionLifecycleContract {
             max_processes: 1,
@@ -1714,7 +1939,7 @@ mod tests {
 
     #[test]
     fn predecessor_capsule_schema_is_refused_without_translation() {
-        for schema in [1, 9, 10, 13] {
+        for schema in [1, 9, 10, 13, 20] {
             let value = serde_json::json!({
                 "schema": schema,
                 "kind": PERSISTENT_SESSION_CAPSULE_KIND

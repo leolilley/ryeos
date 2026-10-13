@@ -30,7 +30,8 @@ use serde_json::{Value, json};
 
 use super::bundle_release_execution::{
     PinnedGraphExecution, ReleaseSourceGeneration, accept_dispatch_products, execute_pinned_graph,
-    publish_qualification, successful_dispatch_result as dispatch_result,
+    execute_protected_qualification, publish_qualification,
+    successful_dispatch_result as dispatch_result,
 };
 
 const RELEASE_GRAPH_REF: &str = "graph:ryeos/bundle-release/publish";
@@ -245,7 +246,7 @@ fn authority_measure_handler(
             "authority calibration measured another fixed recipe set"
         );
         let selected_environment =
-            ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection {
+            ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection {
                 python_runtime: calibration
                     .execution_environment
                     .python_runtime
@@ -313,10 +314,13 @@ fn authority_measure_handler(
                     == request.substrate_build_signer_fingerprint,
             "authority measurement coordinates differ from the authenticated calibration run"
         );
-        let guard = authority.acquire_shared_guard()?;
+        // Measurement re-resolves current verifiers, which starts handler
+        // processes, so no CAS guard is held here. Each measurement confines
+        // its own state reads to short guarded segments and re-reads its
+        // qualification as current at its end.
         let limits = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
         let qualification_project_context_resolver =
             super::qualification_project_context::resolver(state.as_ref());
@@ -324,7 +328,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.portable_qualification_owner_principal,
             &request.portable_qualification_attestation_hash,
@@ -334,7 +337,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.native_qualification_owner_principal,
             &request.native_qualification_attestation_hash,
@@ -344,7 +346,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.substrate_qualification_owner_principal,
             &request.substrate_qualification_attestation_hash,
@@ -354,7 +355,6 @@ fn authority_measure_handler(
             &state,
             &context,
             &authority,
-            &guard,
             limits,
             &request.core_seed_qualification_owner_principal,
             &request.core_seed_qualification_attestation_hash,
@@ -375,7 +375,7 @@ fn authority_measure_handler(
         );
         anyhow::ensure!(
             portable_measured.qualification_policy.policy.verifier_ref
-                == ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER
+                == ryeos_bundle_publication_contract::PORTABLE_QUALIFIER
                 && portable_measured.qualification_policy.canonical_ref
                     == "config:bundle-release/portable-qualification"
                 && portable_measured.qualification_policy.raw_content_digest
@@ -413,7 +413,7 @@ fn authority_measure_handler(
         );
         anyhow::ensure!(
             core_seed_measured.qualification_policy.policy.verifier_ref
-                == ryeos_app::bundle_publication::core_seed::QUALIFIER
+                == ryeos_bundle_publication_contract::CORE_SEED_QUALIFIER
                 && core_seed_measured.qualification_policy.canonical_ref
                     == "config:bundle-release/core-seed-qualification"
                 && core_seed_measured.qualification_policy.raw_content_digest
@@ -422,7 +422,7 @@ fn authority_measure_handler(
                         .core_seed_qualification
                         .raw_content_digest
                 && core_seed_measured.required_qualification_claims
-                    == [ryeos_app::bundle_publication::core_seed::QUALIFICATION_CLAIM],
+                    == [ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM],
             "Core seed qualification must prove the closed Core seed claim"
         );
         anyhow::ensure!(
@@ -440,6 +440,10 @@ fn authority_measure_handler(
                     == substrate_measured.qualification_signer_fingerprint,
             "portable, native, Core seed, and substrate qualification must use one measured signer"
         );
+        // The remaining reads are state-only. Reacquire the guard for them
+        // now that no further resolution starts handler processes.
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
         let cas = authority.cas_store()?;
         for (
             measured,
@@ -557,10 +561,10 @@ fn authority_measure_handler(
                 "namespace": request.catalog_namespace,
                 "publisher_fingerprint": request.publisher_fingerprint,
                 "authorized_uploaders": request.authorized_uploaders,
-                "generation_claim": ryeos_app::bundle_publication::attestation::BUNDLE_GENERATION_RELEASE_CLAIM,
-                "set_claim": ryeos_app::bundle_publication::attestation::BUNDLE_SET_RELEASE_CLAIM,
-                "catalog_publication_claim": ryeos_app::bundle_publication::attestation::BUNDLE_CATALOG_RELEASE_CLAIM,
-                "policy": ryeos_app::bundle_publication::attestation::BUNDLE_PUBLICATION_POLICY,
+                "generation_claim": ryeos_bundle_publication_contract::BUNDLE_GENERATION_RELEASE_CLAIM,
+                "set_claim": ryeos_bundle_publication_contract::BUNDLE_SET_RELEASE_CLAIM,
+                "catalog_publication_claim": ryeos_bundle_publication_contract::BUNDLE_CATALOG_RELEASE_CLAIM,
+                "policy": ryeos_bundle_publication_contract::BUNDLE_PUBLICATION_POLICY,
                 "trust_epoch": request.trust_epoch,
                 "frozen": false,
                 "calibration_run_attestation_hash": request.calibration_run_attestation_hash,
@@ -589,7 +593,7 @@ fn authority_measure_handler(
                 "publisher_tool_artifact_identity_hash": publisher_tool.artifact_identity_hash,
             }]
         });
-        let policy: ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy =
+        let policy: ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy =
             serde_json::from_value(candidate.clone())?;
         policy.validate()?;
         Ok(json!({
@@ -813,7 +817,7 @@ struct CalibrationLaneResult {
 
 fn environment_selection(
     declaration_id: &str,
-    selected: &ryeos_app::bundle_publication::calibration::CalibrationProductSelection,
+    selected: &ryeos_node_runtime::calibration_policy::CalibrationProductSelection,
 ) -> ryeos_state::external_content::products::composition::ProductSelectionInput {
     ryeos_state::external_content::products::composition::ProductSelectionInput {
         target: ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {},
@@ -827,7 +831,7 @@ fn environment_selection(
 }
 
 fn portable_environment_selections(
-    environment: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection,
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
 ) -> Vec<ryeos_state::external_content::products::composition::ProductSelectionInput> {
     vec![environment_selection("python", &environment.python_runtime)]
 }
@@ -841,7 +845,7 @@ struct CalibrationLaneEnvironment {
 
 impl CalibrationLaneEnvironment {
     fn portable(
-        environment: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection,
+        environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
     ) -> Self {
         Self {
             build: portable_environment_selections(environment),
@@ -850,7 +854,7 @@ impl CalibrationLaneEnvironment {
     }
 
     fn native(
-        environment: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection,
+        environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
     ) -> Self {
         Self {
             build: native_environment_selections(environment),
@@ -860,7 +864,7 @@ impl CalibrationLaneEnvironment {
 }
 
 fn qualified_platform_target(
-    environment: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentProduct,
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentProduct,
 ) -> anyhow::Result<ryeos_bundle_publication_contract::BundleTarget> {
     let evidence = environment
         .qualification_probe_evidence
@@ -986,7 +990,7 @@ fn qualified_platform_target(
 }
 
 fn native_environment_selections(
-    environment: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection,
+    environment: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
 ) -> Vec<ryeos_state::external_content::products::composition::ProductSelectionInput> {
     vec![
         environment_selection("cargo-vendor", &environment.cargo_vendor),
@@ -1004,30 +1008,36 @@ fn calibration_source_bundle_roots(source_root: &Path) -> Vec<PathBuf> {
 }
 
 fn verified_calibration_product(
-    selection: &ryeos_app::bundle_publication::calibration::CalibrationProductSelection,
+    selection: &ryeos_node_runtime::calibration_policy::CalibrationProductSelection,
     expected_recipe_ref: &str,
     expected_product_name: &str,
     expected_policy_ref: &str,
     loader: &ryeos_runtime::verified_loader::VerifiedLoader,
     context: &HandlerContext,
     state: &AppState,
-) -> anyhow::Result<ryeos_app::bundle_publication::calibration::CalibrationEnvironmentProduct> {
+) -> anyhow::Result<ryeos_node_runtime::calibration_policy::CalibrationEnvironmentProduct> {
     use ryeos_state::external_content::products::{
         ProductCaptureEvidence, qualification::ProductQualificationEvidence,
     };
     selection.validate()?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let limits = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
-    let qualification_attestation = ryeos_state::objects::Attestation::from_value(
-        &authority
+    // Only this exact-hash read is guarded. Measurement below re-resolves the
+    // current verifier, which starts handler processes, and confines its own
+    // state reads to short guarded segments.
+    let qualification_attestation = {
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
             .cas_store()?
             .get_object(&selection.qualification_attestation_hash)?
-            .context("selected environment qualification is absent")?,
-    )?;
+            .context("selected environment qualification is absent")?;
+        authority.ensure_guard(&guard)?;
+        ryeos_state::objects::Attestation::from_value(&value)?
+    };
     let untrusted = ProductQualificationEvidence::from_value(&qualification_attestation.evidence)?;
     let owner_principal = untrusted.product_coordinate.owner_principal.clone();
     let qualification_project_context_resolver =
@@ -1036,7 +1046,6 @@ fn verified_calibration_product(
         state,
         context,
         &authority,
-        &guard,
         limits,
         &owner_principal,
         &selection.qualification_attestation_hash,
@@ -1092,7 +1101,7 @@ fn verified_calibration_product(
         "selected environment qualification policy is no longer current"
     );
     Ok(
-        ryeos_app::bundle_publication::calibration::CalibrationEnvironmentProduct {
+        ryeos_node_runtime::calibration_policy::CalibrationEnvironmentProduct {
             selection: selection.clone(),
             owner_principal,
             producer: captured.producer,
@@ -1108,15 +1117,12 @@ fn verified_calibration_product(
 }
 
 fn verified_calibration_environment(
-    selected: &ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection,
+    selected: &ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection,
     source_generation: &ReleaseSourceGeneration,
     context: &HandlerContext,
     state: &AppState,
-) -> anyhow::Result<ryeos_app::bundle_publication::calibration::CalibrationEnvironmentEvidence> {
-    use ryeos_app::bundle_publication::calibration::{
-        CalibrationEnvironmentEvidence, CalibrationEnvironmentKind as Kind,
-        CalibrationEnvironmentUse, CalibrationTerminal as Terminal,
-    };
+) -> anyhow::Result<ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence> {
+    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentEvidence, CalibrationEnvironmentKind as Kind, CalibrationEnvironmentUse, CalibrationTerminal as Terminal};
     selected.validate()?;
     let loader = ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
         source_generation.root().to_path_buf(),
@@ -1280,7 +1286,7 @@ fn verified_calibration_environment(
                         ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH
                     }
                     Terminal::PortableQualification => {
-                        ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER
+                        ryeos_bundle_publication_contract::PORTABLE_QUALIFIER
                     }
                     Terminal::NativeBuild => ryeos_app::bundle_publication::recipe::BUILD_GRAPH,
                     Terminal::NativeCapture => ryeos_app::bundle_publication::recipe::CAPTURE_GRAPH,
@@ -1292,7 +1298,7 @@ fn verified_calibration_environment(
                         ryeos_app::bundle_publication::core_seed::CAPTURE_GRAPH
                     }
                     Terminal::CoreSeedQualification => {
-                        ryeos_app::bundle_publication::core_seed::QUALIFIER
+                        ryeos_bundle_publication_contract::CORE_SEED_QUALIFIER
                     }
                     Terminal::SubstrateBuild => SUBSTRATE_BUILD_GRAPH_REF,
                     Terminal::SubstrateQualification => SUBSTRATE_QUALIFY_TOOL_REF,
@@ -1375,14 +1381,13 @@ fn verified_calibration_environment(
 }
 
 fn calibrated_catalog_environment(
-    catalog: &ryeos_app::node_policy::sections::bundle_publication::BundleCatalogPolicy,
+    catalog: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundleCatalogPolicy,
     source_generation: &ReleaseSourceGeneration,
     context: &HandlerContext,
     state: &AppState,
-) -> anyhow::Result<ryeos_app::bundle_publication::calibration::CalibrationEnvironmentSelection> {
-    use ryeos_app::bundle_publication::calibration::{
-        AuthorityCalibrationEvidence, CalibrationEnvironmentSelection,
-    };
+) -> anyhow::Result<ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection> {
+    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection};
+    use ryeos_app::bundle_publication::calibration::{AuthorityCalibrationEvidence};
     let authority = state.state_store.pinned_state_authority()?;
     let attestation = ryeos_state::objects::Attestation::from_value(
         &authority
@@ -1520,7 +1525,7 @@ async fn run_authority_calibration(
         ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource::DerivedCurrent,
         ryeos_app::bundle_publication::recipe::PORTABLE_BUILD_GRAPH,
         ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH,
-        ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER,
+        ryeos_bundle_publication_contract::PORTABLE_QUALIFIER,
         "portable_bundle",
         "unsigned_bundle",
         "signed_portable_bundle",
@@ -1568,7 +1573,7 @@ async fn run_authority_calibration(
         ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource::CoreSeedGenerated,
         ryeos_app::bundle_publication::core_seed::BUILD_GRAPH,
         ryeos_app::bundle_publication::core_seed::CAPTURE_GRAPH,
-        ryeos_app::bundle_publication::core_seed::QUALIFIER,
+        ryeos_bundle_publication_contract::CORE_SEED_QUALIFIER,
         "core_seed",
         "unsigned_core",
         "signed_core_seed",
@@ -1645,7 +1650,7 @@ async fn run_authority_calibration(
         execution_environment,
     };
     evidence.validate()?;
-    struct IdentitySigner<'a>(&'a ryeos_app::identity::NodeIdentity);
+    struct IdentitySigner<'a>(&'a ryeos_node_runtime::identity::NodeIdentity);
     impl ryeos_state::signer::Signer for IdentitySigner<'_> {
         fn fingerprint(&self) -> &str {
             self.0.fingerprint()
@@ -1836,8 +1841,7 @@ async fn calibrate_signed_bundle(
         capture_manifest == signed.evidence().output_content_manifest_hash(),
         "{bundle_name} calibration capture changed the node-signed tree"
     );
-    let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let qualification_envelope = run_pinned_release_graph_from_generation(
+    let qualification_envelope = run_protected_release_qualifier_from_generation(
         qualifier,
         Arc::clone(source_generation),
         build_recipe.clone(),
@@ -1847,7 +1851,6 @@ async fn calibrate_signed_bundle(
         Some(capture_recipe.clone()),
         capture_recipe_ref,
         capture_digest.clone(),
-        json!({}),
         {
             let mut selections = environment.runtime;
             selections.push(ryeos_state::external_content::products::composition::ProductSelectionInput {
@@ -1861,11 +1864,13 @@ async fn calibrate_signed_bundle(
             });
             selections
         },
-        Some(verifier_chain_root_id.clone()),
+        capture_product.witness_hash.clone(),
+        qualification_relationship,
         context.clone(),
         Arc::clone(&state),
     )
     .await?;
+    let verifier_chain_root_id = qualification_thread_id(&qualification_envelope)?;
     anyhow::ensure!(
         dispatch_result(&qualification_envelope)?["schema"]
             == "ryeos.product_qualification_result.v1",
@@ -2023,8 +2028,7 @@ async fn calibrate_substrate(
         &build_digest,
         &build_parameters,
     )?;
-    let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let qualification_envelope = run_pinned_release_graph_from_generation(
+    let qualification_envelope = run_protected_release_qualifier_from_generation(
         SUBSTRATE_QUALIFY_TOOL_REF,
         Arc::clone(source_generation),
         build_recipe.clone(),
@@ -2034,7 +2038,6 @@ async fn calibrate_substrate(
         None,
         "config:bundle-release/substrate-build-products",
         build_digest.clone(),
-        json!({}),
         {
             let mut selections = environment_selections;
             selections.push(ryeos_state::external_content::products::composition::ProductSelectionInput {
@@ -2048,11 +2051,13 @@ async fn calibrate_substrate(
             });
             selections
         },
-        Some(verifier_chain_root_id.clone()),
+        product.witness_hash.clone(),
+        "substrate_release_to_qualification",
         context.clone(),
         Arc::clone(&state),
     )
     .await?;
+    let verifier_chain_root_id = qualification_thread_id(&qualification_envelope)?;
     anyhow::ensure!(
         dispatch_result(&qualification_envelope)?["schema"]
             == "ryeos.product_qualification_result.v1",
@@ -2145,7 +2150,7 @@ async fn catalog_remote_publish_locked(
     let request: CatalogRemotePublishRequest = crate::handler_error::parse_request(params)?;
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>(
     )?;
     let catalog = policy.require_catalog(&request.catalog_namespace)?;
     // The caller already passed service capability admission. The remote call
@@ -2161,7 +2166,7 @@ async fn catalog_remote_publish_locked(
     let cas = authority.cas_store()?;
     let limits = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         &cas,
@@ -2338,7 +2343,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
         binding: &ryeos_app::bundle_publication::ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
         let section = self.state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         anyhow::ensure!(
             section.section_digest()? == binding.bundle_publication_policy_section_digest,
@@ -2369,7 +2374,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
         materialization: &ryeos_bundle_publication_contract::PublisherMaterializationResult,
         binding: &ryeos_app::bundle_publication::ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
-        let policy = self.state.node_policy.require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
+        let policy = self.state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         anyhow::ensure!(
             policy.section_digest()? == binding.bundle_publication_policy_section_digest,
             "bundle-publication policy digest is stale"
@@ -2413,7 +2418,7 @@ impl ryeos_app::bundle_publication::consumer::ConsumerPublicationPolicy
         anyhow::ensure!(
             attestation.claim == expected_claim
                 && attestation.policy
-                    == ryeos_app::bundle_publication::attestation::BUNDLE_PUBLICATION_POLICY
+                    == ryeos_bundle_publication_contract::BUNDLE_PUBLICATION_POLICY
                 && attestation.expires_at.is_none(),
             "release attestation violates closed policy"
         );
@@ -2583,6 +2588,56 @@ async fn run_pinned_release_graph_from_generation(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_protected_release_qualifier_from_generation(
+    qualifier_ref: &'static str,
+    source_generation: Arc<ReleaseSourceGeneration>,
+    signed_build_recipe: String,
+    build_recipe_filename: &'static str,
+    build_recipe_must_match_source: bool,
+    capture_recipe_filename: &'static str,
+    signed_capture_recipe: Option<String>,
+    recipe_ref: &'static str,
+    expected_recipe_raw_digest: String,
+    product_selections: Vec<
+        ryeos_state::external_content::products::composition::ProductSelectionInput,
+    >,
+    witness_hash: String,
+    relationship_name: &str,
+    context: HandlerContext,
+    state: Arc<AppState>,
+) -> anyhow::Result<Value> {
+    execute_protected_qualification(
+        PinnedGraphExecution {
+            graph_ref: qualifier_ref,
+            source_generation,
+            signed_build_recipe,
+            build_recipe_filename,
+            build_recipe_must_match_source,
+            capture_recipe_filename,
+            signed_capture_recipe,
+            recipe_ref,
+            expected_recipe_raw_digest,
+            parameters: json!({}),
+            product_selections,
+            pre_minted_thread_id: None,
+        },
+        witness_hash,
+        relationship_name.to_owned(),
+        context,
+        state,
+    )
+    .await
+}
+
+fn qualification_thread_id(envelope: &Value) -> anyhow::Result<String> {
+    Ok(envelope
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .context("protected qualification omitted its retained terminal thread")?
+        .to_owned())
+}
+
 fn substrate_build_handler(
     params: Value,
     context: HandlerContext,
@@ -2603,7 +2658,7 @@ fn substrate_build_handler(
         )
         .await?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(
@@ -2646,7 +2701,7 @@ fn substrate_build_handler(
             ryeos_app::bundle_publication::consumer::ConsumerPublicationPolicy::verify_publisher_attestation(
                 &proof,
                 &attestation,
-                ryeos_app::bundle_publication::attestation::BUNDLE_GENERATION_RELEASE_CLAIM,
+                ryeos_bundle_publication_contract::BUNDLE_GENERATION_RELEASE_CLAIM,
             )?;
             anyhow::ensure!(
                 attestation.subject_hash == request.core_generation_hash,
@@ -2793,7 +2848,7 @@ fn substrate_qualify_handler(
             &state,
         )
         .await?;
-        let policy = state.node_policy.require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
+        let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         let (signed_source_template, _) = source_generation.signed_recipe(
             "bundles/bundle-release/.ai/config/bundle-release/substrate-build-products.yaml",
@@ -2841,8 +2896,7 @@ fn substrate_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
+        let result = run_protected_release_qualifier_from_generation(
             SUBSTRATE_QUALIFY_TOOL_REF,
             Arc::clone(&source_generation),
             request.substrate_build_recipe_signed_config,
@@ -2852,13 +2906,14 @@ fn substrate_qualify_handler(
             None,
             "config:bundle-release/substrate-build-products",
             request.substrate_build_recipe_raw_digest,
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.substrate_product_witness.clone(),
+            "substrate_release_to_qualification",
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         let terminal = dispatch_result(&result)?;
         anyhow::ensure!(
             terminal.get("schema").and_then(Value::as_str)
@@ -2913,7 +2968,7 @@ fn core_seed_build_handler(
             "Core seed manifest differs from the exact source snapshot"
         );
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(
@@ -3062,7 +3117,7 @@ fn core_seed_capture_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
-        let policy = state.node_policy.require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
+        let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
@@ -3165,7 +3220,7 @@ fn core_seed_qualify_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
-        let policy = state.node_policy.require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
+        let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
@@ -3179,9 +3234,8 @@ fn core_seed_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
-            ryeos_app::bundle_publication::core_seed::QUALIFIER,
+        let result = run_protected_release_qualifier_from_generation(
+            ryeos_bundle_publication_contract::CORE_SEED_QUALIFIER,
             Arc::clone(&source_generation),
             request.build_recipe_signed_config,
             "core-seed-build-products.yaml",
@@ -3190,13 +3244,14 @@ fn core_seed_qualify_handler(
             Some(request.capture_recipe_signed_config),
             ryeos_app::bundle_publication::core_seed::CAPTURE_RECIPE,
             request.capture_recipe_raw_digest,
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.signed_product_witness.clone(),
+            "signed_core_seed_to_qualification",
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         anyhow::ensure!(
             dispatch_result(&result)?["schema"] == "ryeos.product_qualification_result.v1",
             "Core seed qualification returned another contract"
@@ -3233,7 +3288,7 @@ fn input_inspect_handler(
         )
         .await?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(!catalog.frozen, "bundle publication catalog is frozen");
@@ -3280,7 +3335,7 @@ fn core_seed_inspect_handler(
         )
         .await?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         let ownership = exact_release_payload_ownership(&source_generation, &state)?;
@@ -3344,7 +3399,7 @@ fn generation_build_handler(
             "release manifest differs from the exact source snapshot"
         );
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(!catalog.frozen, "bundle publication catalog is frozen");
@@ -3500,7 +3555,7 @@ fn generation_capture_handler(
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(
@@ -3681,7 +3736,7 @@ fn generation_qualify_handler(
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(!catalog.frozen, "bundle publication catalog is frozen");
@@ -3709,7 +3764,7 @@ fn generation_qualify_handler(
             )
         } else {
             (
-                ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER,
+                ryeos_bundle_publication_contract::PORTABLE_QUALIFIER,
                 "portable-build-products.yaml",
                 "portable-signed-capture-products.yaml",
                 ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_RECIPE_REF,
@@ -3726,8 +3781,7 @@ fn generation_qualify_handler(
                 qualification_hash: None,
             },
         });
-        let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_pinned_release_graph_from_generation(
+        let result = run_protected_release_qualifier_from_generation(
             qualifier,
             Arc::clone(&source_generation),
             request.build_recipe_signed_config.clone(),
@@ -3737,13 +3791,14 @@ fn generation_qualify_handler(
             Some(request.capture_recipe_signed_config.clone()),
             capture_recipe_ref,
             request.capture_recipe_raw_digest.clone(),
-            json!({}),
             selections,
-            Some(verifier_chain_root_id.clone()),
+            request.signed_product_witness.clone(),
+            relationship,
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let verifier_chain_root_id = qualification_thread_id(&result)?;
         let terminal_result = dispatch_result(&result)?;
         anyhow::ensure!(
             terminal_result.get("schema").and_then(Value::as_str)
@@ -3867,7 +3922,7 @@ fn genesis_set_compose_handler(
         let set_hash = set.content_hash()?;
         let cas = proof.authority.cas_store()?;
         let policy = state.node_policy.require::<
-            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+            ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let expected_publisher = format!(
             "fp:{}",
@@ -3943,7 +3998,7 @@ fn set_compose_handler(
                 .bundle_publication_policy_section_digest,
             trust_epoch: request.trust_epoch,
         };
-        let policy = state.node_policy.require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
+        let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let expected = format!(
             "fp:{}",
             policy
@@ -4047,21 +4102,21 @@ macro_rules! descriptor {
 
 pub const INPUT_INSPECT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/input-inspect",
-    endpoint: "bundle_release.input_inspect",
+    endpoint: "bundle-release.input-inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/input-inspect"],
     handler: input_inspect_handler,
 };
 pub const AUTHORITY_MEASURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/authority-measure",
-    endpoint: "bundle_release.authority_measure",
+    endpoint: "bundle-release.authority-measure",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/authority-measure"],
     handler: authority_measure_handler,
 };
 pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/authority-calibrate",
-    endpoint: "bundle_release.authority_calibrate",
+    endpoint: "bundle-release.authority-calibrate",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-build-products",
@@ -4076,6 +4131,7 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
         "ryeos.execute.config.bundle-release/signed-capture-products",
         "ryeos.execute.config.bundle-release/substrate-build-products",
         "ryeos.execute.service.bundle-release/authority-calibrate",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-build",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-capture",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify",
@@ -4092,7 +4148,7 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-build",
-    endpoint: "bundle_release.generation_build",
+    endpoint: "bundle-release.generation-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4107,7 +4163,7 @@ pub const GENERATION_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-build",
-    endpoint: "bundle_release.core_seed_build",
+    endpoint: "bundle-release.core-seed-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-build-products",
@@ -4120,14 +4176,14 @@ pub const CORE_SEED_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_INSPECT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-inspect",
-    endpoint: "bundle_release.core_seed_inspect",
+    endpoint: "bundle-release.core-seed-inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/core-seed-inspect"],
     handler: core_seed_inspect_handler,
 };
 pub const CORE_SEED_CAPTURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-capture",
-    endpoint: "bundle_release.core_seed_capture",
+    endpoint: "bundle-release.core-seed-capture",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/core-seed-capture-products",
@@ -4140,11 +4196,12 @@ pub const CORE_SEED_CAPTURE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const CORE_SEED_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/core-seed-qualify",
-    endpoint: "bundle_release.core_seed_qualify",
+    endpoint: "bundle-release.core-seed-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.service.bundle-release/core-seed-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify",
     ],
     handler: core_seed_qualify_handler,
@@ -4152,14 +4209,14 @@ pub const CORE_SEED_QUALIFY: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     REQUEST_TREE_SIGNING,
     "service:bundle-release/request-tree-signing",
-    "bundle_release.request_tree_signing",
+    "bundle-release.request-tree-signing",
     "ryeos.execute.service.bundle-release/request-tree-signing",
     RequestTreeSigningRequest,
     BundleReleaseOperation::RequestTreeSigning
 );
 pub const GENERATION_CAPTURE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-capture",
-    endpoint: "bundle_release.generation_capture",
+    endpoint: "bundle-release.generation-capture",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4174,13 +4231,14 @@ pub const GENERATION_CAPTURE: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-qualify",
-    endpoint: "bundle_release.generation_qualify",
+    endpoint: "bundle-release.generation-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.config.bundle-release/native-qualification",
         "ryeos.execute.config.bundle-release/portable-qualification",
         "ryeos.execute.service.bundle-release/generation-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/native-qualify",
         "ryeos.execute.tool.ryeos/bundle-release/portable-qualify",
     ],
@@ -4188,14 +4246,14 @@ pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
 };
 pub const GENERATION_FINALIZE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-finalize",
-    endpoint: "bundle_release.generation_finalize",
+    endpoint: "bundle-release.generation-finalize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/generation-finalize"],
     handler: generation_finalize_handler,
 };
 pub const SUBSTRATE_BUILD: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-build",
-    endpoint: "bundle_release.substrate_build",
+    endpoint: "bundle-release.substrate-build",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
@@ -4208,19 +4266,20 @@ pub const SUBSTRATE_BUILD: ServiceDescriptor = ServiceDescriptor {
 };
 pub const SUBSTRATE_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-qualify",
-    endpoint: "bundle_release.substrate_qualify",
+    endpoint: "bundle-release.substrate-qualify",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.config.bundle-release/execution-tool-products",
         "ryeos.execute.service.bundle-release/substrate-qualify",
+        "ryeos.execute.service.external-content/launch-product-qualification",
         "ryeos.execute.tool.ryeos/bundle-release/substrate-qualify",
     ],
     handler: substrate_qualify_handler,
 };
 pub const SUBSTRATE_RELEASE_FINALIZE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/substrate-release-finalize",
-    endpoint: "bundle_release.substrate_release_finalize",
+    endpoint: "bundle-release.substrate-release-finalize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/substrate-release-finalize"],
     handler: substrate_release_finalize_handler,
@@ -4228,7 +4287,7 @@ pub const SUBSTRATE_RELEASE_FINALIZE: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     SUBSTRATE_RELEASE_AUTHORIZATION,
     "service:bundle-release/substrate-release-authorization",
-    "bundle_release.substrate_release_authorization",
+    "bundle-release.substrate-release-authorization",
     "ryeos.execute.service.bundle-release/substrate-release-authorization",
     SubstrateReleaseAuthorizationRequest,
     BundleReleaseOperation::SubstrateReleaseAuthorization
@@ -4236,21 +4295,21 @@ descriptor!(
 descriptor!(
     REQUEST_AUTHORIZATION,
     "service:bundle-release/request-authorization",
-    "bundle_release.request_authorization",
+    "bundle-release.request-authorization",
     "ryeos.execute.service.bundle-release/request-authorization",
     RequestAuthorizationRequest,
     BundleReleaseOperation::RequestAuthorization
 );
 pub const SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/set-compose",
-    endpoint: "bundle_release.set_compose",
+    endpoint: "bundle-release.set-compose",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/set-compose"],
     handler: set_compose_handler,
 };
 pub const GENESIS_SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/genesis-set-compose",
-    endpoint: "bundle_release.genesis_set_compose",
+    endpoint: "bundle-release.genesis-set-compose",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/genesis-set-compose"],
     handler: genesis_set_compose_handler,
@@ -4258,14 +4317,14 @@ pub const GENESIS_SET_COMPOSE: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     CATALOG_REQUEST_PUBLICATION,
     "service:bundle-release/catalog-request-publication",
-    "bundle_release.catalog_request_publication",
+    "bundle-release.catalog-request-publication",
     "ryeos.execute.service.bundle-release/catalog-request-publication",
     CatalogRequestPublicationRequest,
     BundleReleaseOperation::CatalogRequestPublication
 );
 pub const CATALOG_REMOTE_PUBLISH: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/catalog-remote-publish",
-    endpoint: "bundle_release.catalog_remote_publish",
+    endpoint: "bundle-release.catalog-remote-publish",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/catalog-remote-publish"],
     handler: |params, context, state| {
@@ -4274,7 +4333,7 @@ pub const CATALOG_REMOTE_PUBLISH: ServiceDescriptor = ServiceDescriptor {
 };
 pub const SUBMIT: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/submit",
-    endpoint: "bundle_release.submit",
+    endpoint: "bundle-release.submit",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-release/submit"],
     handler: submit_handler,
@@ -4282,7 +4341,7 @@ pub const SUBMIT: ServiceDescriptor = ServiceDescriptor {
 descriptor!(
     STATUS,
     "service:bundle-release/status",
-    "bundle_release.status",
+    "bundle-release.status",
     "ryeos.execute.service.bundle-release/status",
     StatusRequest,
     BundleReleaseOperation::Status
@@ -4560,9 +4619,7 @@ mod tests {
 
     #[test]
     fn static_inputs_are_selected_for_native_builds_only() {
-        use ryeos_app::bundle_publication::calibration::{
-            CalibrationEnvironmentSelection, CalibrationProductSelection,
-        };
+        use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection, CalibrationProductSelection};
         let product = |digit: &str| CalibrationProductSelection {
             product_witness_hash: digit.repeat(64),
             qualification_attestation_hash: "f".repeat(64),

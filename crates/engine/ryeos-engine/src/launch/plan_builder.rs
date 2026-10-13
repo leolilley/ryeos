@@ -1356,9 +1356,10 @@ fn build_plan_with_execution_root(
         .project_filesystem_authority_ceiling(root_value)?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
-    let target_requirement = execution.project_target_requirement(root_value)?;
+    let (target_requirement, current_target_request) = execution.project_target_data(root_value)?;
     let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
+    let subprocess_limits = execution.project_subprocess_limits(root_value)?;
     resource_authority_ceiling
         .admits(target_requirement.as_ref())
         .map_err(|error| EngineError::SchemaLoaderError {
@@ -1366,7 +1367,8 @@ fn build_plan_with_execution_root(
         })?;
     let no_host_environment = HostEnvBindings::default();
     let host_env = match filesystem_authority_ceiling {
-        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        | crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedInputs => {
             &no_host_environment
         }
         crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => host_env,
@@ -1386,6 +1388,9 @@ fn build_plan_with_execution_root(
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
+    let mut authenticated_chain_authorities =
+        vec![root_plan_trust_authority(item, &canonical_ref)];
+    authenticated_chain_authorities.extend(terminal.verified_chain.iter().cloned());
     // A pinned snapshot has a materialized execution root even though source
     // lookup remains under its separate admitted project authority. Give the
     // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
@@ -1419,6 +1424,7 @@ fn build_plan_with_execution_root(
         project_authority,
         sealed_content,
         runtime_execution_root,
+        Some(&authenticated_chain_authorities),
     )?;
 
     // Step 5: Build plan node
@@ -1465,9 +1471,11 @@ fn build_plan_with_execution_root(
         network_authority_ceiling,
         filesystem_authority_ceiling,
         target_requirement,
+        current_target_request,
         endpoint_requirement,
         external_endpoint_binding: None,
         resource_authority_ceiling,
+        subprocess_limits,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
@@ -1536,6 +1544,29 @@ fn widen_root_trust_class(
         (ContractTrustClass::Trusted, ItemSpace::Node) => TrustClass::TrustedNode,
         (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
+    }
+}
+
+fn root_plan_trust_authority(
+    item: &VerifiedItem,
+    canonical_ref: &str,
+) -> crate::contracts::PlanTrustAuthority {
+    let resolved = &item.resolved;
+    let trust_class = match (item.trust_class, resolved.source_space) {
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => crate::resolution::TrustClass::TrustedBundle,
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => crate::resolution::TrustClass::TrustedProject,
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => crate::resolution::TrustClass::TrustedNode,
+        (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
+        (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
+    };
+    crate::contracts::PlanTrustAuthority {
+        requested_id: canonical_ref.to_owned(),
+        canonical_ref: canonical_ref.to_owned(),
+        source_space: resolved.source_space,
+        trust_class,
+        signer_fingerprint: resolved.signature_header.as_ref().map(|header| header.signer_fingerprint.clone()),
+        content_hash: resolved.content_hash.clone(),
+        raw_content_digest: resolved.raw_content_digest.clone(),
     }
 }
 
@@ -1750,7 +1781,7 @@ mod tests {
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
         let target = lillux::platform::current_binary_target().unwrap();
         let body = format!(
-            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nexternal_lifecycle_adapters:\n  - id: synthetic-local\n    protocol: ryeos.external-execution.lifecycle-adapter.v2\n    targets: [{target}]\n    adapter: adapter\n    supervisor: supervisor\n    launcher: launcher\n    provider_spec:\n      path: lifecycle/provider.json\n      sha256: '{}'\n    settings_schema_digest: '{}'\n    capabilities: [exact_allocation_reconciliation, authoritative_no_occurrence, exact_activation_reconciliation, idempotent_termination, exact_terminal_observation]\nexternal_providers:\n  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n",
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nexternal_lifecycle_adapters:\n  - id: synthetic-local\n    protocol: ryeos.external-execution.lifecycle-adapter.v2\n    targets: [{target}]\n    adapter: adapter\n    supervisor: supervisor\n    launcher: launcher\n    provider_spec:\n      path: lifecycle/provider.json\n      sha256: '{}'\n    settings_schema_digest: '{}'\n    capabilities: [exact_allocation_reconciliation, authoritative_no_occurrence, exact_activation_reconciliation, idempotent_termination, exact_terminal_observation]\nexternal_providers:\n  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-declaration.v2\n    qualification_request_binding_protocol: null\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n",
             "f".repeat(64),
             "9".repeat(64)
         );
@@ -1771,7 +1802,7 @@ mod tests {
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
         let target = lillux::platform::current_binary_target().unwrap();
         let provider = format!(
-            "  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n"
+            "  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-declaration.v2\n    qualification_request_binding_protocol: null\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n"
         );
         let body = format!(
             "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nexternal_providers:\n{provider}{provider}"

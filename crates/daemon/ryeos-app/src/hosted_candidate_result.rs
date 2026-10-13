@@ -100,7 +100,7 @@ impl HostedCandidateResultRequest {
         ryeos_runtime::validate_runtime_thread_id(&self.chain_root_id)
             .map_err(|error| anyhow::anyhow!(error))
             .context("hosted candidate result chain root is not canonical")?;
-        crate::identity::validate_canonical_site_id(&self.source_site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.source_site_id)
             .context("hosted candidate result source site is not canonical")
     }
 }
@@ -144,8 +144,8 @@ impl HostedCandidateResultEvidence {
         if !canonical_hash(owner) {
             bail!("hosted candidate result owner is not canonical");
         }
-        crate::identity::validate_canonical_site_id(&self.source_site_id)?;
-        crate::identity::validate_canonical_site_id(&self.target_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.source_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.target_site_id)?;
         ryeos_runtime::validate_runtime_thread_id(&self.chain_root_id)
             .map_err(|error| anyhow::anyhow!(error))?;
         ryeos_runtime::validate_runtime_thread_id(&self.placement_thread_id)

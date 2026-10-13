@@ -8,28 +8,39 @@
 //! by a retained `prepared` or `attached` record. Once launch intent exists,
 //! reopen is recovery-only and cannot mint another attachment or launch.
 
-use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::ffi::OsStr;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+use lillux_sqlite::{
+    OriginalNativeBoundMode, OriginalNativeConnection, OriginalNativeConnectionTerminal,
+    OriginalNativeDestinationAuthority, OriginalNativeDomain, OriginalNativeFactory,
 };
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zeroize::Zeroizing;
 
 use super::guest_journal::GuestJournalStoreIdentity;
+use super::native_journal::{self, NativeJournalConnection};
 use super::transport::{
-    ExternalCapturedNetworkInputs, ExternalChannelAttachRequest, ExternalSupervisorBootstrap,
+    ExternalCapturedNetworkInputs, ExternalChannelAttachRequest,
+    ExternalControllerTransportSelection, ExternalSupervisorBootstrap,
     MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES,
 };
 use super::{ExecutionChannelBinding, encode_channel_public_key};
+use crate::operational::RetainTerminal;
+use crate::sqlite_schema::SchemaSqlDefinition;
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-// Epoch 5 requires the exact policy-bound network capture. Predecessor stores
-// remain historical evidence; recovery must never recapture target-local files.
-const SCHEMA_EPOCH: i64 = 6;
+// HTTP epoch 6 retains the exact policy-bound network capture. Relay epoch 7
+// binds the original mailbox inode and exact authenticated attach response and
+// is shared by Q bootstrap schema 8 and ordinary-session schema 9. Relay store
+// identity schema 4 and mailbox capture schema 1 stay unchanged; bootstrap
+// validation, not a journal migration, enforces the workload pair. Predecessor
+// stores remain historical evidence; recovery never recaptures.
+const HTTP_SCHEMA_EPOCH: i64 = 6;
+const RELAY_SCHEMA_EPOCH: i64 = 7;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
@@ -108,17 +119,92 @@ BEGIN SELECT RAISE(ABORT, 'external supervisor launch intent cannot be deleted')
 "#;
 
 struct SupervisorStore {
-    conn: Connection,
-    directory: lillux::PinnedDirectory,
+    conn: NativeJournalConnection,
+    /// Complete schema SQL of this store's epoch, captured from a closed
+    /// native reference whose terminal is already in the host's census.
+    schema_reference: SchemaSqlDefinition,
+    directory: Arc<lillux::PinnedDirectory>,
     _lifetime_lock: lillux::PinnedDirectoryLock,
-    database_file: File,
     bootstrap: ExternalSupervisorBootstrap,
-    captured_network_inputs: ExternalCapturedNetworkInputs,
+    transport_capture: ExternalSupervisorTransportCapture,
     supervisor_signing_key: lillux::crypto::SigningKey,
     attachment_request: ExternalChannelAttachRequest,
     binding: Option<ExecutionChannelBinding>,
     launch_intent: Option<ExternalSupervisorLaunchIntent>,
     store_identity: ExternalSupervisorJournalStoreIdentity,
+}
+
+/// The relay stores the original descriptor identity and signed pathname,
+/// never a sampled network file or a recreated mailbox on recovery.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRelayMailboxCapture {
+    schema: u32,
+    mailbox_root: String,
+    mailbox_identity: lillux::PinnedDirectoryIdentity,
+}
+
+impl ExternalRelayMailboxCapture {
+    pub fn new(
+        bootstrap: &ExternalSupervisorBootstrap,
+        mailbox: &lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        let capture = Self {
+            schema: 1,
+            mailbox_root: bootstrap.relay_mailbox_root()?,
+            mailbox_identity: mailbox.identity()?,
+        };
+        capture.validate_for(bootstrap)?;
+        ensure!(
+            mailbox.path() == std::path::Path::new(&capture.mailbox_root),
+            "original relay mailbox path differs from signed occurrence"
+        );
+        mailbox.require_owner_private_directory()?;
+        mailbox.ensure_path_binding()?;
+        Ok(capture)
+    }
+
+    pub fn validate_for(&self, bootstrap: &ExternalSupervisorBootstrap) -> Result<()> {
+        bootstrap.controller.relay()?;
+        ensure!(
+            self.schema == 1 && self.mailbox_root == bootstrap.relay_mailbox_root()?,
+            "external relay mailbox capture differs from sealed bootstrap"
+        );
+        Ok(())
+    }
+
+    pub fn mailbox_identity(&self) -> lillux::PinnedDirectoryIdentity {
+        self.mailbox_identity
+    }
+
+    pub fn mailbox_root(&self) -> &str {
+        &self.mailbox_root
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "domain":"ryeos.external-relay-mailbox-capture.v1",
+                "capture":self,
+            }))?
+            .as_bytes(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalSupervisorTransportCapture {
+    Http(ExternalCapturedNetworkInputs),
+    Relay(ExternalRelayMailboxCapture),
+}
+
+impl ExternalSupervisorTransportCapture {
+    fn digest(&self) -> Result<String> {
+        match self {
+            Self::Http(capture) => capture.digest(),
+            Self::Relay(capture) => capture.digest(),
+        }
+    }
 }
 
 /// Independent outer anchor supplied again by the lifecycle owner on reopen.
@@ -161,7 +247,7 @@ pub enum ExternalSupervisorJournalRecovery {
 impl ExternalSupervisorJournalStoreIdentity {
     pub fn digest(&self) -> Result<String> {
         ensure!(
-            self.schema == 3,
+            self.schema == 3 || self.schema == 4,
             "unsupported supervisor journal identity schema"
         );
         hash(&self.journal_nonce, "supervisor journal nonce")?;
@@ -174,21 +260,95 @@ impl ExternalSupervisorJournalStoreIdentity {
 }
 
 impl PreparedExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
     }
 
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
+    }
+
+    /// Create the journal on a fresh directory. Its schema reference closes
+    /// into `retain` before the journal's own connection opens.
     pub fn create(
         directory: lillux::PinnedDirectory,
         bootstrap: ExternalSupervisorBootstrap,
         captured_network_inputs: ExternalCapturedNetworkInputs,
         supervisor_signing_key: lillux::crypto::SigningKey,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
     ) -> Result<Self> {
         bootstrap.validate()?;
-        captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
-        let capture_digest = captured_network_inputs.digest()?;
-        let capture_json =
-            lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)?;
+        captured_network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
+        Self::create_with_capture(
+            directory,
+            bootstrap,
+            ExternalSupervisorTransportCapture::Http(captured_network_inputs),
+            supervisor_signing_key,
+            factory,
+            destination,
+            retain,
+        )
+    }
+
+    /// Relay form of [`Self::create`].
+    pub fn create_relay(
+        directory: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+        mailbox: &lillux::PinnedDirectory,
+        supervisor_signing_key: lillux::crypto::SigningKey,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
+    ) -> Result<Self> {
+        let capture = ExternalRelayMailboxCapture::new(&bootstrap, mailbox)?;
+        Self::create_with_capture(
+            directory,
+            bootstrap,
+            ExternalSupervisorTransportCapture::Relay(capture),
+            supervisor_signing_key,
+            factory,
+            destination,
+            retain,
+        )
+    }
+
+    fn create_with_capture(
+        directory: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+        transport_capture: ExternalSupervisorTransportCapture,
+        supervisor_signing_key: lillux::crypto::SigningKey,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
+    ) -> Result<Self> {
+        let (capture_digest, capture_json, schema_epoch, identity_schema) = match &transport_capture
+        {
+            ExternalSupervisorTransportCapture::Http(capture) => {
+                capture.validate_for(&bootstrap.controller.http()?.network_inputs)?;
+                (
+                    capture.digest()?,
+                    lillux::canonical_json(&serde_json::to_value(capture)?)?,
+                    HTTP_SCHEMA_EPOCH,
+                    3,
+                )
+            }
+            ExternalSupervisorTransportCapture::Relay(capture) => {
+                capture.validate_for(&bootstrap)?;
+                (
+                    capture.digest()?,
+                    lillux::canonical_json(&serde_json::to_value(capture)?)?,
+                    RELAY_SCHEMA_EPOCH,
+                    4,
+                )
+            }
+        };
         ensure!(
             capture_json.len() <= MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES,
             "external supervisor network capture JSON exceeds bounds"
@@ -210,60 +370,105 @@ impl PreparedExternalSupervisorJournal {
         let supervisor_public_key =
             encode_channel_public_key(&supervisor_signing_key.verifying_key())?;
         let signing_seed = Zeroizing::new(STANDARD.encode(supervisor_signing_key.to_bytes()));
-        let database_file =
-            directory.open_regular_create(OsStr::new(DATABASE_NAME), true, true, 0o600)?;
-        directory.sync()?;
-        let database_identity = lillux::pinned_regular_file_identity(&database_file)?;
-        let store_identity = ExternalSupervisorJournalStoreIdentity {
-            schema: 3,
-            journal_nonce: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
-            directory_identity: directory.identity()?,
-            database_identity,
-            bootstrap_digest: bootstrap_digest.clone(),
-            capture_digest: capture_digest.clone(),
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the whole capture; the caller's factory and destination come
+        // from the process's one funded native host.
+        let schema_reference = unsafe {
+            native_journal::capture_schema_reference(
+                OriginalNativeDomain::ExternalSupervisorJournalSchemaReference,
+                &schema_for(schema_epoch)?,
+                factory,
+                Arc::clone(&destination),
+                retain,
+            )
+        }?;
+        let directory = Arc::new(directory);
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the connection's whole life; the caller's factory and
+        // destination come from the process's one funded native host.
+        let conn = NativeJournalConnection::Live(unsafe {
+            open_native(
+                Arc::clone(&directory),
+                OriginalNativeBoundMode::CreateExclusive,
+                OriginalNativeDomain::ExternalSupervisorJournal,
+                factory,
+                destination,
+            )
+        }?);
+        let initialized = (|| -> Result<ExternalSupervisorJournalStoreIdentity> {
+            // The native keeper created the main inode exclusively; the outer
+            // anchor is that exact inode.
+            let store_identity = ExternalSupervisorJournalStoreIdentity {
+                schema: identity_schema,
+                journal_nonce: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+                directory_identity: directory.identity()?,
+                database_identity: conn.main_identity()?,
+                bootstrap_digest: bootstrap_digest.clone(),
+                capture_digest: capture_digest.clone(),
+            };
+            store_identity.digest()?;
+            conn.with_sql(|conn| {
+                configure(conn)?;
+                // Configuring reads the store, which creates its WAL
+                // sidecars; their directory entries become durable before
+                // the first commit appends to `-wal`.
+                directory.sync()?;
+                conn.execute_batch(&schema_for(schema_epoch)?)?;
+                conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+                conn.pragma_update(None, "user_version", schema_epoch)?;
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                tx.execute(
+                    "INSERT INTO external_supervisor_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'prepared')",
+                    params![
+                        schema_epoch,
+                        &store_identity.journal_nonce,
+                        lillux::canonical_json(&serde_json::to_value(store_identity.directory_identity)?)?,
+                        lillux::canonical_json(&serde_json::to_value(store_identity.database_identity)?)?,
+                        &bootstrap_digest,
+                        &bootstrap_json,
+                        &capture_digest,
+                        &capture_json,
+                        signing_seed.as_str(),
+                        &supervisor_public_key,
+                        &attachment_request_digest,
+                        &attachment_request_json,
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })?;
+            Ok(store_identity)
+        })();
+        let store_identity = match initialized {
+            Ok(store_identity) => store_identity,
+            Err(error) => return Err(conn.refuse(error)),
         };
-        store_identity.digest()?;
-        let conn = open_exact(&directory, &database_file)?;
-        configure(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_supervisor_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'prepared')",
-            params![
-                SCHEMA_EPOCH,
-                &store_identity.journal_nonce,
-                lillux::canonical_json(&serde_json::to_value(store_identity.directory_identity)?)?,
-                lillux::canonical_json(&serde_json::to_value(store_identity.database_identity)?)?,
-                &bootstrap_digest,
-                &bootstrap_json,
-                &capture_digest,
-                &capture_json,
-                signing_seed.as_str(),
-                &supervisor_public_key,
-                &attachment_request_digest,
-                &attachment_request_json,
-            ],
-        )?;
-        tx.commit()?;
-        database_file.sync_all()?;
-        directory.sync()?;
         let store = SupervisorStore {
             conn,
+            schema_reference,
             directory,
             _lifetime_lock: lifetime_lock,
-            database_file,
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding: None,
             launch_intent: None,
             store_identity,
         };
-        store.validate()?;
+        if let Err(error) = store.validate() {
+            return Err(store.refuse(error));
+        }
         Ok(Self(store))
+    }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -283,38 +488,103 @@ impl PreparedExternalSupervisorJournal {
     }
 
     pub fn record_binding(
-        mut self,
+        self,
         binding: ExecutionChannelBinding,
     ) -> Result<AttachedExternalSupervisorJournal> {
-        self.0.bootstrap.validate_attached_binding(
-            &binding,
-            &self.0.attachment_request.supervisor_public_key,
-        )?;
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let binding_digest = binding.digest()?;
-        let binding_json = lillux::canonical_json(&serde_json::to_value(&binding)?)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_supervisor_binding VALUES(1,?1,?2)",
-            params![&binding_digest, &binding_json],
-        )?;
-        let changed = tx.execute(
-            "UPDATE external_supervisor_meta SET lifecycle='attached'
-             WHERE singleton=1 AND lifecycle='prepared'",
-            [],
-        )?;
-        ensure!(changed == 1, "external supervisor attachment is not fresh");
-        tx.commit()?;
-        self.0.database_file.sync_all()?;
+        if !matches!(
+            &self.0.transport_capture,
+            ExternalSupervisorTransportCapture::Http(_)
+        ) {
+            return Err(self.0.refuse(anyhow::anyhow!(
+                "relay attachment requires its exact authenticated response digest"
+            )));
+        }
+        self.record_binding_inner(binding, None)
+    }
+
+    pub fn record_relay_binding(
+        self,
+        binding: ExecutionChannelBinding,
+        response_digest: &str,
+    ) -> Result<AttachedExternalSupervisorJournal> {
+        if !matches!(
+            &self.0.transport_capture,
+            ExternalSupervisorTransportCapture::Relay(_)
+        ) {
+            return Err(self.0.refuse(anyhow::anyhow!(
+                "HTTP attachment cannot retain a relay response digest"
+            )));
+        }
+        if let Err(error) = hash(
+            response_digest,
+            "authenticated relay attachment response digest",
+        ) {
+            return Err(self.0.refuse(error));
+        }
+        self.record_binding_inner(binding, Some(response_digest))
+    }
+
+    /// A refusal consumes this stage: its connection closes and the terminal
+    /// rides the returned error.
+    fn record_binding_inner(
+        mut self,
+        binding: ExecutionChannelBinding,
+        response_digest: Option<&str>,
+    ) -> Result<AttachedExternalSupervisorJournal> {
+        let recorded = (|| -> Result<()> {
+            self.0.bootstrap.validate_attached_binding(
+                &binding,
+                &self.0.attachment_request.supervisor_public_key,
+            )?;
+            self.0.require_database_identity()?;
+            let binding_digest = binding.digest()?;
+            let binding_json = lillux::canonical_json(&serde_json::to_value(&binding)?)?;
+            self.0.conn.with_sql(|conn| {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                if let Some(response_digest) = response_digest {
+                    tx.execute(
+                        "INSERT INTO external_supervisor_binding VALUES(1,?1,?2,?3)",
+                        params![&binding_digest, &binding_json, response_digest],
+                    )?;
+                } else {
+                    tx.execute(
+                        "INSERT INTO external_supervisor_binding VALUES(1,?1,?2)",
+                        params![&binding_digest, &binding_json],
+                    )?;
+                }
+                let changed = tx.execute(
+                    "UPDATE external_supervisor_meta SET lifecycle='attached'
+                     WHERE singleton=1 AND lifecycle='prepared'",
+                    [],
+                )?;
+                ensure!(changed == 1, "external supervisor attachment is not fresh");
+                tx.commit()?;
+                Ok(())
+            })
+        })();
+        if let Err(error) = recorded {
+            return Err(self.0.refuse(error));
+        }
         self.0.binding = Some(binding);
-        self.0.validate()?;
+        if let Err(error) = self.0.validate() {
+            return Err(self.0.refuse(error));
+        }
         Ok(AttachedExternalSupervisorJournal(self.0))
     }
 }
 
 impl AttachedExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -329,6 +599,38 @@ impl AttachedExternalSupervisorJournal {
         self.0.binding.as_ref().expect("attached stage has binding")
     }
 
+    pub fn attachment_request(&self) -> &ExternalChannelAttachRequest {
+        &self.0.attachment_request
+    }
+
+    pub fn relay_attach_response_digest(&self) -> Result<String> {
+        ensure!(
+            matches!(
+                &self.0.transport_capture,
+                ExternalSupervisorTransportCapture::Relay(_)
+            ),
+            "HTTP journal has no relay attachment response"
+        );
+        let digest: String = self.0.conn.with_sql(|conn| {
+            Ok(conn.query_row(
+                "SELECT attach_response_digest FROM external_supervisor_binding WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        hash(&digest, "retained relay attachment response digest")?;
+        Ok(digest)
+    }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
+    }
+
     pub fn supervisor_signing_key(&self) -> &lillux::crypto::SigningKey {
         &self.0.supervisor_signing_key
     }
@@ -340,6 +642,28 @@ impl AttachedExternalSupervisorJournal {
         launcher_bootstrap_digest: &str,
         launcher_artifact_digest: &str,
     ) -> Result<LaunchIntentExternalSupervisorJournal> {
+        match self.record_launch_intent(
+            guest_store_identity,
+            launcher_spec_digest,
+            launcher_bootstrap_digest,
+            launcher_artifact_digest,
+        ) {
+            Ok(intent) => self.0.launch_intent = Some(intent),
+            Err(error) => return Err(self.0.refuse(error)),
+        }
+        if let Err(error) = self.0.validate() {
+            return Err(self.0.refuse(error));
+        }
+        Ok(LaunchIntentExternalSupervisorJournal(self.0))
+    }
+
+    fn record_launch_intent(
+        &self,
+        guest_store_identity: GuestJournalStoreIdentity,
+        launcher_spec_digest: &str,
+        launcher_bootstrap_digest: &str,
+        launcher_artifact_digest: &str,
+    ) -> Result<ExternalSupervisorLaunchIntent> {
         for (value, label) in [
             (launcher_spec_digest, "launcher specification digest"),
             (launcher_bootstrap_digest, "launcher bootstrap digest"),
@@ -368,39 +692,48 @@ impl AttachedExternalSupervisorJournal {
         };
         let intent_json =
             lillux::canonical_json(&serde_json::to_value(&intent.guest_store_identity)?)?;
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_supervisor_launch_intent VALUES(1,?1,?2,?3,?4,?5,?6)",
-            params![
-                &intent.binding_digest,
-                &intent.guest_store_identity_digest,
-                &intent_json,
-                &intent.launcher_spec_digest,
-                &intent.launcher_bootstrap_digest,
-                &intent.launcher_artifact_digest,
-            ],
-        )?;
-        let changed = tx.execute(
-            "UPDATE external_supervisor_meta SET lifecycle='launch_intent'
-             WHERE singleton=1 AND lifecycle='attached'",
-            [],
-        )?;
-        ensure!(
-            changed == 1,
-            "external supervisor launch intent is not fresh"
-        );
-        tx.commit()?;
-        self.0.database_file.sync_all()?;
-        self.0.launch_intent = Some(intent);
-        self.0.validate()?;
-        Ok(LaunchIntentExternalSupervisorJournal(self.0))
+        self.0.require_database_identity()?;
+        self.0.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO external_supervisor_launch_intent VALUES(1,?1,?2,?3,?4,?5,?6)",
+                params![
+                    &intent.binding_digest,
+                    &intent.guest_store_identity_digest,
+                    &intent_json,
+                    &intent.launcher_spec_digest,
+                    &intent.launcher_bootstrap_digest,
+                    &intent.launcher_artifact_digest,
+                ],
+            )?;
+            let changed = tx.execute(
+                "UPDATE external_supervisor_meta SET lifecycle='launch_intent'
+                 WHERE singleton=1 AND lifecycle='attached'",
+                [],
+            )?;
+            ensure!(
+                changed == 1,
+                "external supervisor launch intent is not fresh"
+            );
+            tx.commit()?;
+            Ok(())
+        })?;
+        Ok(intent)
     }
 }
 
 impl LaunchIntentExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -429,14 +762,31 @@ impl LaunchIntentExternalSupervisorJournal {
     pub fn validate(&self) -> Result<()> {
         self.0.validate()
     }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
+    }
 }
 
 impl ExternalSupervisorJournalRecovery {
+    /// Reopen the retained journal under its outer anchor. Its schema
+    /// reference closes into `retain` before the journal's own connection
+    /// opens. A refusal raised after the native open carries the closed
+    /// terminal in its error.
     pub fn open(
         directory: lillux::PinnedDirectory,
         store_identity: &ExternalSupervisorJournalStoreIdentity,
+        factory: &Arc<OriginalNativeFactory>,
+        destination: Arc<dyn OriginalNativeDestinationAuthority>,
+        retain: RetainTerminal<'_>,
     ) -> Result<Self> {
         store_identity.digest()?;
+        let schema_epoch = schema_epoch_for_identity(store_identity.schema)?;
         directory.require_owner_private_directory()?;
         ensure!(
             directory.identity()? == store_identity.directory_identity,
@@ -446,55 +796,97 @@ impl ExternalSupervisorJournalRecovery {
             .try_lock_exclusive()?
             .context("external supervisor directory still has a live owner")?;
         lifetime_lock.ensure_protects(&directory)?;
-        for name in directory.entry_names()? {
+        // WAL sidecars a crash left behind are admitted: the native keeper
+        // pins them and SQLite replays their committed frames. A rollback
+        // journal is refused.
+        native_journal::require_wal_entries(
+            &directory,
+            DATABASE_NAME,
+            "external supervisor store",
+        )?;
+        {
+            // Metadata check before any SQLite effect: this descriptor is
+            // closed before the native keeper takes its own.
+            let database_file = directory
+                .open_regular(OsStr::new(DATABASE_NAME), false)?
+                .context("external supervisor database is absent")?;
             ensure!(
-                name == OsStr::new(DATABASE_NAME) || name == journal_name(),
-                "external supervisor store has an ambient entry: {}",
-                directory.path().join(name).display()
+                lillux::matches_pinned_regular_file_identity(
+                    &database_file,
+                    store_identity.database_identity,
+                )?,
+                "external supervisor database changed its outer inode identity"
+            );
+            ensure!(
+                lillux::observe_open_regular_file(&database_file)?.size() > 0,
+                "external supervisor database was never initialized"
             );
         }
-        for name in [wal_name(), shm_name()] {
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the whole capture; the caller's factory and destination come
+        // from the process's one funded native host.
+        let schema_reference = unsafe {
+            native_journal::capture_schema_reference(
+                OriginalNativeDomain::ExternalSupervisorJournalSchemaReference,
+                &schema_for(schema_epoch)?,
+                factory,
+                Arc::clone(&destination),
+                retain,
+            )
+        }?;
+        let directory = Arc::new(directory);
+        // SAFETY: this journal holds the directory's exclusive lifetime lock
+        // for the connection's whole life; the caller's factory and
+        // destination come from the process's one funded native host.
+        let conn = NativeJournalConnection::Live(unsafe {
+            open_native(
+                Arc::clone(&directory),
+                OriginalNativeBoundMode::Existing,
+                OriginalNativeDomain::ExternalSupervisorJournal,
+                factory,
+                destination,
+            )
+        }?);
+        let loaded = (|| -> Result<_> {
             ensure!(
-                directory.open_entry(&name, false)?.is_none(),
-                "external supervisor store has an unexpected sidecar"
+                conn.main_identity()? == store_identity.database_identity,
+                "external supervisor database changed its outer inode identity"
             );
-        }
-        let _rollback = directory.open_regular(&journal_name(), false)?;
-        let database_file = directory
-            .open_regular(OsStr::new(DATABASE_NAME), true)?
-            .context("external supervisor database is absent")?;
-        ensure!(
-            lillux::matches_pinned_regular_file_identity(
-                &database_file,
-                store_identity.database_identity,
-            )?,
-            "external supervisor database changed its outer inode identity"
-        );
-        let conn = open_exact(&directory, &database_file)?;
-        configure(&conn)?;
-        validate_schema(&conn, &directory)?;
+            let loaded = conn.with_sql(|conn| {
+                configure(conn)?;
+                validate_schema(conn, &directory, schema_epoch, &schema_reference)?;
+                load_content(conn)
+            })?;
+            directory.sync()?;
+            Ok(loaded)
+        })();
         let (
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding,
             launch_intent,
-        ) = load_content(&conn)?;
+        ) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => return Err(conn.refuse(error)),
+        };
         let store = SupervisorStore {
             conn,
+            schema_reference,
             directory,
             _lifetime_lock: lifetime_lock,
-            database_file,
             bootstrap,
-            captured_network_inputs,
+            transport_capture,
             supervisor_signing_key,
             attachment_request,
             binding,
             launch_intent,
             store_identity: store_identity.clone(),
         };
-        store.validate()?;
+        if let Err(error) = store.validate() {
+            return Err(store.refuse(error));
+        }
         Ok(if store.launch_intent.is_some() {
             Self::LaunchIntent(RecoveredExternalSupervisorJournal(store))
         } else if store.binding.is_some() {
@@ -506,8 +898,17 @@ impl ExternalSupervisorJournalRecovery {
 }
 
 impl RecoveredExternalSupervisorJournal {
-    pub fn captured_network_inputs(&self) -> &ExternalCapturedNetworkInputs {
-        &self.0.captured_network_inputs
+    pub fn transport_capture(&self) -> &ExternalSupervisorTransportCapture {
+        &self.0.transport_capture
+    }
+
+    pub fn captured_network_inputs(&self) -> Result<&ExternalCapturedNetworkInputs> {
+        match &self.0.transport_capture {
+            ExternalSupervisorTransportCapture::Http(value) => Ok(value),
+            ExternalSupervisorTransportCapture::Relay(_) => {
+                anyhow::bail!("relay journal has no network capture")
+            }
+        }
     }
 
     pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
@@ -535,24 +936,128 @@ impl RecoveredExternalSupervisorJournal {
     pub fn validate(&self) -> Result<()> {
         self.0.validate()
     }
+
+    /// Close this journal's native connection; a refusal keeps the journal.
+    pub fn close(
+        self,
+    ) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        self.0
+            .close()
+            .map_err(|(store, error)| (Self(store), error))
+    }
 }
 
 impl SupervisorStore {
+    /// The native keeper still binds the database name to the anchored inode.
+    fn require_database_identity(&self) -> Result<()> {
+        ensure!(
+            self.conn.main_identity()? == self.store_identity.database_identity,
+            "external supervisor database identity changed"
+        );
+        Ok(())
+    }
+
+    fn close(self) -> std::result::Result<OriginalNativeConnectionTerminal, (Self, anyhow::Error)> {
+        let Self {
+            conn,
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            bootstrap,
+            transport_capture,
+            supervisor_signing_key,
+            attachment_request,
+            binding,
+            launch_intent,
+            store_identity,
+        } = self;
+        // The lifetime lock is released only after the connection closed.
+        match conn.close() {
+            Ok(terminal) => Ok(terminal),
+            Err((conn, error)) => Err((
+                Self {
+                    conn,
+                    schema_reference,
+                    directory,
+                    _lifetime_lock,
+                    bootstrap,
+                    transport_capture,
+                    supervisor_signing_key,
+                    attachment_request,
+                    binding,
+                    launch_intent,
+                    store_identity,
+                },
+                error,
+            )),
+        }
+    }
+
+    /// Close this store because `error` refused it; the terminal, or the
+    /// refused close owner, rides the returned error. The lifetime lock is
+    /// released only after the close.
+    fn refuse(self, error: anyhow::Error) -> anyhow::Error {
+        let Self {
+            conn,
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            bootstrap,
+            transport_capture,
+            supervisor_signing_key,
+            attachment_request,
+            binding,
+            launch_intent,
+            store_identity,
+        } = self;
+        let error = conn.refuse(error);
+        drop((
+            schema_reference,
+            directory,
+            _lifetime_lock,
+            bootstrap,
+            transport_capture,
+            supervisor_signing_key,
+            attachment_request,
+            binding,
+            launch_intent,
+            store_identity,
+        ));
+        error
+    }
+
     fn validate(&self) -> Result<()> {
-        ensure_same_file(&self.directory, &self.database_file)?;
+        self.require_database_identity()?;
         self.store_identity.digest()?;
-        validate_store_identity_row(&self.conn, &self.store_identity)?;
+        ensure!(
+            matches!(
+                (
+                    &self.transport_capture,
+                    &self.bootstrap.controller,
+                    self.store_identity.schema
+                ),
+                (
+                    ExternalSupervisorTransportCapture::Http(_),
+                    ExternalControllerTransportSelection::HttpJson(_),
+                    3
+                ) | (
+                    ExternalSupervisorTransportCapture::Relay(_),
+                    ExternalControllerTransportSelection::ControllerFileRelay(_),
+                    4
+                )
+            ),
+            "external supervisor transport capture changed journal identity kind"
+        );
+        // The retained row is checked against the independent outer anchor
+        // first, so a replaced capture is named as an anchor change.
+        self.conn
+            .with_sql(|conn| validate_store_identity_row(conn, &self.store_identity))?;
         ensure!(
             self.store_identity.directory_identity == self.directory.identity()?
-                && lillux::matches_pinned_regular_file_identity(
-                    &self.database_file,
-                    self.store_identity.database_identity,
-                )?
                 && self.store_identity.bootstrap_digest == self.bootstrap.digest()?
-                && self.store_identity.capture_digest == self.captured_network_inputs.digest()?,
+                && self.store_identity.capture_digest == self.transport_capture.digest()?,
             "external supervisor store changed its retained identity"
         );
-        validate_schema(&self.conn, &self.directory)?;
         let (
             loaded_bootstrap,
             loaded_capture,
@@ -560,10 +1065,18 @@ impl SupervisorStore {
             loaded_request,
             loaded_binding,
             loaded_launch,
-        ) = load_content(&self.conn)?;
+        ) = self.conn.with_sql(|conn| {
+            validate_schema(
+                conn,
+                &self.directory,
+                schema_epoch_for_identity(self.store_identity.schema)?,
+                &self.schema_reference,
+            )?;
+            load_content(conn)
+        })?;
         ensure!(
             loaded_bootstrap.canonical_bytes()? == self.bootstrap.canonical_bytes()?
-                && loaded_capture == self.captured_network_inputs
+                && loaded_capture == self.transport_capture
                 && loaded_request.canonical_bytes()?
                     == self.attachment_request.canonical_bytes()?
                 && loaded_key.to_bytes() == self.supervisor_signing_key.to_bytes()
@@ -575,21 +1088,53 @@ impl SupervisorStore {
     }
 }
 
-fn validate_schema(conn: &Connection, directory: &lillux::PinnedDirectory) -> Result<()> {
+/// The stored identity, epoch and integrity, then the complete schema SQL
+/// against the definition captured for `epoch` from a native reference.
+fn validate_schema(
+    conn: &Connection,
+    directory: &lillux::PinnedDirectory,
+    epoch: i64,
+    reference: &SchemaSqlDefinition,
+) -> Result<()> {
     let application_id: i64 = conn.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     ensure!(
-        application_id == i64::from(APPLICATION_ID)
-            && user_version == SCHEMA_EPOCH
-            && quick_check == "ok",
+        application_id == i64::from(APPLICATION_ID) && user_version == epoch && quick_check == "ok",
         "external supervisor database is not the exact current schema"
     );
-    crate::sqlite_schema::assert_complete_schema_sql(
-        conn,
-        SCHEMA,
-        &directory.path().join(DATABASE_NAME),
-    )
+    reference.require_matches(conn, &directory.path().join(DATABASE_NAME))
+}
+
+/// The journal epoch an outer store identity selects: an HTTP identity
+/// (schema 3) stores the HTTP epoch and a relay identity (schema 4) the
+/// relay epoch, exactly as creation pairs them.
+fn schema_epoch_for_identity(identity_schema: u32) -> Result<i64> {
+    match identity_schema {
+        3 => Ok(HTTP_SCHEMA_EPOCH),
+        4 => Ok(RELAY_SCHEMA_EPOCH),
+        _ => anyhow::bail!("unsupported supervisor journal identity schema"),
+    }
+}
+
+fn schema_for(epoch: i64) -> Result<String> {
+    match epoch {
+        HTTP_SCHEMA_EPOCH => Ok(SCHEMA.to_owned()),
+        RELAY_SCHEMA_EPOCH => {
+            let binding_column = "binding_json TEXT NOT NULL\n);";
+            ensure!(
+                SCHEMA.matches(binding_column).count() == 1,
+                "relay schema lost its binding table anchor"
+            );
+            Ok(SCHEMA
+                .replace("CHECK(schema_epoch=6)", "CHECK(schema_epoch=7)")
+                .replace(
+                    binding_column,
+                    "binding_json TEXT NOT NULL,\n    attach_response_digest TEXT NOT NULL\n);",
+                ))
+        }
+        _ => anyhow::bail!("unsupported external supervisor journal schema"),
+    }
 }
 
 fn validate_store_identity_row(
@@ -629,7 +1174,7 @@ fn load_content(
     conn: &Connection,
 ) -> Result<(
     ExternalSupervisorBootstrap,
-    ExternalCapturedNetworkInputs,
+    ExternalSupervisorTransportCapture,
     lillux::crypto::SigningKey,
     ExternalChannelAttachRequest,
     Option<ExecutionChannelBinding>,
@@ -686,15 +1231,36 @@ fn load_content(
         "external supervisor bootstrap changed its canonical identity"
     );
     let signing_seed_base64 = Zeroizing::new(signing_seed_base64);
-    let captured_network_inputs: ExternalCapturedNetworkInputs =
-        serde_json::from_str(&capture_json)
-            .map_err(|_| anyhow::anyhow!("external supervisor network capture JSON is invalid"))?;
-    captured_network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
-    ensure!(
-        lillux::canonical_json(&serde_json::to_value(&captured_network_inputs)?)? == capture_json
-            && captured_network_inputs.digest()? == capture_digest,
-        "external supervisor network capture changed its canonical identity"
-    );
+    let schema_epoch: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let transport_capture = match (schema_epoch, &bootstrap.controller) {
+        (HTTP_SCHEMA_EPOCH, ExternalControllerTransportSelection::HttpJson(http)) => {
+            let capture: ExternalCapturedNetworkInputs = serde_json::from_str(&capture_json)
+                .map_err(|_| {
+                    anyhow::anyhow!("external supervisor network capture JSON is invalid")
+                })?;
+            capture.validate_for(&http.network_inputs)?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&capture)?)? == capture_json
+                    && capture.digest()? == capture_digest,
+                "external supervisor network capture changed its canonical identity"
+            );
+            ExternalSupervisorTransportCapture::Http(capture)
+        }
+        (RELAY_SCHEMA_EPOCH, ExternalControllerTransportSelection::ControllerFileRelay(_)) => {
+            let capture: ExternalRelayMailboxCapture = serde_json::from_str(&capture_json)
+                .map_err(|_| {
+                    anyhow::anyhow!("external supervisor relay capture JSON is invalid")
+                })?;
+            capture.validate_for(&bootstrap)?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&capture)?)? == capture_json
+                    && capture.digest()? == capture_digest,
+                "external supervisor relay capture changed its canonical identity"
+            );
+            ExternalSupervisorTransportCapture::Relay(capture)
+        }
+        _ => anyhow::bail!("external supervisor journal transport differs from schema epoch"),
+    };
     let signing_seed = Zeroizing::new(
         STANDARD
             .decode(signing_seed_base64.as_bytes())
@@ -719,14 +1285,34 @@ fn load_content(
         "external supervisor attachment request changed its exact bytes"
     );
     attachment_request.validate_for_bootstrap(&bootstrap)?;
+    let binding_sql = if schema_epoch == RELAY_SCHEMA_EPOCH {
+        "SELECT binding_digest,binding_json,attach_response_digest FROM external_supervisor_binding WHERE singleton=1"
+    } else {
+        "SELECT binding_digest,binding_json,NULL FROM external_supervisor_binding WHERE singleton=1"
+    };
     let binding = conn
-        .query_row(
-            "SELECT binding_digest,binding_json FROM external_supervisor_binding WHERE singleton=1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
+        .query_row(binding_sql, [], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
         .optional()?
-        .map(|(digest, json)| -> Result<_> {
+        .map(|(digest, json, response_digest)| -> Result<_> {
+            if schema_epoch == RELAY_SCHEMA_EPOCH {
+                hash(
+                    response_digest
+                        .as_deref()
+                        .context("relay attachment lost response digest")?,
+                    "retained relay attachment response digest",
+                )?;
+            } else {
+                ensure!(
+                    response_digest.is_none(),
+                    "HTTP attachment gained a relay response"
+                );
+            }
             let binding: ExecutionChannelBinding = serde_json::from_str(&json)?;
             ensure!(
                 lillux::canonical_json(&serde_json::to_value(&binding)?)? == json
@@ -797,7 +1383,7 @@ fn load_content(
     );
     Ok((
         bootstrap,
-        captured_network_inputs,
+        transport_capture,
         supervisor_signing_key,
         attachment_request,
         binding,
@@ -839,55 +1425,36 @@ fn hash(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// WAL, `synchronous=FULL` and foreign keys, each read back. The crash
+/// argument for this contract is in [`super::native_journal`].
 fn configure(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(lillux::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "synchronous", "FULL")?;
-    let mode: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
-    ensure!(
-        mode == "delete",
-        "external supervisor journal mode is not rollback-delete"
-    );
-    Ok(())
+    native_journal::configure(conn, "external supervisor journal")
 }
 
-fn open_exact(directory: &lillux::PinnedDirectory, expected: &File) -> Result<Connection> {
-    let path = directory.descriptor_child_path(OsStr::new(DATABASE_NAME))?;
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| {
-        format!(
-            "open protected external supervisor database {}",
-            path.display()
+/// Open the supervisor database on one bound ticket of `factory`.
+///
+/// # Safety
+/// The caller holds the exclusive lifetime lock of `directory` for as long as
+/// the returned connection lives, and `factory` and `destination` come from
+/// the one native host funded for this supervisor process.
+unsafe fn open_native(
+    directory: Arc<lillux::PinnedDirectory>,
+    mode: OriginalNativeBoundMode,
+    domain: OriginalNativeDomain,
+    factory: &Arc<OriginalNativeFactory>,
+    destination: Arc<dyn OriginalNativeDestinationAuthority>,
+) -> Result<OriginalNativeConnection> {
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        native_journal::open_bound(
+            directory,
+            OsStr::new(DATABASE_NAME),
+            mode,
+            domain,
+            factory,
+            destination,
         )
-    })?;
-    ensure_same_file(directory, expected)?;
-    Ok(conn)
-}
-
-fn ensure_same_file(directory: &lillux::PinnedDirectory, expected: &File) -> Result<()> {
-    let current = directory
-        .open_regular(OsStr::new(DATABASE_NAME), false)?
-        .context("external supervisor database disappeared")?;
-    ensure!(
-        lillux::same_open_file_identity(expected, &current)?,
-        "external supervisor database identity changed"
-    );
-    Ok(())
-}
-
-fn wal_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-wal"))
-}
-
-fn shm_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-shm"))
-}
-
-fn journal_name() -> OsString {
-    OsString::from(format!("{DATABASE_NAME}-journal"))
+    }
 }
 
 #[cfg(test)]
@@ -900,10 +1467,13 @@ mod tests {
         ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
     };
     use crate::external_execution::guest_journal::PreparedGuestJournal;
+    use crate::external_execution::native_journal::testing::{census, refusal, retire, root};
     use crate::external_execution::transport::{
         EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
         external_tls_root_bundle_digest,
     };
+    use crate::test_support::shared_test_host;
+    use lillux_sqlite::test_host::TestNativeHost;
 
     fn bootstrap() -> ExternalSupervisorBootstrap {
         let recipe = ExternalCandidateRuntimeRecipe {
@@ -923,6 +1493,7 @@ mod tests {
         let recipe_digest = recipe.digest().unwrap();
         let roots = vec![STANDARD.encode(b"fixture root")];
         let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: 55,
@@ -974,7 +1545,7 @@ mod tests {
             )
             .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: super::super::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
                 schema: 2,
                 network_inputs: super::super::transport::ExternalNetworkInputPolicy {
@@ -993,7 +1564,7 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
-            },
+            }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-supervisor-journal".into(),
             occurrence_id: "occurrence-supervisor-journal".into(),
@@ -1027,6 +1598,14 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: crate::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
         }
     }
 
@@ -1061,46 +1640,102 @@ mod tests {
 
     fn state_authority() -> (tempfile::TempDir, crate::PinnedStateAuthority) {
         let root = tempfile::tempdir().unwrap();
-        let db = crate::StateDb::open(root.path(), std::sync::Arc::new(crate::TrustStore::new()))
-            .unwrap();
+        let db = crate::test_support::TestState::open(
+            root.path(),
+            std::sync::Arc::new(crate::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         drop(db);
         (root, authority)
     }
 
-    fn recovery_error(
+    fn create(
+        host: &TestNativeHost,
+        directory: lillux::PinnedDirectory,
+        bootstrap: ExternalSupervisorBootstrap,
+        capture: ExternalCapturedNetworkInputs,
+        supervisor: lillux::crypto::SigningKey,
+    ) -> Result<PreparedExternalSupervisorJournal> {
+        PreparedExternalSupervisorJournal::create(
+            directory,
+            bootstrap,
+            capture,
+            supervisor,
+            host.factory(),
+            host.destination(),
+            &census(host),
+        )
+    }
+
+    fn recover(
+        host: &TestNativeHost,
         root: &tempfile::TempDir,
         identity: &ExternalSupervisorJournalStoreIdentity,
-    ) -> String {
-        match ExternalSupervisorJournalRecovery::open(
+    ) -> Result<ExternalSupervisorJournalRecovery> {
+        ExternalSupervisorJournalRecovery::open(
             lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
             identity,
-        ) {
-            Ok(_) => panic!("mutated supervisor journal reopened"),
-            Err(error) => format!("{error:#}"),
+            host.factory(),
+            host.destination(),
+            &census(host),
+        )
+    }
+
+    fn close_recovery(host: &TestNativeHost, recovery: ExternalSupervisorJournalRecovery) {
+        match recovery {
+            ExternalSupervisorJournalRecovery::Prepared(journal) => retire(host, journal.close()),
+            ExternalSupervisorJournalRecovery::Attached(journal) => retire(host, journal.close()),
+            ExternalSupervisorJournalRecovery::LaunchIntent(journal) => {
+                retire(host, journal.close())
+            }
         }
     }
 
-    fn mutate_meta_without_guard(root: &tempfile::TempDir, mutation: impl FnOnce(&Connection)) {
-        let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-        let trigger_sql: String = conn
-            .query_row(
+    fn recovery_error(
+        host: &TestNativeHost,
+        root: &tempfile::TempDir,
+        identity: &ExternalSupervisorJournalStoreIdentity,
+    ) -> String {
+        refusal(host, recover(host, root, identity))
+    }
+
+    /// Run `work` on the closed journal's database through the native gate.
+    fn with_journal<T>(
+        host: &TestNativeHost,
+        root_dir: &tempfile::TempDir,
+        work: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
+    ) -> T {
+        host.with_existing(
+            root(root_dir.path()),
+            OsStr::new(DATABASE_NAME),
+            OriginalNativeDomain::ExternalSupervisorJournal,
+            work,
+        )
+    }
+
+    fn mutate_meta_without_guard(
+        host: &TestNativeHost,
+        root: &tempfile::TempDir,
+        mutation: impl FnOnce(&Connection),
+    ) {
+        with_journal(host, root, |conn| {
+            let trigger_sql: String = conn.query_row(
                 "SELECT sql FROM sqlite_schema
                  WHERE type='trigger' AND name='external_supervisor_meta_transition'",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap();
-        conn.execute_batch("DROP TRIGGER external_supervisor_meta_transition")
-            .unwrap();
-        mutation(&conn);
-        conn.execute_batch(&trigger_sql).unwrap();
-        drop(conn);
+            )?;
+            conn.execute_batch("DROP TRIGGER external_supervisor_meta_transition")?;
+            mutation(conn);
+            conn.execute_batch(&trigger_sql)?;
+            Ok(())
+        })
     }
 
     fn capture() -> ExternalCapturedNetworkInputs {
         ExternalCapturedNetworkInputs::from_bytes(
-            &bootstrap().controller.network_inputs,
+            &bootstrap().controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
@@ -1109,19 +1744,21 @@ mod tests {
 
     #[test]
     fn invalid_capture_is_refused_before_store_writes() {
+        let host = shared_test_host();
         let root = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
         let mut invalid = capture();
         invalid.policy_digest = "0".repeat(64);
-        assert!(
-            PreparedExternalSupervisorJournal::create(
+        refusal(
+            &host,
+            create(
+                &host,
                 directory,
                 bootstrap(),
                 invalid,
                 lillux::crypto::SigningKey::from_bytes(&[13; 32]),
-            )
-            .is_err()
+            ),
         );
         assert!(
             lillux::PinnedDirectory::open(root.path())
@@ -1135,35 +1772,39 @@ mod tests {
 
     #[test]
     fn network_capture_survives_recovery_and_immutable_updates_are_refused() {
-        let (root, identity) = fresh_journal();
-        let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-        for sql in [
-            "UPDATE external_supervisor_meta SET capture_json='{}' WHERE singleton=1",
-            "UPDATE external_supervisor_meta SET capture_digest='changed' WHERE singleton=1",
-        ] {
-            assert!(conn.execute(sql, []).is_err());
-        }
-        drop(conn);
+        let host = shared_test_host();
+        let (root, identity) = fresh_journal(&host);
+        with_journal(&host, &root, |conn| {
+            for sql in [
+                "UPDATE external_supervisor_meta SET capture_json='{}' WHERE singleton=1",
+                "UPDATE external_supervisor_meta SET capture_digest='changed' WHERE singleton=1",
+            ] {
+                assert!(conn.execute(sql, []).is_err());
+            }
+            Ok(())
+        });
         let ExternalSupervisorJournalRecovery::Prepared(recovered) =
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
-                &identity,
-            )
-            .unwrap()
+            recover(&host, &root, &identity).unwrap()
         else {
             panic!("wrong recovered state")
         };
         assert_eq!(
-            recovered.captured_network_inputs().digest().unwrap(),
+            recovered
+                .captured_network_inputs()
+                .unwrap()
+                .digest()
+                .unwrap(),
             capture().digest().unwrap()
         );
+        retire(&host, recovered.close());
     }
 
     #[test]
     fn network_capture_missing_tampered_or_replaced_cannot_recover() {
+        let host = shared_test_host();
         for mutation in 0..5 {
-            let (root, identity) = fresh_journal();
-            mutate_meta_without_guard(&root, |conn| {
+            let (root, identity) = fresh_journal(&host);
+            mutate_meta_without_guard(&host, &root, |conn| {
                 if mutation == 0 {
                     conn.execute(
                         "UPDATE external_supervisor_meta SET capture_json='{}' WHERE singleton=1",
@@ -1176,7 +1817,12 @@ mod tests {
                 if mutation == 1 {
                     replacement.resolver_base64 = STANDARD.encode(b"tampered");
                 } else if mutation == 2 {
-                    let mut policy = bootstrap().controller.network_inputs;
+                    let mut policy = bootstrap()
+                        .controller
+                        .http()
+                        .unwrap()
+                        .network_inputs
+                        .clone();
                     policy.hosts.source = "/other/hosts".into();
                     replacement =
                         ExternalCapturedNetworkInputs::from_bytes(&policy, b"", b"").unwrap();
@@ -1184,7 +1830,7 @@ mod tests {
                     // Internally valid replacement with a matching row digest must
                     // still fail the independently retained outer anchor.
                     replacement = ExternalCapturedNetworkInputs::from_bytes(
-                        &bootstrap().controller.network_inputs,
+                        &bootstrap().controller.http().unwrap().network_inputs,
                         b"different",
                         b"",
                     )
@@ -1202,7 +1848,7 @@ mod tests {
                 };
                 conn.execute("UPDATE external_supervisor_meta SET capture_json=?1,capture_digest=?2 WHERE singleton=1", params![json, digest]).unwrap();
             });
-            let error = recovery_error(&root, &identity);
+            let error = recovery_error(&host, &root, &identity);
             if mutation == 3 {
                 assert!(error.contains("outer anchor"), "{error}");
             }
@@ -1212,6 +1858,7 @@ mod tests {
     #[test]
     fn malformed_network_capture_recovery_errors_are_bounded_and_private() {
         const SENTINEL: &str = "PROTECTED_NETWORK_INPUT_SENTINEL";
+        let host = shared_test_host();
         let mut unknown = serde_json::to_value(capture()).unwrap();
         unknown[SENTINEL] = serde_json::json!(SENTINEL);
         let mut wrong_scalar = serde_json::to_value(capture()).unwrap();
@@ -1227,19 +1874,19 @@ mod tests {
             oversized,
         ] {
             let oversized = json.len() > MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES;
-            let (root, identity) = fresh_journal();
-            mutate_meta_without_guard(&root, |conn| {
+            let (root, identity) = fresh_journal(&host);
+            mutate_meta_without_guard(&host, &root, |conn| {
                 conn.execute(
                     "UPDATE external_supervisor_meta SET capture_json=?1 WHERE singleton=1",
                     params![json],
                 )
                 .unwrap();
             });
-            let error = match ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
-                &identity,
-            ) {
-                Ok(_) => panic!("malformed capture recovered"),
+            let error = match recover(&host, &root, &identity) {
+                Ok(recovery) => {
+                    close_recovery(&host, recovery);
+                    panic!("malformed capture recovered")
+                }
                 Err(error) => error,
             };
             for rendered in [
@@ -1258,24 +1905,29 @@ mod tests {
             for cause in error.chain() {
                 assert!(!format!("{cause:?}").contains(SENTINEL));
             }
+            refusal(&host, Err::<(), _>(error));
         }
     }
 
     #[test]
     fn predecessor_or_missing_capture_identity_is_refused() {
-        let (root, mut identity) = fresh_journal();
+        let host = shared_test_host();
+        let (root, mut identity) = fresh_journal(&host);
         let mut value = serde_json::to_value(&identity).unwrap();
         value.as_object_mut().unwrap().remove("capture_digest");
         assert!(serde_json::from_value::<ExternalSupervisorJournalStoreIdentity>(value).is_err());
         identity.schema = 1;
-        assert!(recovery_error(&root, &identity).contains("identity schema"));
+        assert!(recovery_error(&host, &root, &identity).contains("identity schema"));
     }
 
-    fn fresh_journal() -> (tempfile::TempDir, ExternalSupervisorJournalStoreIdentity) {
+    fn fresh_journal(
+        host: &TestNativeHost,
+    ) -> (tempfile::TempDir, ExternalSupervisorJournalStoreIdentity) {
         let root = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         directory.tighten_owner_private_directory().unwrap();
-        let journal = PreparedExternalSupervisorJournal::create(
+        let journal = create(
+            host,
             directory,
             bootstrap(),
             capture(),
@@ -1283,11 +1935,13 @@ mod tests {
         )
         .unwrap();
         let identity = journal.store_identity().clone();
-        drop(journal);
+        retire(host, journal.close());
         (root, identity)
     }
 
-    fn launched_journal() -> (tempfile::TempDir, ExternalSupervisorJournalStoreIdentity) {
+    fn launched_journal(
+        host: &TestNativeHost,
+    ) -> (tempfile::TempDir, ExternalSupervisorJournalStoreIdentity) {
         let outer = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(outer.path())
             .unwrap()
@@ -1296,9 +1950,7 @@ mod tests {
         let bootstrap = bootstrap();
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[13; 32]);
         let expected_binding = binding(&bootstrap, &supervisor);
-        let journal =
-            PreparedExternalSupervisorJournal::create(directory, bootstrap, capture(), supervisor)
-                .unwrap();
+        let journal = create(host, directory, bootstrap, capture(), supervisor).unwrap();
         let identity = journal.store_identity().clone();
         let attached = journal.record_binding(expected_binding.clone()).unwrap();
         let guest = tempfile::tempdir().unwrap();
@@ -1313,6 +1965,8 @@ mod tests {
             &authority,
             &launcher_digest,
             expected_binding,
+            host.factory(),
+            host.destination(),
         )
         .unwrap();
         let launch = attached
@@ -1323,13 +1977,14 @@ mod tests {
                 &"8".repeat(64),
             )
             .unwrap();
-        drop(launch);
+        retire(host, launch.close());
         drop(reservation);
         (outer, identity)
     }
 
     #[test]
     fn recovery_preserves_attach_key_and_launch_intent_is_one_way() {
+        let host = shared_test_host();
         let outer = tempfile::tempdir().unwrap();
         let outer_directory = lillux::PinnedDirectory::open(outer.path())
             .unwrap()
@@ -1338,36 +1993,16 @@ mod tests {
         let bootstrap = bootstrap();
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[13; 32]);
         let expected_binding = binding(&bootstrap, &supervisor);
-        let journal = PreparedExternalSupervisorJournal::create(
-            outer_directory,
-            bootstrap,
-            capture(),
-            supervisor,
-        )
-        .unwrap();
+        let journal = create(&host, outer_directory, bootstrap, capture(), supervisor).unwrap();
         let store_identity = journal.store_identity().clone();
         let exact_request = journal.attachment_request().canonical_bytes().unwrap();
         let exact_public_key =
             encode_channel_public_key(&journal.supervisor_signing_key().verifying_key()).unwrap();
-        assert!(
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(outer.path())
-                    .unwrap()
-                    .unwrap(),
-                &store_identity,
-            )
-            .is_err()
-        );
-        drop(journal);
+        refusal(&host, recover(&host, &outer, &store_identity));
+        retire(&host, journal.close());
 
         let ExternalSupervisorJournalRecovery::Prepared(recovered) =
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(outer.path())
-                    .unwrap()
-                    .unwrap(),
-                &store_identity,
-            )
-            .unwrap()
+            recover(&host, &outer, &store_identity).unwrap()
         else {
             panic!("fresh supervisor journal recovered at wrong stage")
         };
@@ -1380,16 +2015,10 @@ mod tests {
             exact_public_key
         );
         let attached = recovered.record_binding(expected_binding.clone()).unwrap();
-        drop(attached);
+        retire(&host, attached.close());
 
         let ExternalSupervisorJournalRecovery::Attached(attached) =
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(outer.path())
-                    .unwrap()
-                    .unwrap(),
-                &store_identity,
-            )
-            .unwrap()
+            recover(&host, &outer, &store_identity).unwrap()
         else {
             panic!("attached supervisor journal recovered at wrong stage")
         };
@@ -1407,6 +2036,8 @@ mod tests {
             &authority,
             &launcher_digest,
             expected_binding.clone(),
+            host.factory(),
+            host.destination(),
         )
         .unwrap();
         let anchored_guest = reservation.store_identity().clone();
@@ -1420,16 +2051,10 @@ mod tests {
             .unwrap();
         assert_eq!(launch.binding(), &expected_binding);
         assert_eq!(launch.launch_intent().guest_store_identity, anchored_guest);
-        drop(launch);
+        retire(&host, launch.close());
 
         let ExternalSupervisorJournalRecovery::LaunchIntent(recovered) =
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(outer.path())
-                    .unwrap()
-                    .unwrap(),
-                &store_identity,
-            )
-            .unwrap()
+            recover(&host, &outer, &store_identity).unwrap()
         else {
             panic!("launch intent recovered with live transition authority")
         };
@@ -1439,12 +2064,15 @@ mod tests {
             anchored_guest
         );
         recovered.validate().unwrap();
-        let prepared_guest = reservation.initialize().unwrap();
+        retire(&host, recovered.close());
+        let prepared_guest = reservation.initialize(&census(&host)).unwrap();
         assert_eq!(prepared_guest.store_identity(), &anchored_guest);
+        retire(&host, prepared_guest.close());
     }
 
     #[test]
     fn substituted_outer_anchor_and_binding_are_refused() {
+        let host = shared_test_host();
         let outer = tempfile::tempdir().unwrap();
         let directory = lillux::PinnedDirectory::open(outer.path())
             .unwrap()
@@ -1453,22 +2081,17 @@ mod tests {
         let first_bootstrap = bootstrap();
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[13; 32]);
         let mut wrong_binding = binding(&first_bootstrap, &supervisor);
-        let journal = PreparedExternalSupervisorJournal::create(
-            directory,
-            first_bootstrap,
-            capture(),
-            supervisor,
-        )
-        .unwrap();
+        let journal = create(&host, directory, first_bootstrap, capture(), supervisor).unwrap();
         wrong_binding.candidate_program_digest = "0".repeat(64);
-        assert!(journal.record_binding(wrong_binding).is_err());
+        refusal(&host, journal.record_binding(wrong_binding));
 
         let other = tempfile::tempdir().unwrap();
         let other_directory = lillux::PinnedDirectory::open(other.path())
             .unwrap()
             .unwrap();
         other_directory.tighten_owner_private_directory().unwrap();
-        let other_journal = PreparedExternalSupervisorJournal::create(
+        let other_journal = create(
+            &host,
             other_directory,
             bootstrap(),
             capture(),
@@ -1476,16 +2099,26 @@ mod tests {
         )
         .unwrap();
         let other_identity = other_journal.store_identity().clone();
-        drop(other_journal);
-        assert!(
-            ExternalSupervisorJournalRecovery::open(
-                lillux::PinnedDirectory::open(outer.path())
-                    .unwrap()
-                    .unwrap(),
-                &other_identity,
-            )
-            .is_err()
+        retire(&host, other_journal.close());
+        refusal(&host, recover(&host, &outer, &other_identity));
+    }
+
+    #[test]
+    fn relay_bootstrap_versions_do_not_change_the_journal_epoch() {
+        assert_eq!(RELAY_SCHEMA_EPOCH, 7);
+        assert_eq!(
+            super::super::transport::EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA,
+            9
         );
+        assert_eq!(
+            super::super::transport::EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA,
+            10
+        );
+        let relay_schema = schema_for(RELAY_SCHEMA_EPOCH).unwrap();
+        assert!(relay_schema.contains("CHECK(schema_epoch=7)"));
+        assert!(relay_schema.contains("attach_response_digest TEXT NOT NULL"));
+        assert!(schema_for(8).is_err());
+        assert!(schema_for(9).is_err());
     }
 
     #[test]
@@ -1496,32 +2129,32 @@ mod tests {
             ExtraTable,
         }
 
+        let host = shared_test_host();
         for mutation in [
             Mutation::MissingTrigger,
             Mutation::ReplacedTrigger,
             Mutation::ExtraTable,
         ] {
-            let (root, identity) = fresh_journal();
-            let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-            match mutation {
-                Mutation::MissingTrigger => conn
-                    .execute_batch("DROP TRIGGER external_supervisor_meta_no_delete")
-                    .unwrap(),
-                Mutation::ReplacedTrigger => conn
-                    .execute_batch(
+            let (root, identity) = fresh_journal(&host);
+            with_journal(&host, &root, |conn| {
+                match mutation {
+                    Mutation::MissingTrigger => {
+                        conn.execute_batch("DROP TRIGGER external_supervisor_meta_no_delete")?
+                    }
+                    Mutation::ReplacedTrigger => conn.execute_batch(
                         "DROP TRIGGER external_supervisor_meta_no_delete;
                          CREATE TRIGGER external_supervisor_meta_no_delete
                          BEFORE DELETE ON external_supervisor_meta
                          BEGIN SELECT RAISE(ABORT, 'changed guard'); END;",
-                    )
-                    .unwrap(),
-                Mutation::ExtraTable => conn
-                    .execute_batch("CREATE TABLE unauthorized_extra(value TEXT)")
-                    .unwrap(),
-            }
-            drop(conn);
+                    )?,
+                    Mutation::ExtraTable => {
+                        conn.execute_batch("CREATE TABLE unauthorized_extra(value TEXT)")?
+                    }
+                }
+                Ok(())
+            });
             assert!(
-                recovery_error(&root, &identity).contains("complete schema SQL mismatch"),
+                recovery_error(&host, &root, &identity).contains("complete schema SQL mismatch"),
                 "mutated exact schema was not diagnosed"
             );
         }
@@ -1529,28 +2162,130 @@ mod tests {
 
     #[test]
     fn predecessor_schema_epoch_is_not_reopened_as_current_authority() {
-        let (root, identity) = fresh_journal();
-        let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH - 1)
-            .unwrap();
-        drop(conn);
+        let host = shared_test_host();
+        let (root, identity) = fresh_journal(&host);
+        with_journal(&host, &root, |conn| {
+            conn.pragma_update(None, "user_version", HTTP_SCHEMA_EPOCH - 1)?;
+            Ok(())
+        });
         assert!(
-            recovery_error(&root, &identity).contains("not the exact current schema"),
+            recovery_error(&host, &root, &identity).contains("not the exact current schema"),
             "predecessor outer-supervisor authority was reinterpreted"
         );
     }
 
     #[test]
     fn same_directory_database_replacement_is_refused() {
-        let (root, identity) = fresh_journal();
+        let host = shared_test_host();
+        let (root, identity) = fresh_journal(&host);
         let database = root.path().join(DATABASE_NAME);
         let replacement = root.path().join("replacement");
         std::fs::copy(&database, &replacement).unwrap();
         std::fs::rename(&replacement, &database).unwrap();
         assert!(
-            recovery_error(&root, &identity).contains("outer inode identity"),
+            recovery_error(&host, &root, &identity).contains("outer inode identity"),
             "same-directory database replacement was not diagnosed"
         );
+    }
+
+    #[test]
+    fn leftover_rollback_journal_is_refused() {
+        let host = shared_test_host();
+        let (root, identity) = fresh_journal(&host);
+        std::fs::File::create(root.path().join(format!("{DATABASE_NAME}-journal")))
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        assert!(
+            recovery_error(&host, &root, &identity).contains("rollback journal"),
+            "a foreign rollback journal was admitted"
+        );
+    }
+
+    /// A commit acknowledged before a crash survives in the WAL alone: the
+    /// crash image is the main file as it stood before the checkpoint plus
+    /// the WAL holding the committed frames and a torn uncommitted tail, all
+    /// written back into the same inodes. Native recovery replays the commit
+    /// under the unchanged main identity and discards the tail.
+    #[test]
+    fn committed_wal_frames_survive_a_crash_before_checkpoint() {
+        use std::io::Write as _;
+
+        let main_identity = |path: &std::path::Path| {
+            lillux::pinned_regular_file_identity(&std::fs::File::open(path).unwrap()).unwrap()
+        };
+        let host = shared_test_host();
+        let outer = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(outer.path())
+            .unwrap()
+            .unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let bootstrap = bootstrap();
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[13; 32]);
+        let expected_binding = binding(&bootstrap, &supervisor);
+        let journal = create(&host, directory, bootstrap, capture(), supervisor).unwrap();
+        let identity = journal.store_identity().clone();
+        let database = outer.path().join(DATABASE_NAME);
+        let wal = outer.path().join(format!("{DATABASE_NAME}-wal"));
+        let main = main_identity(&database);
+        assert_eq!(main, identity.database_identity);
+        let attached = journal.record_binding(expected_binding.clone()).unwrap();
+        // The crash image, taken while the attachment commit is acknowledged
+        // but not yet checkpointed.
+        let crashed_main = std::fs::read(&database).unwrap();
+        let mut crashed_wal = std::fs::read(&wal).unwrap();
+        retire(&host, attached.close());
+        // Move every committed frame into the main file so the crash image
+        // provably differs from the checkpointed state.
+        with_journal(&host, &outer, |conn| {
+            let (busy, _, _): (i64, i64, i64) =
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+            ensure!(busy == 0, "test checkpoint was busy");
+            Ok(())
+        });
+        assert!(
+            crashed_wal.len() > 32,
+            "the acknowledged commit left no WAL frames"
+        );
+        assert_ne!(
+            crashed_main,
+            std::fs::read(&database).unwrap(),
+            "the attachment commit was already checkpointed in the crash image"
+        );
+        // A torn frame past the last commit: never a valid commit frame.
+        crashed_wal.extend_from_slice(&[0x5a; 100]);
+        for (path, bytes) in [(&database, &crashed_main), (&wal, &crashed_wal)] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .unwrap();
+            file.write_all(bytes).unwrap();
+            file.sync_all().unwrap();
+        }
+        assert!(
+            lillux::matches_pinned_regular_file_identity(
+                &std::fs::File::open(&database).unwrap(),
+                main,
+            )
+            .unwrap()
+        );
+        let ExternalSupervisorJournalRecovery::Attached(recovered) =
+            recover(&host, &outer, &identity).unwrap()
+        else {
+            panic!("the acknowledged attachment was lost by the crash")
+        };
+        assert_eq!(recovered.binding(), &expected_binding);
+        assert!(
+            lillux::matches_pinned_regular_file_identity(
+                &std::fs::File::open(&database).unwrap(),
+                main,
+            )
+            .unwrap()
+        );
+        retire(&host, recovered.close());
     }
 
     #[test]
@@ -1561,14 +2296,15 @@ mod tests {
             SigningKey,
         }
 
+        let host = shared_test_host();
         for mutation in [Mutation::Bootstrap, Mutation::Request, Mutation::SigningKey] {
-            let (root, identity) = fresh_journal();
+            let (root, identity) = fresh_journal(&host);
             let expected = match mutation {
                 Mutation::Bootstrap => "bootstrap changed its canonical identity",
                 Mutation::Request => "attachment request changed its exact bytes",
                 Mutation::SigningKey => "signing key changed its public identity",
             };
-            mutate_meta_without_guard(&root, |conn| match mutation {
+            mutate_meta_without_guard(&host, &root, |conn| match mutation {
                 Mutation::Bootstrap => {
                     let json: String = conn
                         .query_row(
@@ -1612,7 +2348,7 @@ mod tests {
                 }
             });
             assert!(
-                recovery_error(&root, &identity).contains(expected),
+                recovery_error(&host, &root, &identity).contains(expected),
                 "mutated retained authority was not diagnosed as {expected}"
             );
         }
@@ -1620,47 +2356,44 @@ mod tests {
 
     #[test]
     fn launch_guest_binding_and_bootstrap_substitution_are_refused() {
+        let host = shared_test_host();
         for mutate_binding in [true, false] {
-            let (root, identity) = launched_journal();
-            let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
-            let trigger_sql: String = conn
-                .query_row(
+            let (root, identity) = launched_journal(&host);
+            with_journal(&host, &root, |conn| {
+                let trigger_sql: String = conn.query_row(
                     "SELECT sql FROM sqlite_schema
                      WHERE type='trigger' AND name='external_supervisor_launch_no_update'",
                     [],
                     |row| row.get(0),
-                )
-                .unwrap();
-            let guest_json: String = conn
-                .query_row(
+                )?;
+                let guest_json: String = conn.query_row(
                     "SELECT guest_store_identity_json
                      FROM external_supervisor_launch_intent WHERE singleton=1",
                     [],
                     |row| row.get(0),
-                )
-                .unwrap();
-            let mut guest_value: serde_json::Value = serde_json::from_str(&guest_json).unwrap();
-            if mutate_binding {
-                guest_value["binding_digest"] = serde_json::Value::String("0".repeat(64));
-            } else {
-                guest_value["bootstrap_digest"] = serde_json::Value::String("1".repeat(64));
-            }
-            let guest: GuestJournalStoreIdentity = serde_json::from_value(guest_value).unwrap();
-            let digest = guest.digest().unwrap();
-            let json = lillux::canonical_json(&serde_json::to_value(&guest).unwrap()).unwrap();
-            conn.execute_batch("DROP TRIGGER external_supervisor_launch_no_update")
-                .unwrap();
-            conn.execute(
-                "UPDATE external_supervisor_launch_intent
-                 SET guest_store_identity_digest=?1,guest_store_identity_json=?2
-                 WHERE singleton=1",
-                params![digest, json],
-            )
-            .unwrap();
-            conn.execute_batch(&trigger_sql).unwrap();
-            drop(conn);
+                )?;
+                let mut guest_value: serde_json::Value = serde_json::from_str(&guest_json)?;
+                if mutate_binding {
+                    guest_value["binding_digest"] = serde_json::Value::String("0".repeat(64));
+                } else {
+                    guest_value["bootstrap_digest"] = serde_json::Value::String("1".repeat(64));
+                }
+                let guest: GuestJournalStoreIdentity = serde_json::from_value(guest_value)?;
+                let digest = guest.digest()?;
+                let json = lillux::canonical_json(&serde_json::to_value(&guest)?)?;
+                conn.execute_batch("DROP TRIGGER external_supervisor_launch_no_update")?;
+                conn.execute(
+                    "UPDATE external_supervisor_launch_intent
+                     SET guest_store_identity_digest=?1,guest_store_identity_json=?2
+                     WHERE singleton=1",
+                    params![digest, json],
+                )?;
+                conn.execute_batch(&trigger_sql)?;
+                Ok(())
+            });
             assert!(
-                recovery_error(&root, &identity).contains("launch intent changed its authority"),
+                recovery_error(&host, &root, &identity)
+                    .contains("launch intent changed its authority"),
                 "substituted guest launch authority was not diagnosed"
             );
         }

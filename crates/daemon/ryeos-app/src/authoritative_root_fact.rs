@@ -643,22 +643,32 @@ mod tests {
 
     #[test]
     fn identical_thread_coordinates_in_independent_stores_do_not_share_replay_state() {
+        // A thread holds one test Store at a time, so the two independent
+        // nodes run one after the other. The first node's cached index stays
+        // in the process-wide cache after its Store closes; the second Store
+        // may even reuse the first one's address, and must still see none of
+        // it.
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
-        let first = crate::state::test_support::build(first_root.path()).unwrap();
-        let second = crate::state::test_support::build(second_root.path()).unwrap();
         let thread_id = "T-authoritative-root-cache-isolation";
-        let mut prior = ReplayIndex::default();
-        prior.initialized = true;
-        prior.verified_through = Some(42);
-        put_index(&first, thread_id, prior);
+        {
+            let (_first_owner, first) =
+                crate::state::test_support::build(first_root.path()).unwrap();
+            let mut prior = ReplayIndex::default();
+            prior.initialized = true;
+            prior.verified_through = Some(42);
+            put_index(&first, thread_id, prior);
+            let retained = take_index(&first, thread_id);
+            assert!(retained.initialized);
+            assert_eq!(retained.verified_through, Some(42));
+            put_index(&first, thread_id, retained);
+        }
 
+        let (_second_owner, second) =
+            crate::state::test_support::build(second_root.path()).unwrap();
         let other = take_index(&second, thread_id);
         assert!(!other.initialized);
         assert_eq!(other.verified_through, None);
-        let retained = take_index(&first, thread_id);
-        assert!(retained.initialized);
-        assert_eq!(retained.verified_through, Some(42));
     }
 
     #[test]

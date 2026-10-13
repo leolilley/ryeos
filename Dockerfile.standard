@@ -2,10 +2,10 @@
 #
 # ryeos-standard — standard remote workflow node image.
 #
-# Bakes the exact standard set: core + central-auth + standard. This provides
-# project sync/CAS/remote APIs, central authorization, and the scheduler,
+# Bakes the exact standard set: core + scheduling + standard. This provides
+# project sync/CAS/remote APIs, native caller authorization, and scheduling,
 # graph/directive/knowledge schemas, services, and runtimes. The hosted-node
-# admission bundle, ryeos-ui, and web can be installed later when needed.
+# admission bundle, application central-auth, ryeos-ui, and web are explicit additions.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -72,7 +72,7 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 
 COPY --from=builder /build/bundles/.ai      /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -155,7 +155,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     };
 
     let session_policy = state.node_policy.require::<
-        ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
+        ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
     >()?;
     let (session_id, token, attachment) = get_ui_state(&state)
         .expect("UiState not set")

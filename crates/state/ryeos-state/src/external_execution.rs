@@ -19,6 +19,9 @@ pub mod connector;
 pub mod export;
 pub mod guest_journal;
 pub mod journal;
+pub mod native_journal;
+pub mod qualification_controller_canary;
+pub mod qualification_session;
 pub mod runtime_content;
 pub mod supervisor_journal;
 pub mod transcript;
@@ -32,7 +35,7 @@ pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
 /// external-candidate requirement and supervisor-bootstrap schemas. Those
 /// documents evolve under different authorities and are not compatibility
 /// aliases for this binding.
-pub const EXECUTION_CHANNEL_BINDING_SCHEMA: u32 = 4;
+pub const EXECUTION_CHANNEL_BINDING_SCHEMA: u32 = 5;
 /// First-generation logical base/candidate ceiling shared by native capture
 /// and receiver verification; transport budgets may independently be smaller.
 pub const MAX_CANDIDATE_CONTENT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -40,7 +43,38 @@ pub const MAX_CANDIDATE_CONTENT_BYTES: u64 = 1024 * 1024 * 1024;
 /// Acknowledgements cannot consume this reserve. Lifecycle validation also
 /// refuses repeated Cancel/Stopped, so it is not an unbounded emergency lane.
 pub const TERMINAL_CONTROL_BYTES: u64 = 4096;
+/// The entire finite Q finish exchange is carved out of signed journal ceilings.
+/// Includes EOF, completion, native settlement and exact lifecycle receipts.
+/// The journal alone classifies correlated receipts; idle polls stay ordinary.
+/// Supervisor: EOF + settlement + completion Applied receipt + three EOF
+/// receipt replies + two settlement receipt replies = eight. Owner: completion
+/// + three EOF receipts + two settlement receipts = six. Scope claim/finish is
+/// atomic; its externally visible receipts are Retained and Applied only.
+pub const Q_FINISH_FRAMES: u32 = 8;
+pub const Q_FINISH_BYTES: u64 = 128 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-execution.frame.v1\0";
+
+/// Shared by precontact admission, bootstrap validation and channel validation.
+pub fn validate_channel_journal_limits(
+    mode: ExternalExecutionMode,
+    max_frames: u32,
+    max_bytes: u64,
+) -> Result<()> {
+    ensure!(
+        (1..=65_536).contains(&max_frames) && (1..=64 * 1024 * 1024).contains(&max_bytes),
+        "external channel journal exceeds bounds"
+    );
+    if matches!(
+        mode,
+        ExternalExecutionMode::QualificationStructuredSession {}
+    ) {
+        ensure!(
+            max_frames > Q_FINISH_FRAMES && max_bytes > Q_FINISH_BYTES,
+            "Q channel journal cannot reserve native settlement and ordinary traffic"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,10 +103,11 @@ pub struct ExecutionChannelBinding {
     /// Maximum raw candidate bytes that may cross the export protocol. This is
     /// distinct from `max_bytes`, which bounds the larger authenticated wire
     /// transcript after JSON, base64, signatures, acknowledgements and control
-    /// frames are included. Direct commands require zero: their immutable input
-    /// view has no candidate export authority.
+    /// frames are included. Qualification sessions and direct commands require
+    /// zero because neither mode has candidate export authority.
     pub candidate_export_max_bytes: u64,
-    /// Per-direction ordinary journal bounds including acknowledged frames.
+    /// Per-direction journal bounds including acknowledged frames. Q reserves
+    /// Q_FINISH_FRAMES and Q_FINISH_BYTES within these ceilings per direction.
     /// One bounded Cancel/Stopped frame is reserved independently.
     pub max_frames: u32,
     pub max_bytes: u64,
@@ -109,16 +144,15 @@ impl ExecutionChannelBinding {
                 && self.expires_at_ms - self.issued_at_ms <= 86_400_000,
             "external channel lifetime is outside its bounds"
         );
-        ensure!(
-            (1..=65_536).contains(&self.max_frames)
-                && (1..=64 * 1024 * 1024).contains(&self.max_bytes),
-            "external channel journal exceeds bounds"
-        );
+        validate_channel_journal_limits(self.execution_mode, self.max_frames, self.max_bytes)?;
         ensure!(
             match self.execution_mode {
                 ExternalExecutionMode::StructuredSession {} =>
                     (1..=self.max_bytes).contains(&self.candidate_export_max_bytes),
-                ExternalExecutionMode::DirectCommand { .. } => self.candidate_export_max_bytes == 0,
+                ExternalExecutionMode::QualificationStructuredSession {}
+                | ExternalExecutionMode::DirectCommand { .. } => {
+                    self.candidate_export_max_bytes == 0
+                }
             },
             "external channel export authority does not match execution mode"
         );
@@ -173,6 +207,16 @@ pub enum ExecutionChannelPayload {
         receipt: lillux::LinuxSandboxAppliedLaunchReceipt,
     },
     Release,
+    /// Controller request to reap only a qualification session's native
+    /// namespace. This request makes no assertion about verifier success.
+    QualificationComplete {
+        completion_request_digest: String,
+    },
+    /// Guest projection of an immutable native reap row, never a provider or
+    /// semantic qualification result.
+    QualificationScopeSettled {
+        observation: NativeQualificationScopeSettlement,
+    },
     ProtocolBytes {
         bytes_base64: String,
     },
@@ -265,6 +309,75 @@ pub struct NativeWriterExclusionObservation {
     pub exit: NativeNamespaceExit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeQualificationScopeSettlementObservation {
+    pub schema: u32,
+    pub binding_digest: String,
+    pub launcher_occurrence_digest: String,
+    pub applied_runtime_receipt_digest: String,
+    pub completion_frame_digest: String,
+    pub completion_request_digest: String,
+    pub mechanism: NativeWriterExclusionMechanism,
+    pub exit: NativeNamespaceExit,
+}
+
+/// Current signed settlement wrapper. The nested native predecessor remains
+/// capture-free so immutable capture metadata cannot form a hash cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeQualificationScopeSettlement {
+    pub schema: u32,
+    pub observation: NativeQualificationScopeSettlementObservation,
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture_capture: Option<crate::objects::qualification_fixture::QFixtureCaptureReference>,
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub fixture_content: Option<crate::objects::qualification_fixture::QFixtureCaptureContent>,
+}
+
+impl NativeQualificationScopeSettlement {
+    pub fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+        ensure!(self.schema == 3, "unsupported Q scope settlement wrapper");
+        self.observation.validate(binding)?;
+        match (&self.fixture_capture, &self.fixture_content) {
+            (None, None) => {}
+            (Some(reference), Some(content)) => {
+                content.verify_reference(reference, binding, &self.observation)?;
+            }
+            _ => bail!("Q scope settlement fixture reference/content presence differs"),
+        }
+        Ok(())
+    }
+}
+
+impl NativeQualificationScopeSettlementObservation {
+    pub fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+        ensure!(
+            binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {}
+                && self.schema == 1
+                && self.binding_digest == binding.digest()?
+                && self.mechanism == NativeWriterExclusionMechanism::NamespaceInitReaped,
+            "qualification scope settlement changed its native authority"
+        );
+        for digest in [
+            &self.launcher_occurrence_digest,
+            &self.applied_runtime_receipt_digest,
+            &self.completion_frame_digest,
+            &self.completion_request_digest,
+        ] {
+            hash(digest)?;
+        }
+        ensure!(
+            match self.exit {
+                NativeNamespaceExit::Code(n) => (0..=255).contains(&n),
+                NativeNamespaceExit::Signal(n) => (1..=64).contains(&n),
+            },
+            "qualification scope settlement has an invalid native exit"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeWriterExclusionMechanism {
@@ -315,11 +428,15 @@ impl ExecutionChannelPayload {
         direction: ChannelDirection,
     ) -> Result<()> {
         use ExecutionChannelPayload::*;
-        let owner_only = matches!(self, Release | Quiesce { .. } | Cancel);
+        let owner_only = matches!(
+            self,
+            Release | Quiesce { .. } | QualificationComplete { .. } | Cancel
+        );
         let supervisor_only = matches!(
             self,
             Ready { .. }
                 | RuntimeApplied { .. }
+                | QualificationScopeSettled { .. }
                 | ProtocolEof
                 | CommandOutput { .. }
                 | CommandTerminated { .. }
@@ -336,18 +453,30 @@ impl ExecutionChannelPayload {
             "owner cannot author supervisor observations"
         );
         ensure!(
+            !matches!(self, ProtocolBytes { .. } | ProtocolEof)
+                || matches!(
+                    binding.execution_mode,
+                    ExternalExecutionMode::StructuredSession {}
+                        | ExternalExecutionMode::QualificationStructuredSession {}
+                ),
+            "direct command channel cannot carry session protocol"
+        );
+        ensure!(
             !matches!(
                 self,
-                ProtocolBytes { .. }
-                    | ProtocolEof
-                    | Quiesce { .. }
-                    | ExportObjectChunk { .. }
-                    | ExportSealed { .. }
+                Quiesce { .. } | ExportObjectChunk { .. } | ExportSealed { .. }
             ) || matches!(
                 binding.execution_mode,
                 ExternalExecutionMode::StructuredSession {}
             ),
-            "direct command channel cannot carry session protocol or candidate export"
+            "execution mode cannot carry candidate export"
+        );
+        ensure!(
+            !matches!(
+                self,
+                QualificationComplete { .. } | QualificationScopeSettled { .. }
+            ) || binding.execution_mode == ExternalExecutionMode::QualificationStructuredSession {},
+            "qualification settlement requires a qualification session"
         );
         match self {
             Ready {
@@ -379,6 +508,10 @@ impl ExecutionChannelPayload {
                     "external runtime-applied frame changed bound native controls"
                 );
             }
+            QualificationComplete {
+                completion_request_digest,
+            } => hash(completion_request_digest)?,
+            QualificationScopeSettled { observation } => observation.validate(binding)?,
             ProtocolBytes { bytes_base64 } => {
                 chunk(bytes_base64, false)?;
             }
@@ -597,23 +730,70 @@ fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> 
 }
 
 /// The same accounting is used for new frames and historical replay validation.
-/// Counts are separate from sequence, which spans both ordinary and terminal
+/// Counts are separate from sequence, which spans ordinary, Q settlement and terminal
 /// traffic and therefore preserves one authenticated chain per direction.
 #[derive(Default)]
 pub struct ExecutionChannelBudget {
     pub ordinary_frames: u64,
     pub ordinary_bytes: u64,
+    pub q_finish_frames: u64,
+    pub q_finish_bytes: u64,
     pub terminal_frames: u64,
     pub terminal_bytes: u64,
 }
 
 impl ExecutionChannelBudget {
+    /// Only the journal may use this after joining an exact, first lifecycle
+    /// receipt to its retained peer. Ordinary Acknowledge never opts itself in.
+    pub(super) fn retain_checked_q_finish_ack(
+        &mut self,
+        binding: &ExecutionChannelBinding,
+        bytes: u64,
+    ) -> Result<()> {
+        validate_channel_journal_limits(
+            binding.execution_mode,
+            binding.max_frames,
+            binding.max_bytes,
+        )?;
+        ensure!(
+            matches!(
+                binding.execution_mode,
+                ExternalExecutionMode::QualificationStructuredSession {}
+            ),
+            "Q finish receipt requires Q mode"
+        );
+        let frames = self
+            .q_finish_frames
+            .checked_add(1)
+            .context("Q finish frame count overflow")?;
+        let total = self
+            .q_finish_bytes
+            .checked_add(bytes)
+            .context("Q finish byte count overflow")?;
+        ensure!(
+            frames <= u64::from(Q_FINISH_FRAMES) && total <= Q_FINISH_BYTES,
+            "external transcript budget exhausted"
+        );
+        self.q_finish_frames = frames;
+        self.q_finish_bytes = total;
+        Ok(())
+    }
+
     pub fn retain(
         &mut self,
         binding: &ExecutionChannelBinding,
         payload: &ExecutionChannelPayload,
         bytes: u64,
     ) -> Result<()> {
+        validate_channel_journal_limits(
+            binding.execution_mode,
+            binding.max_frames,
+            binding.max_bytes,
+        )?;
+        let q_mode = matches!(
+            binding.execution_mode,
+            ExternalExecutionMode::QualificationStructuredSession {}
+        );
         let (frames, used, frame_limit, byte_limit) = if payload.uses_terminal_reserve() {
             (
                 &mut self.terminal_frames,
@@ -621,12 +801,29 @@ impl ExecutionChannelBudget {
                 1,
                 TERMINAL_CONTROL_BYTES,
             )
+        } else if matches!(
+            payload,
+            ExecutionChannelPayload::QualificationScopeSettled { .. }
+        ) || (q_mode
+            && matches!(
+                payload,
+                ExecutionChannelPayload::QualificationComplete { .. }
+                    | ExecutionChannelPayload::ProtocolEof
+            ))
+        {
+            ensure!(q_mode, "native Q settlement requires Q channel accounting");
+            (
+                &mut self.q_finish_frames,
+                &mut self.q_finish_bytes,
+                u64::from(Q_FINISH_FRAMES),
+                Q_FINISH_BYTES,
+            )
         } else {
             (
                 &mut self.ordinary_frames,
                 &mut self.ordinary_bytes,
-                u64::from(binding.max_frames),
-                binding.max_bytes,
+                u64::from(binding.max_frames - if q_mode { Q_FINISH_FRAMES } else { 0 }),
+                binding.max_bytes - if q_mode { Q_FINISH_BYTES } else { 0 },
             )
         };
         let next_frames = frames
@@ -724,6 +921,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn q_settlement_and_cleanup_survive_full_ordinary_budget() {
+        let (mut binding, _, _) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.max_frames = Q_FINISH_FRAMES + 1;
+        binding.max_bytes = Q_FINISH_BYTES + 1000;
+        let acknowledgement = ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence: 1,
+            peer_frame_digest: "a".repeat(64),
+            application: ExecutionFrameApplication::Retained,
+        };
+        let settlement = ExecutionChannelPayload::QualificationScopeSettled {
+            observation: NativeQualificationScopeSettlement {
+                schema: 3,
+                observation: NativeQualificationScopeSettlementObservation {
+                    schema: 1,
+                    binding_digest: binding.digest().unwrap(),
+                    launcher_occurrence_digest: "1".repeat(64),
+                    applied_runtime_receipt_digest: "2".repeat(64),
+                    completion_frame_digest: "3".repeat(64),
+                    completion_request_digest: "4".repeat(64),
+                    mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                    exit: NativeNamespaceExit::Code(0),
+                },
+                fixture_capture: None,
+                fixture_content: None,
+            },
+        };
+        let mut budget = ExecutionChannelBudget::default();
+        budget.retain(&binding, &acknowledgement, 1000).unwrap();
+        assert!(budget.retain(&binding, &acknowledgement, 1).is_err());
+        assert!(
+            budget
+                .retain(&binding, &settlement, Q_FINISH_BYTES + 1)
+                .is_err()
+        );
+        assert_eq!(budget.q_finish_frames, 0);
+        budget
+            .retain(&binding, &settlement, Q_FINISH_BYTES)
+            .unwrap();
+        assert!(budget.retain(&binding, &settlement, 1).is_err());
+        assert_eq!(
+            budget.ordinary_bytes + budget.q_finish_bytes,
+            binding.max_bytes
+        );
+        assert_eq!(budget.ordinary_frames + budget.q_finish_frames, 2);
+        assert!(
+            budget
+                .retain(
+                    &binding,
+                    &ExecutionChannelPayload::Cancel,
+                    TERMINAL_CONTROL_BYTES + 1
+                )
+                .is_err()
+        );
+        budget
+            .retain(
+                &binding,
+                &ExecutionChannelPayload::Cancel,
+                TERMINAL_CONTROL_BYTES,
+            )
+            .unwrap();
+        assert!(
+            budget
+                .retain(&binding, &ExecutionChannelPayload::Cancel, 1)
+                .is_err()
+        );
+        binding.execution_mode = ExternalExecutionMode::StructuredSession {};
+        assert!(
+            ExecutionChannelBudget::default()
+                .retain(&binding, &settlement, 1000)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn q_reserve_requires_capacity_inside_current_signed_limits() {
+        let (mut binding, _, _) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.max_bytes = Q_FINISH_BYTES;
+        assert!(binding.validate().is_err());
+        binding.max_bytes += 1;
+        binding.max_frames = Q_FINISH_FRAMES;
+        assert!(binding.validate().is_err());
+        binding.max_frames = Q_FINISH_FRAMES + 1;
+        binding.validate().unwrap();
+        binding.schema = 4;
+        assert!(binding.validate().is_err());
+    }
+
+    #[test]
     fn terminal_control_survives_both_ordinary_budget_ceilings() {
         let (mut binding, _, _) = binding();
         binding.max_frames = 1;
@@ -788,12 +1077,150 @@ mod tests {
         )
     }
     #[test]
+    fn q_settlement_wrapper_requires_current_schema_and_explicit_capture_presence() {
+        let (mut binding, _, _) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        let native = NativeQualificationScopeSettlementObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            launcher_occurrence_digest: "1".repeat(64),
+            applied_runtime_receipt_digest: "2".repeat(64),
+            completion_frame_digest: "3".repeat(64),
+            completion_request_digest: "4".repeat(64),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let settlement = NativeQualificationScopeSettlement {
+            schema: 3,
+            observation: native.clone(),
+            fixture_capture: None,
+            fixture_content: None,
+        };
+        settlement.validate(&binding).unwrap();
+        let wire = serde_json::to_value(&settlement).unwrap();
+        assert!(wire["fixture_capture"].is_null());
+        assert!(wire["fixture_content"].is_null());
+        for field in ["fixture_capture", "fixture_content"] {
+            let mut missing = wire.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NativeQualificationScopeSettlement>(missing).is_err());
+        }
+        assert!(
+            serde_json::from_value::<NativeQualificationScopeSettlement>(
+                serde_json::to_value(&native).unwrap()
+            )
+            .is_err()
+        );
+        let mut old = settlement.clone();
+        old.schema = 2;
+        assert!(old.validate(&binding).is_err());
+        let mut changed = settlement;
+        changed.observation.binding_digest = "f".repeat(64);
+        assert!(changed.validate(&binding).is_err());
+        let mut cyclic = wire;
+        cyclic["observation"]["fixture_capture"] = serde_json::json!(null);
+        assert!(serde_json::from_value::<NativeQualificationScopeSettlement>(cyclic).is_err());
+    }
+
+    #[test]
+    fn q_settlement_content_is_exact_and_maximum_fits_reserved_frame() {
+        use crate::objects::qualification_fixture::{
+            MAX_Q_FIXTURE_BYTES, Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA,
+            QFixtureCaptureContent, QFixtureCaptureMetadata, QFixtureCaptureReference,
+        };
+        let (mut binding, _, supervisor) = binding();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        let native = NativeQualificationScopeSettlementObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            launcher_occurrence_digest: "1".repeat(64),
+            applied_runtime_receipt_digest: "2".repeat(64),
+            completion_frame_digest: "3".repeat(64),
+            completion_request_digest: "4".repeat(64),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let bytes = vec![0xab; MAX_Q_FIXTURE_BYTES as usize];
+        let metadata = QFixtureCaptureMetadata {
+            kind: Q_FIXTURE_CAPTURE_KIND.into(),
+            schema: Q_FIXTURE_CAPTURE_SCHEMA,
+            fixture_contract_digest: "5".repeat(64),
+            native_settlement: native.clone(),
+            blob_hash: lillux::sha256_hex(&bytes),
+            size_bytes: bytes.len() as u64,
+            normalized_mode: crate::objects::ProjectFile::REGULAR_MODE,
+        };
+        let reference = QFixtureCaptureReference {
+            metadata_hash: metadata.digest().unwrap(),
+            blob_hash: metadata.blob_hash.clone(),
+            size_bytes: metadata.size_bytes,
+        };
+        let content = QFixtureCaptureContent::from_bytes(metadata, &bytes).unwrap();
+        let settlement = NativeQualificationScopeSettlement {
+            schema: 3,
+            observation: native,
+            fixture_capture: Some(reference),
+            fixture_content: Some(content),
+        };
+        settlement.validate(&binding).unwrap();
+        let mut partial = settlement.clone();
+        partial.fixture_content = None;
+        assert!(partial.validate(&binding).is_err());
+        partial = settlement.clone();
+        partial.fixture_capture = None;
+        assert!(partial.validate(&binding).is_err());
+        let mut changed = settlement.clone();
+        changed
+            .fixture_content
+            .as_mut()
+            .unwrap()
+            .metadata
+            .native_settlement
+            .completion_frame_digest = "9".repeat(64);
+        changed.fixture_capture.as_mut().unwrap().metadata_hash = changed
+            .fixture_content
+            .as_ref()
+            .unwrap()
+            .metadata
+            .digest()
+            .unwrap();
+        assert!(changed.validate(&binding).is_err());
+        changed = settlement.clone();
+        changed.fixture_content.as_mut().unwrap().bytes_base64 =
+            STANDARD.encode(vec![0xbb; bytes.len()]);
+        assert!(changed.validate(&binding).is_err());
+        let frame = SignedExecutionFrame::sign(
+            ExecutionFrame {
+                schema: 1,
+                binding_digest: binding.digest().unwrap(),
+                direction: ChannelDirection::SupervisorToOwner,
+                sequence: 2,
+                previous_frame_digest: Some("6".repeat(64)),
+                acknowledged_peer_sequence: 1,
+                payload: ExecutionChannelPayload::QualificationScopeSettled {
+                    observation: settlement,
+                },
+            },
+            &binding,
+            &supervisor,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(frame).unwrap()).unwrap();
+        assert!(
+            wire.len() as u64 <= Q_FINISH_BYTES,
+            "maximum Q content exceeds finite settlement reservation"
+        );
+    }
+
+    #[test]
     fn channel_schema_is_independent_from_enclosing_external_documents() {
         let (binding, _, _) = binding();
         binding.validate().unwrap();
 
         let mut changed = binding;
-        changed.schema = 5;
+        changed.schema = 4;
         assert!(
             changed
                 .validate()
@@ -863,6 +1290,85 @@ mod tests {
         direct.validate().unwrap();
         direct.candidate_export_max_bytes = 1;
         assert!(direct.validate().is_err());
+    }
+
+    #[test]
+    fn qualification_session_carries_protocol_but_no_export() {
+        let (mut binding, owner, supervisor) = binding();
+        let ordinary_digest = binding.digest().unwrap();
+        binding.execution_mode = ExternalExecutionMode::QualificationStructuredSession {};
+        binding.candidate_export_max_bytes = 0;
+        binding.validate().unwrap();
+        let mut wrong_export = binding.clone();
+        wrong_export.candidate_export_max_bytes = 1;
+        assert!(wrong_export.validate().is_err());
+        assert_ne!(binding.digest().unwrap(), ordinary_digest);
+
+        for (direction, payload) in [
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"input"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"output"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolEof,
+            ),
+        ] {
+            let mut value = frame(&binding);
+            value.direction = direction;
+            value.payload = payload;
+            let signer = match direction {
+                ChannelDirection::OwnerToSupervisor => &owner,
+                ChannelDirection::SupervisorToOwner => &supervisor,
+            };
+            SignedExecutionFrame::sign(value, &binding, signer).unwrap();
+        }
+
+        for (direction, payload) in [
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Quiesce {
+                    completion_request_digest: "a".repeat(64),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportObjectChunk {
+                    content_kind: ExportContentKind::Blob,
+                    object_hash: "a".repeat(64),
+                    offset: 0,
+                    bytes_base64: STANDARD.encode(b"x"),
+                    final_chunk: true,
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportSealed {
+                    candidate_snapshot_hash: "a".repeat(64),
+                    candidate_output_capture_hash: None,
+                    completion_request_digest: "b".repeat(64),
+                    writer_exclusion_evidence_hash: "c".repeat(64),
+                },
+            ),
+            (ChannelDirection::SupervisorToOwner, terminated()),
+        ] {
+            let mut value = frame(&binding);
+            value.direction = direction;
+            value.payload = payload;
+            let signer = match direction {
+                ChannelDirection::OwnerToSupervisor => &owner,
+                ChannelDirection::SupervisorToOwner => &supervisor,
+            };
+            assert!(SignedExecutionFrame::sign(value, &binding, signer).is_err());
+        }
     }
 
     #[test]

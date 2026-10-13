@@ -1,0 +1,12 @@
+# UNSIGNED DRAFT: this policy asserts bounded static tree closure and Python ABI only.
+category: ryeos-runtime
+version: 1.0.0
+description: Static GNU-first closure and selected GNU Python ABI policy for a projected user driver.
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v4
+  verifier_ref: tool:local-inference/gnu-cuda-driver-qualification/verify
+  subject_declaration_id: subject
+  allowed_claims: [gnu_user_driver_static_closure_v1]
+  minimum_verifier_process_settlement: trusted_process_group_absent
+  verifier_parameters:
+    schema: ryeos.gnu_cuda_driver_qualification_policy.v1

@@ -6,6 +6,43 @@
 //!
 //! Used by `cleanup_e2e.rs`. NOT used by `cleanup_invariants.rs`
 //! (those are pure in-process invariant checks).
+//!
+//! ## Running the daemon suite
+//!
+//! The harness initializes nodes from the authored `core`,
+//! `core-scheduling`, `standard` and `full` init profiles. Every profile
+//! except `core` installs the scheduling bundle (`service:scheduler/*`) and
+//! all but `core-scheduling` also install the standard bundle
+//! (`service:model-providers/*`). A daemon refuses to start when an installed
+//! operational service has no compiled handler, so the suite runs with the
+//! standard composition CI uses for these bundle sets. The handoff crash
+//! recovery tests are compiled only with `handoff-test-support`:
+//!
+//! ```text
+//! cargo build -p ryeos-cli --features scheduling,model-provider-setup
+//! cargo test -p ryeosd --features scheduling,model-provider-setup,handoff-test-support --tests -- --test-threads=1
+//! ```
+//!
+//! A default-feature build refuses before spawning a daemon whose selected
+//! profile needs a feature the build lacks (see [`require_compiled_composition`]).
+//!
+//! Prerequisites:
+//!
+//! * the selected bundles are freshly published; editing non-test crate
+//!   sources or a `Cargo.toml` makes them stale and [`require_bundles_prepared`]
+//!   refuses;
+//! * the `ryeos` CLI is built beside `ryeosd` (`target/debug/ryeos`) for the
+//!   CLI-driven tests;
+//! * the temporary directory is on a durable filesystem, because every
+//!   authored profile except `hosted-node` requires `storage:durable_root`
+//!   (point `TMPDIR` at a disk-backed directory when `/tmp` is a tmpfs).
+//!
+//! A directly spawned daemon has no protected host-runtime association, so
+//! no delegated cgroup subtree exists and no per-scope capability can
+//! qualify. The fast fixture therefore signs an isolation member derived
+//! from the authored profile without its per-scope contract (see
+//! `fast_fixture::direct_host_isolation`). Per-scope containment is
+//! qualified only against an administrator-prepared host-backed node.
 
 #![allow(dead_code)]
 
@@ -393,32 +430,20 @@ pub fn selected_projection_path(app_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(runtime_state_dir.join(generation.projection_file))
 }
 
-/// Path to the built `ryeos` CLI binary, which lives in the same `target/<profile>/`
-/// directory as `ryeosd`. We build it on demand if it's not present, since
-/// Cargo only auto-builds bins from the same package as the integration test.
+/// Path to the explicitly prepared `ryeos` CLI binary beside `ryeosd`.
+///
+/// The validation queue builds this artifact with its declared source, lock,
+/// target and feature selection before allocating the integration test. A test
+/// must not start another Cargo process or infer freshness from file presence.
 pub fn ryeos_binary() -> PathBuf {
     let candidate = ryeosd_binary()
         .parent()
         .expect("ryeosd binary has parent dir")
         .join("ryeos");
 
-    // Always ask Cargo to build once per test process. Cargo no-ops
-    // when fresh; this guarantees the subprocess CLI matches the
-    // current source rather than a stale pre-v0.4.0 artifact left
-    // over from an earlier build. (See PLAN-V0.4.0-CLI-INTEGRATION-401-FIX.md.)
-    static BUILD_RYEOS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    BUILD_RYEOS.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = std::process::Command::new(&cargo)
-            .args(["build", "-p", "ryeos-cli", "--bin", "ryeos"])
-            .status()
-            .expect("failed to invoke `cargo build -p ryeos-cli`");
-        assert!(status.success(), "cargo build -p ryeos-cli failed");
-    });
-
     assert!(
-        candidate.exists(),
-        "ryeos binary not found at {} after cargo build",
+        candidate.is_file(),
+        "prepared ryeos CLI is unavailable at {}; explicitly build the selected CLI artifact in the validation queue before running this integration test",
         candidate.display()
     );
     candidate
@@ -448,7 +473,18 @@ pub fn workspace_core_dir() -> PathBuf {
 /// state below the registered bundle and make that state appear to be
 /// publisher-authored bundle content.
 pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
-    ensure_bundles_fresh();
+    require_bundles_prepared(&["core"])
+        .expect("Core test bundle must be explicitly prepared before daemon tests");
+    copy_core_to_temp_from_prepared()
+}
+
+fn copy_core_to_temp_prepared(bundle_names: &[&str]) -> anyhow::Result<(TempDir, PathBuf)> {
+    require_compiled_composition(bundle_names)?;
+    require_bundles_prepared(bundle_names)?;
+    Ok(copy_core_to_temp_from_prepared())
+}
+
+fn copy_core_to_temp_from_prepared() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir for isolated app root");
     let app_root = tmp.path().join("app-root");
     let src = workspace_core_dir();
@@ -457,83 +493,131 @@ pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
     (tmp, app_root)
 }
 
-/// Ensure published bundle artifacts under `bundles/{core,standard}/`
-/// reflect the current source tree. If any tracked source file is newer
-/// than the standard bundle's published manifest ref, re-run
-/// `scripts/populate-bundles.sh` to rebuild release binaries, restage
-/// them, and re-sign + republish both bundles.
-///
-/// This guards against the silent stale-artifact failure mode that
-/// otherwise bites every E2E that resolves runtimes through bundle CAS:
-/// touch a runtime crate, forget to republish, watch tests fail with
-/// confusing config / verification errors. Runs at most once per test
-/// process via [`std::sync::OnceLock`].
-///
-/// Set `RYEOS_TEST_SKIP_BUNDLE_REFRESH=1` to opt out (e.g. in CI where
-/// the bundles were already published in an earlier step).
-pub fn ensure_bundles_fresh() {
-    use std::sync::OnceLock;
-    static GUARD: OnceLock<()> = OnceLock::new();
-    GUARD.get_or_init(|| {
-        if std::env::var("RYEOS_TEST_SKIP_BUNDLE_REFRESH").as_deref() == Ok("1") {
-            return;
-        }
-        let root = workspace_root();
-
-        // Cross-process lock: under `cargo test --workspace`, multiple
-        // test binaries race to check/refresh bundles. Use an flock-style
-        // lock file under a repo-stable temp directory so only one process
-        // refreshes at a time without requiring target/ to exist.
-        let lock_dir = root.join(".tmp").join("locks");
-        std::fs::create_dir_all(&lock_dir).expect("create bundle refresh lock dir");
-        let lock_path = lock_dir.join("bundle-refresh.lock");
-        let _lock = std::fs::File::create(&lock_path)
-            .expect("create bundle refresh lock file");
-        // Block until we have exclusive access.
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = _lock.as_raw_fd();
-            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-            assert!(ret == 0, "flock on bundle refresh lock failed");
-        }
-
-        // Re-check staleness inside the lock — another process may have
-        // already refreshed while we waited.
-        // Publication rewrites this ref only after the standard bundle's
-        // manifest closure has been committed. Do not use a source item's
-        // embedded signature timestamp here: unchanged signed YAML remains
-        // byte-for-byte stable across publication, which made every later test
-        // incorrectly treat a freshly published bundle as stale.
-        let representative = root.join("bundles/standard/.ai/refs/bundles/manifest");
-        let publish_time = representative
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        let needs_refresh = match publish_time {
-            None => true,
-            Some(m) => bundle_inputs_newer_than(&root, m),
-        };
-        if !needs_refresh {
-            return;
-        }
-        eprintln!("[ryeosd-tests] bundle artifacts stale — running populate-bundles.sh");
-        let key = root.join(".dev-keys/PUBLISHER_DEV.pem");
-        let status = std::process::Command::new("bash")
-            .arg(root.join("scripts/populate-bundles.sh"))
-            .arg("--key").arg(&key)
-            .arg("--owner").arg("RyeOS Development")
-            .arg("--all")
-            .current_dir(&root)
-            .status()
-            .expect("failed to invoke scripts/populate-bundles.sh");
-        assert!(
-            status.success(),
-            "populate-bundles.sh failed (exit {status}); fix the build or set RYEOS_TEST_SKIP_BUNDLE_REFRESH=1",
-        );
-        // Lock released when _lock is dropped at end of scope.
-    });
+/// Refuse before spawning a daemon whose selected bundles install operational
+/// services this test build has no handler for. The daemon would refuse the
+/// same composition at startup; failing here names the build command instead.
+pub fn require_compiled_composition(bundle_names: &[&str]) -> anyhow::Result<()> {
+    let needs = [
+        ("scheduling", "scheduling", cfg!(feature = "scheduling")),
+        ("standard", "model-provider-setup", cfg!(feature = "model-provider-setup")),
+    ];
+    let missing = needs
+        .iter()
+        .filter(|(bundle, _, compiled)| !compiled && bundle_names.contains(bundle))
+        .map(|(bundle, feature, _)| format!("{bundle} bundle needs feature `{feature}`"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "this ryeosd test build cannot start the selected composition ({}); run the daemon \
+         suite with `cargo test -p ryeosd --features scheduling,model-provider-setup`",
+        missing.join(", ")
+    );
+    Ok(())
 }
+
+/// Require prebuilt, published bundle inputs without rebuilding or signing.
+/// Selected E2E controls use this gate so tests never invoke the development
+/// publisher key implicitly.
+pub fn require_bundles_prepared(bundle_names: &[&str]) -> anyhow::Result<()> {
+    let root = workspace_root();
+    for name in bundle_names {
+        let manifest_ref = root
+            .join("bundles")
+            .join(name)
+            .join(".ai/refs/bundles/manifest");
+        let ref_metadata = std::fs::symlink_metadata(&manifest_ref)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "prepared {name} bundle manifest ref is unavailable at {}; prepare the selected bundle set before running this E2E: {error}",
+                    manifest_ref.display()
+                )
+            })?;
+        anyhow::ensure!(
+            ref_metadata.file_type().is_file(),
+            "prepared {name} bundle manifest ref must be a regular non-symlink file at {}",
+            manifest_ref.display()
+        );
+        let published = ref_metadata.modified()?;
+        let bundle_root = root.join("bundles").join(name);
+        for relative in [".ai/manifest.source.yaml", ".ai/manifest.yaml"] {
+            let path = bundle_root.join(relative);
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                anyhow::anyhow!(
+                    "prepared {name} bundle is missing required file {}; prepare the selected bundle set: {error}",
+                    path.display()
+                )
+            })?;
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "prepared {name} bundle file must be a regular non-symlink file at {}",
+                path.display()
+            );
+        }
+        if *name == "core" {
+            let bin_root = bundle_root.join(".ai/bin");
+            let has_core_tools = std::fs::read_dir(&bin_root)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "prepared Core tools are missing at {}; prepare the selected bundle set: {error}",
+                        bin_root.display()
+                    )
+                })?
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().join("ryeos-core-tools").is_file());
+            anyhow::ensure!(
+                has_core_tools,
+                "prepared Core bundle has no ryeos-core-tools binary under {}; prepare the selected bundle set",
+                bin_root.display()
+            );
+        }
+        anyhow::ensure!(
+            !bundle_inputs_newer_than(&root, published)
+                && !bundle_tree_has_newer(&bundle_root, &bundle_root, published)?,
+            "prepared {name} bundle artifacts are stale; prepare the selected bundle set before running this E2E"
+        );
+    }
+    Ok(())
+}
+
+/// The publisher writes the bundle-root `PUBLISHER_TRUST.toml` after it
+/// commits the manifest ref. The document names the signing key and does not
+/// feed the published artifacts, so its later mtime is not staleness.
+fn bundle_tree_has_newer(
+    bundle_root: &Path,
+    path: &Path,
+    published: std::time::SystemTime,
+) -> anyhow::Result<bool> {
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| anyhow::anyhow!("inspect prepared bundle {}: {error}", path.display()))?
+    {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "prepared bundle contains a symlink at {}; refusing stale-artifact check",
+                entry_path.display()
+            );
+        }
+        if file_type.is_dir() {
+            if bundle_tree_has_newer(bundle_root, &entry_path, published)? {
+                return Ok(true);
+            }
+        } else if path == bundle_root && entry.file_name() == "PUBLISHER_TRUST.toml" {
+            continue;
+        } else if entry
+            .metadata()?
+            .modified()
+            .is_ok_and(|modified| modified > published)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Bundle validation is read-only: test harnesses require prepared artifacts and never
+/// rebuild, sign, or publish workspace bundles implicitly.
 
 /// Walk the source roots that affect bundle binary contents and return
 /// `true` if a workspace manifest or production crate source has an mtime
@@ -650,6 +734,14 @@ pub struct DaemonHarness {
     pub node_key: Option<SigningKey>,
 }
 
+#[derive(Clone, Copy)]
+enum FastBundleSelection {
+    PreparedCoreOnly,
+    PreparedCoreScheduling,
+    PreparedStandard,
+    PreparedFull,
+}
+
 impl DaemonHarness {
     /// Retain the disposable node and its exact bundle/user inputs for diagnosis
     /// if an accepted operation fails or observation times out. The daemon is
@@ -703,7 +795,11 @@ impl DaemonHarness {
         // `repair_daemon_local` invariants pass. The fixture is
         // intentionally pre-applied rather than relying on (now-gone)
         // daemon auto-init for operator artifacts.
-        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        let fixture = fast_fixture::populate_initialized_state_with_profile(
+            &app_root,
+            user_space.path(),
+            fast_fixture::FastFixtureProfile::Core,
+        )?;
         fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
 
         pre_init(&app_root, user_space.path())?;
@@ -786,10 +882,42 @@ impl DaemonHarness {
     /// items (directives, routes, providers, …) with
     /// `fixture.publisher`.
     pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
-        Self::start_fast_with(
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedStandard,
             |state_path, _user_space, fixture| {
-                fast_fixture::register_standard_bundle(state_path, fixture)
+                fast_fixture::register_standard_composition(state_path, fixture)
             },
+            |_| {},
+        )
+        .await
+    }
+
+    /// Start an authenticated Core+Scheduling daemon from already prepared
+    /// bundle artifacts. This path never rebuilds or signs workspace bundles.
+    pub async fn start_fast_core_scheduling() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedCoreScheduling,
+            |state_path, _user_space, fixture| {
+                fast_fixture::register_scheduling_bundle(state_path, fixture)
+            },
+            |_| {},
+        )
+        .await
+    }
+
+    /// Start an authenticated Core-only daemon from already prepared bundle
+    /// artifacts. This path never rebuilds or signs workspace bundles.
+    pub async fn start_fast_core_only_prepared() -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedCoreOnly,
+            |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
         .await
@@ -813,7 +941,14 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(None, None, plant, tweak).await
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     /// Like [`start_fast_with`], but initializes the daemon with an explicit
@@ -828,7 +963,14 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(Some(node_key), None, plant, tweak).await
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            None,
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     /// Cross-site fixture with distinct node and operator identities. This is
@@ -844,13 +986,20 @@ impl DaemonHarness {
         S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
     {
-        Self::start_fast_with_optional_identities(Some(node_key), Some(user_key), plant, tweak)
-            .await
+        Self::start_fast_with_optional_identities(
+            Some(node_key),
+            Some(user_key),
+            FastBundleSelection::PreparedFull,
+            plant,
+            tweak,
+        )
+        .await
     }
 
     async fn start_fast_with_optional_identities<S, F>(
         node_key: Option<SigningKey>,
         user_key: Option<SigningKey>,
+        bundle_selection: FastBundleSelection,
         plant: S,
         tweak: F,
     ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
@@ -862,33 +1011,69 @@ impl DaemonHarness {
         let user_space = tempfile::tempdir()?;
 
         // Copy core bundle to temp so fast fixture writes don't pollute workspace.
-        let (core_bundle_tmp, state_path) = copy_core_to_temp();
+        let (core_bundle_tmp, state_path) = match bundle_selection {
+            FastBundleSelection::PreparedCoreOnly => copy_core_to_temp_prepared(&["core"])?,
+            FastBundleSelection::PreparedCoreScheduling => {
+                copy_core_to_temp_prepared(&["core", "scheduling"])?
+            }
+            FastBundleSelection::PreparedStandard => {
+                copy_core_to_temp_prepared(&["core", "scheduling", "standard"])?
+            }
+            FastBundleSelection::PreparedFull => copy_core_to_temp_prepared(
+                fast_fixture::FastFixtureProfile::Full
+                    .exact_bundles()
+                    .expect("Full profile has an exact bundle inventory"),
+            )?,
+        };
 
+        let selected_profile = match bundle_selection {
+            FastBundleSelection::PreparedCoreOnly => fast_fixture::FastFixtureProfile::Core,
+            FastBundleSelection::PreparedCoreScheduling => {
+                fast_fixture::FastFixtureProfile::CoreScheduling
+            }
+            FastBundleSelection::PreparedStandard => fast_fixture::FastFixtureProfile::Standard,
+            FastBundleSelection::PreparedFull => fast_fixture::FastFixtureProfile::Full,
+        };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
-                fast_fixture::populate_initialized_state_with_identities(
+                fast_fixture::populate_initialized_state_with_profile_and_identities(
                     &state_path,
                     user_space.path(),
                     node_key,
                     user_key,
+                    selected_profile,
                 )?
             }
-            (Some(node_key), None) => fast_fixture::populate_initialized_state_with_node_key(
+            (Some(node_key), None) => {
+                fast_fixture::populate_initialized_state_with_profile_and_identities(
+                    &state_path,
+                    user_space.path(),
+                    node_key,
+                    fast_fixture::user_signing_key(),
+                    selected_profile,
+                )?
+            }
+            (None, None) => fast_fixture::populate_initialized_state_with_profile_and_identities(
                 &state_path,
                 user_space.path(),
-                node_key,
+                fast_fixture::node_signing_key(),
+                fast_fixture::user_signing_key(),
+                selected_profile,
             )?,
-            (None, None) => {
-                fast_fixture::populate_initialized_state(&state_path, user_space.path())?
-            }
             (None, Some(_)) => unreachable!("explicit operator identity requires a node identity"),
         };
         // The harness copies `bundles/core` to `state_path`. Register it
-        // so `bootstrap::verify_initialized` sees at least one bundle. Tests
-        // that need additional bundles call `register_standard_bundle` from
-        // their `plant` hook.
+        // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
+        if matches!(bundle_selection, FastBundleSelection::PreparedFull) {
+            fast_fixture::register_full_composition(&state_path, &fixture)?;
+        }
         plant(&state_path, user_space.path(), &fixture)?;
+        fast_fixture::validate_profile_bundle_records(
+            &state_path,
+            &fixture,
+            selected_profile,
+        )?;
         fast_fixture::seal_initialized_state(&state_path)?;
 
         // Authorize the user key (wildcard scope) so `post_execute` can sign
@@ -1081,6 +1266,145 @@ impl DaemonHarness {
         self.post_json("/execute", body).await
     }
 
+    /// Threads visible to this harness's signed principal, through
+    /// `service:threads/list`. A running daemon's projection is never opened
+    /// from the test process; threads requested by another principal are not
+    /// listed.
+    pub async fn list_threads(&self, limit: usize) -> anyhow::Result<Vec<ListedThread>> {
+        let (status, body) = self
+            .post_execute("service:threads/list", ".", serde_json::json!({ "limit": limit }))
+            .await?;
+        anyhow::ensure!(status.is_success(), "threads/list failed: {status} {body}");
+        let threads = body
+            .pointer("/result/threads")
+            .cloned()
+            .context("threads/list returned no thread array")?;
+        Ok(serde_json::from_value(threads)?)
+    }
+
+    /// One thread through `service:threads/get`: `None` when the daemon does
+    /// not know it, otherwise the `{thread, result, artifacts, facets}` view.
+    pub async fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let (status, body) = self
+            .post_execute(
+                "service:threads/get",
+                ".",
+                serde_json::json!({ "thread_id": thread_id }),
+            )
+            .await?;
+        anyhow::ensure!(status.is_success(), "threads/get failed: {status} {body}");
+        Ok(body.get("result").filter(|value| !value.is_null()).cloned())
+    }
+
+    /// Persisted events of one thread as `(event_type, payload)` in chain
+    /// order, read through `service:events/replay` (Standard bundle). `None`
+    /// when the daemon does not know the thread yet. A running daemon's
+    /// projection is never opened from the test process.
+    pub async fn thread_events(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<Vec<(String, serde_json::Value)>>> {
+        Ok(self
+            .replay_events(
+                "service:events/replay",
+                serde_json::json!({ "thread_id": thread_id }),
+            )
+            .await?
+            .map(|events| {
+                events
+                    .into_iter()
+                    .map(|(_, event_type, payload)| (event_type, payload))
+                    .collect()
+            }))
+    }
+
+    /// Persisted events of one chain as `(thread_id, event_type, payload)` in
+    /// chain order, read through `service:events/chain_replay` (Standard
+    /// bundle). `None` when the daemon does not know the chain root yet.
+    pub async fn chain_events(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<Option<Vec<(String, String, serde_json::Value)>>> {
+        self.replay_events(
+            "service:events/chain_replay",
+            serde_json::json!({ "chain_root_id": chain_root_id }),
+        )
+        .await
+    }
+
+    /// Every persisted event of every chain this harness's principal can
+    /// list, as `(thread_id, event_type, payload)`, each chain in chain order.
+    /// Read through `service:threads/list` and `service:events/chain_replay`;
+    /// empty while the daemon cannot answer, so callers may poll it.
+    pub async fn principal_events(&self) -> Vec<(String, String, serde_json::Value)> {
+        let Ok(threads) = self.list_threads(500).await else {
+            return Vec::new();
+        };
+        let chain_roots = threads
+            .iter()
+            .map(|thread| thread.chain_root_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut events = Vec::new();
+        for chain_root in chain_roots {
+            if let Ok(Some(chain)) = self.chain_events(&chain_root).await {
+                events.extend(chain);
+            }
+        }
+        events
+    }
+
+    /// Page through one replay service until its cursor is exhausted.
+    async fn replay_events(
+        &self,
+        service_ref: &str,
+        scope: serde_json::Value,
+    ) -> anyhow::Result<Option<Vec<(String, String, serde_json::Value)>>> {
+        let mut events = Vec::new();
+        let mut after_chain_seq: Option<i64> = None;
+        loop {
+            let mut params = scope.clone();
+            params["after_chain_seq"] = serde_json::json!(after_chain_seq);
+            params["limit"] = serde_json::json!(500);
+            let (status, body) = self.post_execute(service_ref, ".", params).await?;
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            anyhow::ensure!(status.is_success(), "{service_ref} failed: {status} {body}");
+            let page = body
+                .pointer("/result/events")
+                .and_then(serde_json::Value::as_array)
+                .with_context(|| format!("{service_ref} returned no event array"))?;
+            for event in page {
+                let field = |name: &str| {
+                    event
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .with_context(|| format!("replayed event has no {name}: {event}"))
+                };
+                let payload = event.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                events.push((field("thread_id")?, field("event_type")?, payload));
+            }
+            match body
+                .pointer("/result/next_cursor")
+                .and_then(serde_json::Value::as_i64)
+            {
+                Some(cursor) => after_chain_seq = Some(cursor),
+                None => return Ok(Some(events)),
+            }
+        }
+    }
+
+    /// Like [`Self::thread_events`] but the thread must exist.
+    pub async fn existing_thread_events(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
+        self.thread_events(thread_id)
+            .await?
+            .with_context(|| format!("events/replay does not know thread {thread_id}"))
+    }
+
     /// POST JSON to an authenticated daemon route and return
     /// (status, json body). When the harness has fast-fixture keys, the
     /// request is signed for the exact route path.
@@ -1155,6 +1479,34 @@ impl DaemonHarness {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        Ok(())
+    }
+
+    /// Stop the daemon in order, as a service manager does: SIGTERM to the
+    /// exact `ryeosd` process authenticated over its own UDS endpoint, then
+    /// wait for a successful exit. Stopped-node commands need a node that
+    /// completed a first start; a SIGKILL would instead leave crash recovery
+    /// for the next start.
+    #[cfg(unix)]
+    pub async fn stop_gracefully(&mut self) -> anyhow::Result<()> {
+        use std::os::fd::AsFd as _;
+
+        let stream = std::os::unix::net::UnixStream::connect(&self.uds_path)
+            .with_context(|| format!("connect daemon endpoint {}", self.uds_path.display()))?;
+        let peer = lillux::local_ipc::AuthenticatedUnixPeer::capture(stream.as_fd())?;
+        peer.require_executable_name(std::ffi::OsStr::new("ryeosd"))?;
+        drop(stream);
+        peer.request_termination()
+            .context("request orderly daemon stop")?;
+        let status = tokio::time::timeout(Duration::from_secs(120), self.child.wait())
+            .await
+            .context("daemon did not stop within 120s of its orderly stop request")?
+            .context("observe daemon exit after orderly stop request")?;
+        anyhow::ensure!(
+            status.success(),
+            "daemon orderly stop exited with {status}; stderr log {}",
+            self.stderr_log_path.display()
+        );
         Ok(())
     }
 
@@ -1453,58 +1805,132 @@ impl DaemonHarness {
 
 impl Drop for DaemonHarness {
     fn drop(&mut self) {
-        // Best-effort: kill the child synchronously. tokio::process::Child also
-        // has kill_on_drop enabled; stderr is already captured in a regular file.
+        // Kill the daemon and wait for its exit. Runtimes it launched run in
+        // their own process groups and deliberately survive daemon death for
+        // restart recovery, so a SIGKILLed or stopped daemon can leave them
+        // reparented to init holding inherited descriptors. Once the daemon is
+        // gone, terminate every execution still attached in its Runtime store.
         let _ = self.child.start_kill();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let exited = loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) | Err(_) => break false,
+            }
+        };
+        if exited {
+            terminate_attached_executions(&self.state_path);
+        }
+    }
+}
+
+/// Hard-terminate every execution still attached in an exited node's Runtime
+/// store. Each attachment is an exact process identity, so a recycled PID or
+/// process group is never signalled. The store is read through the native
+/// test gate only after the daemon has exited.
+fn terminate_attached_executions(state_path: &Path) {
+    let runtime_db = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    if !runtime_db.is_file() {
+        return;
+    }
+    let attached = std::panic::catch_unwind(|| {
+        ryeos_app::test_support::read_existing_runtime(&runtime_db, |connection| {
+            let mut statement = connection.prepare(
+                "SELECT process_identity FROM thread_runtime WHERE process_identity IS NOT NULL",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    });
+    let Ok(attached) = attached else {
+        eprintln!(
+            "harness teardown could not read attached executions from {}",
+            runtime_db.display()
+        );
+        return;
+    };
+    for raw in attached {
+        match serde_json::from_str::<ryeos_app::process::ExecutionProcessIdentity>(&raw) {
+            Ok(identity) if ryeos_app::process::execution_group_alive(&identity) => {
+                let result = ryeos_app::process::kill_by_action(
+                    &identity,
+                    ryeos_app::process::ShutdownAction::Hard,
+                );
+                if !result.success {
+                    eprintln!(
+                        "harness teardown could not terminate attached execution {raw}: {}",
+                        result.method
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("harness teardown found an undecodable process identity: {error}");
+            }
+        }
     }
 }
 
 /// Persistent standalone harness for multi-step `run-service` tests.
 ///
-/// Holds tempdirs alive across multiple `run_service()` calls so that
-/// state (installed bundles, node identity, trust store) persists.
-/// The harness installs core under `.ai/bundles/core/` AND registers
-/// it via `.ai/node/bundles/core.yaml` so preflight's
+/// Holds a stopped node alive across multiple `run_service()` calls so that
+/// state (installed bundles, node identity, trust store) persists. Core is
+/// installed under `.ai/bundles/core/` and registered via
+/// `.ai/node/bundles/core.yaml`, so preflight's
 /// `discover_installed_bundle_roots` finds it.
 ///
 /// Use this when a test needs to run several `ryeosd run-service`
 /// invocations against the same state (e.g. install → list → remove).
 pub struct StandaloneHarness {
-    /// Keeps the core-bundle temp copy alive for the harness lifetime.
-    _core_tmp: TempDir,
-    /// Persistent app root (the temp copy of core).
+    /// The node, started once and stopped in order; owns every tempdir.
+    node: DaemonHarness,
+    /// Persistent app root of the stopped node.
     pub app_root: PathBuf,
-    /// Persistent app root dir.
-    pub user_space: TempDir,
-    /// UDS path (unused for standalone but required by CLI).
-    uds_path: PathBuf,
     /// Fixture keys for signing.
     pub fixture: fast_fixture::FastFixture,
 }
 
 impl StandaloneHarness {
-    /// Create a fully initialized standalone harness:
-    /// - Fast-fixture state (node identity, vault, trust)
-    /// - Core bundle copied into `.ai/bundles/core/` (disk install)
-    /// - Core bundle registered in `.ai/node/bundles/core.yaml`
-    /// - Standard bundle registered (path points to workspace)
-    ///
-    /// After this, `run_service()` can invoke any stopped-node service
-    /// and preflight will find installed bundles for dependency discovery.
-    pub fn new_initialized() -> anyhow::Result<Self> {
-        let user_space = tempfile::tempdir()?;
-        let (core_tmp, app_root) = copy_core_to_temp();
-        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
-        fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
-        fast_fixture::register_standard_bundle(&app_root, &fixture)?;
-        fast_fixture::seal_initialized_state(&app_root)?;
+    /// Create a stopped node from the authored Standard profile. Stopped-node
+    /// commands refuse a node that never completed a first start, so the node
+    /// is started once as a daemon and stopped in order before any
+    /// `run_service()` call.
+    pub async fn new_initialized() -> anyhow::Result<Self> {
+        Self::new_initialized_authorizing(&[]).await
+    }
 
-        let uds_path = app_root.join("ryeosd.sock");
+    /// Like [`Self::new_initialized`], but the sealed node policy also grants
+    /// explicit command-registration authority to each named bundle. A bundle
+    /// installed later by `bundle/install` must already hold that authority:
+    /// installation refuses a prospective bundle set the node policy does not
+    /// cover, and the policy generation cannot change after initialization.
+    pub async fn new_initialized_authorizing(bundle_names: &[&str]) -> anyhow::Result<Self> {
+        let (mut node, fixture) = DaemonHarness::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::PreparedStandard,
+            |state_path, _user_space, fixture| {
+                fast_fixture::register_standard_composition(state_path, fixture)?;
+                for bundle_name in bundle_names {
+                    fast_fixture::authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
+                }
+                Ok(())
+            },
+            |_| {},
+        )
+        .await?;
+        node.stop_gracefully().await?;
+        let app_root = node.state_path.clone();
         Ok(Self {
-            _core_tmp: core_tmp,
+            node,
             app_root,
-            user_space,
-            uds_path,
             fixture,
         })
     }
@@ -1520,7 +1946,7 @@ impl StandaloneHarness {
         cmd.arg("--app-root")
             .arg(&self.app_root)
             .arg("--uds-path")
-            .arg(&self.uds_path)
+            .arg(&self.node.uds_path)
             .arg("run-service")
             .arg(service_ref);
         if let Some(p) = params_json {
@@ -1528,7 +1954,7 @@ impl StandaloneHarness {
         }
         cmd.env("HOSTNAME", "testhost")
             .env("RYEOS_APP_ROOT", &self.app_root)
-            .env("HOME", self.user_space.path())
+            .env("HOME", self.node.user_space.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -1550,48 +1976,33 @@ impl StandaloneHarness {
     }
 }
 
-/// Run `ryeosd run-service <ref> ...` standalone (no daemon), with a
-/// fresh state_dir + user_space pair, returning (output, state_dir, user_space).
+/// Run `ryeosd run-service <ref> ...` standalone against a fresh node.
 ///
-/// The tempdirs are returned so callers can keep them alive for follow-up
-/// inspection or for a subsequent harness.
-pub async fn run_service_standalone(
-    state_dir: TempDir,
-    user_space: TempDir,
+/// Stopped-node commands refuse a node that has never completed a first
+/// start, so the node is initialized from the authored Standard profile,
+/// started once as a daemon and stopped in order before the standalone
+/// command runs. The stopped harness is returned so callers keep its state
+/// alive for follow-up inspection.
+pub async fn run_service_standalone_fresh(
     service_ref: &str,
     params_json: Option<&str>,
-) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
-    // Use the fast fixture to set up a fully initialized state with bundles.
-    let (core_tmp, state_path) = copy_core_to_temp();
-    let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
-    fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-    fast_fixture::register_standard_bundle(&state_path, &fixture)?;
-    fast_fixture::seal_initialized_state(&state_path)?;
-    drop(ryeos_app::runtime_db::RuntimeDb::open(
-        &state_path.join(".ai/state/runtime.sqlite3"),
-    )?);
-    let runtime_state_dir = state_path.join(".ai/state");
-    let scheduler_db =
-        ryeos_scheduler::db::SchedulerDb::open(&runtime_state_dir.join("scheduler.sqlite3"))?;
-    ryeos_scheduler::projection::rebuild_fires_from_dir(
-        &runtime_state_dir.join("schedules"),
-        &scheduler_db,
-    )?;
-    drop(scheduler_db);
+) -> anyhow::Result<(std::process::Output, DaemonHarness)> {
+    let (mut node, _fixture) = DaemonHarness::start_fast().await?;
+    node.stop_gracefully().await?;
 
     let mut cmd = ryeosd_command();
     cmd.arg("--app-root")
-        .arg(&state_path)
+        .arg(&node.state_path)
         .arg("--uds-path")
-        .arg(state_dir.path().join("ryeosd.sock"))
+        .arg(&node.uds_path)
         .arg("run-service")
         .arg(service_ref);
     if let Some(p) = params_json {
         cmd.arg("--params").arg(p);
     }
     cmd.env("HOSTNAME", "testhost")
-        .env("RYEOS_APP_ROOT", &state_path)
-        .env("HOME", user_space.path())
+        .env("RYEOS_APP_ROOT", &node.state_path)
+        .env("HOME", node.user_space.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1605,27 +2016,14 @@ pub async fn run_service_standalone(
         s.read_to_end(&mut stderr_buf).await?;
     }
     let status = child.wait().await?;
-    // core_tmp cleaned up here — child has exited so files are closed.
-    let _ = core_tmp;
     Ok((
         std::process::Output {
             status,
             stdout: stdout_buf,
             stderr: stderr_buf,
         },
-        state_dir,
-        user_space,
+        node,
     ))
-}
-
-/// Convenience: fresh tempdirs + run_service_standalone.
-pub async fn run_service_standalone_fresh(
-    service_ref: &str,
-    params_json: Option<&str>,
-) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
-    let state_dir = tempfile::tempdir()?;
-    let user_space = tempfile::tempdir()?;
-    run_service_standalone(state_dir, user_space, service_ref, params_json).await
 }
 
 /// Build ryeos-signed auth headers for a test request.
@@ -1673,4 +2071,39 @@ pub fn build_signed_headers_for_bytes(
         ("x-ryeos-nonce".into(), nonce),
         ("x-ryeos-signature".into(), sig_b64),
     ]
+}
+
+/// One row of `service:threads/list`, as the requesting principal sees it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ListedThread {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub kind: String,
+    pub status: String,
+    pub item_ref: String,
+    pub upstream_thread_id: Option<String>,
+    pub successor_thread_id: Option<String>,
+    pub requested_by: Option<String>,
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    pub admitted_launch_capsule_hash: Option<String>,
+}
+
+/// Open a stopped daemon's node Store through the native test gate, trusting
+/// only that node's own signing key. The daemon must already have exited.
+pub fn open_stopped_node_store(
+    state_path: &Path,
+) -> anyhow::Result<ryeos_app::test_support::TestStateStore> {
+    let identity_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&identity_path)
+        .with_context(|| format!("load node identity {}", identity_path.display()))?;
+    let signer = std::sync::Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+        &identity,
+    ));
+    let mut trust = ryeos_state::refs::TrustStore::new();
+    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+    ryeos_app::test_support::TestStateStore::open(state_path, signer, std::sync::Arc::new(trust))
 }

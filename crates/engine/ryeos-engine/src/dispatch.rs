@@ -22,6 +22,8 @@ pub fn execute_plan(
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
     validate_plan_target_without_selection(plan)?;
+    let effective_ctx = context_with_plan_limits(plan, ctx)?;
+    let ctx = &effective_ctx;
     let mut result: Option<ExecutionCompletion> = None;
 
     for node in &plan.nodes {
@@ -71,6 +73,41 @@ pub fn execute_plan(
         continuation_request: None,
         metadata: None,
     }))
+}
+
+/// Apply retained subject restrictions even for callers outside the app launcher.
+fn context_with_plan_limits(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+) -> Result<EngineContext, EngineError> {
+    let mut effective = ctx.clone();
+    if let Some(limits) = plan.subprocess_limits {
+        let authored = limits
+            .to_native()
+            .map_err(|error| EngineError::ExecutionFailed {
+                reason: error.to_string(),
+            })?;
+        let existing = ctx.subprocess_limits.unwrap_or_default();
+        fn tighter(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+            match (left, right) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            }
+        }
+        effective.subprocess_limits = Some(lillux::SubprocessLimits {
+            max_open_files: tighter(authored.max_open_files, existing.max_open_files),
+            max_address_space_bytes: tighter(
+                authored.max_address_space_bytes,
+                existing.max_address_space_bytes,
+            ),
+            max_cpu_seconds: tighter(authored.max_cpu_seconds, existing.max_cpu_seconds),
+            max_processes: tighter(authored.max_processes, existing.max_processes),
+            deny_process_creation: authored.deny_process_creation || existing.deny_process_creation,
+            max_stdout_bytes: tighter(authored.max_stdout_bytes, existing.max_stdout_bytes),
+            max_stderr_bytes: tighter(authored.max_stderr_bytes, existing.max_stderr_bytes),
+        });
+    }
+    Ok(effective)
 }
 
 fn validate_plan_target_without_selection(plan: &ExecutionPlan) -> Result<(), EngineError> {
@@ -197,6 +234,9 @@ impl DebugCapture {
                     PlanArgument::AdmittedSourceEntry => {
                         "<unbound-admitted-source-entry>".to_owned()
                     }
+                    PlanArgument::AdmittedExecutionProjectFile { .. } => {
+                        "<unbound-execution-project-file>".to_owned()
+                    }
                     PlanArgument::AdmittedSourceMember { .. } => {
                         "<unbound-admitted-source-member>".to_owned()
                     }
@@ -262,7 +302,9 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         .iter()
         .map(|argument| match argument {
             PlanArgument::Literal { value } => Ok(value.clone()),
-            PlanArgument::AdmittedSourceEntry | PlanArgument::AdmittedSourceMember { .. } => {
+            PlanArgument::AdmittedSourceEntry
+            | PlanArgument::AdmittedSourceMember { .. }
+            | PlanArgument::AdmittedExecutionProjectFile { .. } => {
                 Err(EngineError::InvalidRuntimeConfig {
                     path: "config.args".to_owned(),
                     reason: "admitted source entry was not bound before subprocess dispatch"
@@ -539,16 +581,37 @@ fn result_reports_failure(parsed: &Value) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
+/// Independently compiled selected launch expectations retained with the same
+/// pending/running execution owner. Private metadata custody only: this is not
+/// an authenticated generation, applied receipt, or native settlement issuer.
+/// No public DTO can construct or replace this context.
+#[allow(dead_code)] // Consumed by later separately guarded same-owner joins.
+struct SelectedOriginalLaunchContext {
+    expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
+    provenance: crate::isolation::IsolationLaunchProvenance,
+    original_deadline: lillux::time::MonotonicDeadline,
+    backend_capture: std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    command_binding: crate::isolation::CompiledOriginalCommandBinding,
+}
+
 /// A spawned execution whose exact target exists but cannot execute user code
 /// until the daemon durably attaches it.
 pub struct SpawnedExecutionAwaitingAttachment {
     pending: lillux::ProcessAwaitingAttachment,
+    selected_launch_context: Option<SelectedOriginalLaunchContext>,
     /// Present only under `--debug-raw`; transferred to the running state and
     /// consumed when the attached process is waited.
     debug: Option<DebugCapture>,
 }
 
 impl SpawnedExecutionAwaitingAttachment {
+    /// Forward unconditional structural custody from the real held owner.
+    /// Validation follows retention; this never mints native admission.
+    pub fn capture_existing_held_occurrence(&self) -> lillux::exec::ProcessLocalHeldOccurrence {
+        self.pending.capture_existing_held_occurrence()
+    }
+
     pub fn pid(&self) -> u32 {
         self.pending.pid()
     }
@@ -588,6 +651,7 @@ impl SpawnedExecutionAwaitingAttachment {
         Ok(RunningExecution {
             running,
             debug: self.debug,
+            selected_launch_context: self.selected_launch_context,
         })
     }
 
@@ -603,6 +667,7 @@ impl SpawnedExecutionAwaitingAttachment {
         Ok(RunningExecution {
             running,
             debug: self.debug,
+            selected_launch_context: self.selected_launch_context,
         })
     }
 }
@@ -612,15 +677,196 @@ impl SpawnedExecutionAwaitingAttachment {
 pub struct RunningExecution {
     running: lillux::RunningProcess,
     debug: Option<DebugCapture>,
+    selected_launch_context: Option<SelectedOriginalLaunchContext>,
+}
+
+/// Raw selected collection outcomes retaining the exact execution owner.
+/// These variants grant no native, device or financial qualification.
+pub enum SelectedNativeExecutionWaitOutcome {
+    Collected(RunningExecution),
+    Incomplete(RunningExecution),
+    Failed(RunningExecution),
 }
 
 impl RunningExecution {
+    /// Check original live launch correspondence without consuming this owner
+    /// or collecting terminal facts. Success is not session/device admission.
+    pub fn require_original_live_launch_correspondence(
+        &mut self,
+        held: &lillux::exec::ProcessLocalHeldOccurrence,
+        expected_capture: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            return self
+                .running
+                .require_original_live_launch_correspondence(held, Err(error.to_string()))
+                .map_err(EngineError::Internal);
+        }
+        let context = self
+            .selected_launch_context
+            .as_ref()
+            .expect("protected capture check requires selected context");
+        self.running
+            .require_original_live_launch_correspondence(
+                held,
+                Ok((
+                    &context.expected_applied_launch,
+                    &context.expected_mount_preparation,
+                    context.original_deadline,
+                )),
+            )
+            .map_err(EngineError::Internal)?;
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            return self
+                .running
+                .require_original_live_launch_correspondence(held, Err(error.to_string()))
+                .map_err(EngineError::Internal);
+        }
+        Ok(())
+    }
+
+    /// Borrowed association with the same actual held pin and cached identity.
+    /// Neither this comparison nor backend equality proves a funded retirement.
+    pub fn require_original_held_occurrence(
+        &self,
+        held: &lillux::exec::ProcessLocalHeldOccurrence,
+    ) -> Result<(), EngineError> {
+        let context = self.selected_launch_context.as_ref().ok_or_else(|| {
+            EngineError::Internal("held association lacks actual selected compiler context".into())
+        })?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original held association context expired before comparison".into(),
+            ));
+        }
+        self.running
+            .require_same_held_occurrence(held)
+            .map_err(EngineError::Internal)?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original held association context expired during comparison".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Observe the existing bounded raw-byte capture. This grants no process
     /// lifecycle authority: the caller must keep the normal wait/abort owner
     /// advancing concurrently. Protocol decoders must not reconstruct binary
     /// frames from the ordinary human-readable completion string.
     pub fn take_stdout_reader(&mut self) -> Option<lillux::ProcessStdoutReader> {
         self.running.take_stdout_reader()
+    }
+
+    /// Borrowed correspondence with an independently selected protected App
+    /// expectation. This consumes no owner and issues no native/device proof.
+    pub fn require_original_backend_capture(
+        &self,
+        expected: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        let context = self.selected_launch_context.as_ref().ok_or_else(|| {
+            EngineError::Internal(
+                "running execution has no selected original launch context".into(),
+            )
+        })?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original launch context expired before capture check".into(),
+            ));
+        }
+        if !std::sync::Arc::ptr_eq(&context.backend_capture, expected) {
+            return Err(EngineError::Internal(
+                "running original capture differs from protected expectation".into(),
+            ));
+        }
+        context
+            .backend_capture
+            .require_same_backend(expected.backend())?;
+        if context.original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "original launch context expired during capture check".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Compare retained raw facts with this execution's private compiler context.
+    /// The actual protected App caller is a separate required join; success here
+    /// grants no native admission, readiness, driver or financial authority.
+    pub fn require_cached_original_native_correspondence(
+        &mut self,
+        expected_capture: &std::sync::Arc<crate::isolation::VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            let failure = self
+                .running
+                .require_cached_native_terminal_correspondence(Err(error.to_string()));
+            return Err(EngineError::Internal(
+                failure.err().expect("upstream refusal stays refused"),
+            ));
+        }
+        let context = self
+            .selected_launch_context
+            .as_ref()
+            .expect("protected capture check requires selected context");
+        self.running
+            .require_cached_native_terminal_correspondence(Ok((
+                &context.expected_applied_launch,
+                &context.expected_mount_preparation,
+                context.original_deadline,
+            )))
+            .map_err(EngineError::Internal)?;
+        if let Err(error) = self.require_original_backend_capture(expected_capture) {
+            let failure = self
+                .running
+                .require_cached_native_terminal_correspondence(Err(error.to_string()));
+            return Err(EngineError::Internal(
+                failure.err().expect("late refusal stays refused"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Route selected diagnostics without granting qualification authority.
+    pub fn has_selected_original_launch_context(&self) -> bool {
+        self.selected_launch_context.is_some()
+    }
+
+    /// Borrow retained raw diagnostics without consuming the actual result.
+    pub fn native_terminal_raw_view(&self) -> Option<lillux::exec::NativeTerminalRawView<'_>> {
+        self.running.native_terminal_raw_view()
+    }
+
+    /// Keep running, debug and the private original context on every outcome.
+    pub fn wait_for_natural_exit_retaining_native(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<SelectedNativeExecutionWaitOutcome, Self> {
+        if self.selected_launch_context.is_none() {
+            return Err(self);
+        }
+        let Self {
+            running,
+            debug,
+            selected_launch_context,
+        } = self;
+        let rebuild = |running| Self {
+            running,
+            debug,
+            selected_launch_context,
+        };
+        match running.wait_for_natural_exit_retaining_native(timeout) {
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Collected(running)) => Ok(
+                SelectedNativeExecutionWaitOutcome::Collected(rebuild(running)),
+            ),
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Incomplete(running)) => Ok(
+                SelectedNativeExecutionWaitOutcome::Incomplete(rebuild(running)),
+            ),
+            Ok(lillux::exec::SelectedNativeTerminalWaitOutcome::Failed(running)) => {
+                Ok(SelectedNativeExecutionWaitOutcome::Failed(rebuild(running)))
+            }
+            Err(running) => Err(rebuild(running)),
+        }
     }
 
     /// Read the fixed-size diagnostic tail already captured by Lillux without
@@ -636,7 +882,11 @@ impl RunningExecution {
         self,
         timeout: std::time::Duration,
     ) -> Result<ExecutionCompletion, Self> {
-        let Self { running, debug } = self;
+        let Self {
+            running,
+            debug,
+            selected_launch_context,
+        } = self;
         match running.wait_for_natural_exit(timeout) {
             Ok(result) => {
                 let rendered_debug = debug.map(|capture| capture.into_block(&result));
@@ -646,8 +896,19 @@ impl RunningExecution {
                 }
                 Ok(completion)
             }
-            Err(running) => Err(Self { running, debug }),
+            Err(running) => Err(Self {
+                running,
+                debug,
+                selected_launch_context,
+            }),
         }
+    }
+
+    /// Best-effort kill of the retained process group before the owning
+    /// process exits without destructors. Not cleanup proof; returns the PID
+    /// that owns the signalled group.
+    pub fn kill_retained_group_before_exit(&self) -> u32 {
+        self.running.kill_retained_group_before_exit()
     }
 
     pub fn abort(self) {
@@ -747,7 +1008,7 @@ pub(crate) fn spawn_plan_with_scope(
     scope: Option<lillux::ProcessScope>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     validate_plan_target_without_selection(plan)?;
-    spawn_first_plan_node(plan, ctx, scope, None)
+    spawn_first_plan_node(plan, ctx, scope, None, None, None)
 }
 
 pub(crate) fn spawn_plan_with_scope_and_resources(
@@ -757,6 +1018,67 @@ pub(crate) fn spawn_plan_with_scope_and_resources(
     selections: &[crate::contracts::ExecutionResourceSelection],
     devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope_and_resources_until(plan, ctx, scope, selections, devices, None, None)
+}
+
+/// Original expiry is carried through plan/isolation preparation and native birth.
+/// The higher launch owner retains admission, funding and uncertainty.
+pub fn spawn_plan_with_resources_until(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope_and_resources_until(
+        plan,
+        ctx,
+        None,
+        selections,
+        devices,
+        Some(deadline),
+        None,
+    )
+}
+
+/// Forward an owned original window through the existing admitted plan path.
+/// The caller retains its original funding, Runtime intent and settlement owner.
+pub fn spawn_plan_with_original_namespace_occupancy(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: &lillux::CharacterDeviceSet,
+    original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    let deadline = original_window.original_deadline();
+    spawn_plan_with_scope_and_resources_until(
+        plan,
+        ctx,
+        None,
+        selections,
+        Some(devices),
+        Some(deadline),
+        Some(original_window),
+    )
+}
+
+fn spawn_plan_with_scope_and_resources_until(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    if original_window.is_some() && (scope.is_some() || devices.is_none() || deadline.is_none()) {
+        return Err(EngineError::Internal("original namespace occupancy requires its exact device authority, original deadline and no local process scope".into()));
+    }
+    if deadline.is_some_and(|expiry| expiry.has_elapsed()) {
+        return Err(EngineError::Internal(
+            "original held-spawn deadline expired".into(),
+        ));
+    }
     if selections.iter().any(|selection| {
         selection.enforcement
             == crate::contracts::ExecutionResourceEnforcement::CharacterDeviceGrant
@@ -767,7 +1089,7 @@ pub(crate) fn spawn_plan_with_scope_and_resources(
         ));
     }
     validate_plan_target_with_selection(plan, selections, devices)?;
-    spawn_first_plan_node(plan, ctx, scope, devices)
+    spawn_first_plan_node(plan, ctx, scope, devices, deadline, original_window)
 }
 
 fn spawn_first_plan_node(
@@ -775,7 +1097,11 @@ fn spawn_first_plan_node(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    let effective_ctx = context_with_plan_limits(plan, ctx)?;
+    let ctx = &effective_ctx;
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
@@ -788,6 +1114,8 @@ fn spawn_first_plan_node(
                     ctx,
                     scope,
                     devices,
+                    deadline,
+                    original_window,
                 );
             }
             PlanNode::Complete { .. } => {
@@ -809,8 +1137,10 @@ fn spawn_subprocess(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
+    deadline: Option<lillux::time::MonotonicDeadline>,
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
-    let request = isolation_plan_request_awaiting_attachment(
+    let (request, selected_launch_context) = isolation_plan_request_awaiting_attachment(
         spec,
         item_ref,
         filesystem_authority_ceiling,
@@ -818,11 +1148,33 @@ fn spawn_subprocess(
         ctx,
         scope,
         devices,
+        original_window,
     )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
-    let pending = request.spawn().map_err(subprocess_spawn_error)?;
-    Ok(SpawnedExecutionAwaitingAttachment { pending, debug })
+    // Refuse selected expiry immediately before actual process contact. The
+    // clock is the original handoff clock, never a relative replacement.
+    if selected_launch_context
+        .as_ref()
+        .is_some_and(|context| context.original_deadline.has_elapsed())
+    {
+        return Err(EngineError::Internal(
+            "selected compiled launch context expired before spawn".into(),
+        ));
+    }
+    let pending = if let Some(context) = selected_launch_context.as_ref() {
+        request.spawn_until(context.original_deadline)?
+    } else {
+        match deadline {
+            Some(expiry) => request.spawn_until(expiry)?,
+            None => request.spawn().map_err(subprocess_spawn_error)?,
+        }
+    };
+    Ok(SpawnedExecutionAwaitingAttachment {
+        pending,
+        debug,
+        selected_launch_context,
+    })
 }
 
 pub(crate) fn subprocess_spawn_error(result: lillux::SubprocessResult) -> EngineError {
@@ -845,7 +1197,8 @@ fn isolation_plan_request(
     network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
-    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    let (request, project_path, verified_code, verbatim_env_names) =
+        isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
         .isolation_filesystem_authority_ceiling
         .intersect(filesystem_authority_ceiling);
@@ -895,6 +1248,7 @@ fn isolation_plan_request(
             target_channels: &ctx.isolation_target_channels,
             item_ref,
             thread_id: &ctx.thread_id,
+            verbatim_env_names: &verbatim_env_names,
         },
     )
 }
@@ -907,8 +1261,16 @@ fn isolation_plan_request_awaiting_attachment(
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
     devices: Option<&lillux::CharacterDeviceSet>,
-) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
-    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    original_window: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
+) -> Result<
+    (
+        crate::isolation::IsolationRequestAwaitingAttachment,
+        Option<SelectedOriginalLaunchContext>,
+    ),
+    EngineError,
+> {
+    let (request, project_path, verified_code, verbatim_env_names) =
+        isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
         .isolation_filesystem_authority_ceiling
         .intersect(filesystem_authority_ceiling);
@@ -957,8 +1319,74 @@ fn isolation_plan_request_awaiting_attachment(
             target_channels: &ctx.isolation_target_channels,
             item_ref,
             thread_id: &ctx.thread_id,
+            verbatim_env_names: &verbatim_env_names,
         },
     );
+    if let Some(original_window) = original_window {
+        if scope.is_some() {
+            return Err(EngineError::Internal(
+                "original namespace occupancy cannot use a local process scope".into(),
+            ));
+        }
+        let devices = devices.ok_or_else(|| {
+            EngineError::Internal(
+                "original namespace occupancy lacks selected device authority".into(),
+            )
+        })?;
+        // Borrow the original expiry before moving its one-use handoff.
+        let original_deadline = original_window.original_deadline();
+        if original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "selected original launch context expired before compilation".into(),
+            ));
+        }
+        let mut applied = ctx
+            .isolation
+            .apply_awaiting_attachment_with_original_namespace_occupancy(
+                context.0,
+                context.1,
+                devices,
+                original_window,
+            )?;
+        // Construct only here, from this actual selected compiler return.
+        // Public provenance/receipt DTOs are not authority constructors.
+        let backend_capture = applied
+            .request
+            .take_original_backend_capture()
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "selected compiler omitted actual backend capture custody".into(),
+                )
+            })?;
+        let expected_applied_launch = applied.expected_applied_launch.ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted target commitments".into())
+        })?;
+        let expected_mount_preparation = applied.expected_mount_preparation.ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted mount commitments".into())
+        })?;
+        let command_binding = applied.original_command_binding.take().ok_or_else(|| {
+            EngineError::Internal("selected compiler omitted actual command custody".into())
+        })?;
+        command_binding.require_same_compilation(
+            &expected_applied_launch,
+            &expected_mount_preparation,
+            &backend_capture,
+        )?;
+        if original_deadline.has_elapsed() {
+            return Err(EngineError::Internal(
+                "selected original launch context expired during compilation".into(),
+            ));
+        }
+        let selected_launch_context = SelectedOriginalLaunchContext {
+            expected_applied_launch,
+            expected_mount_preparation,
+            provenance: applied.provenance,
+            original_deadline,
+            backend_capture,
+            command_binding,
+        };
+        return Ok((applied.request, Some(selected_launch_context)));
+    }
     match devices {
         Some(devices) => ctx
             .isolation
@@ -967,7 +1395,7 @@ fn isolation_plan_request_awaiting_attachment(
             .isolation
             .apply_awaiting_attachment_in_scope_with_provenance(context.0, context.1, scope),
     }
-    .map(|applied| applied.request)
+    .map(|applied| (applied.request, None))
 }
 
 fn isolation_plan_request_parts<'a>(
@@ -978,10 +1406,24 @@ fn isolation_plan_request_parts<'a>(
         lillux::SubprocessRequest,
         &'a std::path::Path,
         Vec<crate::isolation::IsolationVerifiedCode>,
+        Vec<String>,
     ),
     EngineError,
 > {
     let mut request = spec_to_request(spec)?;
+    // Secret values join only this final request, after the serializable spec
+    // was converted. A name the plan already binds is refused, never replaced.
+    let mut verbatim_env_names = Vec::new();
+    if let Some(secret_env) = ctx.secret_env.as_deref() {
+        secret_env
+            .append_to(&mut request.envs)
+            .map_err(|name| EngineError::ExecutionFailed {
+                reason: format!(
+                    "delivered secret `{name}` collides with an environment name already bound by the plan"
+                ),
+            })?;
+        verbatim_env_names.extend(secret_env.names().map(str::to_owned));
+    }
     request.limits = ctx.subprocess_limits;
     request
         .inherited_fds
@@ -1018,7 +1460,7 @@ fn isolation_plan_request_parts<'a>(
             }
         }
     };
-    Ok((request, project_path, verified_code))
+    Ok((request, project_path, verified_code, verbatim_env_names))
 }
 
 /// Truncate a string for inclusion in error payloads.
@@ -1144,6 +1586,7 @@ mod tests {
             }),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
+            secret_env: None,
         }
     }
 
@@ -1163,8 +1606,10 @@ mod tests {
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             target_requirement: None,
+            current_target_request: None,
             endpoint_requirement: crate::contracts::ExecutionEndpointRequirement::Local {},
             external_endpoint_binding: None,
+            subprocess_limits: None,
             resource_authority_ceiling:
                 crate::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "test".into(),
@@ -1173,6 +1618,35 @@ mod tests {
             runtime_identity: None,
             debug_raw: false,
         }
+    }
+
+    #[test]
+    fn retained_limits_can_only_narrow_existing_context_limits() {
+        let mut plan = make_plan(Vec::new());
+        plan.subprocess_limits = Some(crate::contracts::ExecutionSubprocessLimits {
+            max_open_files: None,
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+            max_stdout_bytes: Some(32768),
+            max_stderr_bytes: Some(8192),
+        });
+        let mut ctx = test_engine_context();
+        ctx.subprocess_limits = Some(lillux::SubprocessLimits {
+            max_cpu_seconds: Some(2),
+            max_stdout_bytes: Some(4096),
+            ..Default::default()
+        });
+        let effective = context_with_plan_limits(&plan, &ctx).unwrap();
+        let limits = effective.subprocess_limits.unwrap();
+        assert_eq!(limits.max_cpu_seconds, Some(2));
+        assert_eq!(limits.max_stdout_bytes, Some(4096));
+        assert_eq!(limits.max_stderr_bytes, Some(8192));
+        assert!(limits.deny_process_creation);
+        assert!(!ctx.subprocess_limits.unwrap().deny_process_creation);
+        plan.subprocess_limits.as_mut().unwrap().max_cpu_seconds = Some(0);
+        assert!(context_with_plan_limits(&plan, &ctx).is_err());
     }
 
     #[test]
@@ -1231,7 +1705,11 @@ mod tests {
             serde_json::json!({"kind":"local"})
         );
         assert!(local["external_endpoint_binding"].is_null());
-        for field in ["endpoint_requirement", "external_endpoint_binding"] {
+        for field in [
+            "endpoint_requirement",
+            "external_endpoint_binding",
+            "subprocess_limits",
+        ] {
             let mut predecessor = local.clone();
             predecessor.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ExecutionPlan>(predecessor).is_err());

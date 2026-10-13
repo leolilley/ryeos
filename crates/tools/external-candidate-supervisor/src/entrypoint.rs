@@ -8,12 +8,12 @@ use ryeos_external_execution::guest_content::{
     BoundGuestMountedContent, open_verified_mounted_guest_content,
 };
 use ryeos_external_execution::guest_installation::{
-    MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES, decode_mounted_supervisor_handoff,
+    MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES, decode_mounted_supervisor_handoff_with_mailbox,
 };
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCH_INTENT_FD,
-    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION,
-    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
+    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RELAY_MAILBOX_FD,
+    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
     fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
@@ -87,14 +87,33 @@ pub fn adopt_mounted_supervisor_inputs(
     state_root: lillux::PinnedDirectory,
     candidate_runtime: lillux::PinnedDirectory,
     candidate_private_parent: lillux::PinnedDirectory,
+    relay_mailbox: Option<lillux::PinnedDirectory>,
 ) -> Result<ExternalCandidateSupervisorInputs> {
-    let handoff = decode_mounted_supervisor_handoff(
+    let handoff = decode_mounted_supervisor_handoff_with_mailbox(
         sealed_launch_record,
         &bootstrap,
         &state_root,
         &candidate_runtime,
         &candidate_private_parent,
+        relay_mailbox.as_ref(),
     )?;
+    if let Some(mailbox) = relay_mailbox.as_ref() {
+        bootstrap
+            .candidate_program
+            .validate_guest_inputs(&bootstrap.guest_inputs)?;
+        for protected in [
+            &state_root,
+            &candidate_runtime,
+            &candidate_private_parent,
+            staged_root,
+        ] {
+            mailbox.require_disjoint_directory_tree(protected)?;
+        }
+        ensure!(
+            handoff.relay_mailbox_identity() == Some(mailbox.identity()?),
+            "mounted relay mailbox differs from sealed launch identity"
+        );
+    }
     let (launcher, content) = adopt_mounted_supervisor_content(
         staged_root,
         &handoff.stage_directory_identity(),
@@ -110,6 +129,8 @@ pub fn adopt_mounted_supervisor_inputs(
         state_root,
         candidate_runtime,
         candidate_private_parent,
+        relay_mailbox,
+        staged_source: Some(staged_root.try_clone()?),
         launcher,
         workspace_outputs,
         runtime_mounts,
@@ -119,7 +140,7 @@ pub fn adopt_mounted_supervisor_inputs(
 
 /// Sole shipped mounted-source entrypoint. The trusted outer owner must have
 /// selected the exact sealed-source child as the read-only stage mount and
-/// applied the schema-2 control-channel profile before target release.
+/// applied the selected sealed control-channel profile before target release.
 pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
     let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
         SUPERVISOR_BOOTSTRAP_FD,
@@ -137,8 +158,8 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
         MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES,
     )
     .map_err(anyhow::Error::msg)?;
-    // SAFETY: the held outer owner maps only the four non-source controls at
-    // their fixed coordinates. Each directory descriptor is adopted once.
+    // SAFETY: the held outer owner maps only the selected non-source controls
+    // at their fixed coordinates. Each directory descriptor is adopted once.
     let state_root = unsafe {
         lillux::PinnedDirectory::take_inherited_directory(
             PathBuf::from("<external-supervisor-state>"),
@@ -157,6 +178,18 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
             SUPERVISOR_PRIVATE_PARENT_FD,
         )
     }?;
+    let relay_mailbox = if bootstrap.controller.relay().is_ok() {
+        // SAFETY: the sealed relay launch intent binds this dedicated fixed
+        // coordinate to the original mailbox inode before any runtime use.
+        Some(unsafe {
+            lillux::PinnedDirectory::take_inherited_directory(
+                PathBuf::from(bootstrap.relay_mailbox_root()?),
+                SUPERVISOR_RELAY_MAILBOX_FD,
+            )
+        }?)
+    } else {
+        None
+    };
     let staged_root =
         lillux::PinnedDirectory::open(std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION))?
             .context("mounted guest stage is absent")?;
@@ -167,6 +200,7 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
         state_root,
         candidate_runtime,
         candidate_private_parent,
+        relay_mailbox,
     )?;
     run_external_candidate_supervisor(inputs)
 }
@@ -189,6 +223,13 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
         "external supervisor bootstrap is not canonical"
     );
     bootstrap.validate()?;
+    ensure!(
+        matches!(
+            &bootstrap.controller,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_)
+        ),
+        "controller file relay requires an installed private mailbox transport"
+    );
     // SAFETY: the admitted lifecycle adapter uniquely maps each fixed
     // descriptor and this executable adopts every coordinate exactly once.
     let state_root = unsafe {
@@ -245,6 +286,8 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
         state_root,
         candidate_runtime,
         candidate_private_parent,
+        relay_mailbox: None,
+        staged_source: None,
         launcher,
         workspace_outputs,
         runtime_mounts,
@@ -299,6 +342,7 @@ mod tests {
             .create_child(OsStr::new("guest-scratch-01"), 0o700)
             .unwrap();
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 10,
@@ -427,6 +471,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
     }
@@ -434,6 +479,7 @@ mod tests {
     #[test]
     fn two_product_inputs_rebind_without_manifest_descriptor_collision() {
         let mut inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: SUPERVISOR_CONTENT_RECORD_FD_BASE,
@@ -505,6 +551,7 @@ mod tests {
     #[test]
     fn source_records_and_products_rebind_in_flattened_order() {
         let mut inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 200,

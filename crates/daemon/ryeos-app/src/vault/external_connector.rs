@@ -142,8 +142,8 @@ fn validate_hash(label: &str, value: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::vault::{
-        NodeVault, SealedEnvelopeVault, VaultScope, read_explicit_secret, read_named_secret,
-        read_required_secrets,
+        NodeVault, NodeVaultReadAll as _, SealedEnvelopeVault, VaultScope,
+        authorize_secret_delivery, read_named_secret,
     };
 
     #[test]
@@ -174,10 +174,21 @@ mod tests {
         assert!(vault.read_all("operator").unwrap().is_empty());
         assert!(vault.list_keys("operator").unwrap().is_empty());
         assert!(read_named_secret(&vault, "operator", access.physical_key()).is_err());
-        assert!(read_explicit_secret(&vault, "operator", access.physical_key(), &[]).is_err());
         assert!(
-            read_required_secrets(&vault, "operator", &[access.physical_key().to_owned()], &[],)
-                .is_err()
+            authorize_secret_delivery(
+                &crate::vault::vault_only_sources(&vault),
+                "operator",
+                &[access.physical_key().to_owned()],
+                &ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                ryeos_state::objects::EnvironmentAuthority::Vault {
+                    namespace: "operator".to_string(),
+                    name_authority:
+                        ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                },
+            )
+            .unwrap(),
+            )
+            .is_err()
         );
         assert!(
             vault

@@ -171,7 +171,12 @@ pub fn materialize_bundle_tree(
                 bail!("bundle payload differs from manifest identity");
             }
             if directory
-                .atomic_create_regular(OsStr::new(child_name), &bytes, entry.mode.unwrap())?
+                .atomic_create_regular(
+                    OsStr::new(child_name),
+                    &bytes,
+                    entry.mode.unwrap(),
+                    crate::APP_TEMP_PURPOSE,
+                )?
                 .is_none()
             {
                 bail!("bundle file appeared during descriptor-bound materialization");
@@ -187,7 +192,9 @@ pub fn materialize_bundle_tree(
     })();
     if result.is_err() {
         let _ = root.remove_contents_recursive();
-        let _ = parent.remove_empty_child_if_same(name, &root);
+        let _ = parent
+            .remove_empty_child_if_same(name, &root)
+            .map(|receipt| receipt.is_some());
     }
     result
 }
