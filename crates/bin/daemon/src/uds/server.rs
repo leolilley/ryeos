@@ -1366,13 +1366,16 @@ fn spawn_machine_continuation_launch(
         return;
     };
     let st = state.clone();
+    // The launch future is built on this worker's stack before the task
+    // takes it; its claim-and-run state machine is boxed so that build costs
+    // a pointer here rather than the whole successor launch.
     tokio::spawn(async move {
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-        match ryeos_executor::execution::launch::launch_prepared_machine_successor(
+        match Box::pin(ryeos_executor::execution::launch::launch_prepared_machine_successor(
             st,
             &successor_id,
             prepared,
-        )
+        ))
         .await
         {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}

@@ -8801,7 +8801,12 @@ async fn prepare_machine_successor_launch_with_bootstrap(
         .with_continuation_source(source_thread_id)
         .with_continuation_runtime_bootstrap(bootstrap)
         .with_sealed_root_request(sealed);
-    let mut prepared = prepare_successor_launch(
+    // Preparation re-admits the successor from its sealed capsule: the
+    // resolution closure, launch policy and realization state it carries
+    // across awaits make this the largest future on the continuation path.
+    // Heap-allocate it so the request handler that awaits it stays small
+    // on the runtime worker's stack.
+    let mut prepared = Box::pin(prepare_successor_launch(
         state,
         successor_thread_id,
         resume,
@@ -8809,7 +8814,7 @@ async fn prepare_machine_successor_launch_with_bootstrap(
         Some(source_thread_id),
         Some(&successor_metadata),
         None,
-    )
+    ))
     .await?;
 
     // A machine continuation is another segment of the same admitted launch,
@@ -9215,14 +9220,18 @@ async fn launch_successor_inner_with_claim(
 
     // Rebuild + run while the owned claim guard remains in this future. It is
     // released on every return, including cancellation and panic unwind.
-    let result = launch_claimed_successor(
+    // The rebuild-and-run state machine carries the successor's whole
+    // admitted authority, envelope and managed-runtime launch across its
+    // awaits; it lives on the heap so building it inside a runtime worker
+    // never costs that worker's stack.
+    let result = Box::pin(launch_claimed_successor(
         &state,
         successor,
         mode,
         launch_handoff,
         prepared_successor,
         None,
-    )
+    ))
     .await;
 
     match result {
@@ -9395,12 +9404,20 @@ async fn launch_claimed_successor(
         rearm_native_resume_budget_after_attach: mode == SuccessorMode::Machine,
         launch_handoff,
     };
+    // Each run future holds the rebuilt launch envelope and the managed
+    // runtime attachment across its awaits; heap-allocate it so the two
+    // arms are not both reserved inline in this frame.
     match prepared_authority {
         Some((authority, launch_audit)) => {
-            run_claimed_thread_row_with_authority(launch_params, successor, authority, launch_audit)
-                .await
+            Box::pin(run_claimed_thread_row_with_authority(
+                launch_params,
+                successor,
+                authority,
+                launch_audit,
+            ))
+            .await
         }
-        None => run_claimed_thread_row(launch_params, successor).await,
+        None => Box::pin(run_claimed_thread_row(launch_params, successor)).await,
     }
 }
 
