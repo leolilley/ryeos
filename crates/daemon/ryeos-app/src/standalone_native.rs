@@ -413,6 +413,12 @@ impl StandaloneNativeHost {
     /// [`Self::open_store`], into this host's census. A refused close or an
     /// unrecorded terminal keeps its owners inside the returned error.
     pub fn close_store(&self, store: Arc<crate::state_store::StateStore>) -> Result<()> {
+        // A Store admits process attachment from the moment it opens; the
+        // close path requires that gate shut first, exactly as the daemon
+        // shuts it at its shutdown serialization point.
+        store
+            .close_process_attachment_admission()
+            .context("close standalone Store: close process attachment admission")?;
         let census = store
             .close_in_process_census(Arc::clone(self.factory()?))
             .map_err(|failure| {
