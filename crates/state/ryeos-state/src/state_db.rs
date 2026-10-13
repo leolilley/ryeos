@@ -3015,6 +3015,17 @@ enum OperationalAccess {
     ProjectionMaintenance,
 }
 
+#[cfg(test)]
+impl StateDb {
+    /// The live State parent of an open store, for frames built directly in
+    /// tests.
+    pub(crate) fn live_native_owner_for_test(&self) -> Arc<live_native::LiveStateNativeOwner> {
+        match &self.original_projection_context.as_ref().expect("live State context").authority {
+            OriginalProjectionStateOwner::Live(owner) => Arc::clone(owner),
+            OriginalProjectionStateOwner::Offline(_) => panic!("a live State has a live parent"),
+        }
+    }
+}
 impl StateDb {
     /// Open established authority/recovery roots for an explicit stopped-node
     /// maintenance operation, with the current-schema transient projection

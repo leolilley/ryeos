@@ -99,10 +99,21 @@ impl OriginalGenerationLease {
         }
         match Arc::try_unwrap(self) {
             Ok(owner) => {
-                let Self { root, custody, .. } = owner;
                 // Only an empty Retired phase can reach this unique transfer.
-                // Destroying that bookkeeping mutex does not close a host owner.
-                drop(ManuallyDrop::into_inner(custody));
+                // Every owned field is read out exactly once and the emptied
+                // shell is never dropped; destroying the bookkeeping mutex
+                // does not close a host owner. The process and identity are
+                // plain copied facts.
+                let mut owner = ManuallyDrop::new(owner);
+                let custody = unsafe { ManuallyDrop::take(&mut owner.custody) };
+                let (root, factory, name) = unsafe {(
+                    std::ptr::read(&owner.root),
+                    std::ptr::read(&owner.factory),
+                    std::ptr::read(&owner.name),
+                )};
+                drop(custody);
+                drop(factory);
+                drop(name);
                 Ok(root)
             }
             Err(owner) => Err(owner),
@@ -296,6 +307,82 @@ impl OriginalGenerationLease {
             receipt.require_original(factory)?;
         }
         Ok(receipt)
+    }
+}
+
+impl Drop for OriginalGenerationLease {
+    fn drop(&mut self) {
+        // Settled exactly when try_into_metadata_root would accept it: retired
+        // in its issuing process. Every other phase holds prepared inputs, a
+        // live native lock, a refusal, a closed disposition or an effect
+        // checkout, so the custody stays retained until the process exits.
+        let mut custody = unsafe { ManuallyDrop::take(&mut self.custody) };
+        if self.process != std::process::id() {
+            // A copy in another process holds no native lock owner.
+            lillux::custody::relinquish_in_foreign_process(custody);
+            return;
+        }
+        let retired = matches!(
+            custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
+            LeaseCustody::Retired
+        );
+        if retired {
+            drop(custody);
+        } else {
+            lillux::custody::abandon("ryeos-state::generation-lease", custody);
+        }
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const KIND: &str = "ryeos-state::generation-lease";
+
+    fn lease(custody: LeaseCustody) -> OriginalGenerationLease {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        OriginalGenerationLease {
+            process: std::process::id(),
+            factory: Weak::new(),
+            root,
+            name: OsString::from("generated.sqlite3.lease"),
+            identity: (0, 0),
+            custody: ManuallyDrop::new(Mutex::new(custody)),
+        }
+    }
+
+    #[test]
+    fn dropped_retired_lease_releases_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(lease(LeaseCustody::Retired));
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_unretired_lease_is_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        // An effect checkout is the lightest unretired phase: it holds no
+        // native owner itself, and the retention rule does not depend on one.
+        drop(lease(LeaseCustody::Checkout));
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+    }
+
+    #[test]
+    fn only_a_retired_lease_transfers_its_root() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let checkout = Arc::new(lease(LeaseCustody::Checkout));
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let checkout = checkout.try_into_metadata_root().err().expect("an unretired lease is refused");
+        drop(checkout);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        let root = Arc::new(lease(LeaseCustody::Retired)).try_into_metadata_root().ok()
+            .expect("a retired lease transfers its root");
+        drop(root);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
     }
 }
 

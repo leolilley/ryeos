@@ -127,6 +127,16 @@ impl OperationalMarkerSource {
             state: OperationalMarkerState::Unobserved,
         }
     }
+    /// A source whose marker receipt is already consumed, for frames built
+    /// directly in tests.
+    #[cfg(test)]
+    pub(super) fn consumed_for_test(had_descriptor: bool) -> Self {
+        Self {
+            process: std::process::id(),
+            registry_identity: None,
+            state: OperationalMarkerState::Consumed { had_descriptor },
+        }
+    }
 
     fn bind_registry(
         &mut self,
@@ -1775,11 +1785,16 @@ impl OutsideOriginalOperationalCustody {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
+        self.require_exhausted_holders()?;
+        registry.require_same_registry(self.shared_registry_identity.as_ref()
+            .context("Operational registry identity absent at final exhaustion")?)
+    }
+    /// The registry-free part of final exhaustion. A dropped frame settles on
+    /// exactly these checks.
+    pub(crate) fn require_exhausted_holders(&self) -> Result<()> {
         self.require_process()?;
         anyhow::ensure!(self.retired_shared_roots_consumed && self.descriptors_retired(),
             "Operational frame retains a physical or native owner at final exhaustion");
-        registry.require_same_registry(self.shared_registry_identity.as_ref()
-            .context("Operational registry identity absent at final exhaustion")?)?;
         anyhow::ensure!(self.descriptor_owners.len() == self.descriptor_receipts.len(),
             "Operational descriptor receipt census changed");
         for (owner, receipt) in self.descriptor_owners.iter().zip(self.descriptor_receipts.iter()) {
@@ -1789,24 +1804,95 @@ impl OutsideOriginalOperationalCustody {
         crate::state_db::live_native::require_exhausted_refusals(self.prior_refusal.iter())
     }
 
-    /// Infallible consumption after `require_exhausted`; every ManuallyDrop
-    /// slot holds `None` and the packet vector is empty.
+    /// Consumption after `require_exhausted`: the exhausted frame's own Drop
+    /// releases every slot normally.
     pub(crate) fn exhaust(self) {
-        let Self { process: _, live, live_metadata, live_domain: _, root, namespace, terminal,
-            native_failure, sql_custody, shared_registrations, shared_registry_identity: _,
-            retired_shared_roots_consumed: _, marker_source, descriptor_owners,
-            descriptor_receipts, prior_refusal } = self;
-        drop(std::mem::ManuallyDrop::into_inner(live));
-        drop(std::mem::ManuallyDrop::into_inner(live_metadata));
-        drop(root);
-        drop(namespace);
-        drop(std::mem::ManuallyDrop::into_inner(terminal));
-        drop(native_failure);
-        drop(sql_custody);
-        drop(shared_registrations);
-        drop(marker_source);
-        drop(descriptor_receipts);
-        drop(descriptor_owners);
-        drop(prior_refusal);
+        drop(self);
+    }
+}
+impl Drop for OutsideOriginalOperationalCustody {
+    fn drop(&mut self) {
+        // Each retained slot is taken exactly once, here. Settled exactly when
+        // final exhaustion would accept the frame: shared roots consumed, every
+        // descriptor, root, marker, terminal, packet and live body retired and
+        // no owner-bearing refusal left. Otherwise the whole graph stays
+        // retained until the process exits.
+        let live = unsafe { std::mem::ManuallyDrop::take(&mut self.live) };
+        let live_metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.live_metadata) };
+        let terminal = unsafe { std::mem::ManuallyDrop::take(&mut self.terminal) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((live, live_metadata, terminal));
+            return;
+        }
+        if self.require_exhausted_holders().is_ok() {
+            drop(live);
+            drop(live_metadata);
+            drop(terminal);
+        } else {
+            let root = self.root.take();
+            let namespace = self.namespace.take();
+            let native_failure = self.native_failure.take();
+            let sql_custody = std::mem::take(&mut self.sql_custody);
+            let shared_registrations = std::mem::replace(&mut self.shared_registrations,
+                std::array::from_fn(|_| None));
+            let descriptor_owners = std::mem::take(&mut self.descriptor_owners);
+            let descriptor_receipts = std::mem::take(&mut self.descriptor_receipts);
+            let prior_refusal = self.prior_refusal.take();
+            lillux::custody::abandon("ryeos-state::outside-operational-custody", (
+                live, live_metadata, terminal, root, namespace, native_failure, sql_custody,
+                shared_registrations, descriptor_owners, descriptor_receipts, prior_refusal,
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod outside_custody_drop_tests {
+    use super::{OperationalMarkerSource, OutsideOriginalOperationalCustody};
+
+    const KIND: &str = "ryeos-state::outside-operational-custody";
+
+    fn frame(shared_roots_consumed: bool) -> OutsideOriginalOperationalCustody {
+        OutsideOriginalOperationalCustody {
+            process: std::process::id(),
+            live: std::mem::ManuallyDrop::new(None),
+            live_metadata: std::mem::ManuallyDrop::new(None),
+            live_domain: true,
+            root: None,
+            namespace: None,
+            terminal: std::mem::ManuallyDrop::new(None),
+            native_failure: None,
+            sql_custody: Vec::new(),
+            shared_registrations: std::array::from_fn(|_| None),
+            shared_registry_identity: None,
+            retired_shared_roots_consumed: shared_roots_consumed,
+            marker_source: OperationalMarkerSource::consumed_for_test(true),
+            descriptor_owners: Vec::new(),
+            descriptor_receipts: Vec::new(),
+            prior_refusal: None,
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_frame_releases_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let frame = frame(true);
+        frame.require_exhausted_holders().unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(frame);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_frame_with_unconsumed_roots_is_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        // Shared roots never registered and never consumed: the frame still
+        // owes its root receipts, so it is held whole.
+        let frame = frame(false);
+        assert!(frame.require_exhausted_holders().is_err());
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(frame);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
     }
 }
