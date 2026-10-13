@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T06:51:53Z:e77b955a460e2bf13b74d79816323fbdb0bbcab350293bca877803912ce4a0eb:JnUIqfUw1br0kYCn42uZpCtC5hNS87AqGbB1jJKEHrRL3m1p75RhwDhBYFabeP1A6IYdLB2mK+UU0LW+LwPHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T10:17:10Z:eda2d91e2496db04330f14f4a88939bb43ce585f014f7a5633320bf6963e7d9e:uN05X6aU5I7ZeobROLN0w8fm7s5Ikb/h5f8TbjZuXoJDkNwPQ0Yv2n8OWtfek3Qcm0ExSr+VbZKdMkFGK9ReCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - status
 description: Show local project snapshot status
@@ -9,6 +9,7 @@ aliases:
   description: Show local project snapshot status
 project:
   resolution: required
+  default: discover_upward_ai
   request_project_path: true
   bind_parameter: project_path
 defaults:
