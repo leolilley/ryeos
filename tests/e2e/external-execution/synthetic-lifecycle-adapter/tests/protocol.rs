@@ -32,9 +32,9 @@ use ryeos_state::external_execution::admission::{
     PROTOCOL,
 };
 use ryeos_state::external_execution::transport::{
-    EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
-    ExternalNetworkInputPolicy, ExternalNetworkInputSelection, ExternalSupervisorBootstrap,
-    external_tls_root_bundle_digest,
+    EXTERNAL_CHANNEL_ROUTE_CONTRACT, EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
+    ExternalControllerTransportContract, ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
+    ExternalSupervisorBootstrap, external_tls_root_bundle_digest,
 };
 
 #[path = "../../support/signed_bundle.rs"]
@@ -434,7 +434,7 @@ fn shipped_external_codex_profile_is_explicit_and_closed() {
     let bytes = sources.get("external-authoring.profile.json").unwrap();
     ryeos_engine::structured_session_profile::compile(bytes, &sources).unwrap();
     let profile: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-    assert_eq!(profile["external_candidate"]["schema"], 6);
+    assert_eq!(profile["external_candidate"]["schema"], 7);
     assert_eq!(
         profile["external_candidate"]["required_lifecycle_capabilities"],
         serde_json::json!(["exact_terminal_observation"])
@@ -5673,7 +5673,7 @@ fn exercise_activation_fault(fault: &str) {
         )
         .unwrap();
     let bootstrap = ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
             schema: 2,
             https_origin: format!("https://localhost:{controller_port}"),
