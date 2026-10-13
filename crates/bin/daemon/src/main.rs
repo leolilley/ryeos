@@ -2045,7 +2045,10 @@ impl DaemonSelectedComposition {
         });
         let refused_fact = failure.is_some_and(lillux_sqlite::native_refusal_is_fact);
         if latched_fact || refused_fact {
-            self.inhibit_supervised_restart(reason);
+            // The record names the refusal, so an operator reading it can
+            // tell an exhausted allowance from any other durable fact.
+            let detail = failure.map(|failure| format!("{failure:#}"));
+            self.inhibit_supervised_restart_with_detail(reason, detail.as_deref());
         } else {
             tracing::warn!(
                 reason,
@@ -7773,6 +7776,59 @@ mod selected_composition_tests {
         let retained = composition.native_failure.take().unwrap();
         assert!(retained.is::<EstablishedResidencyRefused>());
         assert!(format!("{retained}").contains("fixture"));
+    }
+
+    #[test]
+    fn exhaustion_refusal_after_bootstrap_inhibits_restart_and_leaves_no_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut composition, attachment) = fixture(root.path());
+        let state_dir = composition.lifecycle_exit.as_ref().unwrap().state_dir.clone();
+        let lock_path = state_lock::default_lock_path(root.path());
+        let capacity_namespace = root.path().join(".ai/node/native-capacity");
+        // The refusal exactly as prepare_live_native reports an exhausted
+        // allowance: the refused checkout is retained typed and then named
+        // by its Debug form. It is a durable fact of this host, not
+        // contention, the service edge or a transient shortage.
+        let refused = anyhow::anyhow!(
+            "live native reservation refused; original recovery custody retained: \
+             LiveNativeCapacityReservationFailure {{ error: native capacity account \
+             exhausted, .. }}"
+        );
+        assert!(lillux_sqlite::native_refusal_is_fact(&refused));
+        let detail = format!("{refused:#}");
+
+        // Before native bootstrap nothing can have been spent, so the same
+        // refusal leaves the next start free to retry.
+        assert!(!composition.native_bootstrap_entered);
+        composition.inhibit_supervised_restart_after_startup_failure("startup_failed", Some(&refused));
+        assert!(lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().is_none());
+
+        // Once bootstrap claimed its attempt the exhaustion refusal settles
+        // through the native shutdown with every owner released, so the
+        // startup-failure exit is taken rather than the unresolved-custody
+        // exit, and the inhibition names the exhaustion.
+        composition.native_bootstrap_entered = true;
+        assert!(!composition.has_unresolved_custody());
+        composition.record_exit("startup_failed", Some(&detail), Some(&refused));
+        assert!(!composition.has_unresolved_custody());
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert!(matches!(
+            lifecycle_marker::read(&state_dir),
+            Some(lifecycle_marker::LifecycleMarker::Exited { reason, .. }) if reason == "startup_failed"
+        ));
+        assert!(state_dir.join("restart-inhibited.json").is_file());
+        let inhibition = lifecycle_marker::read_restart_inhibition(&state_dir).unwrap().unwrap();
+        assert_eq!(inhibition.reason, "startup_failed");
+        assert!(
+            inhibition.detail.as_deref().unwrap_or_default().contains("native capacity account exhausted"),
+            "{inhibition:?}"
+        );
+        // A refused debit writes nothing: no account or anchor record is
+        // created or touched by the exit.
+        assert!(!capacity_namespace.exists());
+        drop(composition);
+        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        let _replacement = state_lock::StateLock::acquire(&lock_path).unwrap();
     }
 
     #[test]

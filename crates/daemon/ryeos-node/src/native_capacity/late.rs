@@ -453,6 +453,31 @@ impl LateNativeControl {
         work: u64,
         maximum_sources: usize,
     ) -> Result<Arc<Self>> {
+        Self::bounded(inputs, storage_limit, work, maximum_sources)
+    }
+
+    /// The same bounded owner for a reservation refused before any raw
+    /// counter existed: an exhausted or outstanding account debit, or a
+    /// refused raw counter right after the debit. There is no partition to
+    /// transfer because the refused start debited nothing, so its settled
+    /// descriptor retirement is bounded directly by the signed outside
+    /// cleanup floor, in memory. No envelope, allowance or counter is
+    /// charged for constructing it.
+    pub(super) fn from_refused_reservation(
+        inputs: &LiveNativeCapacityInputs,
+        storage_limit: u64,
+        work: u64,
+        maximum_sources: usize,
+    ) -> Result<Arc<Self>> {
+        Self::bounded(inputs, storage_limit, work, maximum_sources)
+    }
+
+    fn bounded(
+        inputs: &LiveNativeCapacityInputs,
+        storage_limit: u64,
+        work: u64,
+        maximum_sources: usize,
+    ) -> Result<Arc<Self>> {
         inputs.require_original(true)?;
         ensure!(
             work == inputs.policy.incarnation.outside_cleanup_steps && work > 0,

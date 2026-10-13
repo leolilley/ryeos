@@ -2461,6 +2461,7 @@ impl LiveNativeCapacityReservation {
                         && original.budget.get().is_none(),
                     "original region publication/factory custody is unresolved"
                 );
+                original.ensure_outside_cleanup_owner()?;
                 // SAFETY: Arc::try_unwrap transferred the actual sole outside
                 // owner; original PID/cleanup checked above. This attempt has
                 // no initialized region/seal/publication, no budget facade or
@@ -2602,6 +2603,69 @@ impl LiveNativeCapacityReservation {
                 error,
             }),
         }
+    }
+
+    /// A reservation refused before its first mapping never issued the
+    /// outside cleanup owner: its account debit was refused (exhausted,
+    /// outstanding, overflowed), or the raw counter or its partition was
+    /// refused right after the debit. It still retains the same account,
+    /// anchor and admission descriptors a mapped reservation retires through
+    /// that owner, so settlement constructs the owner and its registry here,
+    /// bounded in memory by the signed outside-cleanup floor every start is
+    /// admitted against. Nothing durable is charged: no incarnation is
+    /// debited and no native counter is issued or transferred. A refusal
+    /// here leaves the reservation exactly as it was for the next attempt.
+    fn ensure_outside_cleanup_owner(&mut self) -> Result<()> {
+        if self.late.is_some() {
+            return Ok(());
+        }
+        ensure!(
+            self.host_storage.get().is_none()
+                && self.budget.get().is_none()
+                && self.released.is_none()
+                && self.release_exclusion.is_none()
+                && self.seal_failure.is_none()
+                && !self.factory_entered.load(Ordering::Acquire),
+            "unmapped reservation retains a mapping or native owner without its cleanup owner"
+        );
+        ensure!(
+            self.physical_registry
+                .get_mut()
+                .map_err(|_| anyhow::anyhow!("original physical registry poisoned"))?
+                .is_none(),
+            "unmapped reservation retains a physical registry without its cleanup owner"
+        );
+        self.inputs.require_original(true)?;
+        let ReservationFloors {
+            tickets: _,
+            host_layout: _,
+            outside_control_limit,
+            physical_maximum,
+            host_work: _,
+        } = require_reservation_floors(&self.inputs.policy.incarnation)?;
+        let late = LateNativeControl::from_refused_reservation(
+            &self.inputs,
+            outside_control_limit,
+            self.inputs.policy.incarnation.outside_cleanup_steps,
+            physical_maximum,
+        )?;
+        // SAFETY: the inventory is funded from this late owner's finite
+        // counters, bounded by the floor checked above and debited through
+        // the original clock; the owner and registry are cached in this same
+        // unmapped reservation, which never maps or issues native work.
+        let registry = unsafe {
+            lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::issued(
+                physical_maximum,
+                &|bytes, steps| late.prepay(bytes, steps),
+            )
+        }?;
+        late.bind_original_registry_identity(registry.identity()?)?;
+        *self
+            .physical_registry
+            .get_mut()
+            .map_err(|_| anyhow::anyhow!("original physical registry poisoned"))? = Some(registry);
+        self.late = Some(late);
+        Ok(())
     }
 
     /// Account-only continuation, under the same original cleanup authority.
