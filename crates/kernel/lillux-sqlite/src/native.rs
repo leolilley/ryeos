@@ -476,8 +476,28 @@ impl OriginalNativeProjectionLeaseAdmissionFailure {
         if self.original.budget.require_original_process().is_err() {
             return Err(self);
         }
-        let Self { error: _, original } = self;
-        std::mem::ManuallyDrop::into_inner(original).validate_original()
+        let (original, _error) = self.into_fields();
+        original.validate_original()
+    }
+}
+impl OriginalNativeProjectionLeaseAdmissionFailure {
+    /// Move both fields out exactly once; this failure's Drop does not run on
+    /// the emptied owner.
+    fn into_fields(self) -> (OriginalNativeProjectionLeaseAdmission, anyhow::Error) {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is read once.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut failure.original) };
+        let error = unsafe { std::ptr::read(&failure.error) };
+        (original, error)
+    }
+}
+impl Drop for OriginalNativeProjectionLeaseAdmissionFailure {
+    fn drop(&mut self) {
+        // Only retry or admission recovery settles a never-delivered admission.
+        // Its published producer interval and debited ticket stay retained
+        // until the process exits; no production is abandoned from here.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut self.original) };
+        lillux::custody::abandon("lillux-sqlite::projection-lease-admission-failure", original);
     }
 }
 impl std::fmt::Debug for OriginalNativeProjectionLeaseAdmissionFailure {
@@ -524,6 +544,29 @@ impl OriginalProjectionLeaseInputs {
         // retained, never automatically closed while refusing unsafe issuance.
         Self { root, metadata: std::mem::ManuallyDrop::new(metadata), mode,
             authority, identity: (0, 0) }
+    }
+    /// End these inputs after native code consumed the metadata descriptor
+    /// number exactly once. The File value is never closed again; the root
+    /// and authority release normally. Bypasses this owner's Drop.
+    fn release_consumed_metadata(self) {
+        let inputs = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `inputs` is never dropped and each owned field is read once.
+        // `metadata` stays inside it unclosed: its descriptor is already gone.
+        // `mode` and `identity` are plain copies.
+        let root = unsafe { std::ptr::read(&inputs.root) };
+        let authority = unsafe { std::ptr::read(&inputs.authority) };
+        drop(root);
+        drop(authority);
+    }
+}
+impl Drop for OriginalProjectionLeaseInputs {
+    fn drop(&mut self) {
+        // Only a completed lease close consumes the metadata descriptor, and it
+        // ends these inputs through release_consumed_metadata. Any other drop
+        // still holds a live descriptor no close path has verified, so the File
+        // stays retained until the process exits.
+        let metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.metadata) };
+        lillux::custody::abandon("lillux-sqlite::projection-lease-inputs", metadata);
     }
 }
 /// Fixed native debits/layout facts, not funding or total operation cost.
@@ -616,8 +659,20 @@ impl OriginalProjectionLeaseFailure {
         if require_current_native_process().is_err() { return Err(self); }
         if self.owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner)
             .factory.require_process().is_err() { return Err(self); }
-        let owner = unsafe { std::mem::ManuallyDrop::take(&mut self.owner) };
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is moved out once.
+        let owner = unsafe { std::mem::ManuallyDrop::take(&mut failure.owner) };
+        drop(unsafe { std::ptr::read(&failure.error) });
         Ok(owner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+impl Drop for OriginalProjectionLeaseFailure {
+    fn drop(&mut self) {
+        // Only into_owner settles a lease refusal, and it bypasses this Drop.
+        // The retained lease keeps its partial native and descriptor custody
+        // until the process exits.
+        let owner = unsafe { std::mem::ManuallyDrop::take(&mut self.owner) };
+        lillux::custody::abandon("lillux-sqlite::projection-lease-failure", owner);
     }
 }
 impl std::fmt::Debug for OriginalProjectionLeaseFailure {
@@ -683,8 +738,7 @@ impl OriginalProjectionLease {
             self.admission_failure = Some(failure);
             return Err(error);
         }
-        let OriginalNativeProjectionLeaseAdmissionFailure { original, error: _ } = failure;
-        let original = std::mem::ManuallyDrop::into_inner(original);
+        let (original, _error) = failure.into_fields();
         self.ticket = Some(original.ticket);
         *self.producer = Some(original.producer);
         self.ticket_registered = true;
@@ -811,12 +865,19 @@ impl OriginalProjectionLease {
         match result {
             Ok(receipt) => {
                 // Only successful explicit cleanup releases Rust custody; metadata File
-                // remains ManuallyDrop because C consumed its numeric descriptor once.
+                // remains unclosed because C consumed its numeric descriptor once.
+                // The lease's own Drop is bypassed: every field is ended here.
+                let mut lease = std::mem::ManuallyDrop::new(self);
+                // SAFETY: `lease` is never dropped and each field is moved out once.
+                // `ticket` and the six disposition flags are plain copies.
                 unsafe {
-                    std::mem::ManuallyDrop::drop(&mut self.producer);
-                    std::mem::ManuallyDrop::drop(&mut self.inputs);
-                    std::mem::ManuallyDrop::drop(&mut self.fork_registration);
-                    std::mem::ManuallyDrop::drop(&mut self.fork_reservation);
+                    std::mem::ManuallyDrop::drop(&mut lease.producer);
+                    std::mem::ManuallyDrop::take(&mut lease.inputs).release_consumed_metadata();
+                    std::mem::ManuallyDrop::drop(&mut lease.fork_registration);
+                    std::mem::ManuallyDrop::drop(&mut lease.fork_reservation);
+                    drop(std::ptr::read(&lease.admission_failure));
+                    drop(std::ptr::read(&lease.factory));
+                    drop(std::ptr::read(&lease.native));
                 }
                 Ok(receipt)
             }
@@ -826,6 +887,22 @@ impl OriginalProjectionLease {
     }
 }
 // No Drop cleanup, unlock, registry removal, ticket acknowledgement or refund.
+impl Drop for OriginalProjectionLease {
+    fn drop(&mut self) {
+        // Only a successful close settles a lease, and it bypasses this Drop.
+        // Any other drop may hold the metadata descriptor, an acquired native
+        // lock, a published producer or fork-close inventory, so the whole
+        // lease custody stays retained until the process exits.
+        let inputs = unsafe { std::mem::ManuallyDrop::take(&mut self.inputs) };
+        let producer = unsafe { std::mem::ManuallyDrop::take(&mut self.producer) };
+        let fork_reservation = unsafe { std::mem::ManuallyDrop::take(&mut self.fork_reservation) };
+        let fork_registration = unsafe { std::mem::ManuallyDrop::take(&mut self.fork_registration) };
+        lillux::custody::abandon("lillux-sqlite::projection-lease", (
+            inputs, producer, fork_reservation, fork_registration,
+            self.native.take(), self.admission_failure.take(),
+        ));
+    }
+}
 
 pub struct OriginalNativeConnectionAdmission {
     budget: Arc<OriginalNativeBudgetOwner>,
@@ -875,8 +952,28 @@ impl OriginalNativeConnectionAdmissionFailure {
         if self.original.budget.require_original_process().is_err() {
             return Err(self);
         }
-        let Self { error: _, original } = self;
-        std::mem::ManuallyDrop::into_inner(original).validate_original()
+        let (original, _error) = self.into_fields();
+        original.validate_original()
+    }
+}
+impl OriginalNativeConnectionAdmissionFailure {
+    /// Move both fields out exactly once; this failure's Drop does not run on
+    /// the emptied owner.
+    fn into_fields(self) -> (OriginalNativeConnectionAdmission, anyhow::Error) {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is read once.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut failure.original) };
+        let error = unsafe { std::ptr::read(&failure.error) };
+        (original, error)
+    }
+}
+impl Drop for OriginalNativeConnectionAdmissionFailure {
+    fn drop(&mut self) {
+        // Only retry or admission recovery settles a never-delivered admission.
+        // Its published producer interval and debited ticket stay retained
+        // until the process exits; no production is abandoned from here.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut self.original) };
+        lillux::custody::abandon("lillux-sqlite::native-connection-admission-failure", original);
     }
 }
 impl std::fmt::Debug for OriginalNativeConnectionAdmissionFailure {
@@ -1014,6 +1111,30 @@ impl<T: ?Sized + Send + Sync + 'static> OriginalExactArcAliasInventory<T> {
         let slot = &mut self.slots[binding.index];
         ensure!(self.closed && slot.original.is_none() && !slot.transferred, "actual canonical Arc owner has not transferred or already recorded");
         slot.transferred = true; Ok(())
+    }
+    /// Whether this inventory holds no canonical owner: every retained Arc
+    /// has been checked out to its typed receiver.
+    fn retains_no_original(&self) -> bool {
+        self.slots.iter().all(|slot| slot.original.is_none())
+    }
+}
+impl<T: ?Sized + Send + Sync + 'static> Drop for OriginalExactArcAliasInventory<T> {
+    fn drop(&mut self) {
+        // An inventory that still holds a canonical owner has not handed it to
+        // its typed receiver; that owner stays retained until the process
+        // exits. Empty slots hold only identities and release normally.
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(unsafe { std::mem::ManuallyDrop::take(&mut self.slots) });
+            return;
+        }
+        let settled = self.retains_no_original();
+        let slots = unsafe { std::mem::ManuallyDrop::take(&mut self.slots) };
+        if settled {
+            drop(slots);
+        } else {
+            lillux::custody::abandon("lillux-sqlite::arc-alias-inventory", slots);
+        }
     }
 }
 
@@ -1202,13 +1323,53 @@ impl OriginalDestinationOutsideCustody {
         if let Err(error) = checked { return Err((self, error)); }
         Ok(OriginalDestinationRetirement { destination: std::mem::ManuallyDrop::new(self) })
     }
+    /// The joins `into_retired` requires of this owner itself: both joins
+    /// complete, no unregistered source, every registration retired and the
+    /// typed continuation reporting its holders retired.
+    fn retirement_settled(&self) -> bool {
+        self.roots_registered && self.native_references_retired
+            && matches!(self.physical_holders_retired(), Ok(true))
+    }
+}
+impl Drop for OriginalDestinationOutsideCustody {
+    fn drop(&mut self) {
+        // A destination whose joins and holder retirement are complete holds
+        // no live physical source and releases normally. Otherwise its roots,
+        // locks and continuation stay retained until the process exits.
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners; no
+            // continuation callback runs here.
+            lillux::custody::relinquish_in_foreign_process(unsafe { (
+                std::mem::ManuallyDrop::take(&mut self.sources),
+                std::mem::ManuallyDrop::take(&mut self.continuation),
+            ) });
+            return;
+        }
+        let settled = self.retirement_settled();
+        let sources = unsafe { std::mem::ManuallyDrop::take(&mut self.sources) };
+        let continuation = unsafe { std::mem::ManuallyDrop::take(&mut self.continuation) };
+        if settled {
+            drop(sources);
+            drop(continuation);
+        } else {
+            lillux::custody::abandon("lillux-sqlite::destination-outside-custody", (sources, continuation));
+        }
+    }
+}
+impl Drop for OriginalDestinationRetirement {
+    fn drop(&mut self) {
+        // Only into_retired consumes the permit, and it bypasses this Drop.
+        // The destination's own Drop releases it only when its joins and
+        // holder retirement are complete; otherwise it stays retained.
+        drop(unsafe { std::mem::ManuallyDrop::take(&mut self.destination) });
+    }
 }
 impl OriginalDestinationRetirement {
     /// Consume this exact destination only after its own same-registry receipts
     /// and typed continuation report physical retirement. This transition has
     /// no factory, aggregate, or resident-region access by construction.
     pub fn into_retired(
-        mut self,
+        self,
         registry: &crate::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> std::result::Result<(), (Self, anyhow::Error)> {
@@ -1247,18 +1408,22 @@ impl OriginalDestinationRetirement {
         })();
         if let Err(error) = checked { return Err((self, error)); }
 
-        let destination = unsafe { std::mem::ManuallyDrop::take(&mut self.destination) };
-        let OriginalDestinationOutsideCustody {
-            process: _, mut sources, mut continuation, registrations, ..
-        } = destination;
+        let mut retirement = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `retirement` is never dropped; its only field moves out once.
+        let destination = unsafe { std::mem::ManuallyDrop::take(&mut retirement.destination) };
+        let mut destination = std::mem::ManuallyDrop::new(destination);
         // SAFETY: the checks above require an empty source vector, retired
         // registrations, and the concrete owner's positive holder-retirement
         // predicate. These ManuallyDrop fields have no live physical source.
+        // `destination` is never dropped and each owned field ends once;
+        // `process`, `roots_registered` and `native_references_retired` are
+        // plain copies.
         unsafe {
-            std::mem::ManuallyDrop::drop(&mut sources);
-            std::mem::ManuallyDrop::drop(&mut continuation);
+            std::mem::ManuallyDrop::drop(&mut destination.sources);
+            std::mem::ManuallyDrop::drop(&mut destination.continuation);
+            drop(std::ptr::read(&destination.registrations));
+            drop(std::ptr::read(&destination.registry_identity));
         }
-        drop(registrations);
         Ok(())
     }
 }
@@ -1273,10 +1438,24 @@ impl OriginalDestinationCustodyFailure {
     }
     pub fn into_original_inputs(self) -> std::result::Result<(Arc<OriginalNativeFactory>, Arc<dyn OriginalNativeDestinationAuthority>, anyhow::Error), Self> {
         if self.factory.require_process().is_err() { return Err(self); }
-        let Self { factory, authority, error } = self;
-        Ok((std::mem::ManuallyDrop::into_inner(factory), std::mem::ManuallyDrop::into_inner(authority), error))
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is moved out once.
+        let factory = unsafe { std::mem::ManuallyDrop::take(&mut failure.factory) };
+        let authority = unsafe { std::mem::ManuallyDrop::take(&mut failure.authority) };
+        let error = unsafe { std::ptr::read(&failure.error) };
+        Ok((factory, authority, error))
     }
     pub fn error(&self) -> &anyhow::Error { &self.error }
+}
+impl Drop for OriginalDestinationCustodyFailure {
+    fn drop(&mut self) {
+        // Only into_original_inputs settles a refused transfer. The factory and
+        // destination authority it returns stay retained until the process
+        // exits rather than end outside their original domain owner.
+        let factory = unsafe { std::mem::ManuallyDrop::take(&mut self.factory) };
+        let authority = unsafe { std::mem::ManuallyDrop::take(&mut self.authority) };
+        lillux::custody::abandon("lillux-sqlite::destination-custody-failure", (factory, authority));
+    }
 }
 impl std::fmt::Debug for OriginalDestinationCustodyFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("actual destination authority retained") }
@@ -3094,7 +3273,7 @@ impl LiveOperationalInitializationFailure {
         self.outcome
     }
     pub fn into_parts(
-        mut self,
+        self,
     ) -> std::result::Result<
         (anyhow::Error, OriginalNativeConnection, LiveOperationalInitializationOutcome),
         Self,
@@ -3103,8 +3282,21 @@ impl LiveOperationalInitializationFailure {
             return Err(self);
         }
         // Exactly this retained owner transfers once, together with its partial facts.
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is moved out once;
+        // `outcome` is a plain copy.
+        let owner = unsafe { std::mem::ManuallyDrop::take(&mut failure.owner) };
+        let error = unsafe { std::ptr::read(&failure.error) };
+        Ok((error, owner, failure.outcome))
+    }
+}
+impl Drop for LiveOperationalInitializationFailure {
+    fn drop(&mut self) {
+        // Only into_parts settles an initialization refusal, and it bypasses
+        // this Drop. The live connection performs no cleanup from here: the
+        // whole owner stays retained until the process exits.
         let owner = unsafe { std::mem::ManuallyDrop::take(&mut self.owner) };
-        Ok((self.error, owner, self.outcome))
+        lillux::custody::abandon("lillux-sqlite::live-operational-initialization-failure", owner);
     }
 }
 impl std::fmt::Debug for LiveOperationalInitializationFailure {
@@ -3580,23 +3772,17 @@ impl OriginalNativeConnection {
 impl Drop for OriginalNativeConnection {
     fn drop(&mut self) {
         if self.factory.require_process().is_err() {
-            if let Some(p) = self.producer.take() {
-                std::mem::forget(p);
-            }
-            if let Some(destination) = self.destination.take() {
-                std::mem::forget(destination);
-            }
+            // A copy in another process owns no native handle of the original
+            // and may neither allocate nor enter a copied mutex; its copied
+            // owners are relinquished without running their destructors.
+            lillux::custody::relinquish_in_foreign_process(
+                (self.producer.take(), self.destination.take(), self.body.take()));
+            return;
         }
         if let Some(body) = self.body.take() {
-            if self.factory.require_process().is_ok() {
-                // No terminal from Drop: the unsupervised body stays retained.
-                crate::retain_abandoned_sqlite_owner(
-                    crate::AbandonedSqliteOwnerKind::NativeConnection, Box::new(body));
-            } else {
-                // A forked copy owns no native handle of the original process
-                // and may neither allocate nor enter a copied mutex.
-                std::mem::forget(body);
-            }
+            // No terminal from Drop: the unsupervised body stays retained.
+            crate::retain_abandoned_sqlite_owner(
+                crate::AbandonedSqliteOwnerKind::NativeConnection, body);
         }
     }
 }
@@ -4085,9 +4271,30 @@ impl OriginalSchedulerRetirementFailure {
         if require_current_native_process().is_err() { return Err(self); }
         let owner = self.owner.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
         if owner.body.factory().require_process().is_err() { return Err(self); }
-        // SAFETY: the process-checked exclusive owner is taken exactly once.
-        let mutex = unsafe { std::mem::ManuallyDrop::take(&mut self.owner) };
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: the process-checked exclusive owner is taken exactly once;
+        // `failure` is never dropped and its error is read once.
+        let mutex = unsafe { std::mem::ManuallyDrop::take(&mut failure.owner) };
+        drop(unsafe { std::ptr::read(&failure.error) });
         Ok(mutex.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+impl Drop for OriginalSchedulerRetirementFailure {
+    fn drop(&mut self) {
+        // Only into_owner settles a retirement refusal, and it bypasses this
+        // Drop. The retained retirement keeps every phase owner until the
+        // process exits.
+        let owner = unsafe { std::mem::ManuallyDrop::take(&mut self.owner) };
+        lillux::custody::abandon("lillux-sqlite::scheduler-retirement-failure", owner);
+    }
+}
+impl Drop for OriginalSchedulerRetirement {
+    fn drop(&mut self) {
+        // Only a completed release or abort settles a retirement, and it
+        // bypasses this Drop. Any other drop keeps the connection, partial role
+        // owner, destination and producer retained until the process exits.
+        let body = unsafe { std::mem::ManuallyDrop::take(&mut self.body) };
+        lillux::custody::abandon("lillux-sqlite::scheduler-retirement", body);
     }
 }
 impl OriginalNativeConnection {
@@ -4349,9 +4556,11 @@ impl OriginalSchedulerRetirement {
         })();
         if let Err(error) = result { return Err(self.failure(error)); }
         let receipt = self.body.terminal.take().expect("actual retained retirement terminal");
+        let mut retirement = std::mem::ManuallyDrop::new(self);
         // SAFETY: explicit successful physical release and terminal completed;
         // only Rust custody is disposed here, with no automatic native close.
-        unsafe { std::mem::ManuallyDrop::drop(&mut self.body); }
+        // `retirement` is never dropped; its only field is dropped once.
+        unsafe { std::mem::ManuallyDrop::drop(&mut retirement.body); }
         Ok(receipt)
     }
 }
@@ -4510,12 +4719,12 @@ impl OriginalNativeCloseFailure {
 impl Drop for OriginalNativeCloseFailure {
     fn drop(&mut self) {
         if self.factory.require_process().is_err() {
-            if let Some(p) = self.producer.take() {
-                std::mem::forget(p);
-            }
-            if let Some(destination) = self.destination.take() {
-                std::mem::forget(destination);
-            }
+            // A copy in another process owns none of these handles. The
+            // copied producer and destination are relinquished without
+            // allocating, locking or running their destructors; the copied
+            // close owner is never dropped.
+            lillux::custody::relinquish_in_foreign_process(
+                (self.producer.take(), self.destination.take()));
             return;
         }
         if let Some(owner) = self
@@ -4525,7 +4734,7 @@ impl Drop for OriginalNativeCloseFailure {
             .take()
         {
             crate::retain_abandoned_sqlite_owner(
-                crate::AbandonedSqliteOwnerKind::NativeCloseFailure, Box::new(owner));
+                crate::AbandonedSqliteOwnerKind::NativeCloseFailure, owner);
         }
         unsafe {
             std::mem::ManuallyDrop::drop(&mut self.owner);
@@ -4653,10 +4862,9 @@ impl OriginalNativeOpenFailure {
             self.admission_failure = Some(failure);
             return Err(error);
         }
-        let OriginalNativeConnectionAdmissionFailure { original, error } = failure;
+        let (original, error) = failure.into_fields();
         self.error = std::mem::replace(&mut self.error,
             anyhow!("original admission error transferred")).context(error);
-        let original = std::mem::ManuallyDrop::into_inner(original);
         self.ticket = Some(original.ticket);
         self.producer = Some(original.producer);
         Ok(())
@@ -4837,12 +5045,12 @@ impl OriginalNativeOpenFailure {
 impl Drop for OriginalNativeOpenFailure {
     fn drop(&mut self) {
         if self.factory.require_process().is_err() {
-            if let Some(p) = self.producer.take() {
-                std::mem::forget(p);
-            }
-            if let Some(destination) = self.destination.take() {
-                std::mem::forget(destination);
-            }
+            // A copy in another process owns none of these handles. The
+            // copied producer and destination are relinquished without
+            // allocating, locking or running their destructors; the copied
+            // close owner is never dropped.
+            lillux::custody::relinquish_in_foreign_process(
+                (self.producer.take(), self.destination.take()));
             return;
         }
         if let Some(owner) = self
@@ -4852,7 +5060,7 @@ impl Drop for OriginalNativeOpenFailure {
             .take()
         {
             crate::retain_abandoned_sqlite_owner(
-                crate::AbandonedSqliteOwnerKind::NativeOpenFailure, Box::new(owner));
+                crate::AbandonedSqliteOwnerKind::NativeOpenFailure, owner);
         }
         unsafe {
             std::mem::ManuallyDrop::drop(&mut self.owner);
@@ -4973,9 +5181,27 @@ impl OriginalNativeOutsideConnectionCustody {
     /// Consumes the actual packet into accessible original resource owners.
     /// The outside supervisor must preserve them and retire their real affinity
     /// and physical obligations explicitly; none of these facts issues a grant.
-    pub fn into_original_parts(mut self) -> std::result::Result<OriginalNativeOutsideConnectionParts, Self> {
+    pub fn into_original_parts(self) -> std::result::Result<OriginalNativeOutsideConnectionParts, Self> {
         if self.process != std::process::id() { return Err(self); }
-        Ok(unsafe { std::mem::ManuallyDrop::take(&mut self.parts) })
+        let mut custody = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `custody` is never dropped; its only owned field moves out
+        // once and `process` is a plain copy.
+        Ok(unsafe { std::mem::ManuallyDrop::take(&mut custody.parts) })
+    }
+}
+impl Drop for OriginalNativeOutsideConnectionCustody {
+    fn drop(&mut self) {
+        // Only into_original_parts hands this packet to its outside
+        // supervisor, and it bypasses this Drop. Dropped here, its
+        // descriptor, inspection and destination owners stay retained until
+        // the process exits.
+        let parts = unsafe { std::mem::ManuallyDrop::take(&mut self.parts) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(parts);
+            return;
+        }
+        lillux::custody::abandon("lillux-sqlite::native-outside-connection-custody", parts);
     }
 }
 pub struct OriginalNativeOutsideCustodyFailure {
@@ -4983,13 +5209,26 @@ pub struct OriginalNativeOutsideCustodyFailure {
     original: std::mem::ManuallyDrop<OriginalNativeConnectionTerminal>,
 }
 impl OriginalNativeOutsideCustodyFailure {
-    pub fn into_original(mut self) -> std::result::Result<OriginalNativeConnectionTerminal, Self> {
+    pub fn into_original(self) -> std::result::Result<OriginalNativeConnectionTerminal, Self> {
         let factory = match &*self.original {
             OriginalNativeConnectionTerminal::Closed(owner) => &owner.factory,
             OriginalNativeConnectionTerminal::Released(owner) => &owner.factory,
         };
         if factory.require_process().is_err() { return Err(self); }
-        Ok(unsafe { std::mem::ManuallyDrop::take(&mut self.original) })
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `failure` is never dropped and each field is moved out once.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut failure.original) };
+        drop(unsafe { std::ptr::read(&failure.error) });
+        Ok(original)
+    }
+}
+impl Drop for OriginalNativeOutsideCustodyFailure {
+    fn drop(&mut self) {
+        // Only into_original settles a refused outside handoff, and it
+        // bypasses this Drop. The terminal keeps its input and descriptor
+        // owners retained until the process exits.
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut self.original) };
+        lillux::custody::abandon("lillux-sqlite::native-outside-custody-failure", original);
     }
 }
 impl std::fmt::Debug for OriginalNativeOutsideCustodyFailure {
@@ -6311,5 +6550,93 @@ mod original_native_counter_controls {
         let error = budget.debit_steps(1, false).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
         assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_controls {
+    use super::*;
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    #[test]
+    fn dropped_alias_inventory_retains_only_a_held_original() {
+        const KIND: &str = "lillux-sqlite::arc-alias-inventory";
+        let prepay = |_: u64, _: u64| -> Result<()> { Ok(()) };
+        // SAFETY: test-only inventory over an ordinary heap owner.
+        let empty = unsafe { OriginalExactArcAliasInventory::<u8>::issued(1, &prepay) }.unwrap();
+        let before = abandoned(KIND);
+        drop(empty);
+        assert_eq!(abandoned(KIND), before, "an inventory holding no original is settled");
+        // SAFETY: as above.
+        let mut held = unsafe { OriginalExactArcAliasInventory::<u8>::issued(1, &prepay) }.unwrap();
+        let original = Arc::new(7u8);
+        let _binding = held
+            .retain_original(Arc::clone(&original), &prepay)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        drop(held);
+        assert_eq!(abandoned(KIND), before + 1);
+        assert_eq!(Arc::strong_count(&original), 2, "the canonical owner stays retained");
+    }
+
+    struct AdmittedLease;
+    impl OriginalNativeProjectionLeaseAuthority for AdmittedLease {
+        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+            Ok(())
+        }
+        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
+            -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+        }
+    }
+
+    #[test]
+    fn dropped_unused_lease_inputs_retain_the_metadata_descriptor() {
+        const KIND: &str = "lillux-sqlite::projection-lease-inputs";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        // SAFETY: test-only inputs that never reach a factory; no native
+        // code consumes this descriptor.
+        let inputs = unsafe {
+            OriginalProjectionLeaseInputs::issued(
+                Arc::clone(&root), tempfile::tempfile().unwrap(),
+                OriginalProjectionLeaseMode::Shared, Arc::new(AdmittedLease),
+            )
+        };
+        let before = abandoned(KIND);
+        drop(inputs);
+        assert_eq!(abandoned(KIND), before + 1);
+        assert_eq!(Arc::strong_count(&root), 1, "only the descriptor is retained");
+    }
+
+    /// A continuation whose holders never retire.
+    struct HeldContinuation;
+    // SAFETY: test-only continuation; it owns no original resource.
+    unsafe impl OriginalOutsideDestinationContinuation for HeldContinuation {
+        fn require_original_process(&self) -> Result<()> { Ok(()) }
+        fn retire_native_references(&mut self, _factory: &Arc<OriginalNativeFactory>,
+            _aggregate: &OriginalNativeTerminal, _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> { Ok(()) }
+        unsafe fn register_shared_roots(&mut self,
+            _registry: &mut crate::original_physical_custody::OriginalPhysicalRegistry,
+            _prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> { Ok(()) }
+        fn physical_holders_retired(&self) -> Result<bool> { Ok(false) }
+        fn physical_holders_retirement_quote(
+            &self,
+        ) -> Result<crate::original_physical_custody::OutsideWork> {
+            Ok(crate::original_physical_custody::OutsideWork::ZERO)
+        }
+    }
+
+    #[test]
+    fn dropped_unretired_destination_custody_retains_its_continuation() {
+        const KIND: &str = "lillux-sqlite::destination-outside-custody";
+        // SAFETY: test-only custody with no physical source.
+        let custody = unsafe { OriginalDestinationOutsideCustody::issued(Vec::new(), Box::new(HeldContinuation)) };
+        let before = abandoned(KIND);
+        drop(custody);
+        assert_eq!(abandoned(KIND), before + 1);
     }
 }

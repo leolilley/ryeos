@@ -56,7 +56,7 @@ pub use exec::{
     fork_exclusions_held_until_exit, in_forked_child, retain_fork_sensitive_descriptors_until,
     try_retain_fork_sensitive_descriptors,
 };
-pub use custody::{AbandonedCustodyReport, abandon, abandoned_custody};
+pub use custody::{AbandonedCustodyReport, abandon, abandoned_custody, relinquish_in_foreign_process};
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
 };

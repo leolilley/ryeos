@@ -23,7 +23,7 @@ static ABANDONED: Mutex<Vec<(&'static str, Box<dyn Any + Send>)>> = Mutex::new(V
 /// entering the copied registry lock.
 pub fn abandon<T: Send + 'static>(kind: &'static str, owner: T) {
     if crate::exec::in_forked_child() {
-        crate::exec::relinquish_forked_child_owner(owner);
+        relinquish_in_foreign_process(owner);
         return;
     }
     let owner: Box<dyn Any + Send> = Box::new(owner);
@@ -31,6 +31,24 @@ pub fn abandon<T: Send + 'static>(kind: &'static str, owner: T) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((kind, owner));
+}
+
+/// Give up a copied process's copy of an owner without running its
+/// destructor.
+///
+/// Use this only where the caller has already established that the running
+/// process is not the one that issued `owner`, such as a forked child holding
+/// a copy of its parent's memory. Every native handle, descriptor or lock
+/// inside the copy belongs to the original process, which retains the real
+/// owner; running the copy's destructor would act on custody this process does
+/// not hold, and recording it would allocate or enter a mutex copied
+/// mid-operation by the fork. This is the only place an owner's destructor is
+/// deliberately skipped: the named binding below holds the copy until the end
+/// of this frame and is never dropped. Allocation-free and lock-free, so it is
+/// safe between fork and exec. Never call it in the issuing process; an owner
+/// dropped there unsettled goes to [`abandon`].
+pub fn relinquish_in_foreign_process<T>(owner: T) {
+    let _relinquished_foreign_copy = std::mem::ManuallyDrop::new(owner);
 }
 
 /// Counts of owners this process retains because they were dropped without

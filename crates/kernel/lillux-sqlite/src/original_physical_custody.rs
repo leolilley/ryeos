@@ -134,6 +134,17 @@ struct Slot {
     operator_body: Option<ManuallyDrop<lillux::ExactExclusiveFileLock>>,
     observation: Arc<Observation>,
 }
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // Only operator-target retirement consumes the exclusive lock body.
+        // A slot dropped while still holding it keeps the lock and its
+        // registered descriptors retained until the process exits.
+        #[cfg(target_os = "linux")]
+        if let Some(body) = self.operator_body.take() {
+            lillux::custody::abandon("lillux-sqlite::physical-operator-lock", ManuallyDrop::into_inner(body));
+        }
+    }
+}
 /// Opaque membership in one actual original inventory. Cloning membership
 /// shares observation, not a descriptor, a lock lease, or a new admission.
 #[derive(Clone)]
@@ -667,7 +678,9 @@ impl OriginalPhysicalRegistry {
             process: self.process,
             identity: Arc::clone(&self.identity),
         };
-        drop(ManuallyDrop::into_inner(self.slots));
+        // Every descriptor is retired, so this registry's Drop releases its
+        // bookkeeping slots normally.
+        drop(self);
         Ok(receipt)
     }
     /// # Safety
@@ -1119,6 +1132,17 @@ impl OriginalPhysicalRegistry {
                     && slot.observation.receipt.get().is_some()
             })
     }
+    /// Whether no slot holds a source, an operator lock body or a prepared
+    /// close owner: an unused or emptied inventory owns nothing.
+    fn holds_no_custody(&self) -> bool {
+        self.slots.iter().all(|slot| {
+            #[cfg(target_os = "linux")]
+            if slot.operator_body.is_some() {
+                return false;
+            }
+            slot.source.is_none() && slot.observation.owner.get().is_none()
+        })
+    }
     pub fn descriptors_retired(&self) -> bool {
         self.process == std::process::id()
             && self.sealed
@@ -1129,6 +1153,26 @@ impl OriginalPhysicalRegistry {
                     && slot.observation.owner.get().is_some()
                     && slot.observation.receipt.get().is_some()
             })
+    }
+}
+impl Drop for OriginalPhysicalRegistry {
+    fn drop(&mut self) {
+        // A registry whose every descriptor is retired, the predicate `retire`
+        // requires, or one that holds no source, lock body or close owner at
+        // all releases its slots normally. Otherwise its sources, close owners
+        // and operator locks stay retained until the process exits.
+        let slots = unsafe { ManuallyDrop::take(&mut self.slots) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(slots);
+            return;
+        }
+        let settled = self.descriptors_retired() || self.holds_no_custody();
+        if settled {
+            drop(slots);
+        } else {
+            lillux::custody::abandon("lillux-sqlite::physical-registry", slots);
+        }
     }
 }
 
@@ -1169,6 +1213,36 @@ mod tests {
             Ok(())
         }
         fn debit_original_steps(&self, _work: u64) -> Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn dropped_empty_registry_releases_without_abandoning() {
+        let _serial = crate::test_host::serial_guard();
+        const KIND: &str = "lillux-sqlite::physical-registry";
+        let registry = unsafe { OriginalPhysicalRegistry::issued(2, &|_, _| Ok(())) }.unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(registry);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_unretired_registry_retains_its_slots() {
+        let _serial = crate::test_host::serial_guard();
+        const KIND: &str = "lillux-sqlite::physical-registry";
+        let owner = unsafe {
+            RetainedOriginalFinalizerFile::issued(
+                tempfile::tempfile().unwrap(),
+                crate::OriginalFinalizerFileKind::ControlRecord,
+            )
+        };
+        let mut registry = unsafe { OriginalPhysicalRegistry::issued(1, &|_, _| Ok(())) }.unwrap();
+        let _membership = unsafe {
+            registry.register_control_record(Arc::clone(&owner), &|_, _| Ok(()))
+        }.map_err(|(_, error)| error).unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(registry);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        assert!(Arc::strong_count(&owner) >= 2, "the registered owner stays retained");
     }
 
     #[test]
@@ -1465,7 +1539,7 @@ mod tests {
         drop(account_owner);
         // Fixture RAII cleanup only. It is not a registered close receipt,
         // durable account settlement or production disposal qualification.
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
         assert!(account_backedge.upgrade().is_none());
         let _replacement = lillux::ExactExclusiveFileLock::acquire(&target).unwrap();
     }
@@ -1498,7 +1572,7 @@ mod tests {
         assert!(registry.require_directory_source(&binding, &independently_opened).is_err());
         assert!(!registry.descriptors_retired());
         // Fixture cleanup is not an original production close receipt.
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
     }
 
     #[test]
@@ -1508,7 +1582,7 @@ mod tests {
         assert!(unsafe { registry.seal_inventory() }.is_err());
         assert!(!registry.descriptors_retired());
         // No host owner was ever registered. Dispose only fixture bookkeeping.
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
     }
     #[test]
     fn prepayment_unwind_returns_the_exact_original_root_and_keeps_evidence() {
@@ -1547,7 +1621,7 @@ mod tests {
         assert!(!evidence_dropped.load(Ordering::SeqCst));
         drop(original_payload);
         assert!(evidence_dropped.load(Ordering::SeqCst));
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
     }
     #[test]
     fn alias_scan_budget_refusal_returns_original_before_registration() {
@@ -1579,7 +1653,7 @@ mod tests {
         assert!(Arc::ptr_eq(&returned, &original));
         assert_eq!(registry.slots.len(), 1);
         assert!(!registry.descriptors_retired());
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
     }
 
     #[test]
@@ -1605,7 +1679,7 @@ mod tests {
         assert!(registry.membership_work_bound(u64::MAX, 0).is_err());
         assert_eq!(OriginalPhysicalRegistry::membership_work_quote(2, 3).unwrap().steps,
             OriginalPhysicalRegistry::membership_work_quote(200, 3).unwrap().steps);
-        drop(ManuallyDrop::into_inner(registry.slots));
+        drop(std::mem::take(&mut *registry.slots));
     }
 
     #[test]

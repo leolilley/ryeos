@@ -70,9 +70,26 @@ pub struct OriginalNativeRegionInitializationFailure {
     pub refusal: FixedHostRefusal, budget: ManuallyDrop<OriginalNativeBudget>, process: u32,
 }
 impl OriginalNativeRegionInitializationFailure {
-    pub fn into_budget(mut self) -> Result<OriginalNativeBudget, Self> {
+    pub fn into_budget(self) -> Result<OriginalNativeBudget, Self> {
         if self.process != std::process::id() { return Err(self); }
-        Ok(unsafe { ManuallyDrop::take(&mut self.budget) })
+        // The refusal and process are copied facts; only the budget moves out,
+        // so this failure's own Drop must not run on the emptied slot.
+        let mut failure = ManuallyDrop::new(self);
+        Ok(unsafe { ManuallyDrop::take(&mut failure.budget) })
+    }
+}
+impl Drop for OriginalNativeRegionInitializationFailure {
+    fn drop(&mut self) {
+        // Only into_budget settles a refused initialization. The issued counter
+        // is the sole genuine budget; it stays retained until the process
+        // exits rather than end outside its original controller.
+        let budget = unsafe { ManuallyDrop::take(&mut self.budget) };
+        if self.process != std::process::id() {
+            // A copy in another process holds no issued counter.
+            lillux::custody::relinquish_in_foreign_process(budget);
+            return;
+        }
+        lillux::custody::abandon("lillux-sqlite::region-initialization-failure", budget);
     }
 }
 impl OriginalNativeRegionOwner {
@@ -167,9 +184,26 @@ pub struct OriginalNativeRegionCensus { pub closing: bool, pub handles: usize,
     pub rust_borrows: usize, pub c_borrows: usize, pub pending_retirements: usize }
 pub struct OriginalNativeRegionSealFailure { pub refusal: FixedHostRefusal, owner: ManuallyDrop<OriginalNativeRegionOwner> }
 impl OriginalNativeRegionSealFailure {
-    pub fn into_owner(mut self) -> Result<OriginalNativeRegionOwner, Self> {
+    pub fn into_owner(self) -> Result<OriginalNativeRegionOwner, Self> {
         if self.owner.process != std::process::id() { return Err(self); }
-        Ok(unsafe { ManuallyDrop::take(&mut self.owner) })
+        // The refusal is a copied fact; only the owner moves out, so this
+        // failure's own Drop must not run on the emptied slot.
+        let mut failure = ManuallyDrop::new(self);
+        Ok(unsafe { ManuallyDrop::take(&mut failure.owner) })
+    }
+}
+impl Drop for OriginalNativeRegionSealFailure {
+    fn drop(&mut self) {
+        // Only into_owner settles a refused seal. The sole physical-disposal
+        // controller token stays retained until the process exits, so the
+        // region can never be sealed or released through a lost owner.
+        let owner = unsafe { ManuallyDrop::take(&mut self.owner) };
+        if owner.process != std::process::id() {
+            // A copy in another process holds no controller token.
+            lillux::custody::relinquish_in_foreign_process(owner);
+            return;
+        }
+        lillux::custody::abandon("lillux-sqlite::region-seal-failure", owner);
     }
 }
 pub struct OriginalNativeRegionReleaseExclusion { payload: NonNull<NativeResidentState>, process: u32, generation: u64, disposition: u8, base: usize, bytes: usize }
@@ -301,3 +335,58 @@ fn retire(header: NonNull<RegionHeader>, process: u32, generation: u64, kind: Lo
 impl Drop for OriginalNativeRegionHandle { fn drop(&mut self) { retire(self.header, self.process, self.generation, LoanKind::Handle); } }
 impl Drop for OriginalNativeRegionRustBorrow<'_> { fn drop(&mut self) { retire(self.header, self.process, self.generation, LoanKind::Rust); } }
 impl Drop for OriginalNativeRegionCBorrow { fn drop(&mut self) { retire(self.header, self.process, self.generation, LoanKind::C); } }
+
+#[cfg(all(test, target_os = "linux"))]
+mod custody_drop_controls {
+    use super::*;
+
+    fn raw() -> OriginalNativeBudget {
+        // SAFETY: test-only funding of a region that is never installed.
+        unsafe { OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, 1_000_000, 1, 64) }.unwrap()
+    }
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    #[test]
+    fn dropped_initialization_failure_retains_the_budget() {
+        let _serial = crate::test_host::serial_guard();
+        const KIND: &str = "lillux-sqlite::region-initialization-failure";
+        // A zero generation refuses before the storage is touched.
+        let failure = match unsafe {
+            OriginalNativeRegionOwner::initialize(NonNull::dangling(), 0, raw(), std::process::id(), 0)
+        } {
+            Ok(_) => panic!("a zero generation must be refused"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.refusal, FixedHostRefusal::Provenance);
+        let before = abandoned(KIND);
+        drop(failure);
+        assert_eq!(abandoned(KIND), before + 1);
+    }
+
+    #[test]
+    fn dropped_seal_failure_retains_the_region_owner() {
+        let _serial = crate::test_host::serial_guard();
+        const KIND: &str = "lillux-sqlite::region-seal-failure";
+        let quote = original_native_region_layout().unwrap();
+        // SAFETY: a fresh aligned allocation of the quoted layout, used only by
+        // this region; the retained owner keeps it for the process lifetime.
+        let storage = NonNull::new(unsafe { std::alloc::alloc_zeroed(quote.layout) }).unwrap();
+        let owner = match unsafe {
+            OriginalNativeRegionOwner::initialize(storage, quote.layout.size(), raw(), std::process::id(), 1)
+        } {
+            Ok(owner) => owner,
+            Err(failure) => panic!("initialization refused: {}", failure.refusal),
+        };
+        // An open region cannot seal.
+        let failure = match owner.seal() {
+            Ok(_) => panic!("an open region must refuse to seal"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.refusal, FixedHostRefusal::ReferencesRemain);
+        let before = abandoned(KIND);
+        drop(failure);
+        assert_eq!(abandoned(KIND), before + 1);
+    }
+}

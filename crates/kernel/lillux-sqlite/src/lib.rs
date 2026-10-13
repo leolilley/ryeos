@@ -5,6 +5,8 @@
 pub const SQLITE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("sqlite");
 
 mod binding;
+#[cfg(test)]
+mod custody_drop_gate;
 mod native;
 pub mod offline_host;
 pub mod original_host_owner;
@@ -272,14 +274,27 @@ impl SqliteInspectionProductionPublicationFailure {
     pub fn retire_uninstalled_factory_issuer(&self) -> Result<()> {
         self.permit.retire_uninstalled_factory_issuer()
     }
-    pub fn into_parts(mut self) -> std::result::Result<(SqliteInspectionProductionKind, Arc<dyn SqliteInspectionProductionControl>, OriginalNativeProducerControl), Self> {
+    pub fn into_parts(self) -> std::result::Result<(SqliteInspectionProductionKind, Arc<dyn SqliteInspectionProductionControl>, OriginalNativeProducerControl), Self> {
         let ProductionControlOwner::Region { core, .. } = &self.permit.control else { return Err(self); };
         if core.observation().is_err() { return Err(self); }
-        let permit = unsafe { std::mem::ManuallyDrop::take(&mut self.permit) };
-        let mut permit = std::mem::ManuallyDrop::new(permit);
+        // The refusal is a copied fact; only the permit moves out, so this
+        // failure's own Drop must not run on the emptied slot.
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        let permit = unsafe { std::mem::ManuallyDrop::take(&mut failure.permit) };
+        let permit = std::mem::ManuallyDrop::new(permit);
         let control = unsafe { std::ptr::read(&permit.control) };
         let ProductionControlOwner::Region { control, core } = control else { unreachable!("same retained region control") };
         Ok((permit.kind, control, core))
+    }
+}
+impl Drop for SqliteInspectionProductionPublicationFailure {
+    fn drop(&mut self) {
+        // Only into_parts settles a publication refusal. Until then the permit
+        // holds its resident producer cell and region handle; releasing them
+        // here would bypass the supervised recovery, so the whole permit stays
+        // retained until the process exits.
+        let permit = unsafe { std::mem::ManuallyDrop::take(&mut self.permit) };
+        lillux::custody::abandon("lillux-sqlite::production-publication-failure", permit);
     }
 }
 impl Drop for SqliteInspectionProductionPermit {
@@ -663,12 +678,12 @@ impl Drop for RetainedSqliteDestinationRole {
         if let DestinationRoleState::Open(file) =
             std::mem::replace(state, DestinationRoleState::Retired)
         {
-            retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::DestinationRole, Box::new(file));
+            retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::DestinationRole, file);
         }
         // PendingRaw is also preserved. No close of an unverified numeric FD.
     }
 }
-/// What kind of owner the abandoned-owner registry holds.
+/// What kind of SQLite owner was retained without supervised close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbandonedSqliteOwnerKind {
     DestinationRole,
@@ -677,23 +692,29 @@ pub(crate) enum AbandonedSqliteOwnerKind {
     NativeCloseFailure,
     NativeOpenFailure,
 }
+impl AbandonedSqliteOwnerKind {
+    /// The kind under which the process custody holder counts this owner.
+    const fn custody_kind(self) -> &'static str {
+        match self {
+            Self::DestinationRole => "lillux-sqlite::destination-role",
+            Self::BoundConnection => "lillux-sqlite::bound-connection",
+            Self::NativeConnection => "lillux-sqlite::native-connection",
+            Self::NativeCloseFailure => "lillux-sqlite::native-close-failure",
+            Self::NativeOpenFailure => "lillux-sqlite::native-open-failure",
+        }
+    }
+}
 
-/// Process-lifetime retention of SQLite owners discarded without supervised
-/// close. Their native handles or descriptors may still be live, and closing
-/// them from a destructor would bypass the supervised terminal, so each owner
-/// stays reachable here until the process exits. Nothing is ever removed.
-static ABANDONED_SQLITE_OWNERS: std::sync::Mutex<
-    Vec<(AbandonedSqliteOwnerKind, Box<dyn std::any::Any + Send>)>,
-> = std::sync::Mutex::new(Vec::new());
-
-pub(crate) fn retain_abandoned_sqlite_owner(
+/// Retain a SQLite owner discarded without supervised close. Its native
+/// handles or descriptors may still be live, and closing them from a
+/// destructor would bypass the supervised terminal, so the owner stays
+/// reachable in the process custody holder until the process exits. In the
+/// child of a protected fork the copy is relinquished without allocating.
+pub(crate) fn retain_abandoned_sqlite_owner<T: Send + 'static>(
     kind: AbandonedSqliteOwnerKind,
-    owner: Box<dyn std::any::Any + Send>,
+    owner: T,
 ) {
-    ABANDONED_SQLITE_OWNERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push((kind, owner));
+    lillux::custody::abandon(kind.custody_kind(), owner);
 }
 
 /// Count of SQLite owners this process retains because they were discarded
@@ -708,23 +729,17 @@ pub struct AbandonedSqliteOwners {
     pub native_open_failures: usize,
 }
 
-/// Report the abandoned SQLite owners this process retains.
+/// Report the abandoned SQLite owners this process retains: the SQLite
+/// connection and destination kinds of the process custody holder.
 pub fn abandoned_sqlite_owners() -> AbandonedSqliteOwners {
-    let retained = ABANDONED_SQLITE_OWNERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut report = AbandonedSqliteOwners::default();
-    for (kind, _) in retained.iter() {
-        let count = match kind {
-            AbandonedSqliteOwnerKind::DestinationRole => &mut report.destination_roles,
-            AbandonedSqliteOwnerKind::BoundConnection => &mut report.bound_connections,
-            AbandonedSqliteOwnerKind::NativeConnection => &mut report.native_connections,
-            AbandonedSqliteOwnerKind::NativeCloseFailure => &mut report.native_close_failures,
-            AbandonedSqliteOwnerKind::NativeOpenFailure => &mut report.native_open_failures,
-        };
-        *count += 1;
+    let retained = lillux::custody::abandoned_custody();
+    AbandonedSqliteOwners {
+        destination_roles: retained.count(AbandonedSqliteOwnerKind::DestinationRole.custody_kind()),
+        bound_connections: retained.count(AbandonedSqliteOwnerKind::BoundConnection.custody_kind()),
+        native_connections: retained.count(AbandonedSqliteOwnerKind::NativeConnection.custody_kind()),
+        native_close_failures: retained.count(AbandonedSqliteOwnerKind::NativeCloseFailure.custody_kind()),
+        native_open_failures: retained.count(AbandonedSqliteOwnerKind::NativeOpenFailure.custody_kind()),
     }
-    report
 }
 
 /// Native refusal/error retains the exact original owner and observed disposition.
@@ -4302,7 +4317,7 @@ impl Drop for BoundSqliteConnection {
                 if let Some(mut binding) = self.binding.take() {
                     binding.abandon(&refused);
                 }
-                retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::BoundConnection, Box::new(refused));
+                retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::BoundConnection, refused);
             }
         }
         // Binding closes retained host descriptors only after connection close.
