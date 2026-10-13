@@ -472,6 +472,7 @@ fn plant_native_resume_tool(project_path: &Path, signer: &SigningKey) -> anyhow:
 executor_id: "@subprocess"
 category: "resume_tool"
 description: "test runtime with native_resume"
+execution_protocol: "protocol:ryeos/core/opaque"
 native_resume: true
 config:
   command: "/usr/bin/sleep"
@@ -488,6 +489,7 @@ config:
 executor_id: "tool:resume_tool/runtime"
 category: "resume"
 description: "native_resume test tool"
+execution_protocol: "protocol:ryeos/core/opaque"
 "#;
     let signed = lillux::signature::sign_content(tool_body, signer, "#", None);
     std::fs::write(tool_dir.join("resume_test.yaml"), signed)?;
@@ -590,6 +592,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // ── Phase 1: Execute the tool (detached) ────────────────────
     let body = serde_json::json!({
         "item_ref": "tool:resume/resume_test",
+        "launch_id": "L-0123456789abcdef0123456789abcdef",
         "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
