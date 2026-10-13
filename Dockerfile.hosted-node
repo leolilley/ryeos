@@ -2,7 +2,7 @@
 #
 # ryeosd-hosted-node — lean hosted remote-node image.
 #
-# This image bakes the exact hosted-node set: core + central-auth + hosted-node
+# This image bakes the exact hosted-node set: core + hosted-node
 # policy. It does not include standard/ryeos-ui/web, so it can run the
 # decentralized remote admission/execution substrate without workflow
 # runtimes or UI bundles.
@@ -62,7 +62,6 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 
 COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

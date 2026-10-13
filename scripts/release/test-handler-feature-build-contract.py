@@ -40,7 +40,17 @@ def resolved(bundle, binaries):
 
 
 def required_features(binary):
-    return ["basic-parsers"] if binary.startswith("rye-parser-") else ["full-handlers"]
+    if binary.startswith("rye-parser-"):
+        return ["basic-parsers"]
+    if binary in {"rye-composer-identity", "ryeos-direct-execution-evidence", "ryeos-scoped-qualification-execution-evidence"}:
+        return ["core-handlers"]
+    if binary == "rye-composer-extends-chain":
+        return ["extends-composer"]
+    if binary == "ryeos-directive-launch-preparer":
+        return ["directive-handlers"]
+    if binary in {"ryeos-graph-effective-validator", "ryeos-graph-launch-preparer", "ryeos-graph-execution-evidence"}:
+        return ["graph-handlers"]
+    raise ValueError(f"unknown fixture handler {binary!r}")
 
 
 def release_request(bundle, binaries, *, mutate=None, package=PACKAGE):
@@ -55,8 +65,12 @@ def release_request(bundle, binaries, *, mutate=None, package=PACKAGE):
                 for binary in sorted(binaries)]
     features = sorted({feature for payload in payloads
                        for feature in payload["required_features"]})
-    if "full-handlers" in features:
-        features.remove("basic-parsers") if "basic-parsers" in features else None
+    features = set(features)
+    if features & {"graph-handlers", "directive-handlers"}:
+        features -= {"core-handlers", "basic-parsers", "extends-composer"}
+    elif "core-handlers" in features:
+        features.discard("basic-parsers")
+    features = sorted(features)
     value = {"schema": "ryeos.bundle_release_input_plan.v2", "project_path": "/source",
              "bundle_name": bundle,
              "authored_manifest": {"name": bundle, "version": "1.0.0"},
@@ -126,8 +140,8 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
             runpy.run_path(str(script), run_name="__main__")
         return json.loads(stdout.getvalue()), cargo
 
-    def test_native_basic_and_full_selections_reach_cargo_and_evidence(self):
-        for binary in ("rye-parser-regex-kv", "ryeos-directive-launch-preparer"):
+    def test_native_basic_core_and_workflow_selections_reach_cargo_and_evidence(self):
+        for binary in ("rye-parser-regex-kv", "rye-composer-identity", "rye-composer-extends-chain", "ryeos-graph-launch-preparer", "ryeos-directive-launch-preparer"):
             with self.subTest(binary=binary), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 setup_project(root, "demo")
@@ -145,7 +159,7 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
                 self.assertEqual(output["processes"][0]["argv"], argv)
                 self.assertTrue((root / "products/native-bundle/tree/.ai/bin" / TRIPLE / binary).is_file())
 
-    def test_core_seed_uses_full_handler_selection(self):
+    def test_core_seed_uses_core_handler_selection(self):
         binaries = ["rye-parser-yaml-document", "ryeos-direct-execution-evidence"]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -158,16 +172,35 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
                 os.chdir(old)
             argv = cargo.call_args.args[0]
             self.assertIn("--no-default-features", argv)
-            self.assertEqual(argv[argv.index("--features") + 1], "full-handlers")
+            self.assertEqual(argv[argv.index("--features") + 1], "core-handlers")
             self.assertEqual(output["processes"][0]["argv"], argv)
             self.assertEqual([argv[index + 1] for index, token in enumerate(argv[:-1])
                               if token == "--bin"], sorted(binaries))
+
+    def test_independent_roots_survive_aggregate_selection(self):
+        cases = [
+            (["ryeos-graph-launch-preparer", "ryeos-directive-launch-preparer", "rye-composer-extends-chain", "rye-composer-identity"], "directive-handlers,graph-handlers"),
+            (["rye-composer-extends-chain", "rye-composer-identity"], "core-handlers,extends-composer"),
+        ]
+        for binaries, expected in cases:
+            with self.subTest(binaries=binaries), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                setup_project(root, "demo")
+                old = Path.cwd()
+                try:
+                    os.chdir(root)
+                    _, cargo = self.invoke(NATIVE, release_request("demo", binaries))
+                finally:
+                    os.chdir(old)
+                argv = cargo.call_args.args[0]
+                self.assertEqual(argv[argv.index("--features") + 1], expected)
+                self.assertEqual([argv[i + 1] for i, token in enumerate(argv[:-1]) if token == "--bin"], sorted(binaries))
 
     def test_stale_selection_is_rejected_before_cargo(self):
         mutations = (
             lambda value, payloads: value.update(cargo_feature_selections=[]),
             lambda value, payloads: value.update(cargo_feature_selections=[
-                {"cargo_package": PACKAGE, "features": ["basic-parsers", "full-handlers"]}]),
+                {"cargo_package": PACKAGE, "features": ["basic-parsers", "core-handlers"]}]),
             lambda value, payloads: value.update(cargo_feature_selections=[
                 {"cargo_package": PACKAGE, "features": ["basic-parsers"]},
                 {"cargo_package": PACKAGE, "features": ["basic-parsers"]}]),
@@ -175,7 +208,7 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
                 {"cargo_package": "ryeos-wrong-package", "features": ["basic-parsers"]}]),
             lambda value, payloads: value.update(cargo_feature_selections=[
                 {"cargo_package": PACKAGE, "features": ["basic-parsers", "unlisted"]}]),
-            lambda value, payloads: payloads[0].update(required_features=["full-handlers"]),
+            lambda value, payloads: payloads[0].update(required_features=["core-handlers"]),
         )
         for script, bundle, binary in (
                 (NATIVE, "demo", "rye-parser-regex-kv"),

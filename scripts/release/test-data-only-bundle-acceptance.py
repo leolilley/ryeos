@@ -242,7 +242,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         }]
         stale_features = copy.deepcopy(plan)
         stale_features["cargo_feature_selections"] = [{
-            "cargo_package": "ryeos-handler-bins", "features": ["full-handlers"]
+            "cargo_package": "ryeos-handler-bins", "features": ["core-handlers"]
         }]
         cases = [
             ({"release_input": plan}, "verified ownership resolution required"),

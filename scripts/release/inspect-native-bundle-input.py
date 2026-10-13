@@ -73,9 +73,11 @@ def main():
         selected.update(record["required_features"])
     cargo_feature_selections = []
     for package, selected in sorted(features_by_package.items()):
-        # The full composition already includes the basic parser targets.
-        if "full-handlers" in selected:
-            selected = {"full-handlers"}
+        # Larger handler compositions include their smaller targets.
+        if selected & {"graph-handlers", "directive-handlers"}:
+            selected -= {"core-handlers", "basic-parsers", "extends-composer"}
+        elif "core-handlers" in selected:
+            selected.discard("basic-parsers")
         cargo_feature_selections.append({"cargo_package": package, "features": sorted(selected)})
     target = {"kind": "portable"} if args.target == "portable" else {
         "kind": "triple", "triple": args.target

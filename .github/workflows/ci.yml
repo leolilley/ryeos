@@ -266,6 +266,61 @@ jobs:
           RUST_MIN_STACK: 8388608
         run: ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
 
+      - name: Check explicit scheduler compositions
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -j 1 -p ryeos-app --lib --no-default-features
+          cargo tree --locked -p ryeos-app --no-default-features \
+            --edges normal,build --prefix none > "$RUNNER_TEMP/app-production-dependencies.txt"
+          if grep -Eq '^ryeos-scheduler(-service)? v' "$RUNNER_TEMP/app-production-dependencies.txt"; then
+            echo 'Shared App unexpectedly depends on the scheduler implementation' >&2
+            exit 1
+          fi
+          for package in ryeosd ryeos-cli; do
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features
+            cargo tree --locked -p "$package" --no-default-features \
+              --edges normal,build --prefix none > "$RUNNER_TEMP/$package-scheduler-off.txt"
+            if grep -Eq '^ryeos-scheduler(-service)? v' "$RUNNER_TEMP/$package-scheduler-off.txt"; then
+              echo "$package scheduler-free selection retains the scheduler implementation" >&2
+              exit 1
+            fi
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features --features scheduling
+            cargo tree --locked -p "$package" --no-default-features --features scheduling \
+              --edges normal,build --prefix none > "$RUNNER_TEMP/$package-scheduler-on.txt"
+            grep -Eq '^ryeos-scheduler v' "$RUNNER_TEMP/$package-scheduler-on.txt"
+            grep -Eq '^ryeos-scheduler-service v' "$RUNNER_TEMP/$package-scheduler-on.txt"
+          done
+          # Provider setup is selected independently from scheduler capability.
+          cargo check --locked -j 1 -p ryeos-api --lib --no-default-features
+          cargo tree --locked -p ryeos-api --no-default-features \
+            --edges normal,build --prefix none > "$RUNNER_TEMP/api-provider-off.txt"
+          if grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/api-provider-off.txt"; then
+            echo 'Core API unexpectedly retains directive provider implementation' >&2
+            exit 1
+          fi
+          cargo test --locked -j 1 -p ryeos-api --no-default-features \
+            --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-api --no-default-features \
+            --features model-provider-setup --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-cli --no-default-features \
+            --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-cli --no-default-features \
+            --features model-provider-setup --test provider_setup_composition -- --test-threads=1
+          for package in ryeosd ryeos-cli; do
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features \
+              --features scheduling,model-provider-setup
+            cargo tree --locked -p "$package" --no-default-features \
+              --features scheduling,model-provider-setup --edges normal,build --prefix none \
+              > "$RUNNER_TEMP/$package-standard.txt"
+            grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/$package-standard.txt"
+            if grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/$package-scheduler-off.txt"; then
+              echo "$package Core selection retains provider setup implementation" >&2
+              exit 1
+            fi
+          done
+
   crash-qualification:
     name: Crash recovery qualification
     runs-on: ubuntu-latest

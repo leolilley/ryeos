@@ -59,7 +59,7 @@ class NativeBundleInputInspectionTests(unittest.TestCase):
             item["cargo_package"]: item["features"]
             for item in plan["cargo_feature_selections"]
         }
-        self.assertEqual(feature_selections["ryeos-handler-bins"], ["full-handlers"])
+        self.assertEqual(feature_selections["ryeos-handler-bins"], ["core-handlers"])
         self.assertTrue(all(not features for package, features in feature_selections.items()
                             if package != "ryeos-handler-bins"))
         self.assertTrue(plan["requires_binary_build"])

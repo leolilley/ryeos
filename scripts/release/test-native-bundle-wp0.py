@@ -48,7 +48,16 @@ class NativeBundleWp0Tests(unittest.TestCase):
             self.assertTrue(record["cargo_package"])
             self.assertIsInstance(record["required_features"], list)
             if record["cargo_package"] == "ryeos-handler-bins":
-                expected = ["basic-parsers"] if binary.startswith("rye-parser-") else ["full-handlers"]
+                if binary.startswith("rye-parser-"):
+                    expected = ["basic-parsers"]
+                elif binary == "rye-composer-extends-chain":
+                    expected = ["extends-composer"]
+                elif binary == "ryeos-directive-launch-preparer":
+                    expected = ["directive-handlers"]
+                elif binary.startswith("ryeos-graph-"):
+                    expected = ["graph-handlers"]
+                else:
+                    expected = ["core-handlers"]
                 self.assertEqual(record["required_features"], expected, (bundle, binary))
             self.assertIn(record["build_class"], {"release", "static"})
             self.assertNotIn((bundle, binary), seen)
