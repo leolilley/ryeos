@@ -628,7 +628,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // observable. Fresh rows use current generic authority; existing rows use
     // their exact stored birth identity and never recapture a snapshot. The
     // in-memory values own secret material and are consumed exactly once.
-    let prepared_follow_children = prepare_follow_children(
+    // Each nested preparation future is boxed: their poll frames otherwise
+    // stack past the daemon worker's limit in debug builds.
+    let prepared_follow_children = Box::pin(prepare_follow_children(
         state,
         &children,
         &authority_indices,
@@ -650,7 +652,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         child_handler_context,
         &cap,
         resolution_engine,
-    )
+    ))
     .await?;
 
     // Publish each fresh durable slot only after its metadata contains the
@@ -1400,16 +1402,16 @@ async fn prepare_follow_children(
                 admitted_children.get(item_index),
                 Some(AdmittedFollowChildRequest::Persisted(_))
             ) {
-            crate::execution::launch::prepare_existing_follow_child_launch(
+            Box::pin(crate::execution::launch::prepare_existing_follow_child_launch(
                 state,
                 child_thread_id,
                 &meta,
                 launch_provenance,
                 launch_parent_context.clone(),
-            )
+            ))
             .await?
         } else {
-            crate::execution::launch::prepare_follow_child_launch(
+            Box::pin(crate::execution::launch::prepare_follow_child_launch(
                 state,
                 child_thread_id,
                 &meta,
@@ -1419,7 +1421,7 @@ async fn prepare_follow_children(
                 launch_provenance,
                 launch_parent_context.clone(),
                 child_handler_context.clone(),
-            )
+            ))
             .await?
         };
         child_metadata.insert(item_index, prepared.launch_metadata().clone());

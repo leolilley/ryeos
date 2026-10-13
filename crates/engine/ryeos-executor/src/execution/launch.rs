@@ -8161,7 +8161,7 @@ pub async fn prepare_follow_child_launch(
     parent_context: crate::dispatch::ParentExecutionContext,
     handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
-    prepare_follow_child_launch_inner(
+    Box::pin(prepare_follow_child_launch_inner(
         state,
         thread_id,
         launch_metadata,
@@ -8170,7 +8170,7 @@ pub async fn prepare_follow_child_launch(
         provenance,
         parent_context,
         true,
-    )
+    ))
     .await
 }
 
@@ -8199,7 +8199,7 @@ pub async fn prepare_existing_follow_child_launch(
             "follow child {thread_id} re-drive parent context differs from its persisted birth identity"
         )));
     }
-    prepare_follow_child_launch_inner(
+    Box::pin(prepare_follow_child_launch_inner(
         state,
         thread_id,
         launch_metadata,
@@ -8208,7 +8208,7 @@ pub async fn prepare_existing_follow_child_launch(
         provenance,
         parent_context,
         false,
-    )
+    ))
     .await
 }
 
@@ -8328,7 +8328,7 @@ async fn prepare_follow_child_launch_inner(
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
-    let mut authority = prepare_managed_launch_authority(
+    let mut authority = Box::pin(prepare_managed_launch_authority(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -8363,7 +8363,7 @@ async fn prepare_follow_child_launch_inner(
         thread_id,
         Some(launch_metadata),
         None,
-    )
+    ))
     .await?;
     let (launch_metadata, prepared_resume, fresh_launch_authority_digest) =
         if capture_project_snapshot {
