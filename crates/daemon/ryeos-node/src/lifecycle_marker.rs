@@ -717,8 +717,12 @@ pub fn complete_finalizing_exit(
 /// Inspect the previous run's marker and log its outcome: a recorded clean
 /// exit, an unproved finalization, or an inferred unclean exit when the marker
 /// is still `running` but the pid is gone.
-pub fn report_previous_exit(state_dir: &Path) {
-    match read(state_dir) {
+/// Log what the previous run's marker says about how it ended. The marker is
+/// taken by the caller before its own running record is written; this only
+/// narrates it, so it runs once the tracing subscriber exists, otherwise the
+/// crash and unclean-exit warnings are emitted into nothing.
+pub fn report_previous_exit(previous: Option<&LifecycleMarker>) {
+    match previous {
         Some(LifecycleMarker::Exited {
             reason,
             pid,
@@ -764,7 +768,7 @@ pub fn report_previous_exit(state_dir: &Path) {
             if pending_latched_drain.is_some() {
                 tracing::info!(pid, "previous ryeosd run carried unapplied latched-drain facts");
             }
-            if process_alive(pid) {
+            if process_alive(*pid) {
                 tracing::warn!(
                     pid,
                     ?launch_route,
@@ -959,7 +963,7 @@ mod tests {
         write(tmp.path(), &marker);
         // The reporter must not panic and must classify it as not-alive.
         assert!(!process_alive(u32::MAX - 1));
-        report_previous_exit(tmp.path()); // smoke: logs the inferred-crash path
+        report_previous_exit(read(tmp.path()).as_ref()); // smoke: logs the inferred-crash path
     }
 
     #[test]
@@ -973,7 +977,7 @@ mod tests {
             Some("staged reason: signal"),
             LaunchRoute::Direct,
         );
-        report_previous_exit(tmp.path());
+        report_previous_exit(read(tmp.path()).as_ref());
         assert!(!complete_finalizing_exit(
             tmp.path(),
             "signal",

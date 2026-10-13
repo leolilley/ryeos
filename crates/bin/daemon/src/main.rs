@@ -3239,11 +3239,10 @@ async fn run(
     // the running marker, any recovery or any native debit, until an operator
     // clears the inhibition. This holds whatever restarted the process.
     lifecycle_marker::require_restart_allowed(&state_dir)?;
-    lifecycle_marker::report_previous_exit(&state_dir);
-    lifecycle_marker::check_disk_space(&state_dir);
     // An unreadable marker may carry latched-drain facts that recovery must
     // apply, so the start is refused and the marker left for the operator.
-    let _previous_exit = lifecycle_marker::take_previous_exit(&state_dir)
+    // What the marker says is narrated after the tracing subscriber exists.
+    let previous_exit = lifecycle_marker::take_previous_exit(&state_dir)
         .context("previous lifecycle marker is unreadable; start refused and marker retained")?;
     // Fatal before any native debit: a start without its own running record
     // could not bind the previous stop's unapplied facts.
@@ -3321,6 +3320,10 @@ async fn run(
     // Use `ryeos init` to install bundle registrations before daemon startup.
 
     tracing::info!("State lock acquired");
+    lifecycle_marker::report_previous_exit(previous_exit.as_ref());
+    lifecycle_marker::check_disk_space(
+        &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
+    );
 
     let early_startup = async {
         process::remove_stale_socket(&config.uds_path)?;
