@@ -6063,6 +6063,17 @@ impl std::error::Error for OriginalOutsideFinalizerFileRetirementFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
 }
 
+/// A region gate held past its wait bound refuses this call as contention,
+/// which never latches service refusal; every other region refusal stays a
+/// fact refusal.
+fn original_region_refusal(refusal: FixedHostRefusal) -> anyhow::Error {
+    if refusal == FixedHostRefusal::Contended {
+        anyhow::Error::new(NativeCheckContended).context(refusal)
+    } else {
+        anyhow::Error::new(refusal)
+    }
+}
+
 /// Actual sole counter reference. This ordinary facade and its Arc control
 /// belong to the enclosing bounded process; the raw repr(C) value is resident.
 pub struct OriginalNativeBudgetOwner {
@@ -6079,13 +6090,20 @@ impl OriginalNativeBudgetOwner {
         ensure!(self.process == std::process::id(), "foreign original budget facade");
         Ok(())
     }
+    /// Waits for, rather than refuses on, another thread's charge: the
+    /// facade lock is held only for the bounded region-gate wait and a few
+    /// raw-counter operations. The closures run under it are the fixed atomic
+    /// counter operations of this impl plus the C process-identity check, which
+    /// reads only the process id and atomics. No SQL, SQLite callback, C
+    /// allocator effect or other call into this facade can run on the holding
+    /// thread, so the blocking lock cannot self-deadlock.
     fn with_raw_budget<T>(&self, cleanup: bool,
         apply: impl FnOnce(&OriginalNativeBudget) -> Result<T>) -> Result<T> {
         self.require_original_process()?;
-        let retained = self.region.try_lock()
-            .map_err(|_| anyhow!("original budget facade busy or poisoned"))?;
+        let retained = self.region.lock()
+            .map_err(|_| anyhow!("original budget facade poisoned"))?;
         let region = retained.as_ref().context("actual original budget handle consumed")?;
-        let borrow = region.borrow(cleanup)?;
+        let borrow = region.borrow(cleanup).map_err(original_region_refusal)?;
         // Only local fixed raw-counter operations execute here. The genuine
         // handle and counted Rust loan remain alive throughout the use; no
         // outside authority callback or native C effect runs under this mutex.
@@ -6110,17 +6128,29 @@ impl OriginalNativeBudgetOwner {
     fn same_region(&self, region: &OriginalNativeRegionHandle) -> Result<bool> {
         self.require_original_process()?;
         region.require_original_process()?;
-        let retained = self.region.try_lock()
-            .map_err(|_| anyhow!("original budget provenance gate busy or poisoned"))?;
+        let retained = self.region.lock()
+            .map_err(|_| anyhow!("original budget provenance gate poisoned"))?;
         Ok(retained.as_ref().is_some_and(|original| original.same_region(region)))
     }
     pub fn same_original(&self, other: &Self) -> bool {
         if self.require_original_process().is_err() || other.require_original_process().is_err() { return false; }
-        let Ok(original) = self.region.try_lock() else { return false; };
-        let Some(original) = original.as_ref() else { return false; };
-        if std::ptr::eq(self, other) { return true; }
-        let Ok(other) = other.region.try_lock() else { return false; };
-        other.as_ref().is_some_and(|other| original.same_region(other))
+        if std::ptr::eq(self, other) {
+            let Ok(original) = self.region.lock() else { return false; };
+            return original.is_some();
+        }
+        // Both facade locks are taken in address order, so two threads
+        // comparing the same pair in opposite directions cannot deadlock.
+        let (first, second) = if (self as *const Self) < (other as *const Self) {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let Ok(first) = first.region.lock() else { return false; };
+        let Ok(second) = second.region.lock() else { return false; };
+        match (first.as_ref(), second.as_ref()) {
+            (Some(first), Some(second)) => first.same_region(second),
+            _ => false,
+        }
     }
     /// Consume only this facade's counted handle after the SAME actual
     /// aggregate ACK. Native factory/C loans and host release credit remain
@@ -6131,8 +6161,8 @@ impl OriginalNativeBudgetOwner {
         factory.require_process()?;
         ensure!(Arc::ptr_eq(self, &factory.budget), "budget retirement selects a different actual facade");
         aggregate.require_original(factory)?;
-        let mut retained = self.region.try_lock()
-            .map_err(|_| anyhow!("original budget handle retirement busy or poisoned"))?;
+        let mut retained = self.region.lock()
+            .map_err(|_| anyhow!("original budget handle retirement poisoned"))?;
         if retained.is_none() {
             return self.retired_snapshot.get().cloned()
                 .context("actual retired budget evidence absent");
@@ -6140,7 +6170,7 @@ impl OriginalNativeBudgetOwner {
         let region = retained.as_ref().expect("same retained original budget handle");
         ensure!(region.same_region(&factory.region), "budget retirement selects a foreign actual region");
         let snapshot = {
-            let borrow = region.borrow(true)?;
+            let borrow = region.borrow(true).map_err(original_region_refusal)?;
             borrow.state()?.budget.snapshot()
         };
         // Cache the real snapshot before making the handle unavailable. All
@@ -6329,10 +6359,18 @@ impl OriginalNativeRegionHandle {
         // Preserve a real whole-region reference before reserving any cell.
         let region = self.try_clone()?;
         let state = region.state_ref()?;
-        let previous = state.controls_next.load(Ordering::Acquire);
-        let next = previous.checked_add(1).ok_or(FixedHostRefusal::Overflow)?;
-        if next as usize > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Exhausted); }
-        state.controls_next.compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire).map_err(|_| FixedHostRefusal::Busy)?;
+        let mut previous = state.controls_next.load(Ordering::Acquire);
+        // A lost exchange means another claim took a cell first; retry from
+        // the observed count so only overflow or exhaustion refuses. Every
+        // loss is another claim's success and the cell count caps those.
+        loop {
+            let next = previous.checked_add(1).ok_or(FixedHostRefusal::Overflow)?;
+            if next as usize > MAX_NATIVE_PRODUCER_CELLS { return Err(FixedHostRefusal::Exhausted); }
+            match state.controls_next.compare_exchange(previous, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(observed) => previous = observed,
+            }
+        }
         let cell = &state.controls[previous as usize];
         cell.kind.store(producer_kind(kind), Ordering::Release);
         Ok(OriginalNativeProducerControl { region, index: OriginalNativeProducerCellIndex(previous as u16) })
@@ -6550,6 +6588,71 @@ mod original_native_counter_controls {
         let error = budget.debit_steps(1, false).unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error:#}");
         assert_eq!(budget.snapshot().allocator_steps, THREADS * DEBITS);
+    }
+
+    /// One budget facade over a fresh resident region. The storage stays
+    /// with the returned owner for the rest of the test process.
+    fn resident_facade(limit: u64, cleanup: u64)
+        -> (crate::original_host_owner::OriginalNativeRegionOwner, Arc<OriginalNativeBudgetOwner>) {
+        use crate::original_host_owner::{OriginalNativeRegionOwner, original_native_region_layout};
+        // SAFETY: test-only counter funding a region that never installs a factory.
+        let raw = unsafe { OriginalNativeBudget::prepaid_by_original_issuer(16 * 1024 * 1024, limit, 1, cleanup) }
+            .unwrap();
+        let quote = original_native_region_layout().unwrap();
+        // SAFETY: a fresh aligned allocation of the quoted layout, used only by
+        // this region and never freed while the test process runs.
+        let storage = NonNull::new(unsafe { std::alloc::alloc_zeroed(quote.layout) }).unwrap();
+        let owner = match unsafe {
+            OriginalNativeRegionOwner::initialize(storage, quote.layout.size(), raw, std::process::id(), 1)
+        } {
+            Ok(owner) => owner,
+            Err(failure) => panic!("initialization refused: {}", failure.refusal),
+        };
+        let facade = OriginalNativeBudgetOwner::from_region(owner.handle().unwrap());
+        (owner, facade)
+    }
+
+    #[test]
+    fn concurrent_facade_charges_wait_instead_of_refusing() {
+        let _serial = crate::test_host::serial_guard();
+        const THREADS: u64 = 2;
+        const DEBITS: u64 = 20_000;
+        const CLEANUP: u64 = 64;
+        let (owner, facade) = resident_facade(THREADS * DEBITS + CLEANUP, CLEANUP);
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS as usize));
+        let workers: Vec<_> = (0..THREADS).map(|_| {
+            let (facade, barrier) = (facade.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..DEBITS {
+                    // Contention on the facade lock or region gate waits;
+                    // below the limit no charge may refuse.
+                    facade.debit_steps(1, false).unwrap();
+                }
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        assert_eq!(facade.snapshot().unwrap().allocator_steps, THREADS * DEBITS);
+        // Every counted Rust loan was retired, directly or as published debt.
+        owner.retire_pending().unwrap();
+        assert_eq!(owner.census().unwrap().rust_borrows, 0);
+    }
+
+    #[test]
+    fn facade_charges_still_refuse_at_the_limit() {
+        let _serial = crate::test_host::serial_guard();
+        const SERVICE: u64 = 8;
+        const CLEANUP: u64 = 4;
+        let (_owner, facade) = resident_facade(SERVICE + CLEANUP, CLEANUP);
+        for _ in 0..SERVICE { facade.debit_steps(1, false).unwrap(); }
+        let error = facade.debit_steps(1, false).unwrap_err();
+        assert!(error.to_string().contains("exhausted"), "{error:#}");
+        assert!(error.downcast_ref::<NativeCheckContended>().is_none(), "{error:#}");
+        assert_eq!(facade.snapshot().unwrap().allocator_steps, SERVICE);
+        for _ in 0..CLEANUP { facade.debit_steps(1, true).unwrap(); }
+        let error = facade.debit_steps(1, true).unwrap_err();
+        assert!(error.to_string().contains("exhausted"), "{error:#}");
+        assert_eq!(facade.snapshot().unwrap().cleanup_steps, CLEANUP);
     }
 }
 

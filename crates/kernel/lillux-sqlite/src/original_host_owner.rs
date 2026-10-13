@@ -9,7 +9,10 @@ use crate::native::{NativeResidentState, OriginalNativeBudget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixedHostRefusal { Process, Layout, Provenance, Busy, Closed, Exhausted,
-    Overflow, Purpose, Uninitialized, ReferencesRemain, TerminalRequired, Native(i32) }
+    Overflow, Purpose, Uninitialized, ReferencesRemain, TerminalRequired, Native(i32),
+    /// The region gate stayed held by other threads past its wait bound.
+    /// Momentary contention only; no region fact refused.
+    Contended }
 impl std::fmt::Display for FixedHostRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "native region refusal: {self:?}") }
 }
@@ -49,11 +52,44 @@ impl Drop for Gate {
         unsafe { self.header.as_ref() }.gate.store(UNLOCKED, Ordering::Release);
     }
 }
+/// Longest one claim waits for other holders before refusing as contended.
+/// Holders run only primitive metadata transitions, so reaching it means a
+/// holder was descheduled for that long, not that the region refused.
+const GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Lost claims spun before each further retry yields to the holder.
+const GATE_SPINS: u32 = 64;
+/// Claim the gate, waiting out other holders. A held gate only means another
+/// thread is mid-transition; process, provenance or the wait bound refuse.
+/// No gate holder claims the gate again on its own thread, so waiting cannot
+/// self-deadlock, and the bound still ends any wait on a gate that stays held.
 fn gate(header: NonNull<RegionHeader>, process: u32, generation: u64) -> Result<Gate, FixedHostRefusal> {
+    claim_gate(header, process, generation, true)
+}
+/// One claim attempt; a held gate refuses as Busy. Only loan retirement in
+/// Drop uses it: Drop never waits and publishes a refused retirement as
+/// pending debt that `retire_pending` applies later.
+fn try_gate(header: NonNull<RegionHeader>, process: u32, generation: u64) -> Result<Gate, FixedHostRefusal> {
+    claim_gate(header, process, generation, false)
+}
+fn claim_gate(header: NonNull<RegionHeader>, process: u32, generation: u64, wait: bool)
+    -> Result<Gate, FixedHostRefusal> {
     if process != std::process::id() { return Err(FixedHostRefusal::Process); }
     let h = unsafe { header.as_ref() };
     if h.process != process || h.generation != generation { return Err(FixedHostRefusal::Provenance); }
-    h.gate.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed).map_err(|_| FixedHostRefusal::Busy)?;
+    let mut spins = 0u32;
+    let mut deadline = None;
+    while h.gate.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        if !wait { return Err(FixedHostRefusal::Busy); }
+        if spins < GATE_SPINS {
+            spins += 1;
+            std::hint::spin_loop();
+            continue;
+        }
+        // The clock is read only once a claim is genuinely contended.
+        let bound = *deadline.get_or_insert_with(|| lillux::time::MonotonicDeadline::after(GATE_WAIT));
+        if bound.has_elapsed() { return Err(FixedHostRefusal::Contended); }
+        std::thread::yield_now();
+    }
     Ok(Gate { header, process, armed: true })
 }
 fn increment(value: usize) -> Result<usize, FixedHostRefusal> {
@@ -327,7 +363,7 @@ fn retire(header: NonNull<RegionHeader>, process: u32, generation: u64, kind: Lo
     if process != std::process::id() { return; }
     let h = unsafe { header.as_ref() };
     let pending = match kind { LoanKind::Handle => &h.pending_handles, LoanKind::Rust => &h.pending_rust, LoanKind::C => &h.pending_c };
-    let Ok(_guard) = gate(header, process, generation) else { pending.fetch_add(1, Ordering::Release); return; };
+    let Ok(_guard) = try_gate(header, process, generation) else { pending.fetch_add(1, Ordering::Release); return; };
     let c = unsafe { &mut *h.counts.get() };
     let count = match kind { LoanKind::Handle => &mut c.handles, LoanKind::Rust => &mut c.rust, LoanKind::C => &mut c.c };
     if *count != 0 { *count -= 1; }

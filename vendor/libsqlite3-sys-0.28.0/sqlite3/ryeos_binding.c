@@ -123,10 +123,15 @@ static int ryeosNativeCharge(RyeosNativeArena *a,uint64_t steps,int cleanup){
   counter=cleanup?&a->budget->cleanupSteps:&a->budget->serviceSteps;
   limit=cleanup?a->budget->cleanupReserved:a->budget->stepLimit-a->budget->cleanupReserved;
   previous=atomic_load(counter);
-  if(previous>limit || steps>limit-previous) return 0;
-  next=previous+steps;
-  /* One nonblocking checked CAS. Contention refuses before any effect. */
-  return atomic_compare_exchange_strong(counter,&previous,next);
+  /* A lost CAS only means another charger landed first. The failed exchange
+     reloads previous, so every retry rechecks the limit against what is
+     actually charged; only the limit (or poison above) refuses. Each loss is
+     another charger's success and the limit caps those, so this terminates. */
+  do{
+    if(previous>limit || steps>limit-previous) return 0;
+    next=previous+steps;
+  }while(!atomic_compare_exchange_weak(counter,&previous,next));
+  return 1;
 }
 /* Disposal-only charge: a lost CAS race retries, since another charger made
    progress; only a real limit (or poison) refuses. */
