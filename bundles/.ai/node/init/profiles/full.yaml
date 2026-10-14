@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:6d2b025d9f72361b2728b641ebc03a09ab68af19e1baf0846e515cfdbdde630c:1Fjy3vT952iaXXY35xMCUlnGivPfVBXvxFEL2nSCCrGd6Tb25l+IvoOGP/UubyqRFcp3+fHvyLUgkFh/O8BiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:d33c48fe95f95f2cbfc09e6d7c39d8f34dca91263165f83f3bee6ac5a4b28f29:RwiQE7xvb8eXDoOhSTx+0UEMAK97eRdayG3ThfEFr2dUlj1FcRwv6qvDo4l9pCyMIJDOpTmNj61dEptqYWtWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -277,10 +277,10 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -291,7 +291,6 @@ policies:
         # when filesystem/network isolation is disabled.
         mode: required
         control_timeout_ms: 5000
-        nested_sandbox: false
       trusted_process_group_sessions: false
       mode: disabled
       backend: null

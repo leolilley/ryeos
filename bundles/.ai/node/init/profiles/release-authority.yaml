@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:5af1cdef76385a7011cdadeb89e476769cf0d007422fb4e2a7a792404e8d2e7c:e8r0ICY2wZih9AlyyzgFIiWqyUBBwEpC0hQS0s0jp75DpXwtcA3TEoTO5Y/OcpCUYdgOfb4kfYc108FIqpDCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:a3f28f48014f0e29103aa68eb13f16e6ff3e8a8f4a90f166aa367c0321f733ce:tMCei4gQjQEXxXVZt4SVDlR4B/d/3Ut6ZHHn2ij8XD+ZxFunS3mzXNARjU00zu/y+xvBURk6c7gG80J2GI2GDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -336,7 +336,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
       requires_capabilities: [accounting, isolation:namespaces, limits:enclosure, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
@@ -351,7 +351,6 @@ policies:
         # scope; disabled isolation cannot admit these release tools.
         mode: required
         control_timeout_ms: 5000
-        nested_sandbox: true
       trusted_process_group_sessions: false
       mode: enforce
       backend:

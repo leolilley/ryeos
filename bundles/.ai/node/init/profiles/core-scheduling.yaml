@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:0c9bf78ecfc82ed64fe180da8b956a363c369e14faee9a66292efb8d9236ca7f:kZODjjrZtdI7CnYktbuXoiZLxvd7NNXSSes4cV9h0sonRh8FbzcyjKCrrNKzVWgojcPiUJDixOvsUMRO2r3RCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:a631e66491c691419a21aecbdb145c73c6d98acc1ad046eeab7f8452a2db8890:0IBHzmx/vSfgzG0trghDb0EvRWgOSN3m9SfE77XmqdRje1e/UXfpkTjNOS4HtiYR77d7zAG3cfq4wndd3FnODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Source-only Core+scheduling profile; signing/admission/native qualification pending.
 schema: 1
 exact_bundles:
@@ -215,10 +215,10 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, isolation:namespaces, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -229,7 +229,6 @@ policies:
         # Lillux provider. Policy never contains native cgroup coordinates.
         mode: required
         control_timeout_ms: 5000
-        nested_sandbox: true
       # This profile requires qualified Lillux scopes. It must never select the
       # weaker trusted direct-process-group worker lifecycle.
       trusted_process_group_sessions: false
@@ -238,7 +237,7 @@ policies:
         bundle: core
         implementation: linux-lillux
       filesystem:
-        proc_filesystem: pid_namespace_nested
+        proc_filesystem: pid_namespace
         live_project:
           mode: fixed_parents
           limits:

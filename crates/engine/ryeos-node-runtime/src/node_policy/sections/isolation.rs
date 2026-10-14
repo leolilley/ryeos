@@ -132,6 +132,70 @@ mod tests {
     }
 
     #[test]
+    fn refuses_the_previous_policy_version_and_the_removed_nested_sandbox_key() {
+        let section = IsolationPolicySection;
+        let mut previous = disabled_policy_value();
+        previous["policy"]["version"] =
+            Value::from(ryeos_engine::isolation::ISOLATION_POLICY_VERSION - 1);
+        let error = section
+            .parse(&context(), &previous)
+            .err()
+            .unwrap()
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(
+            error.contains("unsupported node isolation policy version"),
+            "got: {error}"
+        );
+
+        let mut removed_key = disabled_policy_value();
+        removed_key["policy"]["process_scopes"] = serde_json::json!({
+            "mode": "required", "control_timeout_ms": 1000, "nested_sandbox": true,
+        });
+        let error = section
+            .parse(&context(), &removed_key)
+            .err()
+            .unwrap()
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(error.contains("nested_sandbox"), "got: {error}");
+    }
+
+    #[test]
+    fn floor_entries_carry_accepted_grades_and_providers_through_the_section() {
+        let section = IsolationPolicySection;
+        let mut declared = disabled_policy_value();
+        declared["policy"]["requires_capabilities"] = serde_json::json!([
+            {"any_of": ["accounting", "residency:swap_absent"]},
+            "storage:durable_root",
+            {"name": "termination:process_group", "accept": ["trusted"]},
+            {"name": "time", "providers": ["host"]},
+        ]);
+        let parsed = section.parse(&context(), &declared).unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<ryeos_engine::isolation::IsolationPolicy>()
+            .unwrap();
+        assert_eq!(policy.requires_capabilities.len(), 4);
+        assert_eq!(policy.requires_capabilities[2].accepted_grades(), ["trusted"]);
+        assert_eq!(policy.requires_capabilities[3].providers(), ["host"]);
+        assert!(policy.requires_capabilities[1].accepted_grades().is_empty());
+
+        let mut refused_grade = declared.clone();
+        refused_grade["policy"]["requires_capabilities"][3]["accept"] =
+            serde_json::json!(["peer_attested"]);
+        assert!(section.parse(&context(), &refused_grade).is_err());
+
+        let mut unknown_key = declared;
+        unknown_key["policy"]["requires_capabilities"][3]["grade"] = Value::from("measured");
+        assert!(section.parse(&context(), &unknown_key).is_err());
+    }
+
+    #[test]
     fn delegates_semantic_validation_to_the_engine_contract() {
         let section = IsolationPolicySection;
         let mut invalid = disabled_policy_value();

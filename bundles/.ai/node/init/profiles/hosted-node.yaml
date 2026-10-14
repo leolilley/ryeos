@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:b8fb6e1cc3129f53e978d38a09a40eb8f2adefead11af1248c28616a89bad25c:SEWB7ssDfZhXUk5csVNlcKdXIJ7UROtJn3T5uyNzcZjj2QiqbcB0VM0PiJjP5bfLDMafYUNSYES664wkCfgSBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:06a6a4819700333727613d4b28778281de43bbf986b62c30515efd09efa65a7b:PFhy4GAOxueeZrw7DzqNdnCTzpyFveSkamcM+pwj6lX7q2UYUx6v3kKBYlOD2EFT0JR/olEjrIn2H6iQ/RlIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -211,7 +211,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
       # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this

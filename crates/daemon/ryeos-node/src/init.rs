@@ -1705,25 +1705,25 @@ fn require_profile_storage(
         &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         Path::new("selected-node-profile"),
     )?;
-    let required = isolation
+    let Some(entry) = isolation
         .requires_capabilities
         .iter()
-        .any(|entry| entry.names().iter().any(|entry_name| entry_name == STORAGE_DURABLE_ROOT));
-    if !required {
+        .find(|entry| entry.names().iter().any(|entry_name| entry_name == STORAGE_DURABLE_ROOT))
+    else {
         return Ok(());
-    }
+    };
     let storage = observe_storage(app_root);
     let evidence = lillux::process_control::decide_durable_root(&storage);
     let refusal = match &evidence {
-        Ok(evidence) if lillux::process_control::satisfies_local_requirement(STORAGE_DURABLE_ROOT, evidence) => {
-            tracing::info!(profile = name, basis = %evidence.basis, "durable app-root storage proven");
-            return Ok(());
+        Ok(evidence) => {
+            match lillux::process_control::satisfies(entry, STORAGE_DURABLE_ROOT, evidence) {
+                Ok(()) => {
+                    tracing::info!(profile = name, basis = %evidence.basis, "durable app-root storage proven");
+                    return Ok(());
+                }
+                Err(mismatch) => mismatch,
+            }
         }
-        Ok(evidence) => format!(
-            "{STORAGE_DURABLE_ROOT} is only {}-proven here ({})",
-            evidence.source.as_str(),
-            evidence.basis
-        ),
         Err(reason) => reason.clone(),
     };
     bail!(

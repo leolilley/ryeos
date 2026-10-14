@@ -1003,11 +1003,13 @@ fn materialize_seed_node_policy_generation(
 /// the per-scope contract:
 ///
 ///   * `process_scopes` becomes `unconfigured`;
-///   * every per-scope name leaves `requires_capabilities` (an `any_of`
-///     entry that names only per-scope alternatives is refused rather than
-///     dropped);
-///   * `pid_namespace_nested` proc, which exists only for the scoped nested
-///     sandbox, narrows to `pid_namespace`.
+///   * every per-scope name leaves `requires_capabilities`, whether it is a
+///     bare string or the `name` of an object entry (an `any_of` entry that
+///     names only per-scope alternatives is refused rather than dropped;
+///     one that keeps other alternatives keeps its `accept`/`providers`);
+///   * `isolation:namespaces` leaves with them and `pid_namespace_nested`
+///     proc narrows to `pid_namespace`: together they are the scoped nested
+///     sandbox, which has no scope here to belong to.
 ///
 /// The result is signed by the fixture node key and is never shipped. The
 /// authored profiles keep their floors; tests of per-scope containment need
@@ -1035,32 +1037,41 @@ fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
         .get_mut("requires_capabilities")
         .and_then(serde_json::Value::as_array_mut)
         .context("isolation policy has no requires_capabilities list")?;
+    let scoped_only = |name: &str| {
+        lillux::process_control::is_scope_capability(name)
+            || name == ryeos_engine::isolation::ISOLATION_NAMESPACES
+    };
     let mut retained = Vec::with_capacity(floor.len());
     for entry in floor.drain(..) {
         match &entry {
             serde_json::Value::String(name) => {
-                if !lillux::process_control::is_scope_capability(name) {
+                if !scoped_only(name) {
                     retained.push(entry);
                 }
             }
-            serde_json::Value::Object(alternatives) => {
-                let names = alternatives
+            serde_json::Value::Object(spec) => {
+                if let Some(name) = spec.get("name").and_then(serde_json::Value::as_str) {
+                    if !scoped_only(name) {
+                        retained.push(entry);
+                    }
+                    continue;
+                }
+                let names = spec
                     .get("any_of")
                     .and_then(serde_json::Value::as_array)
-                    .context("isolation floor entry is neither a name nor an any_of set")?;
+                    .context("isolation floor entry names neither a name nor an any_of set")?;
                 let kept = names
                     .iter()
-                    .filter(|name| {
-                        name.as_str()
-                            .is_none_or(|name| !lillux::process_control::is_scope_capability(name))
-                    })
+                    .filter(|name| name.as_str().is_none_or(|name| !scoped_only(name)))
                     .cloned()
                     .collect::<Vec<_>>();
                 anyhow::ensure!(
                     !kept.is_empty(),
                     "isolation floor entry {entry} can be met only by per-scope capabilities"
                 );
-                retained.push(serde_json::json!({ "any_of": kept }));
+                let mut narrowed = spec.clone();
+                narrowed.insert("any_of".to_owned(), serde_json::Value::Array(kept));
+                retained.push(serde_json::Value::Object(narrowed));
             }
             other => anyhow::bail!("isolation floor entry {other} has an unknown shape"),
         }

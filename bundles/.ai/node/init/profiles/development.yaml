@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:d5fab5eca3bbae05684f114f72b747158a805d9577e53fe656b4b44174592baa:sTH/BtZMHJ9RXUMkjkjUKOsf5QwNePctSTVLN8zVyKH3D2WEFXSikQjdpWnAqTKiGjpBsJjJLRtUkrzb8ZR1DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:3c10e3dcd1329e1a334674cd6141d5bb653e9f73e9f3bb91e13a1ee3214939a9:wW1Nz3YiME4wgTQlXI1T3CADN/wFVwKMYke1yLAXv4aqnxLfpA36lJ7DKgq9z5WnYi+1TnoY+ZPrdq50c71lCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -298,10 +298,10 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, isolation:namespaces, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      requires_capabilities: [accounting, isolation:namespaces, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -312,10 +312,6 @@ policies:
         # provider from an administrator-owned host association at daemon boot.
         mode: required
         control_timeout_ms: 5000
-        # Development workers may run a separately pinned inner sandbox (for
-        # example, an authored CLI's own workspace confinement). Whole-process
-        # scope ownership and the nested proc ceiling are selected together.
-        nested_sandbox: true
       trusted_process_group_sessions: false
       mode: enforce
       backend:
