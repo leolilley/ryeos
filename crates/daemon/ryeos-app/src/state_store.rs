@@ -5750,6 +5750,15 @@ impl StateStore {
     /// its reservation was born into: its own id for a direct invocation
     /// root, its parent's chain for an inline in-process child. `None` when
     /// the chain head does not carry the thread (an unpublished birth).
+    /// The chain an in-process handler thread belongs to, read from its own
+    /// runtime row. That row is written before the authoritative birth commit
+    /// and outlives the rebuildable projection, so terminal repair can locate
+    /// the chain after the projection row has been lost.
+    pub fn in_process_handler_chain_root_id(&self, thread_id: &str) -> Result<String> {
+        let g = self.lock()?;
+        in_process_handler_chain_root_locked(&g, thread_id)
+    }
+
     pub fn get_authoritative_in_process_handler_snapshot(
         &self,
         thread_id: &str,

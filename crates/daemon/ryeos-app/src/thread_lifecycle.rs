@@ -4495,11 +4495,9 @@ impl ThreadLifecycleService {
     /// inline child in its parent's chain, so this never scans a long-lived
     /// chain or exposes the admitted parameter values.
     pub fn recorded_service_parameters_digest(&self, thread_id: &str) -> Result<String> {
-        let thread = self
-            .get_thread(thread_id)?
-            .ok_or_else(|| anyhow!("recorded service thread not found: {thread_id}"))?;
+        let chain_root_id = self.state_store.in_process_handler_chain_root_id(thread_id)?;
         let page = self.state_store.replay_events(
-            &thread.chain_root_id,
+            &chain_root_id,
             Some(thread_id),
             None,
             2,
@@ -5432,13 +5430,13 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
     ) -> Result<()> {
         let reported_status = normalize_terminal_status(&params.status)?;
-        // The chain is resolved from the thread's own row: a direct invocation
-        // is its own chain root, an inline in-process child lives in its
-        // parent's chain.
+        // The chain comes from the handler's runtime row, never from the
+        // rebuildable projection row this repair may be restoring: a direct
+        // invocation is its own chain root, an inline in-process child lives
+        // in its parent's chain.
         let chain_root_id = self
-            .get_thread(&params.thread_id)?
-            .ok_or_else(|| anyhow!("recorded service thread not found: {}", params.thread_id))?
-            .chain_root_id;
+            .state_store
+            .in_process_handler_chain_root_id(&params.thread_id)?;
         let (authoritative, terminal, _chain_head_hash) = self
             .state_store
             .get_authoritative_thread_snapshot_with_last_event(&chain_root_id, &params.thread_id)?
