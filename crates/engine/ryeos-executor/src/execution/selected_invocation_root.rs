@@ -539,38 +539,30 @@ struct AbandonedSelectedComposition {
     _registered_generation: Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>,
 }
 
-/// Process-lifetime retention of selected composition barriers dropped with
-/// unresolved owners. Drop cannot run a bounded native or financial
-/// reconciliation, so the exact root and its registered Store generation stay
-/// reachable here until the process exits. Nothing is ever removed.
-static ABANDONED_SELECTED_COMPOSITIONS: std::sync::Mutex<Vec<AbandonedSelectedComposition>> =
-    std::sync::Mutex::new(Vec::new());
+/// The kind under which a selected composition barrier dropped with
+/// unresolved owners is retained for the life of the process.
+const ABANDONED_SELECTED_COMPOSITION_KIND: &str = "ryeos-executor::selected-composition";
 
 /// Count of selected composition barriers this process retains because they
 /// were dropped with unresolved owners. Any nonzero count means a selected
 /// root and its Store generation stay held until the process exits.
 pub fn abandoned_selected_compositions() -> usize {
-    ABANDONED_SELECTED_COMPOSITIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len()
+    lillux::custody::abandoned_custody().count(ABANDONED_SELECTED_COMPOSITION_KIND)
 }
 
 impl Drop for SelectedInvocationCompositionBarrier {
     fn drop(&mut self) {
         if self.close() == SelectedRootClose::Unresolved {
+            // Drop cannot run a bounded native or financial reconciliation.
             // Keep the exact root and Store alive even if a caller misses the
-            // normal daemon unresolved hold. Both move whole into the
-            // process-lifetime registry; no root mutex re-entry, ledger write
-            // or synthetic positive receipt.
+            // normal daemon unresolved hold: both move whole into the
+            // process-lifetime custody registry; no root mutex re-entry,
+            // ledger write or synthetic positive receipt.
             let abandoned = AbandonedSelectedComposition {
                 _root: Arc::clone(&self.root),
                 _registered_generation: self.registered_generation.take(),
             };
-            ABANDONED_SELECTED_COMPOSITIONS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(abandoned);
+            lillux::custody::abandon(ABANDONED_SELECTED_COMPOSITION_KIND, abandoned);
         }
     }
 }

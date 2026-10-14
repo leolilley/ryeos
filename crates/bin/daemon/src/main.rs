@@ -228,12 +228,63 @@ struct UnresolvedNativeCustody {
     startup_recovery_retained: bool,
     selected_root_unresolved: bool,
     operator_lock_retained: bool,
+    /// Owners dropped unsettled anywhere in this process and retained until
+    /// exit, and fork exclusions held until exit. Neither can be retried.
+    abandoned_owners: usize,
+    fork_exclusions_held: usize,
+}
+
+impl UnresolvedNativeCustody {
+    /// Whether an owner was abandoned or a fork exclusion is held until exit.
+    fn abandoned(&self) -> bool {
+        self.abandoned_owners + self.fork_exclusions_held > 0
+    }
+
+    /// The lifecycle and restart-inhibition reason this snapshot ends the
+    /// run with. Abandonment is named first: no attempt can resolve an
+    /// owner that already lost its supervised terminal.
+    fn exit_reason(&self) -> &'static str {
+        if self.abandoned() {
+            "native_custody_abandoned"
+        } else {
+            "native_custody_unresolved"
+        }
+    }
+}
+
+/// Owners this process retains because a destructor ran on them unsettled,
+/// and fork exclusions held until exit. Read from the process-wide registries
+/// in lillux; both only ever grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct AbandonedNativeCustody {
+    owners: usize,
+    fork_exclusions: usize,
+}
+
+impl AbandonedNativeCustody {
+    fn observe() -> Self {
+        Self {
+            owners: lillux::custody::abandoned_custody().total,
+            fork_exclusions: lillux::fork_exclusions_held_until_exit(),
+        }
+    }
+
+    fn total(self) -> usize {
+        self.owners + self.fork_exclusions
+    }
+}
+
+/// Whether any owner in this process was dropped without settlement or any
+/// fork exclusion is held until exit. Unlike retained composition fields this
+/// cannot be resolved by another finalization attempt.
+fn has_abandoned_native_custody() -> bool {
+    AbandonedNativeCustody::observe().total() > 0
 }
 
 impl std::fmt::Display for UnresolvedNativeCustody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f,
-            "attempts_used={} services_drained={} persistent_pool_retained={} app_state_retained={} live_store_retained={} scheduler_retained={} accounting_retained={} native_failure_retained={} inputs_retained={} reservation_retained={} factory_retained={} prepared_registry_retained={} store_close_retained={} store_outside_retained={} settled_account_retained={} native_terminal_retained={} startup_recovery_retained={} selected_root_unresolved={} operator_lock_retained={}",
+            "attempts_used={} services_drained={} persistent_pool_retained={} app_state_retained={} live_store_retained={} scheduler_retained={} accounting_retained={} native_failure_retained={} inputs_retained={} reservation_retained={} factory_retained={} prepared_registry_retained={} store_close_retained={} store_outside_retained={} settled_account_retained={} native_terminal_retained={} startup_recovery_retained={} selected_root_unresolved={} operator_lock_retained={} abandoned_owners={} fork_exclusions_held={}",
             self.attempts_used,
             self.services_drained,
             self.persistent_pool_retained,
@@ -253,6 +304,8 @@ impl std::fmt::Display for UnresolvedNativeCustody {
             self.startup_recovery_retained,
             self.selected_root_unresolved,
             self.operator_lock_retained,
+            self.abandoned_owners,
+            self.fork_exclusions_held,
         )
     }
 }
@@ -1935,6 +1988,7 @@ impl DaemonSelectedComposition {
     }
 
     fn unresolved_native_custody(&self) -> UnresolvedNativeCustody {
+        let abandoned = AbandonedNativeCustody::observe();
         UnresolvedNativeCustody {
             attempts_used: self.native_finalizer_attempts.0,
             services_drained: self.services_drained,
@@ -1967,6 +2021,8 @@ impl DaemonSelectedComposition {
                     false
                 }
             },
+            abandoned_owners: abandoned.owners,
+            fork_exclusions_held: abandoned.fork_exclusions,
         }
     }
 
@@ -2004,27 +2060,31 @@ impl DaemonSelectedComposition {
     }
 
     /// Terminal outcome for custody that bounded finalization cannot
-    /// resolve: best-effort kill the retained worker groups, record the
+    /// resolve, or that was abandoned by a destructor anywhere in this
+    /// process: best-effort kill the retained worker groups, record the
     /// secret-free snapshot best-effort and exit 70. `process::exit` runs no
-    /// destructors, so every unresolved owner stays resident until the kernel
-    /// ends the process; cold recovery must still prove that end
-    /// independently. Once operator target retirement began the exclusion may
-    /// already be released, so only this run's provisional marker is replaced.
+    /// destructors, so every unresolved or abandoned owner stays resident
+    /// until the kernel ends the process; cold recovery must still prove that
+    /// end independently. Once operator target retirement began the exclusion
+    /// may already be released, so only this run's provisional marker is
+    /// replaced. The snapshot names the reason: abandonment when any owner or
+    /// fork exclusion is held until exit, unresolved custody otherwise.
     fn exit_unresolved_custody(&mut self, custody: UnresolvedNativeCustody) -> ! {
         self.close_native_admission();
-        tracing::error!(%custody,
-            "native custody remains unresolved; exiting with status 70 while original owners remain resident");
+        let reason = custody.exit_reason();
+        tracing::error!(%custody, reason,
+            "native custody remains held; exiting with status 70 while original owners remain resident");
         let killed = self.kill_retained_process_groups_before_exit();
         tracing::error!(%killed, "best-effort process group kill before exit 70");
         let detail = format!("{custody}; {killed}");
         if let Some(lifecycle) = self.lifecycle_exit.as_mut() {
             if !self.operator_target_retirement_entered && !lifecycle.recorded {
-                lifecycle.record("native_custody_unresolved", Some(&detail));
+                lifecycle.record(reason, Some(&detail));
             } else {
-                lifecycle.complete_provisional("native_custody_unresolved", Some(&detail));
+                lifecycle.complete_provisional(reason, Some(&detail));
             }
         }
-        self.inhibit_supervised_restart("native_custody_unresolved");
+        self.inhibit_supervised_restart(reason);
         std::process::exit(70)
     }
 
@@ -2218,7 +2278,7 @@ impl DaemonSelectedComposition {
     }
 
     fn close_after_run(&mut self) {
-        if self.has_unresolved_custody() {
+        if self.has_unresolved_custody() || has_abandoned_native_custody() {
             self.exit_unresolved_custody_sync();
         }
         self.close_native_admission();
@@ -2299,9 +2359,10 @@ fn record_established_residency(
 
 impl Drop for DaemonSelectedComposition {
     fn drop(&mut self) {
-        if self.has_unresolved_custody() {
-            // Drop cannot await or claim another attempt. Exit while every
-            // field is still resident rather than letting Rust drop them.
+        if self.has_unresolved_custody() || has_abandoned_native_custody() {
+            // Drop cannot await or claim another attempt, and an abandoned
+            // owner has none to claim. Exit while every field is still
+            // resident rather than letting Rust drop them.
             self.exit_unresolved_custody_sync();
         }
         self.close_after_run();
@@ -8200,5 +8261,44 @@ mod render_composition_custody_tests {
         let owner = composition.native_operator_lock.take().unwrap();
         drop(std::mem::ManuallyDrop::into_inner(owner));
         assert!(!composition.has_unresolved_custody());
+    }
+
+    /// The abandoned counts are read from lillux's process-wide registries,
+    /// never from composition fields. Nothing here abandons an owner: that
+    /// would end this test process with status 70 at the next composition
+    /// drop, which is the behaviour under test.
+    #[test]
+    fn abandoned_custody_is_read_from_the_process_registries() {
+        let observed = super::AbandonedNativeCustody::observe();
+        assert_eq!(observed.owners, lillux::custody::abandoned_custody().total);
+        assert_eq!(observed.fork_exclusions, lillux::fork_exclusions_held_until_exit());
+        assert_eq!(observed.total(), observed.owners + observed.fork_exclusions);
+        assert_eq!(super::has_abandoned_native_custody(), observed.total() > 0);
+
+        let composition = DaemonSelectedComposition::bootstrap();
+        let custody = composition.unresolved_native_custody();
+        assert_eq!(custody.abandoned_owners, observed.owners);
+        assert_eq!(custody.fork_exclusions_held, observed.fork_exclusions);
+    }
+
+    #[test]
+    fn abandoned_custody_names_its_own_exit_reason() {
+        let composition = DaemonSelectedComposition::bootstrap();
+        let mut custody = composition.unresolved_native_custody();
+        custody.abandoned_owners = 0;
+        custody.fork_exclusions_held = 0;
+        assert!(!custody.abandoned());
+        assert_eq!(custody.exit_reason(), "native_custody_unresolved");
+
+        custody.abandoned_owners = 1;
+        assert!(custody.abandoned());
+        assert_eq!(custody.exit_reason(), "native_custody_abandoned");
+        assert!(custody.to_string().contains("abandoned_owners=1 fork_exclusions_held=0"));
+
+        custody.abandoned_owners = 0;
+        custody.fork_exclusions_held = 2;
+        assert!(custody.abandoned());
+        assert_eq!(custody.exit_reason(), "native_custody_abandoned");
+        assert!(custody.to_string().contains("abandoned_owners=0 fork_exclusions_held=2"));
     }
 }

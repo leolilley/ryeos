@@ -2,6 +2,8 @@
 pub(crate) const EXECUTOR_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("executor");
 
 pub mod augmentations;
+#[cfg(test)]
+mod custody_drop_gate;
 pub mod dispatch;
 pub mod dispatch_error;
 pub mod dispatch_role;
