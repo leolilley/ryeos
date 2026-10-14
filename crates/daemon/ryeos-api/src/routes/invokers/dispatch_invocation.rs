@@ -236,11 +236,22 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             effect_authority: None,
         };
 
-        let result = match ctx.principal.as_ref() {
-            Some(principal) => {
+        // The handler context handed to dispatch must be the authority the
+        // request was sealed under. Under caller-principal authority that is
+        // the transport-authenticated caller; under a fixed route principal
+        // the route itself is the principal and the caller's context (if any)
+        // would name a different fingerprint, so none is passed.
+        let caller_context = match &self.authority {
+            DispatchAuthority::CallerPrincipal => {
+                ctx.principal.as_ref().map(|principal| principal.handler_context())
+            }
+            DispatchAuthority::FixedPrincipal { .. } => None,
+        };
+        let result = match caller_context {
+            Some(handler_context) => {
                 ryeos_executor::dispatch::dispatch_with_handler_context(
                     item_ref.as_str(),
-                    principal.handler_context(),
+                    handler_context,
                     &dispatch_req,
                     &exec_ctx,
                     &ctx.state,
