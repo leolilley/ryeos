@@ -7,6 +7,8 @@ pub mod bundle_set_apply;
 pub mod bundle_set_update;
 pub mod capability_report;
 mod control;
+#[cfg(test)]
+mod custody_drop_gate;
 pub mod host_runtime;
 pub mod init;
 pub mod init_check;

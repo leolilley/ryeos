@@ -536,7 +536,9 @@ fn require_reservation_floors(
 }
 
 pub struct LiveNativeCapacityReservation {
-    pub(super) inputs: std::mem::ManuallyDrop<Arc<LiveNativeCapacityInputs>>,
+    // The verified admission inputs, taken exactly once when settlement moves
+    // them into finalizer custody; every other reader goes through `inputs`.
+    inputs: Option<std::mem::ManuallyDrop<Arc<LiveNativeCapacityInputs>>>,
     // Boundaries share the read lock; only settlement, recovery and the
     // initial debit take it exclusively, and none of those overlaps service SQL.
     account: std::sync::RwLock<Option<RetainedCapacityAccount>>,
@@ -582,6 +584,42 @@ enum RetainedReservationOwner {
     Bootstrap(std::mem::ManuallyDrop<LiveNativeCapacityReservation>),
     Published(std::mem::ManuallyDrop<Arc<LiveNativeCapacityReservation>>),
 }
+impl RetainedReservationOwner {
+    fn original(&self) -> &LiveNativeCapacityReservation {
+        match self {
+            Self::Bootstrap(owner) => owner,
+            Self::Published(owner) => owner,
+        }
+    }
+
+    /// Move the retained reservation out exactly once; the emptied shell is
+    /// never dropped.
+    fn into_taken(self) -> Arc<LiveNativeCapacityReservation> {
+        let mut owner = std::mem::ManuallyDrop::new(self);
+        match &mut *owner {
+            Self::Bootstrap(original) => Arc::new(unsafe { std::mem::ManuallyDrop::take(original) }),
+            Self::Published(original) => unsafe { std::mem::ManuallyDrop::take(original) },
+        }
+    }
+}
+impl Drop for RetainedReservationOwner {
+    fn drop(&mut self) {
+        // No drop settles a retained reservation: outside its refusal it
+        // always holds the reservation that supervised recovery takes back.
+        // The reservation is taken exactly once, here, and stays retained
+        // until the process exits; a copied process relinquishes it through
+        // the same call.
+        const KIND: &str = "ryeos-node::native-capacity-reservation-failure";
+        match self {
+            Self::Bootstrap(original) => {
+                lillux::custody::abandon(KIND, unsafe { std::mem::ManuallyDrop::take(original) })
+            }
+            Self::Published(original) => {
+                lillux::custody::abandon(KIND, unsafe { std::mem::ManuallyDrop::take(original) })
+            }
+        }
+    }
+}
 
 pub struct LiveNativeCapacityReservationFailure {
     original: RetainedReservationOwner,
@@ -622,6 +660,17 @@ enum FinalizationDestinationPhase {
     StoreRegistryRetired,
     StoreDestinationsRetired,
     NoStoreRegistryRetired,
+}
+
+/// The admission inputs a reservation still retains. Absent only after
+/// settlement moved them into finalizer custody. Borrows the slot alone, so
+/// a caller holding another field of the same reservation mutably can use it.
+fn retained_inputs(
+    inputs: &Option<std::mem::ManuallyDrop<Arc<LiveNativeCapacityInputs>>>,
+) -> Result<&Arc<LiveNativeCapacityInputs>> {
+    inputs
+        .as_deref()
+        .context("original native admission inputs already moved into settled finalizer custody")
 }
 
 pub(super) trait SettledSourceRegistry {
@@ -772,7 +821,7 @@ fn register_finalizer_directory_source(
             lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
             "settled directory membership changed source role");
         ensure!(
-            source.owner.is_none(),
+            source.owner_transferred(),
             "registered settled directory retains its source owner"
         );
         return Ok(());
@@ -804,7 +853,7 @@ fn register_finalizer_control_source(
             lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::ControlRecord { .. }),
             "settled control membership changed source role");
         ensure!(
-            source.owner.is_none() && source.pinned_file.is_none() && source.duplicate.is_none(),
+            source.owner.is_none() && source.source_transferred(),
             "registered settled control source retains an open owner"
         );
         return Ok(());
@@ -917,7 +966,7 @@ impl SettledLiveNative {
                 .context("settled outside cleanup owner absent")?
                 .require_original_process()
         } else {
-            self.original.inputs.require_original_process()
+            self.original.require_original_process()
         }
     }
 
@@ -936,7 +985,7 @@ impl SettledLiveNative {
                 .context("settled outside cleanup owner absent")?
                 .require_original()
         } else {
-            self.original.inputs.require_original_cleanup()
+            self.original.inputs()?.require_original_cleanup()
         }
     }
 
@@ -967,7 +1016,16 @@ impl SettledLiveNative {
             .map_err(|_| anyhow::anyhow!("capacity account poisoned"))?
             .take()
             .context("settled capacity account owner absent")?;
-        let inputs = &original.inputs;
+        let inputs = match original.inputs() {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                *original
+                    .account
+                    .get_mut()
+                    .map_err(|_| anyhow::anyhow!("capacity account poisoned"))? = Some(account);
+                return Err(error);
+            }
+        };
         let late = original
             .late
             .as_ref()
@@ -1014,20 +1072,24 @@ impl SettledLiveNative {
             .context("settled outside cleanup owner absent")?;
         if let Some(alias) = composition_inputs.as_ref() {
             ensure!(
-                Arc::ptr_eq(alias, &original.inputs),
+                Arc::ptr_eq(alias, original.inputs()?),
                 "composition retains a foreign native input owner"
             );
             drop(composition_inputs.take());
         }
-        // SAFETY: the settled reservation is itself under ManuallyDrop. The
-        // exact Arc is immediately restored on uniqueness or prepay refusal;
-        // success moves every actual source into the retained finalizer frame.
-        let input_owner = unsafe { std::mem::ManuallyDrop::take(&mut original.inputs) };
+        // The input slot is taken exactly once. The exact Arc is restored on
+        // uniqueness or prepay refusal; success moves every actual source
+        // into the retained finalizer frame and leaves the slot empty.
+        let input_owner = original
+            .inputs
+            .take()
+            .map(std::mem::ManuallyDrop::into_inner)
+            .context("original native admission inputs already moved into settled finalizer custody")?;
         let inputs = match Arc::try_unwrap(input_owner) {
             Ok(inputs) => inputs,
             Err(input_owner) => {
                 let aliases = Arc::strong_count(&input_owner);
-                original.inputs = std::mem::ManuallyDrop::new(input_owner);
+                original.inputs = Some(std::mem::ManuallyDrop::new(input_owner));
                 anyhow::bail!("settled input source still has {aliases} actual Arc owners");
             }
         };
@@ -1037,7 +1099,7 @@ impl SettledLiveNative {
                 Ok(())
             }
             Err((inputs, error)) => {
-                original.inputs = std::mem::ManuallyDrop::new(Arc::new(inputs));
+                original.inputs = Some(std::mem::ManuallyDrop::new(Arc::new(inputs)));
                 Err(error)
             }
         }
@@ -1951,101 +2013,116 @@ impl SettledLiveNative {
                 .is_some_and(|late| late.clock_retired().unwrap_or(false))
     }
 
+    /// The registry-free part of final consumption: this process, every
+    /// finalizer source frame consumed, the destination phase complete, the
+    /// late registry and clock retired, and the reservation holding nothing
+    /// but its release receipt. A dropped settled owner settles on exactly
+    /// these checks.
+    fn require_finalized_holders(&self) -> Result<()> {
+        self.require_original_process()?;
+        ensure!(self.control_sources_consumed && self.account_sources.is_none()
+            && self.operator_registration.is_none(),
+            "settled control sources remain before final consumption");
+        let inputs = self.input_sources.as_ref()
+            .context("settled admission-input frame absent before final consumption")?;
+        ensure!(inputs.consumed(),
+            "settled admission-input sources remain before final consumption");
+        match self.destination_phase {
+            FinalizationDestinationPhase::NoStoreRegistryRetired => {}
+            FinalizationDestinationPhase::StoreDestinationsRetired => ensure!(
+                self.store_metadata_sources_consumed && self.store_parent_sources_consumed
+                    && self.store_state_projection_sources_consumed
+                    && self.store_state_root_sources_consumed
+                    && self.store_runtime_shared_roots_consumed
+                    && self.store_packet_bound_roots_consumed
+                    && self.store_packet_metadata_pins_consumed
+                    && self.store_packet_source_parts_consumed
+                    && self.store_packet_acquisition_failure_count.is_some()
+                    && self.store_scheduler_sources_consumed
+                    && self.store_owner_frames_consumed
+                    && self.store_outside_exhausted,
+                "settled Store receipts remain before final consumption"),
+            _ => anyhow::bail!("settled destination phase is incomplete before final consumption"),
+        }
+        let late = self.original.late.as_ref()
+            .context("settled outside cleanup owner absent before final consumption")?;
+        ensure!(late.registry_retired() && late.clock_retired()?,
+            "late cleanup registry or clock is not retired before final consumption");
+        self.original.require_settled_holders()
+    }
+
     /// Consume this settled phase into its final non-owning record once the
     /// clock retired and every finalizer source frame was consumed. A refusal
     /// returns the same settled owner unchanged.
     pub fn into_finalized(self) -> std::result::Result<FinalizedLiveNative, (Self, anyhow::Error)> {
-        let checked = (|| -> Result<()> {
-            self.require_original_process()?;
-            ensure!(self.control_sources_consumed && self.account_sources.is_none()
-                && self.operator_registration.is_none(),
-                "settled control sources remain before final consumption");
-            let inputs = self.input_sources.as_ref()
-                .context("settled admission-input frame absent before final consumption")?;
-            ensure!(inputs.root.is_none() && inputs.runtime.is_none()
-                && inputs.completion_parent.is_none() && inputs.completion_file.is_none()
-                && inputs.completion_duplicate.is_none() && inputs.policy_parent.is_none()
-                && inputs.policy_file.is_none() && inputs.policy_duplicate.is_none()
-                && inputs.exclusion_alias.is_none() && inputs.clock_alias.is_none(),
-                "settled admission-input sources remain before final consumption");
-            match self.destination_phase {
-                FinalizationDestinationPhase::NoStoreRegistryRetired => {}
-                FinalizationDestinationPhase::StoreDestinationsRetired => ensure!(
-                    self.store_metadata_sources_consumed && self.store_parent_sources_consumed
-                        && self.store_state_projection_sources_consumed
-                        && self.store_state_root_sources_consumed
-                        && self.store_runtime_shared_roots_consumed
-                        && self.store_packet_bound_roots_consumed
-                        && self.store_packet_metadata_pins_consumed
-                        && self.store_packet_source_parts_consumed
-                        && self.store_packet_acquisition_failure_count.is_some()
-                        && self.store_scheduler_sources_consumed
-                        && self.store_owner_frames_consumed
-                        && self.store_outside_exhausted,
-                    "settled Store receipts remain before final consumption"),
-                _ => anyhow::bail!("settled destination phase is incomplete before final consumption"),
-            }
-            let late = self.original.late.as_ref()
-                .context("settled outside cleanup owner absent before final consumption")?;
-            ensure!(late.registry_retired() && late.clock_retired()?,
-                "late cleanup registry or clock is not retired before final consumption");
-            let original = &*self.original;
-            ensure!(original.released.is_some() && original.seal_failure.is_none()
-                && original.budget.get().is_none(),
-                "settled reservation lacks its release receipt or retains a native owner");
-            ensure!(original.account.try_read()
-                    .map_err(|_| anyhow::anyhow!("settled account owner busy or poisoned"))?.is_none()
-                && original.raw_budget.try_lock()
-                    .map_err(|_| anyhow::anyhow!("settled raw budget busy or poisoned"))?.is_none()
-                && original.region.try_lock()
-                    .map_err(|_| anyhow::anyhow!("settled region owner busy or poisoned"))?.is_none()
-                && original.physical_registry.try_lock()
-                    .map_err(|_| anyhow::anyhow!("settled physical registry busy or poisoned"))?.is_none(),
-                "settled reservation retains an account, budget, region or registry owner");
-            Ok(())
-        })();
-        if let Err(error) = checked {
+        if let Err(error) = self.require_finalized_holders() {
             return Err((self, error));
         }
-        let Self { original, account_sources, input_sources, operator_registration,
-            destination_phase: _, control_sources_consumed: _, store_metadata_sources_consumed: _,
-            store_parent_sources_consumed: _, store_state_projection_sources_consumed: _,
-            store_state_root_sources_consumed: _, store_runtime_shared_roots_consumed: _,
-            store_packet_bound_roots_consumed: _, store_packet_metadata_pins_consumed: _,
-            store_packet_source_parts_consumed: _, store_packet_acquisition_failure_count: _,
-            store_scheduler_sources_consumed: _, store_owner_frames_consumed: _,
-            store_outside_exhausted: _ } = self;
-        drop(account_sources);
-        drop(operator_registration);
-        drop(input_sources);
-        let LiveNativeCapacityReservation { inputs, account, budget, raw_budget, region,
-            release_exclusion, seal_failure, resident_generation: _, factory_entered: _,
-            host_storage, host_release_credit, released, late, physical_registry,
-            rollover_claim } =
-            std::mem::ManuallyDrop::into_inner(original);
-        // The input Arc moved into the finalizer frame checked above; this
-        // ManuallyDrop shell is a stale copy, not an owner, and is not dropped.
-        let _moved_input_shell = inputs;
-        drop(account);
-        drop(budget);
-        drop(raw_budget);
-        drop(region);
-        drop(seal_failure);
-        drop(physical_registry);
+        // Every holder is taken from its shell exactly once, in the order
+        // final consumption releases them. The emptied shells are never
+        // dropped, so neither owner's Drop can retain what was released here.
+        let mut settled = std::mem::ManuallyDrop::new(self);
+        let mut original = std::mem::ManuallyDrop::new(unsafe {
+            std::mem::ManuallyDrop::take(&mut settled.original)
+        });
+        drop(settled.account_sources.take());
+        drop(settled.operator_registration.take());
+        drop(settled.input_sources.take());
+        // The input Arc moved into the finalizer frame consumed above; the
+        // slot is already empty.
+        drop(original.inputs.take());
+        drop(original.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(original.budget.take());
+        drop(original.raw_budget.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(original.region.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(original.seal_failure.take());
+        drop(original.physical_registry.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
         // Disposed exclusion, released mapping and spent credit are plain
         // post-release records; none closes or unmaps anything on drop.
-        drop(release_exclusion);
-        drop(host_storage);
-        drop(host_release_credit);
-        drop(late);
+        drop(original.release_exclusion.take());
+        drop(original.host_storage.take());
+        drop(original.host_release_credit.take());
+        drop(original.late.take());
         // The settled claim is a plain copied observation; nothing to settle.
-        drop(rollover_claim);
-        Ok(FinalizedLiveNative {
-            process: std::process::id(),
-            _released: released.expect("checked settled release receipt"),
-        })
+        drop(original.rollover_claim.take());
+        let released = original.released.take().expect("checked settled release receipt");
+        Ok(FinalizedLiveNative { process: std::process::id(), _released: released })
     }
+}
 
+impl Drop for SettledLiveNative {
+    fn drop(&mut self) {
+        // Settled exactly when final consumption would accept this owner:
+        // every finalizer frame consumed, the late registry and clock retired
+        // and the reservation holding only its release receipt. The
+        // reservation and frames are taken exactly once, here; otherwise they
+        // stay retained together until the process exits.
+        const KIND: &str = "ryeos-node::native-capacity-settled";
+        if lillux::exec::in_forked_child() {
+            // A copy in another process holds none of these owners.
+            let original = unsafe { std::mem::ManuallyDrop::take(&mut self.original) };
+            lillux::custody::relinquish_in_foreign_process((
+                original,
+                self.account_sources.take(),
+                self.input_sources.take(),
+                self.operator_registration.take(),
+            ));
+            return;
+        }
+        let settled = self.require_finalized_holders().is_ok();
+        let original = unsafe { std::mem::ManuallyDrop::take(&mut self.original) };
+        let frames = (
+            self.account_sources.take(),
+            self.input_sources.take(),
+            self.operator_registration.take(),
+        );
+        if settled {
+            drop(frames);
+            drop(original);
+        } else {
+            lillux::custody::abandon(KIND, (original, frames));
+        }
+    }
 }
 
 /// Final non-owning record of one settled live native reservation: its
@@ -2066,29 +2143,17 @@ impl LiveNativeCapacityReservationFailure {
     /// does not renew authority, debit again, or certify a resource terminal.
     /// A forked copy must keep its refusal and cannot extract original custody.
     pub fn into_original(
-        mut self,
+        self,
     ) -> std::result::Result<Arc<LiveNativeCapacityReservation>, Self> {
-        if self.original().inputs.require_original_process().is_err() {
+        if self.original().require_original_process().is_err() {
             return Err(self);
         }
-        // SAFETY: consuming the failure transfers its one retained owner once;
-        // ManuallyDrop prevents the old wrapper from disposing transferred data.
-        let original = match &mut self.original {
-            RetainedReservationOwner::Bootstrap(owner) => {
-                Arc::new(unsafe { std::mem::ManuallyDrop::take(owner) })
-            }
-            RetainedReservationOwner::Published(owner) => unsafe {
-                std::mem::ManuallyDrop::take(owner)
-            },
-        };
-        Ok(original)
+        let Self { original, error: _ } = self;
+        Ok(original.into_taken())
     }
 
     pub fn original(&self) -> &LiveNativeCapacityReservation {
-        match &self.original {
-            RetainedReservationOwner::Bootstrap(owner) => owner,
-            RetainedReservationOwner::Published(owner) => owner,
-        }
+        self.original.original()
     }
 }
 impl std::fmt::Debug for LiveNativeCapacityReservationFailure {
@@ -2114,6 +2179,43 @@ impl std::error::Error for LiveNativeCapacityReservationFailure {
 }
 
 impl LiveNativeCapacityReservation {
+    /// The admission inputs this reservation still retains. Absent only after
+    /// settlement moved them into finalizer custody.
+    pub(super) fn inputs(&self) -> Result<&Arc<LiveNativeCapacityInputs>> {
+        retained_inputs(&self.inputs)
+    }
+
+    pub(super) fn require_original_process(&self) -> Result<()> {
+        self.inputs()?.require_original_process()
+    }
+
+    pub(super) fn require_service_edge(&self) -> Result<()> {
+        self.inputs()?.require_service_edge()
+    }
+
+    /// The registry-free part of final consumption for this reservation: its
+    /// admission inputs moved into settled finalizer custody, the physical
+    /// release receipt is present, and no native, account, budget, region
+    /// or registry owner remains. A dropped reservation settles on exactly
+    /// these checks.
+    pub(super) fn require_settled_holders(&self) -> Result<()> {
+        ensure!(self.inputs.is_none(),
+            "settled reservation retains its original admission inputs");
+        ensure!(self.released.is_some() && self.seal_failure.is_none()
+            && self.budget.get().is_none(),
+            "settled reservation lacks its release receipt or retains a native owner");
+        ensure!(self.account.try_read()
+                .map_err(|_| anyhow::anyhow!("settled account owner busy or poisoned"))?.is_none()
+            && self.raw_budget.try_lock()
+                .map_err(|_| anyhow::anyhow!("settled raw budget busy or poisoned"))?.is_none()
+            && self.region.try_lock()
+                .map_err(|_| anyhow::anyhow!("settled region owner busy or poisoned"))?.is_none()
+            && self.physical_registry.try_lock()
+                .map_err(|_| anyhow::anyhow!("settled physical registry busy or poisoned"))?.is_none(),
+            "settled reservation retains an account, budget, region or registry owner");
+        Ok(())
+    }
+
     pub(super) fn take_prepared_physical_registry(
         &self,
     ) -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
@@ -2151,7 +2253,7 @@ impl LiveNativeCapacityReservation {
         // Creating the shared reservation must not precede durable debit.
         // This does not fund the remaining input/error/shared allocations.
         let mut original = Self {
-            inputs: std::mem::ManuallyDrop::new(inputs),
+            inputs: Some(std::mem::ManuallyDrop::new(inputs)),
             account: std::sync::RwLock::new(Some(account)),
             budget: OnceLock::new(),
             raw_budget: Mutex::new(None),
@@ -2175,8 +2277,8 @@ impl LiveNativeCapacityReservation {
             let account = account_guard
                 .as_mut()
                 .context("original capacity account owner absent")?;
-            account.debit(&original.inputs)?;
-            account.require_original_debit(&original.inputs, false)?;
+            account.debit(original.inputs()?)?;
+            account.require_original_debit(original.inputs()?, false)?;
             // Release the lock itself, not only the borrowed owner, before
             // later original-authority checks reacquire the same account.
             drop(account_guard);
@@ -2204,7 +2306,7 @@ impl LiveNativeCapacityReservation {
                 .debit_steps(host_work, false)?;
             // Transfer the explicit signed split once while the original raw
             // counter is accessible. It cannot be spent again by native cleanup.
-            let host_release_steps = original.inputs.policy.incarnation.host_release_steps;
+            let host_release_steps = original.inputs()?.policy.incarnation.host_release_steps;
             raw.as_ref()
                 .context("original raw budget absent")?
                 .debit_steps(host_release_steps, true)?;
@@ -2223,7 +2325,7 @@ impl LiveNativeCapacityReservation {
                 .debit_steps(outside_cleanup_steps, true)?;
             drop(raw);
             original.late = Some(LateNativeControl::from_native_transfer(
-                &original.inputs,
+                original.inputs()?,
                 outside_control_limit,
                 outside_cleanup_steps,
                 physical_maximum,
@@ -2278,7 +2380,7 @@ impl LiveNativeCapacityReservation {
                 .map_err(|_| anyhow::anyhow!("original capacity account busy"))?
                 .as_mut()
                 .context("original capacity account owner absent")?
-                .resident_generation(&original.inputs)?;
+                .resident_generation(original.inputs()?)?;
             original.resident_generation = Some(generation);
             let (pointer, length) = storage.resident_region().map_err(anyhow::Error::msg)?;
             let mut region_slot = original
@@ -2367,11 +2469,11 @@ impl LiveNativeCapacityReservation {
     }
 
     pub(crate) fn require_original(&self, cleanup: bool) -> Result<()> {
-        self.inputs.require_original(cleanup)?;
+        self.inputs()?.require_original(cleanup)?;
         self.account_for_check()?
             .as_ref()
             .context("original capacity account owner absent")?
-            .require_original_debit(&self.inputs, cleanup)
+            .require_original_debit(self.inputs()?, cleanup)
     }
 
     /// Re-check, before new native work is admitted against the resident
@@ -2394,7 +2496,7 @@ impl LiveNativeCapacityReservation {
     /// incarnation its durable debit followed. Read from the retained account
     /// after its debit; refuses before it or once settlement took the owner.
     pub fn incarnation_lineage(&self) -> Result<([u8; 32], Option<[u8; 32]>)> {
-        self.inputs.require_original(true)?;
+        self.inputs()?.require_original(true)?;
         self.account_for_check()?
             .as_ref()
             .context("original capacity account owner absent")?
@@ -2405,11 +2507,11 @@ impl LiveNativeCapacityReservation {
     /// epoch, remaining allowance and recovery attempts. Shares the boundary
     /// read lock and writes nothing.
     pub fn capacity_summary(&self) -> Result<super::account::CapacityAccountSummary> {
-        self.inputs.require_original(true)?;
+        self.inputs()?.require_original(true)?;
         self.account_for_check()?
             .as_ref()
             .context("original capacity account owner absent")?
-            .summary(&self.inputs.policy)
+            .summary(&self.inputs()?.policy)
     }
 
     /// Durable account verification runs at native operation boundaries,
@@ -2482,7 +2584,7 @@ impl LiveNativeCapacityReservation {
             // Fix the claim before any check can refuse: the first call's
             // observation is the one every retry settles under.
             original.rollover_claim.get_or_init(|| claim);
-            original.inputs.require_original(true)?;
+            original.inputs()?.require_original(true)?;
             // Match the outside receipt before consulting any region state.
             // The original mapping may already be gone and account writes may
             // be partially complete. Reuse the same owner/target, never release
@@ -2517,9 +2619,8 @@ impl LiveNativeCapacityReservation {
                                 .as_mut()
                                 .context("original host release credit absent")?,
                             || {
-                                original
-                                    .inputs
-                                    .require_original(true)
+                                retained_inputs(&original.inputs)
+                                    .and_then(|inputs| inputs.require_original(true))
                                     .map_err(|_| "original pre-region cleanup authority refused")?;
                                 Ok(())
                             },
@@ -2556,13 +2657,13 @@ impl LiveNativeCapacityReservation {
                     .map_err(|_| anyhow::anyhow!("resident owner poisoned"))?
                     .as_ref()
                     .context("original resident owner absent; partial-start recovery required")?;
-                original.inputs.require_original(true)?;
+                retained_inputs(&original.inputs)?.require_original(true)?;
                 owner.begin_close()?;
                 // The sole local facade is retired only after admission is
                 // closed. All other real handles still block the lower seal.
                 drop(original.budget.take());
                 owner.retire_pending()?;
-                original.inputs.require_original(true)?;
+                retained_inputs(&original.inputs)?.require_original(true)?;
                 let owner = original
                     .region
                     .get_mut()
@@ -2586,7 +2687,7 @@ impl LiveNativeCapacityReservation {
                 Some(exclusion.original_generation()?) == original.resident_generation,
                 "resident release selects foreign durable generation"
             );
-            original.inputs.require_original(true)?;
+            retained_inputs(&original.inputs)?.require_original(true)?;
             exclusion.dispose()?;
             // SAFETY: this exclusion was retained from sealing this same
             // reservation's initialized region, whose span came only from
@@ -2605,9 +2706,8 @@ impl LiveNativeCapacityReservation {
                             .as_mut()
                             .context("original host release credit absent")?,
                         || {
-                            original
-                                .inputs
-                                .require_original(true)
+                            retained_inputs(&original.inputs)
+                                .and_then(|inputs| inputs.require_original(true))
                                 .map_err(|_| "original host cleanup authority refused")?;
                             Ok(())
                         },
@@ -2677,18 +2777,19 @@ impl LiveNativeCapacityReservation {
                 .is_none(),
             "unmapped reservation retains a physical registry without its cleanup owner"
         );
-        self.inputs.require_original(true)?;
+        let inputs = self.inputs()?;
+        inputs.require_original(true)?;
         let ReservationFloors {
             tickets: _,
             host_layout: _,
             outside_control_limit,
             physical_maximum,
             host_work: _,
-        } = require_reservation_floors(&self.inputs.policy.incarnation)?;
+        } = require_reservation_floors(&inputs.policy.incarnation)?;
         let late = LateNativeControl::from_refused_reservation(
-            &self.inputs,
+            inputs,
             outside_control_limit,
-            self.inputs.policy.incarnation.outside_cleanup_steps,
+            inputs.policy.incarnation.outside_cleanup_steps,
             physical_maximum,
         )?;
         // SAFETY: the inventory is funded from this late owner's finite
@@ -2714,7 +2815,7 @@ impl LiveNativeCapacityReservation {
     /// A refusal leaves the affine release receipt and the account's exact
     /// predecessor/target in this owner for `failure.into_original()`.
     fn settle_retained_release(&mut self) -> Result<()> {
-        self.inputs.require_original(true)?;
+        self.inputs()?.require_original(true)?;
         let account = self
             .account
             .get_mut()
@@ -2727,7 +2828,7 @@ impl LiveNativeCapacityReservation {
             .context("original physical release receipt absent")?
         {
             ReleasedReservation::BeforeRegion(released) => {
-                account.settle_before_region(&self.inputs, released)?;
+                account.settle_before_region(retained_inputs(&self.inputs)?, released)?;
                 self.raw_budget
                     .get_mut()
                     .map_err(|_| anyhow::anyhow!("original raw budget poisoned"))?
@@ -2742,7 +2843,7 @@ impl LiveNativeCapacityReservation {
                     .late
                     .as_ref()
                     .context("original released region lost its late cleanup owner")?;
-                let inputs = &self.inputs;
+                let inputs = retained_inputs(&self.inputs)?;
                 // Only a served region release carries the rollover claim; a
                 // before-region release above is never a served window.
                 let claim = self.rollover_claim.get().copied().flatten();
@@ -2758,7 +2859,7 @@ impl LiveNativeCapacityReservation {
     /// Seal construction before retiring a genuinely uninstalled issuer.
     /// This does not acknowledge native shutdown or release physical backing.
     pub(super) fn close_uninstalled_construction(&self) -> Result<()> {
-        self.inputs.require_original(true)?;
+        self.inputs()?.require_original(true)?;
         let owner = self
             .region
             .try_lock()
@@ -2788,6 +2889,150 @@ impl LiveNativeCapacityReservation {
             "original native factory already entered; retain existing owner"
         );
         Ok(())
+    }
+}
+
+impl Drop for LiveNativeCapacityReservation {
+    fn drop(&mut self) {
+        // Settled exactly when final consumption would accept this
+        // reservation without a registry: its admission inputs moved into
+        // settled finalizer custody, the release receipt is present and no
+        // account, native, region or registry owner remains. The input and
+        // account slots are taken exactly once, here; otherwise the original
+        // admission descriptors and the capacity account stay retained
+        // together until the process exits.
+        const KIND: &str = "ryeos-node::native-capacity-reservation";
+        if lillux::exec::in_forked_child() {
+            // A copy in another process holds none of these owners.
+            let inputs = self.inputs.take();
+            let account = self.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            lillux::custody::relinquish_in_foreign_process((inputs, account));
+            return;
+        }
+        let settled = self.require_settled_holders().is_ok();
+        let inputs = self.inputs.take().map(std::mem::ManuallyDrop::into_inner);
+        let account = self.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if settled {
+            drop(inputs);
+            drop(account);
+        } else {
+            lillux::custody::abandon(KIND, (inputs, account));
+        }
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const RESERVATION: &str = "ryeos-node::native-capacity-reservation";
+    const SETTLED: &str = "ryeos-node::native-capacity-settled";
+    const FAILURE: &str = "ryeos-node::native-capacity-reservation-failure";
+
+    /// A reservation that holds nothing: inputs already transferred, no
+    /// account, native, region or registry owner. With `released` it is
+    /// exactly what final consumption accepts.
+    fn empty_reservation(released: bool) -> LiveNativeCapacityReservation {
+        LiveNativeCapacityReservation {
+            inputs: None,
+            account: std::sync::RwLock::new(None),
+            budget: OnceLock::new(),
+            raw_budget: Mutex::new(None),
+            region: Mutex::new(None),
+            release_exclusion: None,
+            seal_failure: None,
+            resident_generation: None,
+            factory_entered: AtomicBool::new(false),
+            host_storage: OnceLock::new(),
+            host_release_credit: None,
+            // SAFETY: a test-only release fact for a reservation that never
+            // mapped, published or retained anything.
+            released: released.then(|| {
+                ReleasedReservation::BeforeRegion(unsafe { HostStorageReleased::never_mapped() })
+            }),
+            late: None,
+            physical_registry: Mutex::new(None),
+            rollover_claim: OnceLock::new(),
+        }
+    }
+
+    fn settled_phase(original: LiveNativeCapacityReservation) -> SettledLiveNative {
+        SettledLiveNative {
+            original: std::mem::ManuallyDrop::new(original),
+            account_sources: None,
+            input_sources: None,
+            operator_registration: None,
+            destination_phase: FinalizationDestinationPhase::Pending,
+            control_sources_consumed: false,
+            store_metadata_sources_consumed: false,
+            store_parent_sources_consumed: false,
+            store_state_projection_sources_consumed: false,
+            store_state_root_sources_consumed: false,
+            store_runtime_shared_roots_consumed: false,
+            store_packet_bound_roots_consumed: false,
+            store_packet_metadata_pins_consumed: false,
+            store_packet_source_parts_consumed: false,
+            store_packet_acquisition_failure_count: None,
+            store_scheduler_sources_consumed: false,
+            store_owner_frames_consumed: false,
+            store_outside_exhausted: false,
+        }
+    }
+
+    #[test]
+    fn dropped_settled_reservation_releases_normally() {
+        let _serial = super::super::abandoned_custody_serial();
+        let reservation = empty_reservation(true);
+        reservation.require_settled_holders().unwrap();
+        assert!(reservation.inputs().is_err());
+        let before = lillux::custody::abandoned_custody().count(RESERVATION);
+        drop(reservation);
+        assert_eq!(lillux::custody::abandoned_custody().count(RESERVATION), before);
+    }
+
+    #[test]
+    fn dropped_reservation_without_release_receipt_is_retained() {
+        let _serial = super::super::abandoned_custody_serial();
+        let reservation = empty_reservation(false);
+        assert!(reservation.require_settled_holders().is_err());
+        let before = lillux::custody::abandoned_custody().count(RESERVATION);
+        drop(reservation);
+        assert_eq!(lillux::custody::abandoned_custody().count(RESERVATION), before + 1);
+    }
+
+    #[test]
+    fn dropped_settled_phase_before_final_consumption_is_retained_whole() {
+        let _serial = super::super::abandoned_custody_serial();
+        let settled = settled_phase(empty_reservation(true));
+        assert!(settled.require_finalized_holders().is_err());
+        // A refused final consumption hands the same owner back unchanged.
+        let (settled, _error) = settled.into_finalized().err().expect("unconsumed frames refuse");
+        let before = lillux::custody::abandoned_custody();
+        drop(settled);
+        let after = lillux::custody::abandoned_custody();
+        assert_eq!(after.count(SETTLED), before.count(SETTLED) + 1);
+        // The reservation went with its settled owner; its own Drop never ran.
+        assert_eq!(after.count(RESERVATION), before.count(RESERVATION));
+    }
+
+    #[test]
+    fn dropped_retained_reservation_owner_is_abandoned_and_taken_one_is_not() {
+        let _serial = super::super::abandoned_custody_serial();
+        let before = lillux::custody::abandoned_custody();
+        drop(RetainedReservationOwner::Bootstrap(std::mem::ManuallyDrop::new(empty_reservation(true))));
+        let after = lillux::custody::abandoned_custody();
+        assert_eq!(after.count(FAILURE), before.count(FAILURE) + 1);
+        assert_eq!(after.count(RESERVATION), before.count(RESERVATION));
+
+        let published = Arc::new(empty_reservation(true));
+        let alias = Arc::clone(&published);
+        let taken = RetainedReservationOwner::Published(std::mem::ManuallyDrop::new(published)).into_taken();
+        assert!(Arc::ptr_eq(&taken, &alias));
+        drop(alias);
+        drop(taken);
+        let settled = lillux::custody::abandoned_custody();
+        assert_eq!(settled.count(FAILURE), after.count(FAILURE));
+        assert_eq!(settled.count(RESERVATION), after.count(RESERVATION));
     }
 }
 

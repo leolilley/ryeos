@@ -149,7 +149,7 @@ impl SqliteInspectionProductionControl for LiveProductionControl {
     fn checkpoint(&self) -> Result<()> { self.authority.require_original(false) }
     fn complete(&self) -> Result<()> { self.authority.require_original(true) }
     fn abandoned(&self) {
-        if self.authority.reservation.inputs.require_original_process().is_ok() {
+        if self.authority.reservation.require_original_process().is_ok() {
             self.authority.latch(service_refusal::PRODUCER_ABANDONED);
         }
     }
@@ -164,7 +164,7 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
         // Inside one running boundary the durable reads already passed; the
         // latch above and the process are still re-read.
         if lillux_sqlite::native_boundary_reuses_durable_check(self, cleanup) {
-            return self.reservation.inputs.require_original_process();
+            return self.reservation.require_original_process();
         }
         let checked = DurableCheckGuard::enter()
             .and_then(|_guard| self.reservation.require_original(cleanup));
@@ -174,7 +174,7 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
         self.require_original(false)?;
         ensure!(
-            self.reservation.inputs.runtime.is_same_directory(runtime)?,
+            self.reservation.inputs()?.runtime.is_same_directory(runtime)?,
             "live native factory selects foreign runtime"
         );
         runtime.ensure_path_binding()
@@ -194,7 +194,7 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
     }
 
     fn refuse_service(&self) {
-        if self.reservation.inputs.require_original_process().is_ok() {
+        if self.reservation.require_original_process().is_ok() {
             self.latch(service_refusal::BOUNDARY_REFUSED);
         }
     }
@@ -241,7 +241,7 @@ impl LiveNativeAuthority {
     }
 
     fn require_service_edge(&self) -> Result<()> {
-        self.reservation.inputs.require_service_edge().map_err(|error| {
+        self.reservation.require_service_edge().map_err(|error| {
             self.latch(service_refusal::WINDOW_EDGE);
             error.context(lillux_sqlite::NativeServiceEdgeReached)
         })
@@ -250,10 +250,10 @@ impl LiveNativeAuthority {
     /// A durable-check refusal latches only when it is a fact: not in a
     /// foreign process, not momentary contention and not the planned edge.
     fn latch_refusal(&self, error: anyhow::Error) -> anyhow::Error {
-        if self.reservation.inputs.require_original_process().is_err() {
+        if self.reservation.require_original_process().is_err() {
             return error;
         }
-        if self.reservation.inputs.require_service_edge().is_err() {
+        if self.reservation.require_service_edge().is_err() {
             self.latch(service_refusal::WINDOW_EDGE);
             return error.context(lillux_sqlite::NativeServiceEdgeReached);
         }
@@ -318,7 +318,7 @@ impl LiveNativeProducerPreparationFailure {
     /// Only a failed debit (no ticket issued) can retire as a never-published
     /// preparation. The actual lower cell checks its own unbound state.
     pub fn retire_unbound(self) -> std::result::Result<anyhow::Error, Self> {
-        if self.original.inputs.require_original_process().is_err() || self.ticket.is_some() {
+        if self.original.require_original_process().is_err() || self.ticket.is_some() {
             return Err(self);
         }
         if self.core.retire_unbound_preparation().is_err() { return Err(self); }
@@ -342,7 +342,7 @@ impl LiveNativeProducerPreparationFailure {
     }
 
     pub fn into_parts(self) -> std::result::Result<(Arc<LiveNativeCapacityReservation>, lillux_sqlite::OriginalNativeProducerControl, Option<u32>, anyhow::Error), Self> {
-        if self.original.inputs.require_original_process().is_err() { return Err(self); }
+        if self.original.require_original_process().is_err() { return Err(self); }
         Ok((self.original, self.core, self.ticket, self.error))
     }
 }
@@ -385,7 +385,7 @@ impl LiveNativeProducerPublicationFailure {
         }
     }
     pub fn into_parts(self) -> std::result::Result<(Arc<LiveNativeCapacityReservation>, SqliteInspectionProductionPublicationFailure), Self> {
-        if self.original.inputs.require_original_process().is_err() { return Err(self); }
+        if self.original.require_original_process().is_err() { return Err(self); }
         Ok((self.original, self.retained))
     }
 }
@@ -433,7 +433,7 @@ impl LiveNativeFactoryFailure {
     /// Recover an actual publication refusal before a lower factory exists.
     /// No replacement factory, budget or backend terminal is issued.
     pub fn retire_uninstalled(self) -> std::result::Result<(), Self> {
-        if self._original.authority.reservation.inputs.require_original_process().is_err()
+        if self._original.authority.reservation.require_original_process().is_err()
             || self._original.factory.get().is_some()
             || self._original.close_admission().is_err() { return Err(self); }
         let Self { _original, error } = self;
@@ -468,7 +468,7 @@ impl LiveNativeFactoryFailure {
     /// Return actual custody to the outside supervisor, preserving the same
     /// failed factory, reservation and resident graph. No retry grant is issued.
     pub fn into_original(self) -> std::result::Result<Arc<LiveNativeFactory>, Self> {
-        if self._original.authority.reservation.inputs.require_original_process().is_err() {
+        if self._original.authority.reservation.require_original_process().is_err() {
             return Err(self);
         }
         Ok(self._original)
@@ -518,7 +518,7 @@ impl LiveNativeFactory {
         reservation.claim_factory_install()?;
         let budget = reservation.budget()?;
         let region = reservation.region_handle()?;
-        let service_edge = reservation.inputs.service_edge;
+        let service_edge = reservation.inputs()?.service_edge;
         let authority = Arc::new_cyclic(|original| LiveNativeAuthority {
             original: original.clone(), reservation, budget, region, issuer: OnceLock::new(),
             latch: Arc::new(ServiceRefusalLatch::new(service_edge)),
@@ -580,7 +580,7 @@ impl LiveNativeFactory {
     /// Closing local admission is permitted even after the original time window
     /// expires; the actual original process remains required.
     pub fn close_admission(&self) -> Result<()> {
-        self.authority.reservation.inputs.require_original_process()?;
+        self.authority.reservation.require_original_process()?;
         self.authority.admission_closed.store(true, Ordering::Release);
         let _gate = self.authority.admission_gate.try_lock()
             .map_err(|_| anyhow::anyhow!("native admission close busy; gate remains closed"))?;
@@ -741,7 +741,7 @@ impl LiveNativeFactory {
         self.authority.require_original(cleanup)?;
         let original = self.factory.get().context("original live factory absent")?;
         ensure!(Arc::ptr_eq(original, factory), "foreign live projection lease factory");
-        let inputs = &self.authority.reservation.inputs;
+        let inputs = self.authority.reservation.inputs()?;
         let deadline = if cleanup { inputs.cleanup_deadline } else { inputs.sql_deadline };
         ensure!(!deadline.has_elapsed(), "original live projection lease deadline elapsed");
         Ok(deadline)
@@ -782,7 +782,7 @@ impl LiveNativeFactory {
     pub fn arm_service_window_timers(&self, on_margin: ServiceRefusalWake) -> Result<()> {
         let latch = Arc::clone(&self.authority.latch);
         let margin = std::time::Duration::from_millis(
-            self.authority.reservation.inputs.policy.incarnation.rollover_drain_margin_ms,
+            self.authority.reservation.inputs()?.policy.incarnation.rollover_drain_margin_ms,
         );
         std::thread::Builder::new()
             .name("ryeosd-service-window".to_owned())
@@ -807,7 +807,7 @@ impl LiveNativeFactory {
     /// Return the original captured service deadline, never a fresh interval.
     pub fn original_sql_deadline(&self) -> Result<lillux::time::MonotonicDeadline> {
         self.authority.require_original(false)?;
-        let deadline = self.authority.reservation.inputs.sql_deadline;
+        let deadline = self.authority.reservation.inputs()?.sql_deadline;
         ensure!(
             !deadline.has_elapsed(),
             "original live SQL deadline elapsed"
