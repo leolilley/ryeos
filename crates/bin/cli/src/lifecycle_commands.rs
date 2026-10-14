@@ -2507,24 +2507,28 @@ fn capability_section(
             "requires",
             &format!(
                 "{} — {}",
-                floor.requires.iter().map(|entry| entry.label()).collect::<Vec<_>>().join(", "),
+                floor.requires.iter().map(floor_entry_text).collect::<Vec<_>>().join(", "),
                 if floor.admitted { "met" } else { "NOT met" }
             ),
         )
         .with_tone(floor_tone),
     );
-    for (label, name) in &floor.met_by {
+    for (label, met) in &floor.met_by {
         // Only an admission on a weaker grade than the entry's strongest
         // name is worth a warning.
         let strongest = floor
             .requires
             .iter()
             .find(|entry| entry.label() == *label)
-            .is_some_and(|entry| lillux::process_control::met_by_strongest(entry, name));
+            .is_some_and(|entry| lillux::process_control::met_by_strongest(entry, &met.name));
+        let proof = format!("from {} ({})", met.provider, met.source.as_str());
         let (text, tone) = if strongest {
-            (format!("  met {label} by {name}"), crate::tty::Tone::Secondary)
+            (format!("  met {label} by {} {proof}", met.name), crate::tty::Tone::Secondary)
         } else {
-            (format!("  met {label} by {name}, a weaker grade it names"), crate::tty::Tone::Warning)
+            (
+                format!("  met {label} by {} {proof}, a weaker grade it names", met.name),
+                crate::tty::Tone::Warning,
+            )
         };
         section.rows.push(crate::tty::Row::text(text).with_tone(tone));
     }
@@ -2536,8 +2540,11 @@ fn capability_section(
     for (name, evidence) in &report.provided {
         let source = evidence.source.as_str();
         section.rows.push(
-            crate::tty::Row::text(format!("  proves {name} ({source}): {}", evidence.basis))
-                .with_tone(crate::tty::Tone::Secondary),
+            crate::tty::Row::text(format!(
+                "  proves {name} ({source} by {}): {}",
+                evidence.provider, evidence.basis
+            ))
+            .with_tone(crate::tty::Tone::Secondary),
         );
     }
     for (name, reason) in &report.missing {
@@ -2547,6 +2554,23 @@ fn capability_section(
         );
     }
     section
+}
+
+/// One floor entry as the doctor shows it: its label, then the grades and
+/// providers it accepts when it names any.
+fn floor_entry_text(entry: &lillux::process_control::CapabilityRequirement) -> String {
+    let mut text = entry.label();
+    let mut constraints = Vec::new();
+    if !entry.accepted_grades().is_empty() {
+        constraints.push(format!("accept {}", entry.accepted_grades().join("|")));
+    }
+    if !entry.providers().is_empty() {
+        constraints.push(format!("providers {}", entry.providers().join("|")));
+    }
+    if !constraints.is_empty() {
+        text.push_str(&format!(" [{}]", constraints.join("; ")));
+    }
+    text
 }
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
@@ -3179,7 +3203,11 @@ mod tests {
         durable.missing.clear();
         durable.provided.insert(
             STORAGE_DURABLE_ROOT.to_owned(),
-            CapabilityEvidence { source: ProofSource::Measured, basis: "ext4 at /data, durable by mount".to_owned() },
+            CapabilityEvidence {
+                source: ProofSource::Measured,
+                provider: lillux::process_control::HOST_PROVIDER.to_owned(),
+                basis: "ext4 at /data, durable by mount".to_owned(),
+            },
         );
         durable.exposure.listeners.clear();
         let signed = SignedNodeCapabilityReport {

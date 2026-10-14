@@ -627,7 +627,7 @@ pub fn load_node_config_two_phase(
 /// never discovers a lifecycle provider or decodes an OS backend.
 pub fn load_node_config_two_phase_with_host_runtime(
     config: &Config,
-    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    host_runtime: Option<ryeos_node::host_runtime::SelectedHostRuntime<'_>>,
     provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
@@ -670,7 +670,7 @@ pub fn load_node_config_two_phase_standalone(
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
-    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    host_runtime: Option<ryeos_node::host_runtime::SelectedHostRuntime<'_>>,
     provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
@@ -801,8 +801,8 @@ fn load_node_config_two_phase_with_socket(
         ) {
         match host_runtime {
             Some(runtime) => {
-                runtime.verify_loaded_node_identity(&node_identity)?;
-                Some(runtime.open_process_scope_provider()?)
+                runtime.binding.verify_loaded_node_identity(&node_identity)?;
+                Some(runtime.binding.open_process_scope_provider()?)
             }
             // Without a host runtime no scope capability qualifies. Policy
             // validation guarantees required scopes name termination:scope
@@ -815,7 +815,7 @@ fn load_node_config_two_phase_with_socket(
         None
     };
     let process_scope_authority_digest = host_runtime
-        .map(|runtime| runtime.identity_digest())
+        .map(|runtime| runtime.binding.identity_digest())
         .transpose()
         .context("Phase 1: identify protected host-runtime authority")?;
     let isolation = match daemon_socket {
@@ -874,7 +874,9 @@ fn load_node_config_two_phase_with_socket(
     // Every node process records what it contains and what its host proves,
     // then admits itself only if the signed policy's capability floor is met.
     // This precedes the engine and every native reservation, so a refusal
-    // spends no incarnation.
+    // spends no incarnation. Every per-scope proof is attributed to the host
+    // runtime's transport, which cannot change within one incarnation, so a
+    // floor that constrains providers is decided here once.
     let daemon_digest = lillux::current_executable_digest()
         .map_err(anyhow::Error::msg)
         .context("Phase 1: measure the running daemon executable")?;
@@ -894,7 +896,7 @@ fn load_node_config_two_phase_with_socket(
             listeners,
             policy_generation: format!("sha256:{}", node_policy.generation_digest()),
             isolation: isolation.inspection(),
-            host_runtime_present: host_runtime.is_some(),
+            host_runtime_provider: host_runtime.map(|runtime| runtime.provider),
             provider_environment: provider_environment.environment().as_ref(),
         },
     )

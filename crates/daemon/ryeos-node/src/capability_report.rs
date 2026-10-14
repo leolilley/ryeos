@@ -14,13 +14,16 @@ use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use lillux::process_control::{
     CapabilityEvidence, CapabilityRequirement, HostCapabilities, HostFacts, ProofSource,
-    ResidencyProof, SCOPE_LIMITS, is_scope_capability,
+    ResidencyProof, SCOPE_LIMITS, is_scope_capability, satisfies,
 };
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v3";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v4";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
+/// Provider id of the environment the hosting provider delivers to the node
+/// process at startup.
+pub const PROVIDER_ENV_PROVIDER: &str = "provider_env";
 const REPORT_FILE: &str = "node-capability-report.json";
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 
@@ -92,15 +95,26 @@ impl CapabilityFloorRefused {
     }
 }
 
+/// The proof that met one floor entry: which of the entry's names, at what
+/// grade, from which provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FloorEntryMet {
+    pub name: String,
+    pub source: ProofSource,
+    pub provider: String,
+}
+
 /// Result of matching the declared floor against what the host proves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FloorAdmission {
     pub requires: Vec<CapabilityRequirement>,
     pub admitted: bool,
-    /// Each met `any_of` entry, by its label, with the name that met it, so
-    /// an admission on a weaker grade the floor names is always visible.
-    pub met_by: BTreeMap<String, String>,
+    /// Every met entry, by its label, with the proof that met it, so an
+    /// admission on a weaker grade the floor names, or on a provider it
+    /// merely allows, is always visible.
+    pub met_by: BTreeMap<String, FloorEntryMet>,
     /// Each unmet requirement, by its label, with the plain-language reason.
     pub unmet: BTreeMap<String, String>,
 }
@@ -156,9 +170,10 @@ pub struct ReportInputs<'a> {
     pub listeners: Vec<String>,
     pub policy_generation: String,
     pub isolation: &'a ryeos_engine::isolation::IsolationInspection,
-    /// Whether a protected host-runtime binding (host service or external
-    /// controller) delegated a cgroup subtree to this node.
-    pub host_runtime_present: bool,
+    /// The provider id of the protected host-runtime binding that delegated
+    /// a cgroup subtree to this node, which every per-scope proof is
+    /// attributed to; `None` when no binding did.
+    pub host_runtime_provider: Option<&'a str>,
     /// Provider-delivered environment taken at startup. Only its names reach
     /// the report.
     pub provider_environment: &'a ryeos_app::vault::ProviderEnvironment,
@@ -178,7 +193,7 @@ impl NodeCapabilityReport {
             bail!("host generation changed while the node capability report was observed");
         }
         let mut view = host.capabilities();
-        add_scope_capabilities(&mut view, inputs.isolation, inputs.host_runtime_present, host.gvisor());
+        add_scope_capabilities(&mut view, inputs.isolation, inputs.host_runtime_provider, host.gvisor());
         add_provider_environment(&mut view, inputs.provider_environment);
         let mut capacity = BTreeMap::new();
         if let Some(limit) = &host.cgroup.memory_max
@@ -448,42 +463,65 @@ pub fn resident_region_bytes() -> Result<u64> {
     u64::try_from(bytes).context("native resident region size overflow")
 }
 
+/// Per-scope guarantees, attributed to the host runtime that delegated the
+/// cgroup subtree. The probe exercises the kernel barrier only when the
+/// floor names quiescence, so an unqualified quiescence the floor does not
+/// name was not probed rather than refused.
 fn add_scope_capabilities(
     view: &mut HostCapabilities,
     isolation: &ryeos_engine::isolation::IsolationInspection,
-    host_runtime_present: bool,
+    host_runtime_provider: Option<&str>,
     gvisor: bool,
 ) {
     let qualified = &isolation.process_scope_capabilities;
-    let absent = match (&isolation.process_scopes, host_runtime_present) {
-        (ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {}, _) => Some(
-            "node policy configures no process scopes, so no per-job cgroup is opened".to_owned(),
+    let (provider, absent) = match (&isolation.process_scopes, host_runtime_provider) {
+        (ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {}, provider) => (
+            provider.unwrap_or_default(),
+            Some("node policy configures no process scopes, so no per-job cgroup is opened".to_owned()),
         ),
-        (_, false) => Some(
-            "no host service or external controller delegated a writable cgroup subtree to \
-             this node"
-                .to_owned(),
+        (_, None) => (
+            "",
+            Some(
+                "no host service or external controller delegated a writable cgroup subtree to \
+                 this node"
+                    .to_owned(),
+            ),
         ),
-        _ => None,
+        (_, Some(provider)) => (provider, None),
     };
+    let wanted = isolation
+        .requires_capabilities
+        .iter()
+        .flat_map(|entry| entry.names())
+        .filter_map(|name| lillux::ProcessScopeCapability::from_capability_name(name))
+        .collect::<std::collections::BTreeSet<_>>();
     let source = if gvisor { ProofSource::ProviderAttested } else { ProofSource::Measured };
     for capability in lillux::ProcessScopeCapability::ALL {
         let name = capability.capability_name();
         if qualified.contains(&capability) {
-            view.provide(name, source.clone(), "qualified by a disposable probe scope of the delegated cgroup provider");
-        } else {
+            view.provide(
+                name,
+                source.clone(),
+                provider,
+                "qualified by a disposable probe scope of the delegated cgroup provider",
+            );
+        } else if let Some(reason) = &absent {
+            view.refuse(name, reason.clone());
+        } else if capability == lillux::ProcessScopeCapability::Quiescence && !wanted.contains(&capability) {
             view.refuse(
                 name,
-                absent.clone().unwrap_or_else(|| {
-                    "the delegated cgroup provider's probe scope did not qualify it".to_owned()
-                }),
+                "not probed: the capability floor does not name it, so the kernel barrier was not \
+                 exercised",
             );
+        } else {
+            view.refuse(name, "the delegated cgroup provider's probe scope did not qualify it");
         }
     }
     if qualified.contains(&lillux::ProcessScopeCapability::Termination) {
         view.provide(
             SCOPE_LIMITS,
             source,
+            provider,
             "each job scope carries its own memory.max, memory.swap.max of 0 and pids.max",
         );
     } else {
@@ -523,36 +561,42 @@ fn add_provider_environment(
     basis.push_str(
         "; delivered as plain child environment, readable by the recipient's model commands",
     );
-    view.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, basis);
+    view.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, PROVIDER_ENV_PROVIDER, basis);
 }
 
-/// A name is met only by the exact named capability, proven by a local
-/// measurement, or by trust where the name itself is a trusted grade. A
-/// weaker grade is a different name and never stands in for a stronger one
-/// unless the floor entry names it as an alternative, and then the
-/// admission records that it did. Provider and peer attestations never
-/// satisfy a local requirement.
+/// A name is met only by the exact named capability, at a grade the entry
+/// accepts, from a provider it accepts. A weaker grade is a different name
+/// and never stands in for a stronger one unless the floor entry names it
+/// as an alternative. Every admission records which name met each entry,
+/// at what grade, from which provider.
 pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) -> FloorAdmission {
     let mut unmet = BTreeMap::new();
     let mut met_by = BTreeMap::new();
     for entry in requires {
         let mut failures: Vec<(&str, String)> = Vec::new();
-        let met = entry.names().iter().find(|name| match unmet_reason(name, view) {
+        let met = entry.names().iter().find(|name| match unmet_reason(entry, name, view) {
             None => true,
             Some(reason) => {
                 failures.push((name.as_str(), reason));
                 false
             }
         });
-        match (entry, met, failures.as_slice()) {
-            (CapabilityRequirement::AnyOf(_), Some(name), _) => {
-                met_by.insert(entry.label(), name.clone());
+        match (met, failures.as_slice()) {
+            (Some(name), _) => {
+                let evidence = &view.provided[name];
+                met_by.insert(
+                    entry.label(),
+                    FloorEntryMet {
+                        name: name.clone(),
+                        source: evidence.source.clone(),
+                        provider: evidence.provider.clone(),
+                    },
+                );
             }
-            (CapabilityRequirement::Name(_), Some(_), _) => {}
-            (CapabilityRequirement::Name(name), None, [(_, reason)]) => {
-                unmet.insert(name.clone(), reason.clone());
+            (None, [(_, reason)]) if !entry.is_set() => {
+                unmet.insert(entry.label(), reason.clone());
             }
-            (_, None, _) => {
+            (None, _) => {
                 let reasons: Vec<String> =
                     failures.iter().map(|(name, reason)| format!("{name}: {reason}")).collect();
                 unmet.insert(entry.label(), format!("none of its names is met; {}", reasons.join("; ")));
@@ -562,15 +606,15 @@ pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) 
     FloorAdmission { requires: requires.to_vec(), admitted: unmet.is_empty(), met_by, unmet }
 }
 
-/// Why `name` is not met here, or `None` when it is.
-fn unmet_reason(name: &str, view: &HostCapabilities) -> Option<String> {
+/// Why `name`, one of `entry`'s names, is not met here, or `None` when it
+/// is: the proof's basis is appended to a grade or provider mismatch so the
+/// refusal says what was proven instead.
+fn unmet_reason(entry: &CapabilityRequirement, name: &str, view: &HostCapabilities) -> Option<String> {
     match view.provided.get(name) {
-        Some(evidence) if lillux::process_control::satisfies_local_requirement(name, evidence) => None,
-        Some(evidence) => Some(format!(
-            "{name} is only {}-proven here ({}); a local requirement needs a local measurement",
-            evidence.source.as_str(),
-            evidence.basis
-        )),
+        Some(evidence) => match satisfies(entry, name, evidence) {
+            Ok(()) => None,
+            Err(mismatch) => Some(format!("{mismatch} ({})", evidence.basis)),
+        },
         None => Some(
             view.missing
                 .get(name)
@@ -602,10 +646,12 @@ fn refusal_text(
 mod tests {
     use super::*;
 
+    use lillux::process_control::{CapabilityRequirementSpec, HOST_PROVIDER};
+
     fn view(provided: &[&str], missing: &[(&str, &str)]) -> HostCapabilities {
         let mut view = HostCapabilities::default();
         for name in provided {
-            view.provide(name, ProofSource::Measured, "fixture");
+            view.provide(name, ProofSource::Measured, HOST_PROVIDER, "fixture");
         }
         for (name, reason) in missing {
             view.refuse(name, *reason);
@@ -618,9 +664,25 @@ mod tests {
     }
 
     fn any_of(names: &[&str]) -> CapabilityRequirement {
-        CapabilityRequirement::AnyOf(lillux::process_control::AnyOfCapabilities {
+        CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: None,
             any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+            accept: Vec::new(),
+            providers: Vec::new(),
         })
+    }
+
+    fn entry(name: &str, accept: &[&str], providers: &[&str]) -> CapabilityRequirement {
+        CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: Some(name.to_owned()),
+            any_of: Vec::new(),
+            accept: accept.iter().map(|grade| (*grade).to_owned()).collect(),
+            providers: providers.iter().map(|provider| (*provider).to_owned()).collect(),
+        })
+    }
+
+    fn met(name: &str, source: ProofSource, provider: &str) -> FloorEntryMet {
+        FloorEntryMet { name: name.to_owned(), source, provider: provider.to_owned() }
     }
 
     fn report(provided: HostCapabilities, requires: Vec<CapabilityRequirement>) -> NodeCapabilityReport {
@@ -659,17 +721,40 @@ mod tests {
         assert!(!refused.admitted);
         assert_eq!(refused.unmet["termination:scope"], "no writable cgroup subtree");
         assert!(refused.unmet["warp:drive"].contains("does not know how to prove"));
+        // Every met entry records the name, grade and provider that met it.
+        assert_eq!(admitted.met_by["accounting"], met("accounting", ProofSource::Measured, HOST_PROVIDER));
+        assert_eq!(admitted.met_by["time"], met("time", ProofSource::Measured, HOST_PROVIDER));
+        assert_eq!(admitted.met_by.len(), 2);
         let mut attested = host.clone();
-        attested.provide("time", ProofSource::ProviderAttested, "gvisor");
-        attested.provide("termination:process_group", ProofSource::Trusted, "pidfd");
-        attested.provide("isolation:namespaces", ProofSource::Trusted, "policy");
+        attested.provide("time", ProofSource::ProviderAttested, HOST_PROVIDER, "gvisor");
+        attested.provide("termination:process_group", ProofSource::Trusted, HOST_PROVIDER, "pidfd");
+        attested.provide("isolation:namespaces", ProofSource::Trusted, HOST_PROVIDER, "policy");
+        // A bare name accepts a measurement only, whatever the name; the
+        // refusal names the grade and provider and what was proven.
         let attested_floor = match_floor(
             &floor(&["isolation:namespaces", "termination:process_group", "time"]),
             &attested,
         );
-        assert!(!attested_floor.unmet.contains_key("termination:process_group"));
-        assert!(attested_floor.unmet["time"].contains("provider_attested-proven"));
+        assert_eq!(
+            attested_floor.unmet["termination:process_group"],
+            "termination:process_group is only trusted-proven here by host; the floor accepts measured (pidfd)"
+        );
+        assert_eq!(
+            attested_floor.unmet["time"],
+            "time is only provider_attested-proven here by host; the floor accepts measured (gvisor)"
+        );
         assert!(attested_floor.unmet["isolation:namespaces"].contains("trusted-proven"));
+        // The grade is data: a floor that accepts trust for the name is met
+        // by it, and records the grade it was met at.
+        let trusting = match_floor(
+            &[entry("termination:process_group", &["trusted"], &[]), "accounting".into()],
+            &attested,
+        );
+        assert!(trusting.admitted, "{trusting:?}");
+        assert_eq!(
+            trusting.met_by["termination:process_group"],
+            met("termination:process_group", ProofSource::Trusted, HOST_PROVIDER)
+        );
         let scoped = report(host.clone(), floor(&["limits:scope", "termination:scope", "time"]));
         assert!(scoped.require_floor().is_err());
         scoped.require_floor_without_scopes().unwrap();
@@ -697,11 +782,11 @@ mod tests {
         let accepting = vec![any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]), "time".into()];
         let admitted = match_floor(&accepting, &momentary);
         assert!(admitted.admitted, "{admitted:?}");
-        assert_eq!(admitted.met_by["any_of(accounting, residency:swap_absent)"], RESIDENCY_SWAP_ABSENT);
+        assert_eq!(admitted.met_by["any_of(accounting, residency:swap_absent)"].name, RESIDENCY_SWAP_ABSENT);
         // The same floor on a standing basis is met by the strong name.
         let standing = view(&[ACCOUNTING, RESIDENCY_LOCKED, "time"], &[]);
         assert_eq!(
-            match_floor(&accepting, &standing).met_by["any_of(accounting, residency:swap_absent)"],
+            match_floor(&accepting, &standing).met_by["any_of(accounting, residency:swap_absent)"].name,
             ACCOUNTING
         );
         // Neither name proven: one unmet entry with every name's reason.
@@ -709,9 +794,9 @@ mod tests {
         let refused = match_floor(&accepting, &neither);
         let reason = &refused.unmet["any_of(accounting, residency:swap_absent)"];
         assert!(reason.contains("accounting: no proof") && reason.contains("residency:swap_absent: swap active"), "{reason}");
-        // A set's alternatives obey the local-proof rule too.
+        // A set's alternatives obey the grade rule too.
         let mut attested = momentary.clone();
-        attested.provide(RESIDENCY_SWAP_ABSENT, ProofSource::ProviderAttested, "gvisor");
+        attested.provide(RESIDENCY_SWAP_ABSENT, ProofSource::ProviderAttested, HOST_PROVIDER, "gvisor");
         assert!(!match_floor(&accepting, &attested).admitted);
         // An entry with a host-level alternative is checked without scopes.
         let mixed = report(momentary.clone(), vec![any_of(&[ACCOUNTING, "limits:scope"])]);
@@ -726,22 +811,81 @@ mod tests {
         };
         let mut under_tini = view(&["time"], &[]);
         for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT] {
-            under_tini.provide(name, ProofSource::Trusted, "pid 1 is tini, named by node policy");
+            under_tini.provide(name, ProofSource::Trusted, HOST_PROVIDER, "pid 1 is tini, named by node policy");
         }
         under_tini.refuse(TERMINATION_ENCLOSURE, "the node is not pid 1");
         under_tini.refuse(RECOVERY_ENCLOSURE, "the node is not pid 1");
-        let trusted = match_floor(
+        // The trusted-init names carry no trust of their own: the floor
+        // says in data that it accepts the trusted grade.
+        let bare = match_floor(
             &floor(&[RECOVERY_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE_TRUSTED_INIT, "time"]),
             &under_tini,
         );
+        assert!(bare.unmet[TERMINATION_ENCLOSURE_TRUSTED_INIT].contains("only trusted-proven here by host"));
+        let trusted = match_floor(
+            &[
+                entry(RECOVERY_ENCLOSURE_TRUSTED_INIT, &["trusted"], &[]),
+                entry(TERMINATION_ENCLOSURE_TRUSTED_INIT, &["measured", "trusted"], &[]),
+                "time".into(),
+            ],
+            &under_tini,
+        );
         assert!(trusted.admitted, "{trusted:?}");
+        assert_eq!(
+            trusted.met_by[TERMINATION_ENCLOSURE_TRUSTED_INIT],
+            met(TERMINATION_ENCLOSURE_TRUSTED_INIT, ProofSource::Trusted, HOST_PROVIDER)
+        );
         let measured = match_floor(&floor(&[RECOVERY_ENCLOSURE, TERMINATION_ENCLOSURE]), &under_tini);
         assert_eq!(measured.unmet[TERMINATION_ENCLOSURE], "the node is not pid 1");
         assert_eq!(measured.unmet[RECOVERY_ENCLOSURE], "the node is not pid 1");
         // Trust offered under a measured name is still refused.
-        under_tini.provide(TERMINATION_ENCLOSURE, ProofSource::Trusted, "policy");
+        under_tini.provide(TERMINATION_ENCLOSURE, ProofSource::Trusted, HOST_PROVIDER, "policy");
         let forged = match_floor(&floor(&[TERMINATION_ENCLOSURE]), &under_tini);
         assert!(forged.unmet[TERMINATION_ENCLOSURE].contains("trusted-proven"));
+    }
+
+    #[test]
+    fn a_floor_may_constrain_the_provider_of_a_proof() {
+        let mut runit = view(&["time"], &[]);
+        for name in ["termination:scope", "recovery:scope", SCOPE_LIMITS] {
+            runit.provide(name, ProofSource::Measured, "host_service", "qualified by a disposable probe scope");
+        }
+        // Open providers: met, with the provider recorded.
+        let open = match_floor(&floor(&["termination:scope", "time"]), &runit);
+        assert!(open.admitted, "{open:?}");
+        assert_eq!(open.met_by["termination:scope"], met("termination:scope", ProofSource::Measured, "host_service"));
+        // Constrained to another provider: refused with the exact mismatch.
+        let oci_only = vec![entry("termination:scope", &[], &["external_controller:oci"]), "time".into()];
+        let refused = match_floor(&oci_only, &runit);
+        assert!(!refused.admitted);
+        assert_eq!(
+            refused.unmet["termination:scope"],
+            "termination:scope is proven here by host_service (measured); the floor accepts only \
+             external_controller:oci (qualified by a disposable probe scope)"
+        );
+        let text = refusal_text("before native reservation", &refused, &runit.provided);
+        assert!(text.contains("requires termination:scope: termination:scope is proven here by host_service"), "{text}");
+        // Constrained to the provider that proved it: admitted.
+        let service_only = vec![entry("termination:scope", &[], &["host_service", "external_controller"]), "time".into()];
+        let admitted = match_floor(&service_only, &runit);
+        assert!(admitted.admitted, "{admitted:?}");
+        assert_eq!(admitted.met_by["termination:scope"].provider, "host_service");
+        // A provider-attested proof from the right provider needs the grade
+        // accepted as well, and the grade is judged first.
+        let mut emulated = runit.clone();
+        emulated.provide("termination:scope", ProofSource::ProviderAttested, "host_service", "under gVisor");
+        let graded = match_floor(&service_only, &emulated);
+        assert!(graded.unmet["termination:scope"].starts_with("termination:scope is only provider_attested-proven here by host_service; the floor accepts measured"));
+        let widened = vec![entry("termination:scope", &["measured", "provider_attested"], &["host_service"]), "time".into()];
+        let accepted = match_floor(&widened, &emulated);
+        assert!(accepted.admitted, "{accepted:?}");
+        assert_eq!(accepted.met_by["termination:scope"].source, ProofSource::ProviderAttested);
+        // The admission round-trips with its provider.
+        let value = serde_json::to_value(&accepted).unwrap();
+        assert_eq!(value["met_by"]["termination:scope"]["provider"], "host_service");
+        assert_eq!(value["met_by"]["termination:scope"]["source"], "provider_attested");
+        let parsed: FloorAdmission = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, accepted);
     }
 
     #[test]
@@ -771,7 +915,7 @@ mod tests {
         signed.report.require_floor().unwrap();
         assert_eq!(
             signed.report.floor.met_by["any_of(accounting, residency:swap_absent)"],
-            RESIDENCY_SWAP_ABSENT
+            met(RESIDENCY_SWAP_ABSENT, ProofSource::Measured, HOST_PROVIDER)
         );
     }
 
@@ -803,7 +947,7 @@ mod tests {
         // A disposable floor that does not name it admits on the same root.
         report(ephemeral, floor(&["time"])).require_floor().unwrap();
         let mut volume = view(&["time"], &[]);
-        volume.provide(STORAGE_DURABLE_ROOT, ProofSource::Measured, "ext4 mounted at /data, durable by mount");
+        volume.provide(STORAGE_DURABLE_ROOT, ProofSource::Measured, HOST_PROVIDER, "ext4 mounted at /data, durable by mount");
         report(volume, floor(&[STORAGE_DURABLE_ROOT, "time"])).require_floor().unwrap();
     }
 
@@ -863,6 +1007,7 @@ mod tests {
         );
         let evidence = &present.provided[SECRETS_PROVIDER_ENV];
         assert_eq!(evidence.source, ProofSource::ProviderAttested);
+        assert_eq!(evidence.provider, PROVIDER_ENV_PROVIDER);
         assert!(evidence.basis.contains("declared names present at startup: OPENAI_API_KEY"));
         assert!(evidence.basis.contains("absent at startup: ANTHROPIC_API_KEY"));
         assert!(evidence.basis.contains("readable by the recipient's model commands"));
@@ -880,13 +1025,13 @@ mod tests {
         });
         assert_eq!(stale_format(&current), None);
         let older_schema = serde_json::json!({
-            "report": {"schema": "ryeos.node.capability-report/v2", "host": {"version": 3}}
+            "report": {"schema": "ryeos.node.capability-report/v3", "host": {"version": 4}}
         });
-        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v2"));
+        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v3"));
         let older_host = serde_json::json!({
-            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 3}}
+            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 4}}
         });
-        assert!(stale_format(&older_host).unwrap().contains("host facts version is 3"));
+        assert!(stale_format(&older_host).unwrap().contains("host facts version is 4"));
         assert!(stale_format(&serde_json::json!({})).unwrap().contains("absent"));
 
         let app_root = tempfile::tempdir().unwrap();

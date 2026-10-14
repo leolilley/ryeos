@@ -1997,11 +1997,20 @@ impl ProcessCgroup {
             .map_err(|error| format!("clone exact cgroup kill authority: {error}"))
     }
 
-    /// Prove this controller can place a child in the exact reserved scope,
-    /// then freeze and terminate it. The child performs only async-signal-safe
-    /// syscalls and never execs a host program or workload. CLONE_PIDFD retains
-    /// the child incarnation atomically, including failed placement.
-    pub fn probe_lifecycle(self: &Arc<Self>, timeout: Duration) -> Result<(), String> {
+    /// Prove this controller can place a child in the exact reserved scope
+    /// and terminate it, freezing it first when `barrier` asks for the
+    /// kernel barrier. Without `barrier` the freezer is never written, so a
+    /// host that refuses it still proves placement and kill; with it, a
+    /// refused freeze is reported and the child is still killed. The child
+    /// performs only async-signal-safe syscalls and never execs a host
+    /// program or workload. CLONE_PIDFD retains the child incarnation
+    /// atomically, including failed placement.
+    pub fn probe_lifecycle(
+        self: &Arc<Self>,
+        timeout: Duration,
+        barrier: bool,
+    ) -> Result<super::scope::ProbeBarrier, String> {
+        use super::scope::ProbeBarrier;
         if timeout.is_zero() {
             return Err("process scope probe needs a positive bounded timeout".to_owned());
         }
@@ -2103,21 +2112,36 @@ impl ProcessCgroup {
         // witness, which hangs up only once this probe has exited.
         drop(fork_custody_witness);
         let mut child_disposal_proved = false;
+        let mut barrier_requested = false;
         let child_pidfd = unsafe { File::from_raw_fd(child_pidfd) };
         drop(writer);
         let outcome = (|| {
             read_placement_report(&reader, deadline)?;
             // The child closes the whole inventory before writing its report.
             child_disposal_proved = true;
-            let frozen = self.freeze(deadline.saturating_duration_since(Instant::now()))?;
-            frozen.terminate(deadline.saturating_duration_since(Instant::now()))
+            let remaining = || deadline.saturating_duration_since(Instant::now());
+            if !barrier {
+                return self.terminate_and_wait(remaining()).map(|()| ProbeBarrier::NotRequested);
+            }
+            barrier_requested = true;
+            match self.freeze(remaining()) {
+                Ok(frozen) => frozen.terminate(remaining()).map(|()| ProbeBarrier::Held),
+                // The kill does not depend on the barrier, so the probe still
+                // proves termination; only quiescence is withheld.
+                Err(refusal) => {
+                    self.terminate_and_wait(remaining()).map(|()| ProbeBarrier::Refused(refusal))
+                }
+            }
         })();
         drop(reader);
-        // Only this disposable non-executing probe owns the leaf. If its kill
-        // attempt failed, thawing allows controller loss to exit the probe.
-        // This is NOT the workload FrozenCgroup failure rule: a real exclusive
-        // workspace barrier must stay frozen until durable recovery settles it.
-        let thaw_error = if outcome.is_err() {
+        // Only this disposable non-executing probe owns the leaf. If its
+        // barrier was requested and did not end in a held freeze that the
+        // kill consumed, thawing allows controller loss to exit the probe and
+        // leaves no freeze request behind. This is NOT the workload
+        // FrozenCgroup failure rule: a real exclusive workspace barrier must
+        // stay frozen until durable recovery settles it. A probe that never
+        // requested the barrier never writes the freezer.
+        let thaw_error = if barrier_requested && !matches!(outcome, Ok(ProbeBarrier::Held)) {
             write_control(&self.freeze, b"0").err()
         } else {
             None
@@ -2161,16 +2185,16 @@ impl ProcessCgroup {
             fork_custody.settle()
         };
         let result = match (outcome, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(barrier), Ok(())) => Ok(barrier),
             (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(error)) => Err(format!("scope probe cleanup remains unproved: {error}")),
+            (Ok(_), Err(error)) => Err(format!("scope probe cleanup remains unproved: {error}")),
             (Err(error), Err(cleanup)) => Err(format!(
                 "{error}; scope probe cleanup remains unproved: {cleanup}"
             )),
         };
         match (result, custody) {
             (result, Ok(())) => result,
-            (Ok(()), Err(fact)) => Err(fact),
+            (Ok(_), Err(fact)) => Err(fact),
             (Err(error), Err(fact)) => Err(format!("{error}; {fact}")),
         }
     }
@@ -3510,13 +3534,29 @@ pub(super) mod tests {
         // A probe must obey the existing daemon fork/descriptor authority,
         // even though it never runs a workload or executes an image.
         let lease = crate::try_retain_fork_sensitive_descriptors().unwrap();
-        let refused = sibling.probe_lifecycle(Duration::from_secs(1)).unwrap_err();
+        let refused = sibling.probe_lifecycle(Duration::from_secs(1), true).unwrap_err();
         assert!(
             refused.contains("calling thread retains fork-sensitive descriptor authority"),
             "{refused}"
         );
         assert!(!sibling.events().unwrap().populated);
         drop(lease);
+        // A probe not asked for the barrier places and kills its child
+        // without ever requesting a freeze, and leaves the leaf empty and
+        // unfrozen for retirement.
+        let unfrozen = parent
+            .create(&format!("{name}-unfrozen"), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            unfrozen.probe_lifecycle(Duration::from_secs(5), false).unwrap(),
+            super::super::scope::ProbeBarrier::NotRequested
+        );
+        assert_eq!(read_control(&unfrozen.freeze).unwrap().trim(), "0");
+        let events = unfrozen.events().unwrap();
+        assert!(!events.populated && !events.frozen);
+        parent
+            .retire_empty(unfrozen.identity(), Duration::from_secs(5))
+            .unwrap();
         let state = tempfile::tempdir().unwrap();
         let heartbeat = state.path().join("heartbeat");
 

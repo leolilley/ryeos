@@ -17,7 +17,11 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_FACTS_VERSION: u32 = 4;
+pub const HOST_FACTS_VERSION: u32 = 5;
+
+/// Provider id of every capability these host facts prove: the kernel as
+/// this process observes it, with no service or controller in between.
+pub const HOST_PROVIDER: &str = "host";
 
 // Residency names match exactly, like every capability name: a proof meets
 // only the name of its own basis, so a stronger basis does not meet a
@@ -267,62 +271,170 @@ impl From<ProofSource> for String {
     }
 }
 
-/// Capability names whose grade admits policy trust: the grade is part of
-/// the name, so a requirement that names one explicitly accepts trusted
-/// evidence for it. The enclosure `trusted_init` names are proven by trust
-/// in a policy-named init at pid 1, and stay distinct from the measured
-/// enclosure names, which only a node that is pid 1 itself can prove. Every
-/// other requirement needs a local measurement.
-pub const TRUSTED_GRADE_CAPABILITIES: &[&str] = &[
-    RECOVERY_ENCLOSURE_TRUSTED_INIT,
-    TERMINATION_ENCLOSURE_TRUSTED_INIT,
-    "termination:process_group",
-];
-
-/// Whether `evidence` satisfies a local requirement for `name`. Provider
-/// and peer attestations never satisfy a local requirement.
-pub fn satisfies_local_requirement(name: &str, evidence: &CapabilityEvidence) -> bool {
-    match evidence.source {
-        ProofSource::Measured => true,
-        ProofSource::Trusted => TRUSTED_GRADE_CAPABILITIES.contains(&name),
-        ProofSource::ProviderAttested | ProofSource::PeerAttested | ProofSource::Unknown(_) => false,
-    }
-}
-
-/// One entry of a capability floor: a name the node must prove, or a set of
-/// names any one of which meets the entry. A set lets a floor accept a
-/// weaker grade only by naming it; nothing the entry does not name meets
-/// it, and admission records which name did.
+/// One entry of a capability floor. A bare name is met only by a measured
+/// proof of that name, from any provider. The object form names one
+/// capability or a set of alternatives any one of which meets the entry,
+/// and may widen the grades it accepts or narrow the providers it accepts.
+/// Nothing the entry does not name meets it, and admission records which
+/// name, grade and provider did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CapabilityRequirement {
     Name(String),
-    AnyOf(AnyOfCapabilities),
+    Spec(CapabilityRequirementSpec),
 }
 
+/// The object form of a floor entry. Exactly one of `name` and `any_of` is
+/// given. `accept` lists the proof grades that meet the entry, as the text
+/// `ProofSource` carries; absent, only a measured proof does. `providers`
+/// lists the provider ids whose proof meets the entry; absent, any does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AnyOfCapabilities {
+pub struct CapabilityRequirementSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub any_of: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
 }
+
+/// Grades a floor entry may accept. A peer's claim is not evidence about
+/// this host, so `peer_attested` is refused by name.
+const ACCEPTABLE_GRADES: [&str; 3] = ["measured", "provider_attested", "trusted"];
 
 impl CapabilityRequirement {
     /// The names that can meet this entry, in the order written.
     pub fn names(&self) -> &[String] {
         match self {
             Self::Name(name) => std::slice::from_ref(name),
-            Self::AnyOf(alternatives) => &alternatives.any_of,
+            Self::Spec(spec) => match &spec.name {
+                Some(name) => std::slice::from_ref(name),
+                None => &spec.any_of,
+            },
         }
+    }
+
+    /// Whether this entry is a set of alternatives rather than one name.
+    pub fn is_set(&self) -> bool {
+        matches!(self, Self::Spec(spec) if spec.name.is_none())
     }
 
     /// How the entry is shown in an admission: the name itself, or
     /// `any_of(a, b)` for a set.
     pub fn label(&self) -> String {
-        match self {
-            Self::Name(name) => name.clone(),
-            Self::AnyOf(alternatives) => format!("any_of({})", alternatives.any_of.join(", ")),
+        if self.is_set() {
+            format!("any_of({})", self.names().join(", "))
+        } else {
+            self.names().first().cloned().unwrap_or_default()
         }
     }
+
+    /// The grades the entry accepts; empty means a measured proof only.
+    pub fn accepted_grades(&self) -> &[String] {
+        match self {
+            Self::Name(_) => &[],
+            Self::Spec(spec) => &spec.accept,
+        }
+    }
+
+    /// The provider ids the entry accepts; empty means any provider.
+    pub fn providers(&self) -> &[String] {
+        match self {
+            Self::Name(_) => &[],
+            Self::Spec(spec) => &spec.providers,
+        }
+    }
+
+    /// Why the entry's own shape is malformed, or `None` when it is well
+    /// formed: it must name exactly one of `name` and `any_of`, every string
+    /// in it must be non-empty and unique within its list, and every grade
+    /// must be one this node can judge.
+    pub fn spec_refusal(&self) -> Option<String> {
+        let spec = match self {
+            Self::Name(name) if name.is_empty() => {
+                return Some("entry names an empty capability".to_owned());
+            }
+            Self::Name(_) => return None,
+            Self::Spec(spec) => spec,
+        };
+        match (&spec.name, spec.any_of.is_empty()) {
+            (Some(_), false) => {
+                return Some(format!("entry {} gives both name and any_of", self.label()));
+            }
+            (None, true) => return Some("entry gives neither name nor any_of".to_owned()),
+            _ => {}
+        }
+        for (list, what) in [
+            (self.names(), "capability"),
+            (spec.accept.as_slice(), "grade"),
+            (spec.providers.as_slice(), "provider"),
+        ] {
+            if list.iter().any(String::is_empty) {
+                return Some(format!("entry {} names an empty {what}", self.label()));
+            }
+            if let Some(repeated) = list.iter().enumerate().find_map(|(index, item)| {
+                list[..index].contains(item).then_some(item)
+            }) {
+                return Some(format!("entry {} names {what} {repeated} twice", self.label()));
+            }
+        }
+        if spec.accept.iter().any(|grade| grade == "peer_attested") {
+            return Some(format!(
+                "entry {} accepts peer_attested, which no node admits: a peer's claim is not \
+                 evidence about this host",
+                self.label()
+            ));
+        }
+        if let Some(unknown) =
+            spec.accept.iter().find(|grade| !ACCEPTABLE_GRADES.contains(&grade.as_str()))
+        {
+            return Some(format!(
+                "entry {} accepts grade {unknown}, which this node cannot judge; the grades are {}",
+                self.label(),
+                ACCEPTABLE_GRADES.join(", ")
+            ));
+        }
+        None
+    }
+}
+
+/// Whether `evidence` for `name`, one of `entry`'s names, meets the entry.
+/// The refusal names the exact mismatch: the grade the proof carries
+/// against the grades the entry accepts, or the provider that proved it
+/// against the providers the entry accepts. A grade the entry does not list
+/// never meets it, however the name reads, so a floor that wants a trusted
+/// or provider-attested proof says so in data.
+pub fn satisfies(
+    entry: &CapabilityRequirement,
+    name: &str,
+    evidence: &CapabilityEvidence,
+) -> Result<(), String> {
+    let grade = evidence.source.as_str();
+    let accepted = entry.accepted_grades();
+    let grade_accepted = if accepted.is_empty() {
+        evidence.source == ProofSource::Measured
+    } else {
+        accepted.iter().any(|accept| accept == grade)
+    };
+    if !grade_accepted {
+        return Err(format!(
+            "{name} is only {grade}-proven here by {}; the floor accepts {}",
+            evidence.provider,
+            if accepted.is_empty() { "measured".to_owned() } else { accepted.join(", ") }
+        ));
+    }
+    let providers = entry.providers();
+    if !providers.is_empty() && !providers.iter().any(|provider| *provider == evidence.provider) {
+        return Err(format!(
+            "{name} is proven here by {} ({grade}); the floor accepts only {}",
+            evidence.provider,
+            providers.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// Per-job scope limits, proven only by a qualified delegated provider.
@@ -361,16 +473,25 @@ pub fn met_by_strongest(entry: &CapabilityRequirement, met: &str) -> bool {
     !entry.names().iter().any(|other| is_weaker_grade(met, other))
 }
 
-/// Why one floor entry is malformed in what it names, or `None` when it is
-/// well placed. A per-scope name decides how scopes are configured, so it is
-/// never conditional inside a set. Durable app-root storage decides whether
-/// the node's identity and records survive a restart, which no alternative
-/// replaces, so it too stands alone. A weaker residency basis is not met by
-/// a stronger one, so it appears only in a set beside `accounting`, which
-/// every standing basis meets.
+/// Nested sandboxing of a job: user, pid and mount namespaces can be
+/// unshared on this host.
+pub const ISOLATION_NAMESPACES: &str = "isolation:namespaces";
+
+/// Why one floor entry is malformed in its shape or in what it names, or
+/// `None` when it is well formed and well placed. A per-scope name decides
+/// how scopes are configured, so it is never conditional inside a set.
+/// Durable app-root storage decides whether the node's identity and records
+/// survive a restart, and namespace isolation decides whether jobs are
+/// launched into a nested sandbox; no alternative replaces either, so each
+/// stands alone. A weaker residency basis is not met by a stronger one, so
+/// it appears only in a set beside `accounting`, which every standing basis
+/// meets.
 pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
+    if let Some(refusal) = entry.spec_refusal() {
+        return Some(refusal);
+    }
     let names = entry.names();
-    if let CapabilityRequirement::AnyOf(_) = entry
+    if entry.is_set()
         && let Some(scoped) = names.iter().find(|name| is_scope_capability(name))
     {
         return Some(format!(
@@ -378,16 +499,17 @@ pub fn floor_entry_refusal(entry: &CapabilityRequirement) -> Option<String> {
             entry.label()
         ));
     }
-    if let CapabilityRequirement::AnyOf(_) = entry
-        && names.iter().any(|name| name == STORAGE_DURABLE_ROOT)
+    if entry.is_set()
+        && let Some(alone) = names
+            .iter()
+            .find(|name| *name == STORAGE_DURABLE_ROOT || *name == ISOLATION_NAMESPACES)
     {
         return Some(format!(
-            "entry {} names {STORAGE_DURABLE_ROOT}, which must be required on its own",
+            "entry {} names {alone}, which must be required on its own",
             entry.label()
         ));
     }
-    let beside_accounting =
-        matches!(entry, CapabilityRequirement::AnyOf(_)) && names.iter().any(|name| name == ACCOUNTING);
+    let beside_accounting = entry.is_set() && names.iter().any(|name| name == ACCOUNTING);
     match names.iter().find(|name| WEAKER_RESIDENCY.contains(&name.as_str())) {
         Some(weaker) if !beside_accounting => Some(format!(
             "entry {} names {weaker}, which a stronger residency basis does not meet; name it \
@@ -410,10 +532,14 @@ impl From<String> for CapabilityRequirement {
     }
 }
 
+/// One proof of a capability: how strongly it holds, who proved it, and
+/// on what basis. The provider is an open id naming the mechanism that
+/// produced the proof, so a floor can accept or refuse proofs by it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityEvidence {
     pub source: ProofSource,
+    pub provider: String,
     pub basis: String,
 }
 
@@ -477,6 +603,7 @@ fn decide_enclosure_exit(
     if node_pid == 1 {
         return Ok(CapabilityEvidence {
             source: ProofSource::Measured,
+            provider: HOST_PROVIDER.to_owned(),
             basis: "the node is pid 1 of its private pid namespace, so the namespace ends when \
                     the node exits"
                 .to_owned(),
@@ -491,6 +618,7 @@ fn decide_enclosure_exit(
     match pid1 {
         Some(init) if trusted_inits.iter().any(|trusted| trusted == init) => Ok(CapabilityEvidence {
             source: ProofSource::Trusted,
+            provider: HOST_PROVIDER.to_owned(),
             basis: format!(
                 "the node's parent is pid 1 ({init}), which node policy trusts to exit when its \
                  only child exits"
@@ -838,10 +966,11 @@ pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidenc
     if facts.kernel_kind == "gvisor" {
         return Ok(CapabilityEvidence {
             source: ProofSource::ProviderAttested,
+            provider: HOST_PROVIDER.to_owned(),
             basis: format!("{basis} (observed under gVisor emulation)"),
         });
     }
-    Ok(CapabilityEvidence { source: ProofSource::Measured, basis })
+    Ok(CapabilityEvidence { source: ProofSource::Measured, provider: HOST_PROVIDER.to_owned(), basis })
 }
 
 /// Raw host observations. Every field is a measurement as this process sees
@@ -907,9 +1036,20 @@ pub struct HostCapabilities {
 }
 
 impl HostCapabilities {
-    pub fn provide(&mut self, name: &str, source: ProofSource, basis: impl Into<String>) {
+    /// Record that `provider` proved `name` at grade `source` on `basis`,
+    /// replacing any earlier decision for the name.
+    pub fn provide(
+        &mut self,
+        name: &str,
+        source: ProofSource,
+        provider: &str,
+        basis: impl Into<String>,
+    ) {
         self.missing.remove(name);
-        self.provided.insert(name.to_owned(), CapabilityEvidence { source, basis: basis.into() });
+        self.provided.insert(
+            name.to_owned(),
+            CapabilityEvidence { source, provider: provider.to_owned(), basis: basis.into() },
+        );
     }
 
     pub fn refuse(&mut self, name: &str, reason: impl Into<String>) {
@@ -1016,13 +1156,13 @@ impl HostFacts {
         }
         for name in [RESIDENCY_LOCKED, RESIDENCY_SWAP_LIMIT, RESIDENCY_SWAP_ABSENT] {
             if name == held {
-                view.provide(name, source.clone(), basis.clone());
+                view.provide(name, source.clone(), HOST_PROVIDER, basis.clone());
             } else {
                 view.refuse(name, format!("the resident region is held by {held}, not {name}"));
             }
         }
         if proof.standing() {
-            view.provide(ACCOUNTING, source, format!("{held}: {basis}"));
+            view.provide(ACCOUNTING, source, HOST_PROVIDER, format!("{held}: {basis}"));
         } else {
             view.refuse(
                 ACCOUNTING,
@@ -1050,7 +1190,12 @@ impl HostFacts {
             if self.gvisor() { format!("{basis} (observed under gVisor emulation)") } else { basis }
         };
         let mut view = HostCapabilities::default();
-        view.provide("time", ProofSource::Measured, "the node enforces each deadline and then kills");
+        view.provide(
+            "time",
+            ProofSource::Measured,
+            HOST_PROVIDER,
+            "the node enforces each deadline and then kills",
+        );
         let unproven = "resident memory is not proven".to_owned();
         self.apply_residency(
             &mut view,
@@ -1064,6 +1209,7 @@ impl HostFacts {
             view.provide(
                 "termination:process_group",
                 trusted.clone(),
+                HOST_PROVIDER,
                 emulated(
                     "process group plus pidfd; a job that calls setsid or double-forks escapes it".to_owned(),
                 ),
@@ -1101,6 +1247,7 @@ impl HostFacts {
                 Ok((source, basis)) => view.provide(
                     name,
                     source.clone(),
+                    HOST_PROVIDER,
                     format!("{basis}; when the pid namespace ends the kernel kills every job"),
                 ),
                 Err(reason) => view.refuse(name, reason.clone()),
@@ -1110,6 +1257,7 @@ impl HostFacts {
             Some(limit) if !limit.writable_by_node => view.provide(
                 "limits:enclosure",
                 observed.clone(),
+                HOST_PROVIDER,
                 emulated(format!("memory.max {} on cgroup {}, not writable by the node", limit.value, limit.cgroup)),
             ),
             Some(limit) => view.refuse(
@@ -1132,6 +1280,7 @@ impl HostFacts {
                 (Some(inode), Ok((source, basis))) => view.provide(
                     name,
                     source.clone(),
+                    HOST_PROVIDER,
                     format!(
                         "boot {} and container enclosure cgroup inode {inode}; {basis}, so a \
                          different inode on this boot is a new generation whose jobs all died \
@@ -1160,18 +1309,21 @@ impl HostFacts {
             }
         }
         match decide_durable_root(&self.app_root_storage) {
-            Ok(evidence) => view.provide(STORAGE_DURABLE_ROOT, evidence.source, evidence.basis),
+            Ok(evidence) => {
+                view.provide(STORAGE_DURABLE_ROOT, evidence.source, &evidence.provider, evidence.basis)
+            }
             Err(reason) => view.refuse(STORAGE_DURABLE_ROOT, reason),
         }
         if self.unshare_user_pid_mount.allowed() {
             view.provide(
-                "isolation:namespaces",
+                ISOLATION_NAMESPACES,
                 observed,
+                HOST_PROVIDER,
                 emulated("unshare of user, pid and mount namespaces is allowed".to_owned()),
             );
         } else {
             view.refuse(
-                "isolation:namespaces",
+                ISOLATION_NAMESPACES,
                 format!("unshare of user, pid and mount namespaces {}", self.unshare_user_pid_mount.describe()),
             );
         }
@@ -2056,7 +2208,13 @@ mod tests {
         let attested = decide_durable_root(&emulated).unwrap();
         assert_eq!(attested.source, ProofSource::ProviderAttested);
         assert!(attested.basis.contains("gVisor"), "{}", attested.basis);
-        assert!(!satisfies_local_requirement(STORAGE_DURABLE_ROOT, &attested));
+        assert_eq!(attested.provider, HOST_PROVIDER);
+        let bare = CapabilityRequirement::from(STORAGE_DURABLE_ROOT);
+        let refusal = satisfies(&bare, STORAGE_DURABLE_ROOT, &attested).unwrap_err();
+        assert_eq!(
+            refusal,
+            "storage:durable_root is only provider_attested-proven here by host; the floor accepts measured"
+        );
         emulated.filesystem = Some("overlay".to_owned());
         assert!(decide_durable_root(&emulated).is_err());
     }
@@ -2149,13 +2307,31 @@ mod tests {
             let evidence = &view.provided[name];
             assert_eq!(evidence.source, ProofSource::ProviderAttested, "{name}");
             assert!(evidence.basis.contains("gVisor"), "{name}: {}", evidence.basis);
-            assert!(!satisfies_local_requirement(name, evidence), "{name}");
+            assert!(satisfies(&CapabilityRequirement::from(name), name, evidence).is_err(), "{name}");
+            assert!(satisfies(&accepting(name, &["trusted"]), name, evidence).is_err(), "{name}");
+            satisfies(&accepting(name, &["provider_attested"]), name, evidence).unwrap();
         }
 
         under_tini.kernel_kind = "native".to_owned();
         let view = under_tini.capabilities();
-        assert_eq!(view.provided["termination:process_group"].source, ProofSource::Trusted);
-        assert!(satisfies_local_requirement("termination:process_group", &view.provided["termination:process_group"]));
+        let process_group = &view.provided["termination:process_group"];
+        assert_eq!(process_group.source, ProofSource::Trusted);
+        // The grade is accepted only where the floor says so; the name alone
+        // carries no trust.
+        let bare = CapabilityRequirement::from("termination:process_group");
+        let refusal = satisfies(&bare, "termination:process_group", process_group).unwrap_err();
+        assert_eq!(
+            refusal,
+            "termination:process_group is only trusted-proven here by host; the floor accepts measured"
+        );
+        satisfies(&accepting("termination:process_group", &["trusted"]), "termination:process_group", process_group)
+            .unwrap();
+        satisfies(
+            &accepting("termination:process_group", &["measured", "trusted"]),
+            "termination:process_group",
+            process_group,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2169,7 +2345,7 @@ mod tests {
             RECOVERY_ENCLOSURE_TRUSTED_INIT,
         ] {
             assert_eq!(view.provided[name].source, ProofSource::Measured, "{name}");
-            assert!(satisfies_local_requirement(name, &view.provided[name]), "{name}");
+            satisfies(&CapabilityRequirement::from(name), name, &view.provided[name]).unwrap();
         }
 
         let under_tini = facts(decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()), Some(42));
@@ -2179,18 +2355,26 @@ mod tests {
         assert_eq!(view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
         assert_eq!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].source, ProofSource::Trusted);
         assert!(view.provided[RECOVERY_ENCLOSURE_TRUSTED_INIT].basis.contains("inode 42"));
-        // The trusted-init names admit their trusted proof; the measured
-        // names never accept trust, even when a floor names them.
+        // A trusted proof meets a trusted-init name only where the floor
+        // accepts the trusted grade; a bare name still wants a measurement.
         for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT] {
-            assert!(satisfies_local_requirement(name, &view.provided[name]), "{name}");
+            assert!(satisfies(&CapabilityRequirement::from(name), name, &view.provided[name]).is_err(), "{name}");
+            satisfies(&accepting(name, &["trusted"]), name, &view.provided[name]).unwrap();
         }
-        let trusted = view.provided[TERMINATION_ENCLOSURE_TRUSTED_INIT].clone();
-        for name in [TERMINATION_ENCLOSURE, RECOVERY_ENCLOSURE] {
-            assert!(!satisfies_local_requirement(name, &trusted), "{name}");
-        }
-        // A provider attestation of a trusted-init name is still not local.
-        let attested = CapabilityEvidence { source: ProofSource::ProviderAttested, basis: String::new() };
-        assert!(!satisfies_local_requirement(TERMINATION_ENCLOSURE_TRUSTED_INIT, &attested));
+        // A provider attestation of a trusted-init name does not meet a
+        // floor that accepts trust.
+        let attested = CapabilityEvidence {
+            source: ProofSource::ProviderAttested,
+            provider: HOST_PROVIDER.to_owned(),
+            basis: String::new(),
+        };
+        let refusal = satisfies(
+            &accepting(TERMINATION_ENCLOSURE_TRUSTED_INIT, &["trusted"]),
+            TERMINATION_ENCLOSURE_TRUSTED_INIT,
+            &attested,
+        )
+        .unwrap_err();
+        assert!(refusal.contains("only provider_attested-proven here by host; the floor accepts trusted"), "{refusal}");
 
         let other = facts(decide_enclosure_exit(Some(true), 7, 1, Some("sh"), &inits()), Some(42));
         let view = other.capabilities();
@@ -2265,7 +2449,10 @@ mod tests {
         host.residency = Some(ResidencyProof::Locked { basis: "cap".to_owned() });
         let view = host.capabilities();
         assert_eq!(view.provided[ACCOUNTING].source, ProofSource::ProviderAttested);
-        assert!(!satisfies_local_requirement(ACCOUNTING, &view.provided[ACCOUNTING]));
+        assert!(satisfies(&CapabilityRequirement::from(ACCOUNTING), ACCOUNTING, &view.provided[ACCOUNTING]).is_err());
+        for evidence in view.provided.values() {
+            assert_eq!(evidence.provider, HOST_PROVIDER);
+        }
     }
 
     #[test]
@@ -2288,13 +2475,121 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_value::<CapabilityRequirement>(serde_json::json!(7)).is_err());
+
+        // The object form carries accepted grades and providers and
+        // round-trips without filling in what it did not say.
+        let spec = serde_json::json!({
+            "name": "termination:scope",
+            "accept": ["measured", "provider_attested"],
+            "providers": ["external_controller:oci"]
+        });
+        let entry: CapabilityRequirement = serde_json::from_value(spec.clone()).unwrap();
+        assert!(!entry.is_set());
+        assert_eq!(entry.names(), ["termination:scope"]);
+        assert_eq!(entry.label(), "termination:scope");
+        assert_eq!(entry.accepted_grades(), ["measured", "provider_attested"]);
+        assert_eq!(entry.providers(), ["external_controller:oci"]);
+        assert_eq!(entry.spec_refusal(), None);
+        assert_eq!(serde_json::to_value(&entry).unwrap(), spec);
+        let bare = CapabilityRequirement::from("time");
+        assert!(bare.accepted_grades().is_empty() && bare.providers().is_empty());
+        assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!("time"));
+    }
+
+    fn spec(value: serde_json::Value) -> CapabilityRequirement {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_spec_names_one_thing_and_only_grades_this_node_can_judge() {
+        for (entry, refusal) in [
+            (spec(serde_json::json!({"name": "time", "any_of": ["accounting"]})), "both name and any_of"),
+            (spec(serde_json::json!({"accept": ["measured"]})), "neither name nor any_of"),
+            (spec(serde_json::json!({"name": ""})), "empty capability"),
+            (spec(serde_json::json!({"any_of": ["accounting", "accounting"]})), "capability accounting twice"),
+            (spec(serde_json::json!({"name": "time", "accept": ["measured", "measured"]})), "grade measured twice"),
+            (spec(serde_json::json!({"name": "time", "accept": [""]})), "empty grade"),
+            (spec(serde_json::json!({"name": "time", "providers": ["host", "host"]})), "provider host twice"),
+            (spec(serde_json::json!({"name": "time", "accept": ["peer_attested"]})), "a peer's claim is not evidence"),
+            (spec(serde_json::json!({"name": "time", "accept": ["quorum_attested"]})), "grade quorum_attested, which this node cannot judge"),
+            (CapabilityRequirement::from(""), "empty capability"),
+        ] {
+            let reason = entry.spec_refusal().unwrap_or_default();
+            assert!(reason.contains(refusal), "{entry:?}: {reason}");
+            // The placement check reports the shape refusal first.
+            assert_eq!(floor_entry_refusal(&entry), entry.spec_refusal());
+        }
+        for entry in [
+            spec(serde_json::json!({"name": "time"})),
+            spec(serde_json::json!({"name": "time", "accept": ["trusted"]})),
+            spec(serde_json::json!({"any_of": [ACCOUNTING, RESIDENCY_SWAP_ABSENT], "providers": ["host"]})),
+        ] {
+            assert_eq!(entry.spec_refusal(), None, "{entry:?}");
+        }
+    }
+
+    fn accepting(name: &str, grades: &[&str]) -> CapabilityRequirement {
+        CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: Some(name.to_owned()),
+            any_of: Vec::new(),
+            accept: grades.iter().map(|grade| (*grade).to_owned()).collect(),
+            providers: Vec::new(),
+        })
+    }
+
+    fn evidence(source: ProofSource, provider: &str) -> CapabilityEvidence {
+        CapabilityEvidence { source, provider: provider.to_owned(), basis: "fixture".to_owned() }
+    }
+
+    #[test]
+    fn an_entry_is_met_by_the_grades_and_providers_it_accepts() {
+        let measured_by_service = evidence(ProofSource::Measured, "host_service");
+        let bare = CapabilityRequirement::from("termination:scope");
+        satisfies(&bare, "termination:scope", &measured_by_service).unwrap();
+        // Any provider meets an entry that names none; a listed provider set
+        // refuses every other, with the mismatch spelled out.
+        let oci_only = CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: Some("termination:scope".to_owned()),
+            any_of: Vec::new(),
+            accept: Vec::new(),
+            providers: vec!["external_controller:oci".to_owned()],
+        });
+        assert_eq!(
+            satisfies(&oci_only, "termination:scope", &measured_by_service).unwrap_err(),
+            "termination:scope is proven here by host_service (measured); the floor accepts only external_controller:oci"
+        );
+        satisfies(&oci_only, "termination:scope", &evidence(ProofSource::Measured, "external_controller:oci")).unwrap();
+        // The grade is judged before the provider.
+        let attested_by_oci = evidence(ProofSource::ProviderAttested, "external_controller:oci");
+        assert_eq!(
+            satisfies(&oci_only, "termination:scope", &attested_by_oci).unwrap_err(),
+            "termination:scope is only provider_attested-proven here by external_controller:oci; the floor accepts measured"
+        );
+        // Accepted grades are matched as text, so listing one widens the
+        // entry to exactly that grade.
+        let widened = accepting("termination:scope", &["measured", "provider_attested"]);
+        satisfies(&widened, "termination:scope", &attested_by_oci).unwrap();
+        satisfies(&widened, "termination:scope", &measured_by_service).unwrap();
+        let refusal = satisfies(&widened, "termination:scope", &evidence(ProofSource::Trusted, "host")).unwrap_err();
+        assert_eq!(
+            refusal,
+            "termination:scope is only trusted-proven here by host; the floor accepts measured, provider_attested"
+        );
+        // A grade this build does not know meets nothing, even when listed
+        // in evidence under the same text as an accepted grade's neighbour.
+        let unknown = evidence(ProofSource::Unknown("quorum_attested".to_owned()), "host");
+        assert!(satisfies(&widened, "termination:scope", &unknown).unwrap_err().contains("quorum_attested-proven"));
+        assert!(satisfies(&bare, "termination:scope", &evidence(ProofSource::PeerAttested, "peer")).is_err());
     }
 
     #[test]
     fn weaker_residency_names_appear_only_beside_accounting() {
         let any_of = |names: &[&str]| {
-            CapabilityRequirement::AnyOf(AnyOfCapabilities {
+            CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                name: None,
                 any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+                accept: Vec::new(),
+                providers: Vec::new(),
             })
         };
         for entry in [
@@ -2316,6 +2611,7 @@ mod tests {
             (any_of(&[ACCOUNTING, SCOPE_LIMITS]), "per-scope"),
             (any_of(&[ACCOUNTING, STORAGE_DURABLE_ROOT]), "on its own"),
             (any_of(&["isolation:namespaces", STORAGE_DURABLE_ROOT]), "on its own"),
+            (any_of(&[ISOLATION_NAMESPACES, "time"]), "isolation:namespaces, which must be required on its own"),
         ] {
             let reason = floor_entry_refusal(&entry).unwrap_or_default();
             assert!(reason.contains(refusal), "{}: {reason}", entry.label());
@@ -2345,7 +2641,15 @@ mod tests {
     fn unknown_report_enums_round_trip_exactly() {
         let source: ProofSource = serde_json::from_str("\"quorum_attested\"").unwrap();
         assert_eq!(source, ProofSource::Unknown("quorum_attested".to_owned()));
-        assert!(!satisfies_local_requirement("time", &CapabilityEvidence { source: source.clone(), basis: String::new() }));
+        let foreign = CapabilityEvidence { source: source.clone(), provider: HOST_PROVIDER.to_owned(), basis: String::new() };
+        assert!(satisfies(&CapabilityRequirement::from("time"), "time", &foreign).is_err());
+        let round_trip: CapabilityEvidence =
+            serde_json::from_value(serde_json::to_value(&foreign).unwrap()).unwrap();
+        assert_eq!(round_trip, foreign);
+        assert!(serde_json::from_value::<CapabilityEvidence>(
+            serde_json::json!({"source": "measured", "basis": "no provider"})
+        )
+        .is_err());
         assert_eq!(serde_json::to_string(&source).unwrap(), "\"quorum_attested\"");
         assert_eq!(serde_json::to_string(&ProofSource::Trusted).unwrap(), "\"trusted\"");
 

@@ -3469,13 +3469,21 @@ async fn run(
             }
 
             // ── Two-phase node-config bootstrap ──
+            // The transport that delivered the binding is the provider the
+            // capability report attributes every per-scope proof to.
             let host_runtime = external_host_runtime
                 .as_ref()
-                .map(|runtime| runtime.binding())
+                .map(|runtime| ryeos_node::host_runtime::SelectedHostRuntime {
+                    binding: runtime.binding(),
+                    provider: runtime.binding().provider_id(),
+                })
                 .or_else(|| {
                     host_service
                         .as_ref()
-                        .map(|service| &service.binding.runtime)
+                        .map(|service| ryeos_node::host_runtime::SelectedHostRuntime {
+                            binding: &service.binding.runtime,
+                            provider: ryeos_node::host_runtime::HOST_SERVICE_PROVIDER,
+                        })
                 });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
                 bootstrap::load_node_config_two_phase_with_host_runtime(
