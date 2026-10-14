@@ -1737,6 +1737,18 @@ pub struct CreateChainWithEventSuccessorRequest<'a> {
     pub cas_mutation_guard: &'a crate::recovery::CasMutationGuard,
 }
 
+/// A member thread birth whose initial events are committed together with the
+/// member's successor snapshot under one signed head.
+pub struct AddThreadWithEventSuccessorRequest<'a> {
+    pub chain_root_id: &'a str,
+    pub genesis_snapshot: ThreadSnapshot,
+    pub event_successor_snapshot: ThreadSnapshot,
+    pub events: Vec<ThreadEvent>,
+    pub signer: &'a dyn Signer,
+    pub runtime_liveness: &'a dyn RuntimeLivenessInspector,
+    pub cas_mutation_guard: &'a crate::recovery::CasMutationGuard,
+}
+
 struct CreateChainWithEventsRequest<'a> {
     chain_root_id: &'a str,
     snapshot: ThreadSnapshot,
@@ -5010,7 +5022,15 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.add_thread_with_events_inner(chain_root_id, snapshot, events, signer, None, &guard)
+        self.add_thread_with_events_inner(
+            chain_root_id,
+            snapshot,
+            None,
+            events,
+            signer,
+            None,
+            &guard,
+        )
     }
 
     pub fn add_thread_with_events_admitted(
@@ -5025,6 +5045,7 @@ impl StateDb {
         self.add_thread_with_events_inner(
             chain_root_id,
             snapshot,
+            None,
             events,
             signer,
             Some(runtime_liveness),
@@ -5032,10 +5053,30 @@ impl StateDb {
         )
     }
 
+    /// Add a member thread whose initial events carry it to a successor
+    /// snapshot under one signed head: the member is created and transitions
+    /// (for example created→running for an in-process handler child born in
+    /// its parent's chain) in one authoritative commit.
+    pub fn add_thread_with_event_successor_admitted(
+        &self,
+        request: AddThreadWithEventSuccessorRequest<'_>,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        self.add_thread_with_events_inner(
+            request.chain_root_id,
+            request.genesis_snapshot,
+            Some(request.event_successor_snapshot),
+            request.events,
+            request.signer,
+            Some(request.runtime_liveness),
+            request.cas_mutation_guard,
+        )
+    }
+
     fn add_thread_with_events_inner(
         &self,
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
+        event_successor_snapshot: Option<ThreadSnapshot>,
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
@@ -5069,6 +5110,7 @@ impl StateDb {
             &self.refs_root,
             chain_root_id,
             snapshot.clone(),
+            event_successor_snapshot,
             events,
             signer,
             self.trust_store.as_ref(),

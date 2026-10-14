@@ -605,7 +605,7 @@ fn in_process_reservation_race_converged(
         .in_process_handler_reservation(thread_id)?;
     let authoritative = state
         .state_store
-        .get_authoritative_root_thread_snapshot(thread_id)?;
+        .get_authoritative_in_process_handler_snapshot(thread_id)?;
     let race_state = classify_in_process_reservation_race(
         reservation.as_ref().map(|reservation| reservation.phase),
         authoritative.as_ref().map(|snapshot| snapshot.status),
@@ -699,7 +699,7 @@ fn fail_ownerless_in_process_reservation(
         })) => {
             let snapshot = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(thread_id)?
+                .get_authoritative_in_process_handler_snapshot(thread_id)?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "ownerless in-process handler {thread_id} lost its authoritative terminal"
@@ -719,7 +719,7 @@ fn fail_ownerless_in_process_reservation(
             // handler or overwrite a committed outcome.
             let Some(snapshot) = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(thread_id)?
+                .get_authoritative_in_process_handler_snapshot(thread_id)?
             else {
                 return Err(error);
             };
@@ -764,7 +764,7 @@ fn reconcile_in_process_handler_reservations(
                     .is_in_process_handler_active(&reservation.thread_id)?;
             let authoritative = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(&reservation.thread_id)?;
+                .get_authoritative_in_process_handler_snapshot(&reservation.thread_id)?;
             match (reservation.phase, authoritative) {
                 (InProcessHandlerReservationPhase::Pending, None) if active => {
                     // The registered owner is between its atomic RuntimeDb
@@ -803,13 +803,13 @@ fn reconcile_in_process_handler_reservations(
                 }
                 (InProcessHandlerReservationPhase::Running, None) => {
                     anyhow::bail!(
-                        "running in-process reservation {} has no authoritative root",
+                        "running in-process reservation {} has no authoritative thread",
                         reservation.thread_id
                     );
                 }
                 (InProcessHandlerReservationPhase::TerminalConfirmed, None) => {
                     anyhow::bail!(
-                        "terminal-confirmed in-process reservation {} has no authoritative root",
+                        "terminal-confirmed in-process reservation {} has no authoritative thread",
                         reservation.thread_id
                     );
                 }
@@ -903,10 +903,10 @@ fn reconcile_in_process_handler(
     }
     let authoritative = state
         .state_store
-        .get_authoritative_root_thread_snapshot(&thread.thread_id)?
+        .get_authoritative_in_process_handler_snapshot(&thread.thread_id)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "recorded in-process handler {} has no authoritative root snapshot",
+                "recorded in-process handler {} has no authoritative snapshot",
                 thread.thread_id
             )
         })?;

@@ -138,9 +138,11 @@ pub struct HandlerContext {
     #[serde(skip)]
     pub authenticated_grant_authority:
         Option<ryeos_engine::principal_contract::AuthenticatedGrantAuthority>,
-    /// Root of the currently executing recorded service invocation. The
-    /// executor supplies this only after that root is durably running; it is
-    /// local dispatch context, never caller input or portable authority.
+    /// Thread of the currently executing recorded service invocation: its own
+    /// chain root for a direct invocation, or an inline in-process child in
+    /// its callback parent's chain. The executor supplies this only after that
+    /// thread is durably running; it is local dispatch context, never caller
+    /// input or portable authority.
     #[serde(skip)]
     recorded_service_root_id: Option<String>,
     /// Original managed caller budget. Service audit-root birth and JSON
@@ -221,8 +223,10 @@ impl HandlerContext {
         }
     }
 
-    /// Bind the daemon-minted root of this recorded service call. This is an
-    /// executor-only causality coordinate, not an authorization input.
+    /// Bind the daemon-minted recorded thread of this service call (a chain
+    /// root for a direct invocation, a same-chain child for an inline callback
+    /// child). This is an executor-only causality coordinate, not an
+    /// authorization input.
     pub fn with_recorded_service_root_id(mut self, root_thread_id: String) -> anyhow::Result<Self> {
         if root_thread_id.is_empty()
             || root_thread_id.len() > 256

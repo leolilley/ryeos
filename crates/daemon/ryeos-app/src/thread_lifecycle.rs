@@ -3390,7 +3390,35 @@ impl RecordedServiceAdmission {
         })
     }
 
+    /// Create parameters for a recorded service thread born as its own chain
+    /// root (a direct service invocation).
     fn thread_create_params(&self, thread_id: String) -> Result<ThreadCreateParams> {
+        let chain_root_id = thread_id.clone();
+        self.create_params_in_chain(thread_id, chain_root_id, None)
+    }
+
+    /// Create parameters for a recorded service thread born inside its inline
+    /// callback parent's chain. An inline in-process child is a thread in its
+    /// parent's chain with the parent as upstream, exactly like an inline tool
+    /// leaf; only the chain placement differs from a direct invocation.
+    fn child_thread_create_params(
+        &self,
+        thread_id: String,
+        parent: &ThreadDetail,
+    ) -> Result<ThreadCreateParams> {
+        self.create_params_in_chain(
+            thread_id,
+            parent.chain_root_id.clone(),
+            Some(parent.thread_id.clone()),
+        )
+    }
+
+    fn create_params_in_chain(
+        &self,
+        thread_id: String,
+        chain_root_id: String,
+        upstream_thread_id: Option<String>,
+    ) -> Result<ThreadCreateParams> {
         if thread_id.is_empty()
             || thread_id.trim() != thread_id
             || thread_id.chars().any(char::is_control)
@@ -3399,7 +3427,7 @@ impl RecordedServiceAdmission {
         }
         let authority = self.root.project_authority().clone();
         Ok(ThreadCreateParams {
-            chain_root_id: thread_id.clone(),
+            chain_root_id,
             thread_id,
             kind: self.root.thread_profile.clone(),
             item_ref: self
@@ -3412,7 +3440,7 @@ impl RecordedServiceAdmission {
             launch_mode: "wait".to_string(),
             current_site_id: self.root.plan_context.current_site_id.clone(),
             origin_site_id: self.root.plan_context.origin_site_id.clone(),
-            upstream_thread_id: None,
+            upstream_thread_id,
             requested_by: Some(plan_principal_identifier(&self.root.plan_context).to_string()),
             project_root: authority.project_root_projection().map(PathBuf::from),
             base_project_snapshot_hash: authority
@@ -4388,47 +4416,14 @@ impl ThreadLifecycleService {
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         owner: &crate::state_store::InProcessHandlerControl,
     ) -> Result<()> {
-        launch_metadata.validate()?;
-        if launch_metadata.launch_driver
-            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
-        {
-            bail!("recorded service root requires the in-process handler launch driver");
-        }
-        if launch_metadata.in_process_lifecycle_authority != Some(admission.lifecycle_authority) {
-            bail!("recorded service launch lifecycle authority differs from its sealed admission");
-        }
+        validate_recorded_service_launch(admission, launch_metadata)?;
         let params = admission.thread_create_params(thread_id.to_string())?;
         let admitted = self.admitted_root_create_params(&params, &admission.root)?;
-        let thread_record = NewThreadRecord {
-            thread_id: admitted.thread_id.clone(),
-            chain_root_id: admitted.chain_root_id.clone(),
-            kind: admitted.kind.clone(),
-            item_ref: admitted.item_ref.clone(),
-            executor_ref: admitted.executor_ref.clone(),
-            launch_mode: admitted.launch_mode.clone(),
-            current_site_id: admitted.current_site_id.clone(),
-            origin_site_id: admitted.origin_site_id.clone(),
-            upstream_thread_id: None,
-            requested_by: admitted.requested_by.clone(),
-            project_root: admitted.project_root.clone(),
-            project_authority: admitted.project_authority.clone(),
-            base_project_snapshot_hash: admitted.base_project_snapshot_hash.clone(),
-            usage_subject: admitted.usage_subject.clone(),
-            usage_subject_asserted_by: admitted.usage_subject_asserted_by.clone(),
-            captured_history_policy: admitted.captured_history_policy.clone(),
-        };
         let persisted = self
             .state_store
             .create_in_process_root_with_events_and_launch_metadata(
-                &thread_record,
-                vec![NewEventRecord {
-                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
-                    storage_class: "indexed".to_string(),
-                    payload: json!({
-                        "schema": RECORDED_SERVICE_ADMISSION_SCHEMA,
-                        (RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD): admission.parameters_digest,
-                    }),
-                }],
+                &recorded_service_thread_record(&admitted),
+                recorded_service_birth_events(admission),
                 launch_metadata,
                 owner,
             )?;
@@ -4436,34 +4431,98 @@ impl ThreadLifecycleService {
         Ok(())
     }
 
+    /// Publish a recorded in-process service child of an inline callback
+    /// parent. An inline in-process child is a thread in its parent's chain
+    /// with the parent as upstream, exactly like an inline tool leaf: it is
+    /// born running with the in-process launch driver installed, then linked
+    /// to its parent with the `dispatch` relation so lineage readers and the
+    /// stop cascade see it as an ordinary child. The returned stop intent is
+    /// the parent's already-durable stop, inherited by the newborn child; the
+    /// caller settles the child before any handler effect.
+    pub fn create_recorded_service_child(
+        &self,
+        parent: &ThreadDetail,
+        thread_id: &str,
+        admission: &RecordedServiceAdmission,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &crate::state_store::InProcessHandlerControl,
+    ) -> Result<Option<crate::state_store::StopIntent>> {
+        validate_recorded_service_launch(admission, launch_metadata)?;
+        let params = admission.child_thread_create_params(thread_id.to_string(), parent)?;
+        let admitted =
+            self.admitted_inline_child_create_params(&params, &admission.root, parent)?;
+        let persisted = self.publish_recorded_service_child_birth(
+            &recorded_service_thread_record(&admitted),
+            recorded_service_birth_events(admission),
+            launch_metadata,
+            owner,
+        )?;
+        self.publish_records(&persisted);
+        self.state_store
+            .record_child_link(&parent.thread_id, thread_id, "dispatch")
+    }
+
+    /// The in-process child birth is one store commit: the child's
+    /// `thread_created` and `thread_started` events appended to the parent's
+    /// chain with the in-process launch driver reserved and the registered
+    /// owner's birth proof marked, the same shape the root birth commits for
+    /// a direct invocation.
+    fn publish_recorded_service_child_birth(
+        &self,
+        thread_record: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &crate::state_store::InProcessHandlerControl,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        if owner.has_committed_birth() {
+            bail!(
+                "in-process owner of `{}` already committed a birth",
+                thread_record.thread_id
+            );
+        }
+        self.state_store
+            .create_in_process_child_with_events_and_launch_metadata(
+                thread_record,
+                initial_events,
+                launch_metadata,
+                owner,
+            )
+    }
+
     /// Read the canonical parameters digest committed atomically with a
-    /// recorded in-process service root. The first two root events are a
-    /// closed birth record, so this never scans a long-lived chain or exposes
-    /// the admitted parameter values.
+    /// recorded in-process service thread. The thread's first two events are
+    /// a closed birth record whether the thread is its own chain root or an
+    /// inline child in its parent's chain, so this never scans a long-lived
+    /// chain or exposes the admitted parameter values.
     pub fn recorded_service_parameters_digest(&self, thread_id: &str) -> Result<String> {
-        let page =
-            self.state_store
-                .replay_events(thread_id, Some(thread_id), None, 2, 32 * 1024)?;
+        let thread = self
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("recorded service thread not found: {thread_id}"))?;
+        let page = self.state_store.replay_events(
+            &thread.chain_root_id,
+            Some(thread_id),
+            None,
+            2,
+            32 * 1024,
+        )?;
         if page.events.len() != 2
             || page.events[0].event_type != ryeos_state::event_types::THREAD_CREATED
             || page.events[1].event_type != ryeos_state::event_types::THREAD_STARTED
-            || page.events[0].chain_seq != 1
-            || page.events[1].chain_seq != 2
             || page.events[0].thread_seq != 1
             || page.events[1].thread_seq != 2
             || page.events[1].payload.as_object().map(|value| value.len()) != Some(2)
             || page.events[1].payload.get("schema").and_then(Value::as_u64)
                 != Some(RECORDED_SERVICE_ADMISSION_SCHEMA)
         {
-            bail!("recorded service root has no exact current parameter testimony");
+            bail!("recorded service thread has no exact current parameter testimony");
         }
         let digest = page.events[1]
             .payload
             .get(RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD)
             .and_then(Value::as_str)
-            .context("recorded service root omitted admitted parameter digest")?;
+            .context("recorded service thread omitted admitted parameter digest")?;
         if !lillux::valid_hash(digest) {
-            bail!("recorded service root admitted parameter digest is invalid");
+            bail!("recorded service thread admitted parameter digest is invalid");
         }
         Ok(digest.to_owned())
     }
@@ -4474,57 +4533,147 @@ impl ThreadLifecycleService {
         admission: &RootExecutionAdmission,
     ) -> Result<ThreadCreateParams> {
         self.validate_root_create_shape(params)?;
-        admission.validate_for_persistence()?;
-        let admitted_ref = admission
-            .verified_subject
-            .resolved
-            .canonical_ref
-            .to_string();
-        if params.item_ref != admitted_ref {
-            bail!(
-                "root item_ref `{}` does not match admitted subject `{admitted_ref}`",
-                params.item_ref
-            );
-        }
-        if params.kind != admission.thread_profile {
-            bail!(
-                "root thread profile `{}` does not match admitted profile `{}` for `{admitted_ref}`",
-                params.kind,
-                admission.thread_profile
-            );
-        }
-        if params.current_site_id != admission.plan_context.current_site_id
-            || params.origin_site_id != admission.plan_context.origin_site_id
-        {
-            bail!("root site identity does not match the sealed planning authority");
-        }
-        if params.requested_by.as_deref()
-            != Some(plan_principal_identifier(&admission.plan_context))
-        {
-            bail!("root principal does not match the sealed planning authority");
-        }
-        if &params.project_authority != admission.project_authority() {
-            bail!("root project authority does not exactly match the sealed admission authority");
-        }
-        if params.project_root.as_deref() != admission.project_root() {
-            bail!("root project path is not the exact admitted authority projection");
-        }
-        if params.base_project_snapshot_hash.as_deref() != admission.base_project_snapshot_hash() {
-            bail!("root base snapshot is not the exact admitted authority projection");
-        }
-        if params.usage_subject != admission.usage_subject
-            || params.usage_subject_asserted_by != admission.usage_subject_asserted_by
-        {
-            bail!("root usage attribution does not match the sealed admission authority");
-        }
-        if params.captured_history_policy.is_some() {
-            bail!("root captured history policy is supplied only by sealed admission authority");
-        }
+        validate_admitted_execution_create_params(params, admission)?;
         let mut admitted = params.clone();
         admitted.captured_history_policy = Some(admission.captured_history_policy.clone());
         Ok(admitted)
     }
 
+    /// Admit create parameters for an inline in-process child: the same sealed
+    /// admission equalities as a root, placed in the parent's chain with the
+    /// parent as upstream. Chain members carry no captured history policy; the
+    /// chain root's policy governs the whole chain.
+    fn admitted_inline_child_create_params(
+        &self,
+        params: &ThreadCreateParams,
+        admission: &RootExecutionAdmission,
+        parent: &ThreadDetail,
+    ) -> Result<ThreadCreateParams> {
+        if params.thread_id == params.chain_root_id
+            || params.chain_root_id != parent.chain_root_id
+            || params.upstream_thread_id.as_deref() != Some(parent.thread_id.as_str())
+        {
+            bail!(
+                "inline in-process child `{}` must be placed in parent `{}` chain `{}`",
+                params.thread_id,
+                parent.thread_id,
+                parent.chain_root_id
+            );
+        }
+        if params.thread_id == parent.thread_id {
+            bail!("inline in-process child cannot reuse its parent's thread id");
+        }
+        validate_admitted_execution_create_params(params, admission)?;
+        Ok(params.clone())
+    }
+}
+
+/// The sealed admission equalities every admitted execution thread satisfies
+/// at persistence, whether it is born as a chain root or as an inline child.
+fn validate_admitted_execution_create_params(
+    params: &ThreadCreateParams,
+    admission: &RootExecutionAdmission,
+) -> Result<()> {
+    admission.validate_for_persistence()?;
+    let admitted_ref = admission
+        .verified_subject
+        .resolved
+        .canonical_ref
+        .to_string();
+    if params.item_ref != admitted_ref {
+        bail!(
+            "admitted thread item_ref `{}` does not match admitted subject `{admitted_ref}`",
+            params.item_ref
+        );
+    }
+    if params.kind != admission.thread_profile {
+        bail!(
+            "admitted thread profile `{}` does not match admitted profile `{}` for `{admitted_ref}`",
+            params.kind,
+            admission.thread_profile
+        );
+    }
+    if params.current_site_id != admission.plan_context.current_site_id
+        || params.origin_site_id != admission.plan_context.origin_site_id
+    {
+        bail!("admitted thread site identity does not match the sealed planning authority");
+    }
+    if params.requested_by.as_deref() != Some(plan_principal_identifier(&admission.plan_context)) {
+        bail!("admitted thread principal does not match the sealed planning authority");
+    }
+    if &params.project_authority != admission.project_authority() {
+        bail!(
+            "admitted thread project authority does not exactly match the sealed admission authority"
+        );
+    }
+    if params.project_root.as_deref() != admission.project_root() {
+        bail!("admitted thread project path is not the exact admitted authority projection");
+    }
+    if params.base_project_snapshot_hash.as_deref() != admission.base_project_snapshot_hash() {
+        bail!("admitted thread base snapshot is not the exact admitted authority projection");
+    }
+    if params.usage_subject != admission.usage_subject
+        || params.usage_subject_asserted_by != admission.usage_subject_asserted_by
+    {
+        bail!("admitted thread usage attribution does not match the sealed admission authority");
+    }
+    if params.captured_history_policy.is_some() {
+        bail!("captured history policy is supplied only by sealed admission authority");
+    }
+    Ok(())
+}
+
+fn validate_recorded_service_launch(
+    admission: &RecordedServiceAdmission,
+    launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<()> {
+    launch_metadata.validate()?;
+    if launch_metadata.launch_driver
+        != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+    {
+        bail!("recorded service thread requires the in-process handler launch driver");
+    }
+    if launch_metadata.in_process_lifecycle_authority != Some(admission.lifecycle_authority) {
+        bail!("recorded service launch lifecycle authority differs from its sealed admission");
+    }
+    Ok(())
+}
+
+fn recorded_service_thread_record(admitted: &ThreadCreateParams) -> NewThreadRecord {
+    NewThreadRecord {
+        thread_id: admitted.thread_id.clone(),
+        chain_root_id: admitted.chain_root_id.clone(),
+        kind: admitted.kind.clone(),
+        item_ref: admitted.item_ref.clone(),
+        executor_ref: admitted.executor_ref.clone(),
+        launch_mode: admitted.launch_mode.clone(),
+        current_site_id: admitted.current_site_id.clone(),
+        origin_site_id: admitted.origin_site_id.clone(),
+        upstream_thread_id: admitted.upstream_thread_id.clone(),
+        requested_by: admitted.requested_by.clone(),
+        project_root: admitted.project_root.clone(),
+        project_authority: admitted.project_authority.clone(),
+        base_project_snapshot_hash: admitted.base_project_snapshot_hash.clone(),
+        usage_subject: admitted.usage_subject.clone(),
+        usage_subject_asserted_by: admitted.usage_subject_asserted_by.clone(),
+        captured_history_policy: admitted.captured_history_policy.clone(),
+    }
+}
+
+/// The `thread_started` successor committed with a recorded service birth,
+/// carrying the admitted parameter digest as the thread's birth testimony.
+fn recorded_service_birth_events(admission: &RecordedServiceAdmission) -> Vec<NewEventRecord> {
+    vec![NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+        storage_class: "indexed".to_string(),
+        payload: json!({
+            "schema": RECORDED_SERVICE_ADMISSION_SCHEMA,
+            (RECORDED_SERVICE_PARAMETERS_DIGEST_FIELD): admission.parameters_digest,
+        }),
+    }]
+}
+
+impl ThreadLifecycleService {
     /// Persist a daemon-owned non-execution root (for example an operator seat)
     /// after its generic verified history policy has been captured. Executable
     /// executable roots must use the resolved-request-specific creation paths.
@@ -5283,9 +5432,16 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
     ) -> Result<()> {
         let reported_status = normalize_terminal_status(&params.status)?;
-        let (authoritative, terminal) = self
+        // The chain is resolved from the thread's own row: a direct invocation
+        // is its own chain root, an inline in-process child lives in its
+        // parent's chain.
+        let chain_root_id = self
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("recorded service thread not found: {}", params.thread_id))?
+            .chain_root_id;
+        let (authoritative, terminal, _chain_head_hash) = self
             .state_store
-            .get_authoritative_root_thread_snapshot_with_last_event(&params.thread_id)?
+            .get_authoritative_thread_snapshot_with_last_event(&chain_root_id, &params.thread_id)?
             .ok_or_else(|| {
                 anyhow!(
                     "recorded-service terminal snapshot is missing for {}",

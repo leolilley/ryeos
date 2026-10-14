@@ -596,11 +596,56 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         "canonical graph lifecycle events must not be rejected: {warnings:#?}"
     );
 
+    // An inline in-process child is a thread in the graph's chain with the
+    // graph thread as upstream, so `threads.children` lists it with its
+    // dispatch edge while the daemon is live. The intent ledger below must
+    // name this same child.
+    let (children_status, children_body) = h
+        .post_execute(
+            "service:threads/children",
+            ".",
+            json!({ "thread_id": graph_thread }),
+        )
+        .await
+        .expect("post service:threads/children for graph thread");
+    assert!(
+        children_status.is_success(),
+        "threads.children failed: status={children_status}; body={children_body:#}"
+    );
+    let linked_children = children_body
+        .pointer("/result/children")
+        .and_then(Value::as_array)
+        .expect("threads.children returns a children array")
+        .iter()
+        .map(|child| {
+            (
+                child
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .expect("child thread_id")
+                    .to_owned(),
+                child
+                    .get("upstream_thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                child
+                    .get("chain_root_id")
+                    .and_then(Value::as_str)
+                    .expect("child chain_root_id")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        linked_children.len(),
+        1,
+        "the inline in-process child is the graph thread's one child: {linked_children:#?}"
+    );
+    let (linked_child, linked_upstream, linked_chain_root) = &linked_children[0];
+    assert_eq!(linked_upstream.as_deref(), Some(graph_thread.as_str()));
+    assert_eq!(linked_chain_root, &graph_thread);
+
     // Lifecycle testimony is read through the live daemon's replay service.
-    // An inline in-process child is a fresh root (no upstream edge, no
-    // `child_thread_spawned`), so `threads.children` never lists it; capture
-    // every thread this principal owns while the daemon is live and select
-    // the child once the intent ledger names it below.
     let graph_events = persisted_thread_events(&h, &graph_thread).await;
     let mut child_events_by_thread: std::collections::BTreeMap<String, Vec<(String, Value)>> =
         std::collections::BTreeMap::new();
@@ -652,6 +697,10 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
     );
     assert_eq!(mode, "inline");
     assert_ne!(child_thread, &graph_thread);
+    assert_eq!(
+        child_thread, linked_child,
+        "the intent ledger and the lineage edge name the same inline child"
+    );
 
     for event_type in ["tool_call_start", "tool_call_result"] {
         let payload = graph_events

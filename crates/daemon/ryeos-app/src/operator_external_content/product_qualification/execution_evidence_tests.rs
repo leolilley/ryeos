@@ -171,25 +171,34 @@ fn required_call() -> ExecutionEvidenceRequiredCallWire {
 }
 
 #[test]
-fn inline_participant_is_an_independent_root_not_a_continuation() {
-    let child = ryeos_state::objects::thread_snapshot::ThreadSnapshotBuilder::new(
-        "T-child",
-        "T-child",
-        "tool_run",
-        "tool:test/probe",
-        "@subprocess",
-    )
-    .build();
-    require_inline_child_root(&child, "T-child").unwrap();
-    assert!(require_inline_child_root(&child, "T-another-child").is_err());
+fn inline_participant_is_a_same_chain_child_of_its_parent() {
+    use ryeos_state::objects::thread_snapshot::ThreadSnapshotBuilder;
+    let parent =
+        ThreadSnapshotBuilder::new("T-parent", "T-root", "graph_run", "graph:test/flow", "@graph")
+            .build();
+    let mut child =
+        ThreadSnapshotBuilder::new("T-child", "T-root", "tool_run", "tool:test/probe", "@subprocess")
+            .build();
+    child.upstream_thread_id = Some("T-parent".into());
+    require_inline_child_placement(&child, &parent, "T-child").unwrap();
+    assert!(require_inline_child_placement(&child, &parent, "T-another-child").is_err());
 
-    let mut continuation = child.clone();
-    continuation.chain_root_id = "T-parent".into();
-    assert!(require_inline_child_root(&continuation, "T-child").is_err());
+    let mut independent_root = child.clone();
+    independent_root.chain_root_id = "T-child".into();
+    independent_root.upstream_thread_id = None;
+    assert!(require_inline_child_placement(&independent_root, &parent, "T-child").is_err());
 
-    let mut upstream = child;
-    upstream.upstream_thread_id = Some("T-parent".into());
-    assert!(require_inline_child_root(&upstream, "T-child").is_err());
+    let mut other_chain = child.clone();
+    other_chain.chain_root_id = "T-other-root".into();
+    assert!(require_inline_child_placement(&other_chain, &parent, "T-child").is_err());
+
+    let mut other_upstream = child.clone();
+    other_upstream.upstream_thread_id = Some("T-sibling".into());
+    assert!(require_inline_child_placement(&other_upstream, &parent, "T-child").is_err());
+
+    let mut no_upstream = child;
+    no_upstream.upstream_thread_id = None;
+    assert!(require_inline_child_placement(&no_upstream, &parent, "T-child").is_err());
 }
 
 #[test]

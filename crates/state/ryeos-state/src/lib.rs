@@ -128,7 +128,7 @@ pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
 pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
-    AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
+    AddThreadWithEventSuccessorRequest, AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
     AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
     AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,

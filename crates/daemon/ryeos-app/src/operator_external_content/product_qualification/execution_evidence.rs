@@ -1341,18 +1341,16 @@ fn prove_participant(
     {
         bail!("qualification occurrence contradicts its daemon-owned inline intent");
     }
-    let child = state
-        .state_store
-        .get_authoritative_root_thread_snapshot(&intent.child_thread_id)?
-        .context("qualification participant terminal is unavailable")?;
+    // An inline in-process child lives in its parent's chain with the parent
+    // as upstream, so it is read at the parent's chain position.
     let (child, continued, _) = state
         .state_store
         .get_authoritative_thread_snapshot_with_continuation_presence(
-            &child.chain_root_id,
-            &child.thread_id,
+            &parent.chain_root_id,
+            &intent.child_thread_id,
         )?
         .context("qualification participant exact terminal is unavailable")?;
-    require_inline_child_root(&child, &intent.child_thread_id)?;
+    require_inline_child_placement(&child, parent, &intent.child_thread_id)?;
     if continued
         || child.status != ThreadStatus::Completed
         || child.error.is_some()
@@ -1491,18 +1489,21 @@ fn prove_participant(
     })
 }
 
-fn require_inline_child_root(
+fn require_inline_child_placement(
     child: &ThreadSnapshot,
+    parent: &ThreadSnapshot,
     expected_child_id: &str,
 ) -> anyhow::Result<()> {
     // The daemon action intent above owns dispatch-parent linkage. An inline
-    // dispatch creates an independent root; upstream_thread_id instead links
-    // continuations and is forbidden by the existing root-creation contract.
+    // in-process child is a thread in its parent's chain with the parent as
+    // upstream, exactly like an inline tool leaf; any other placement is not
+    // the child that intent dispatched.
     if child.thread_id != expected_child_id
-        || child.chain_root_id != child.thread_id
-        || child.upstream_thread_id.is_some()
+        || child.thread_id == child.chain_root_id
+        || child.chain_root_id != parent.chain_root_id
+        || child.upstream_thread_id.as_deref() != Some(parent.thread_id.as_str())
     {
-        bail!("qualification participant is not the exact inline child root");
+        bail!("qualification participant is not the exact inline child of its parent");
     }
     Ok(())
 }

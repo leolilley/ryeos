@@ -43,6 +43,14 @@ pub enum ServiceRecordingAuthoritySource<'a> {
     Execution {
         provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     },
+    /// An inline callback action issued by a running parent thread for a
+    /// pre-minted child. A recorded service thread born here is an inline
+    /// in-process child: a thread in its parent's chain with the parent as
+    /// upstream, exactly like an inline tool leaf.
+    InlineCallbackChild {
+        provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
+        parent_thread_id: &'a str,
+    },
     /// An explicitly projectless executor surface. The execution mode remains
     /// an independent sealed input; projectless authority does not need
     /// separate live/standalone aliases.
@@ -168,6 +176,9 @@ pub fn validate_service_invocation_id(value: &str) -> anyhow::Result<()> {
 struct RecordedServiceTerminalGuard {
     state: AppState,
     thread_id: String,
+    /// Chain the recorded thread is born into: its own id for a direct
+    /// invocation root, the parent's chain for an inline in-process child.
+    chain_root_id: String,
     owner: ryeos_app::state_store::InProcessHandlerControl,
     terminal_armed: bool,
     /// Once the handler returns, guard cleanup must retry that exact authored
@@ -178,11 +189,12 @@ struct RecordedServiceTerminalGuard {
 }
 
 impl RecordedServiceTerminalGuard {
-    fn registered(state: &AppState, thread_id: &str) -> Result<Self> {
+    fn registered(state: &AppState, thread_id: &str, chain_root_id: &str) -> Result<Self> {
         let control = state.state_store.register_in_process_handler(thread_id)?;
         Ok(Self {
             state: state.clone(),
             thread_id: thread_id.to_string(),
+            chain_root_id: chain_root_id.to_string(),
             owner: control,
             terminal_armed: false,
             completed_handler_terminal: None,
@@ -208,6 +220,10 @@ impl RecordedServiceTerminalGuard {
     fn owner(&self) -> &ryeos_app::state_store::InProcessHandlerControl {
         &self.owner
     }
+
+    fn chain_root_id(&self) -> &str {
+        &self.chain_root_id
+    }
 }
 
 impl Drop for RecordedServiceTerminalGuard {
@@ -228,7 +244,12 @@ impl Drop for RecordedServiceTerminalGuard {
                     summary_json: None,
                 }
             });
-            if let Err(error) = finalize_recorded_service_exact(&self.state, &self.owner, &params) {
+            if let Err(error) = finalize_recorded_service_exact(
+                &self.state,
+                &self.owner,
+                &self.chain_root_id,
+                &params,
+            ) {
                 tracing::warn!(
                     thread_id = %self.thread_id,
                     error = %error,
@@ -326,14 +347,44 @@ fn select_service_handler_context(
     }
 }
 
-/// Confirm every durable representation of one recorded service outcome.
+/// The terminal a durable stop intent commits for any later finalizer. A
+/// newborn inline child whose parent already carries a stop is settled to
+/// exactly this shape so the owner's confirmation readback matches.
+fn inherited_stop_terminal(
+    thread_id: &str,
+    intent: ryeos_app::state_store::StopIntent,
+) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+    let status = match intent {
+        ryeos_app::state_store::StopIntent::Cancel => ryeos_state::objects::ThreadStatus::Cancelled,
+        ryeos_app::state_store::StopIntent::Kill => ryeos_state::objects::ThreadStatus::Killed,
+    };
+    ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+        thread_id: thread_id.to_owned(),
+        status: status.as_str().to_owned(),
+        outcome_code: Some(status.as_str().to_owned()),
+        result: None,
+        error: Some(serde_json::json!({
+            "reason": "durable_stop_intent",
+            "intent": intent.as_str(),
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    }
+}
+
+/// Confirm every durable representation of one recorded service outcome. The
+/// thread is read at its exact chain position: a direct invocation is its own
+/// chain root, an inline in-process child lives in its parent's chain.
 fn confirm_recorded_service_terminal(
     state: &AppState,
+    chain_root_id: &str,
     params: &ryeos_app::thread_lifecycle::ThreadFinalizeParams,
 ) -> Result<()> {
-    let snapshot = state
+    let (snapshot, _last_event, _chain_head_hash) = state
         .state_store
-        .get_authoritative_root_thread_snapshot(&params.thread_id)?
+        .get_authoritative_thread_snapshot_with_last_event(chain_root_id, &params.thread_id)?
         .ok_or_else(|| anyhow::anyhow!("authoritative terminal snapshot is missing"))?;
     let expected_status = ryeos_state::objects::ThreadStatus::from_str_lossy(&params.status)
         .ok_or_else(|| {
@@ -467,6 +518,7 @@ fn recorded_service_terminal_projection(
 fn finalize_recorded_service_exact(
     state: &AppState,
     owner: &ryeos_app::state_store::InProcessHandlerControl,
+    chain_root_id: &str,
     params: &ryeos_app::thread_lifecycle::ThreadFinalizeParams,
 ) -> Result<()> {
     if params.metadata.is_some()
@@ -502,7 +554,7 @@ fn finalize_recorded_service_exact(
             }
             Err(error) => (format!("terminal write failed: {error}"), false),
         };
-        match confirm_recorded_service_terminal(state, params) {
+        match confirm_recorded_service_terminal(state, chain_root_id, params) {
             Ok(()) => {
                 if !postcommit_complete {
                     let repair_result = state
@@ -705,6 +757,26 @@ pub async fn execute_service_verified(
         bail!("service execution identity differs from its sealed planning principal/scopes");
     }
     let trust_class = verified.trust_class;
+    // An inline callback child is recorded in its parent's chain. The parent
+    // is named only by the callback authority source and only together with
+    // the pre-minted child identity that the callback reserved.
+    let inline_parent_thread_id = match (&recording.authority_source, pre_minted_thread_id) {
+        (
+            ServiceRecordingAuthoritySource::InlineCallbackChild {
+                parent_thread_id, ..
+            },
+            Some(_),
+        ) => Some(*parent_thread_id),
+        (ServiceRecordingAuthoritySource::InlineCallbackChild { .. }, None) => {
+            bail!("inline callback child service execution requires its pre-minted child identity");
+        }
+        (
+            ServiceRecordingAuthoritySource::Execution { .. }
+            | ServiceRecordingAuthoritySource::ExplicitProjectless
+            | ServiceRecordingAuthoritySource::UnrecordedOnly,
+            _,
+        ) => None,
+    };
 
     // 3. Extract endpoint + required_caps
     let endpoint = extract_endpoint(&verified.resolved.metadata.extra)?;
@@ -789,7 +861,8 @@ pub async fn execute_service_verified(
             recording.usage_subject_asserted_by,
         )?;
         match &recording.authority_source {
-            ServiceRecordingAuthoritySource::Execution { provenance } => {
+            ServiceRecordingAuthoritySource::Execution { provenance }
+            | ServiceRecordingAuthoritySource::InlineCallbackChild { provenance, .. } => {
                 root_admission.ensure_matches_provenance(provenance)?;
             }
             ServiceRecordingAuthoritySource::ExplicitProjectless => {
@@ -812,14 +885,22 @@ pub async fn execute_service_verified(
         // `UnrecordedOnly` is an assertion by the caller, not a way to
         // override a verified service's recording contract.
         let project_binding = match (&recording.authority_source, record_thread) {
-            (ServiceRecordingAuthoritySource::Execution { provenance }, true) => Some(
+            (
+                ServiceRecordingAuthoritySource::Execution { provenance }
+                | ServiceRecordingAuthoritySource::InlineCallbackChild { provenance, .. },
+                true,
+            ) => Some(
                 ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
                     &ctx.engine,
                     &ctx.plan_ctx,
                     provenance,
                 )?,
             ),
-            (ServiceRecordingAuthoritySource::Execution { .. }, false) => None,
+            (
+                ServiceRecordingAuthoritySource::Execution { .. }
+                | ServiceRecordingAuthoritySource::InlineCallbackChild { .. },
+                false,
+            ) => None,
             (ServiceRecordingAuthoritySource::ExplicitProjectless, should_record) => {
                 if !matches!(
                     &ctx.plan_ctx.project_context,
@@ -892,9 +973,24 @@ pub async fn execute_service_verified(
             endpoint.clone(),
             &params,
         )?;
+        // An inline in-process child is born in its parent's chain; a direct
+        // invocation is its own chain root. The parent row is read before
+        // owner registration so the guard knows the chain it must settle in.
+        let inline_parent = inline_parent_thread_id
+            .map(|parent_thread_id| {
+                state.threads.get_thread(parent_thread_id)?.ok_or_else(|| {
+                    anyhow::anyhow!("inline callback parent thread not found: {parent_thread_id}")
+                })
+            })
+            .transpose()?;
+        let chain_root_id = inline_parent.as_ref().map_or_else(
+            || invocation_id.clone(),
+            |parent| parent.chain_root_id.clone(),
+        );
         // Registration precedes publication, while launch metadata and the
-        // created→running transition commit atomically with root birth.
-        let mut lifecycle_guard = RecordedServiceTerminalGuard::registered(state, &invocation_id)?;
+        // created→running transition commit atomically with the birth.
+        let mut lifecycle_guard =
+            RecordedServiceTerminalGuard::registered(state, &invocation_id, &chain_root_id)?;
         // Arm the owner-qualified fallback before durable publication. If any
         // post-commit step unwinds or returns an error, the exact registered
         // owner remains responsible for terminal settlement.
@@ -904,12 +1000,42 @@ pub async fn execute_service_verified(
             .with_in_process_lifecycle_authority(
                 ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
             );
-        state.threads.create_recorded_service_root(
-            &invocation_id,
-            &recorded_admission,
-            &launch_metadata,
-            lifecycle_guard.owner(),
-        )?;
+        match inline_parent.as_ref() {
+            Some(parent) => {
+                let inherited_stop = state.threads.create_recorded_service_child(
+                    parent,
+                    &invocation_id,
+                    &recorded_admission,
+                    &launch_metadata,
+                    lifecycle_guard.owner(),
+                )?;
+                if let Some(intent) = inherited_stop {
+                    // The parent's durable stop reached the newborn child
+                    // before its handler ran. Settle the child to the exact
+                    // outcome that durable stop dominance commits, then refuse
+                    // the launch; the handler never starts.
+                    let terminal = inherited_stop_terminal(&invocation_id, intent);
+                    lifecycle_guard.record_completed_handler_terminal(&terminal);
+                    finalize_recorded_service_exact(
+                        state,
+                        lifecycle_guard.owner(),
+                        lifecycle_guard.chain_root_id(),
+                        &terminal,
+                    )?;
+                    lifecycle_guard.disarm_terminal();
+                    bail!(
+                        "parent {} was stop-requested before inline service child {invocation_id} launched",
+                        parent.thread_id
+                    );
+                }
+            }
+            None => state.threads.create_recorded_service_root(
+                &invocation_id,
+                &recorded_admission,
+                &launch_metadata,
+                lifecycle_guard.owner(),
+            )?,
+        }
 
         // The handler and terminal commit are daemon-owned once the running
         // root exists. Dropping a request future detaches this task instead of
@@ -954,8 +1080,12 @@ pub async fn execute_service_verified(
                 &result_policy,
             );
             lifecycle_guard.record_completed_handler_terminal(&terminal);
-            let terminal_confirmation =
-                finalize_recorded_service_exact(&task_state, lifecycle_guard.owner(), &terminal);
+            let terminal_confirmation = finalize_recorded_service_exact(
+                &task_state,
+                lifecycle_guard.owner(),
+                lifecycle_guard.chain_root_id(),
+                &terminal,
+            );
             if terminal_confirmation.is_ok() {
                 lifecycle_guard.disarm_terminal();
             }

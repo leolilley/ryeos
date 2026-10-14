@@ -2509,6 +2509,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
         refs_root,
         chain_root_id,
         new_snapshot,
+        None,
         events,
         signer,
         trust_store,
@@ -2517,6 +2518,14 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
     )
 }
 
+/// Add a member thread and its initial durable events under one signed head.
+///
+/// `event_successor_snapshot`, when supplied, is the member's snapshot after
+/// its initial events: the Created snapshot and the successor are written in
+/// one CAS batch and only the successor is published in the chain entry. An
+/// in-process handler child (born running in its parent's chain) uses this so
+/// its created→running transition commits atomically with its birth, the
+/// same way a root birth publishes its event successor.
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
 #[allow(clippy::too_many_arguments)]
@@ -2525,6 +2534,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     refs_root: &Path,
     chain_root_id: &str,
     mut new_snapshot: ThreadSnapshot,
+    mut event_successor_snapshot: Option<ThreadSnapshot>,
     mut events: Vec<ThreadEvent>,
     signer: &dyn Signer,
     trust_store: &TrustStore,
@@ -2656,10 +2666,45 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     let snapshot_value = new_snapshot.to_value();
     let snapshot_json = lillux::canonical_json(&snapshot_value)
         .context("failed to canonicalize branch snapshot")?;
-    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
-    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    let created_snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &created_snapshot_hash, ".json");
     pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
-    new_entry.snapshot_hash.clone_from(&snapshot_hash);
+    new_entry.snapshot_hash.clone_from(&created_snapshot_hash);
+
+    let (new_entry, published_snapshot, snapshot_hash) =
+        if let Some(mut successor) = event_successor_snapshot.take() {
+            validation::validate_snapshot_transition_identity(&new_snapshot, &successor)?;
+            validation::stamp_snapshot_position(&mut successor, &new_entry, final_chain_seq);
+            validation::normalize_and_validate_snapshot_transition(
+                &new_snapshot,
+                &mut successor,
+                &append_timestamp,
+            )?;
+            validation::validate_snapshot_last_event(
+                &successor,
+                successor.last_event_hash.as_deref().ok_or_else(|| {
+                    anyhow!("member successor snapshot is missing its final event hash")
+                })?,
+                stored_events
+                    .last()
+                    .expect("add_thread_with_events rejects an empty event list"),
+            )?;
+            let successor_json = lillux::canonical_json(&successor.to_value())
+                .context("failed to canonicalize branch successor snapshot")?;
+            let successor_hash = lillux::sha256_hex(successor_json.as_bytes());
+            let successor_path = lillux::shard_path(cas_root, "objects", &successor_hash, ".json");
+            pending_writes.push((successor_path, successor_json.into_bytes()));
+            let entry = ChainThreadEntry {
+                snapshot_hash: successor_hash.clone(),
+                last_event_hash: new_entry.last_event_hash.clone(),
+                last_thread_seq: new_entry.last_thread_seq,
+                status: successor.status,
+            };
+            (entry, successor, successor_hash)
+        } else {
+            (new_entry, new_snapshot.clone(), created_snapshot_hash)
+        };
+    let new_snapshot = published_snapshot;
 
     let mut new_threads = current_chain_state.threads.clone();
     new_threads.insert(new_snapshot.thread_id.clone(), new_entry);
