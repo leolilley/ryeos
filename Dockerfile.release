@@ -145,6 +145,19 @@ RUN test -x /usr/bin/python3
 COPY --from=node-runtime /usr/local/ /usr/local/
 WORKDIR /app
 
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. tini stays
+# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
+# mounted root-owned) to this account, then re-executes itself as ryeos
+# before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /usr/sbin/nologin ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
 FROM workflow-runtime AS ryeos-standard
 COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
@@ -168,6 +181,8 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="standard"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
@@ -198,6 +213,8 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="local-inference"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
@@ -229,6 +246,8 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="central-host"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
@@ -295,6 +314,19 @@ RUN test -x /usr/bin/tini
 RUN test -x /usr/bin/python3
 WORKDIR /app
 
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. tini stays
+# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
+# mounted root-owned) to this account, then re-executes itself as ryeos
+# before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /usr/sbin/nologin ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
 # Stable substrate for native bundle publication. This image contains only the
 # bootstrap set required to run a bundle-source node. Subsequent bundle
 # releases advance CAS/catalog and node-selection coordinates; they do not
@@ -321,6 +353,8 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="substrate"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.bundle-seed-mode="first-boot-only"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
@@ -355,6 +389,8 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
