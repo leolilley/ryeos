@@ -12,6 +12,23 @@ use lillux::{InheritedReadonlyDocument, PinnedDirectory, PinnedDirectoryIdentity
 use serde::{Deserialize, Serialize};
 
 pub const HOST_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 2;
+/// Provider id of a binding the native host service installed and placed.
+pub const HOST_SERVICE_PROVIDER: &str = "host_service";
+/// Provider id of a binding an external supervisor prepared and handed in,
+/// without an OCI lifecycle.
+pub const EXTERNAL_CONTROLLER_PROVIDER: &str = "external_controller";
+/// Provider id of a binding an OCI hook prepared from the container's own
+/// lifecycle cgroup.
+pub const EXTERNAL_CONTROLLER_OCI_PROVIDER: &str = "external_controller:oci";
+
+/// One selected host runtime and the transport that delivered it. The
+/// capability report names the transport as the provider of every per-scope
+/// proof, so a floor can say which transports it accepts.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedHostRuntime<'a> {
+    pub binding: &'a HostRuntimeBinding,
+    pub provider: &'static str,
+}
 pub const HOST_RUNTIME_AUTHORITY_FD_ENV: &str = "RYEOS_HOST_RUNTIME_AUTHORITY_FD";
 const MAX_HOST_RUNTIME_DOCUMENT_BYTES: u64 = 64 * 1024;
 
@@ -187,6 +204,18 @@ impl HostRuntimeBinding {
             bail!("loaded node signing identity differs from host-runtime authority");
         }
         Ok(())
+    }
+
+    /// The external route this binding came by, as the capability report
+    /// names it: through an OCI hook when it carries an OCI lifecycle, else
+    /// an externally prepared controller leaf. A binding the native host
+    /// service installed is named by its transport, not by the binding.
+    pub fn provider_id(&self) -> &'static str {
+        if self.oci_lifecycle.is_some() {
+            EXTERNAL_CONTROLLER_OCI_PROVIDER
+        } else {
+            EXTERNAL_CONTROLLER_PROVIDER
+        }
     }
 
     /// Stable, non-secret identity of this complete protected binding. Status

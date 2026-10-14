@@ -326,7 +326,40 @@ impl TestStateStore {
     fn close_inner(&mut self) -> Result<()> {
         let store = self.store.take().context("test StateStore already closed")?;
         let factory = self.factory.take().context("test StateStore factory alias absent")?;
-        let prepared = (|| -> Result<()> {
+        let prepared = end_process_registries(&store);
+        // A refused close keeps every native owner inside its failure; the
+        // host then reports its arena as leaked when it is released.
+        let census = match prepared {
+            Ok(()) => close_on_deep_stack(store, Arc::clone(&factory)),
+            Err(error) => {
+                drop(store);
+                Err(error)
+            }
+        };
+        drop(factory);
+        let mut outcome = Ok(());
+        with_shared_host_release(|host| match census {
+            Ok(StateStoreCensus { terminals, leases, lease_retirements, prior_refusal }) => {
+                record_census(host, terminals, leases, lease_retirements);
+                if let Some(error) = prior_refusal {
+                    outcome = Err(error.context("test StateStore close recorded an earlier refusal"));
+                }
+            }
+            Err(error) => {
+                eprintln!("test StateStore close refused: {error:#}");
+                outcome = Err(error.context("test StateStore close refused"))
+            }
+        });
+        outcome
+    }
+}
+
+/// End every in-memory registry the close audit checks, the way a daemon
+/// exit does: attachment admission, attachments, workers, launch tasks and
+/// owners, in-process handlers and selected invocations. Their durable rows
+/// remain for the next opening's rebuild.
+fn end_process_registries(store: &StateStore) -> Result<()> {
+    (|| -> Result<()> {
             store.close_process_attachment_admission()?;
             store.attached_process_registry().clear();
             store.live_worker_registry().clear();
@@ -365,32 +398,42 @@ impl TestStateStore {
                 .map_err(|_| anyhow!("selected registry poisoned"))?
                 .end_process_records();
             Ok(())
-        })();
-        // A refused close keeps every native owner inside its failure; the
-        // host then reports its arena as leaked when it is released.
-        let census = match prepared {
-            Ok(()) => close_on_deep_stack(store, Arc::clone(&factory)),
-            Err(error) => {
-                drop(store);
-                Err(error)
-            }
-        };
-        drop(factory);
-        let mut outcome = Ok(());
-        with_shared_host_release(|host| match census {
-            Ok(StateStoreCensus { terminals, leases, lease_retirements, prior_refusal }) => {
-                record_census(host, terminals, leases, lease_retirements);
-                if let Some(error) = prior_refusal {
-                    outcome = Err(error.context("test StateStore close recorded an earlier refusal"));
-                }
-            }
-            Err(error) => {
-                eprintln!("test StateStore close refused: {error:#}");
-                outcome = Err(error.context("test StateStore close refused"))
-            }
-        });
-        outcome
-    }
+    })()
+}
+
+/// Everything an isolated child keeps beside a closed Store frame it never
+/// settles: the factory alias, the operator lock and the shared host, which
+/// would otherwise try to release an arena the frame still holds.
+#[cfg(test)]
+pub(crate) type RetainedTestStoreContext = (
+    Arc<lillux_sqlite::OriginalNativeFactory>,
+    Arc<ryeos_node_runtime::state_lock::StateLock>,
+    Option<TestNativeHost>,
+);
+
+/// Open a fresh node Store under `app_root` and close it into its closed
+/// frame, not its census, for a test that retains or abandons that frame in
+/// an isolated child process. The frame keeps the Store's namespace
+/// exclusion and native context, so the child must end with it.
+#[cfg(test)]
+pub(crate) fn closed_store_for_test(app_root: &Path) -> (ClosedLiveStateStore, RetainedTestStoreContext) {
+    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+        .expect("test node identity");
+    let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
+    let mut opened = TestStateStore::open(app_root, signer, Arc::new(head_trust)).expect("test StateStore opens");
+    let store = opened.store.take().expect("test StateStore open");
+    let factory = opened.factory.take().expect("test StateStore factory alias");
+    let lock = Arc::clone(&opened.lock);
+    end_process_registries(&store).expect("test StateStore registries end");
+    let close_factory = Arc::clone(&factory);
+    let closed = on_deep_stack("test-store-close-live", move || {
+        store.close_live(close_factory).map_err(|failure| anyhow!("{failure:#}"))
+    })
+    .and_then(|closed| closed)
+    .expect("test StateStore closes into its frame");
+    (closed, (factory, lock, take_shared_host()))
 }
 
 impl std::ops::Deref for TestStateStore {

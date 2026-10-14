@@ -369,6 +369,13 @@ impl LiveProjectionPhysicalCustody {
         Self { process: std::process::id(), prepared: false, retired_sources_consumed: false,
             registry_identity: None, maximum: 0, work_bound: 0, slots: Vec::new() }
     }
+    /// An empty frame whose retired sources are already consumed.
+    #[cfg(test)]
+    pub(super) fn exhausted_for_test() -> Self {
+        let mut exhausted = Self::empty();
+        exhausted.retired_sources_consumed = true;
+        exhausted
+    }
     fn require_registered(
         &self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
@@ -1189,12 +1196,24 @@ impl StateNativeSourcesRetired {
         let quote = quote_state_metadata_pin_receipt_checks(self.leaves.len())?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
+        self.require_retired_holders()
+    }
+    /// The funding-free part of `require_retired`: every leaf ended its
+    /// connection, kept its ticket and holds its receipts.
+    pub(super) fn require_retired_holders(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign State native source receipt");
         for leaf in &self.leaves {
             anyhow::ensure!(leaf.connection.is_none() && leaf.ticket.is_some(),
                 "State native source receipt retains a connection or lost its ticket");
             leaf.require_receipts()?;
         }
         Ok(())
+    }
+    /// The receipt of a frame that had no native source to retire.
+    #[cfg(test)]
+    pub(super) fn retired_for_test() -> Self {
+        Self { process: std::process::id(), factory: std::sync::Weak::new(), leaves: Vec::new(),
+            projection_refusals: 0, prior_refusal: false }
     }
 
     pub(super) fn diagnostics(&self) -> (usize, bool) {
@@ -1213,6 +1232,13 @@ impl LiveRecoveryPhysicalRegistrations {
     pub(super) fn empty() -> Self {
         Self { process: std::process::id(), owners: [None, None], bindings: [None, None],
             registry_identity: None, retired_sources_consumed: false }
+    }
+    /// Empty registrations whose retired sources are already consumed.
+    #[cfg(test)]
+    pub(super) fn exhausted_for_test() -> Self {
+        let mut exhausted = Self::empty();
+        exhausted.retired_sources_consumed = true;
+        exhausted
     }
     pub(super) fn require_registered(
         &self,
@@ -1372,6 +1398,37 @@ struct RetiredLiveStateHostAliases {
     lease: std::sync::Weak<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
     _deadline: lillux::time::MonotonicDeadline,
 }
+impl Drop for LiveStatePhysicalParent {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept these parts.
+        // Each retained slot is taken exactly once, here; otherwise the host,
+        // trust map, join link and every root, registration and recovery
+        // owner stay retained together until the process exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let host = unsafe { std::mem::ManuallyDrop::take(&mut self._host) };
+        let trust = unsafe { std::mem::ManuallyDrop::take(&mut self._trust) };
+        let join_link = unsafe { std::mem::ManuallyDrop::take(&mut self._join_link) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((host, trust, join_link));
+            return;
+        }
+        if settled {
+            drop(host);
+            drop(trust);
+            drop(join_link);
+        } else {
+            lillux::custody::abandon("ryeos-state::live-state-physical-parent", (
+                host, trust, join_link,
+                self.runtime.take(), self.namespace.take(),
+                std::mem::replace(&mut self.roots, std::array::from_fn(|_| None)),
+                std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None)),
+                self.retired_host.take(), self._recovery.take(),
+                std::mem::replace(&mut self.recovery_registrations, LiveRecoveryPhysicalRegistrations::empty()),
+            ));
+        }
+    }
+}
 impl LiveStatePhysicalParent {
     pub(crate) fn retire_host_aliases(&mut self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
@@ -1460,6 +1517,25 @@ impl LiveStatePhysicalParent {
             _host: std::mem::ManuallyDrop::new(Some(host)), retired_host: None, _recovery: Some(_recovery),
             recovery_owner_consumed: false, recovery_registrations: LiveRecoveryPhysicalRegistrations::empty(),
             _trust: std::mem::ManuallyDrop::new(_trust), _join_link: std::mem::ManuallyDrop::new(outside_join) }
+    }
+    /// Parts in the shape final exhaustion accepts: every root, registration,
+    /// host alias and recovery owner already ended.
+    #[cfg(test)]
+    pub(crate) fn exhausted_for_test() -> Self {
+        Self { process: std::process::id(), runtime: None, namespace: None,
+            roots: std::array::from_fn(|_| None), registrations: std::array::from_fn(|_| None),
+            registry_identity: None, retired_root_sources_consumed: true,
+            _host: std::mem::ManuallyDrop::new(None),
+            retired_host: Some(RetiredLiveStateHostAliases {
+                factory: std::sync::Weak::new(),
+                store: std::sync::Weak::<LiveStateNativeOwner>::new(),
+                lease: std::sync::Weak::<LiveStateNativeOwner>::new(),
+                _deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
+            }),
+            _recovery: None, recovery_owner_consumed: true,
+            recovery_registrations: LiveRecoveryPhysicalRegistrations::exhausted_for_test(),
+            _trust: std::mem::ManuallyDrop::new(Arc::new(TrustStore::new())),
+            _join_link: std::mem::ManuallyDrop::new(Mutex::new(std::sync::Weak::new())) }
     }
     /// # Safety
     /// This whole parent remains cached in the same prepaid original outside
@@ -1891,6 +1967,56 @@ pub struct ReleasedLiveStateStartup {
     // Destination inputs taken from State terminals, pending their State leaf.
     destination_inputs: std::mem::ManuallyDrop<Vec<StateTakenDestination>>,
     destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>, progress: std::mem::ManuallyDrop<StartupCloseProgress> }
+/// Every field of a released startup moved out of its owner.
+struct ReleasedLiveStateStartupParts {
+    schema_pending: Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>,
+    schema_definitions: Vec<crate::sqlite_schema::SchemaSqlDefinition>,
+    projection_files: Vec<crate::projection::OutsideOriginalProjectionCustody>,
+    projection_native: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
+    projection_refusals: Vec<anyhow::Error>,
+    destination_inputs: Vec<StateTakenDestination>,
+    destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>,
+    progress: StartupCloseProgress,
+}
+impl ReleasedLiveStateStartup {
+    /// Move every field out exactly once; the emptied shell is never dropped.
+    /// Whether the leases retired is a plain copied fact.
+    fn into_parts(self) -> ReleasedLiveStateStartupParts {
+        let mut released = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            ReleasedLiveStateStartupParts {
+                schema_pending: std::mem::ManuallyDrop::take(&mut released.schema_pending),
+                schema_definitions: std::mem::ManuallyDrop::take(&mut released.schema_definitions),
+                projection_files: std::mem::ManuallyDrop::take(&mut released.projection_files),
+                projection_native: std::mem::ManuallyDrop::take(&mut released.projection_native),
+                projection_refusals: std::mem::ManuallyDrop::take(&mut released.projection_refusals),
+                destination_inputs: std::mem::ManuallyDrop::take(&mut released.destination_inputs),
+                destination_join: std::ptr::read(&released.destination_join),
+                progress: std::mem::ManuallyDrop::take(&mut released.progress),
+            }
+        }
+    }
+}
+impl Drop for ReleasedLiveStateStartup {
+    fn drop(&mut self) {
+        // No drop settles a released startup: its progress always holds the
+        // State parent, whose namespace exclusion, roots and host authority
+        // end only through the physical-custody or census transfer that
+        // consumes this frame whole. Each slot is taken exactly once, here,
+        // and everything stays retained until the process exits.
+        let parts = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.schema_pending),
+            std::mem::ManuallyDrop::take(&mut self.schema_definitions),
+            std::mem::ManuallyDrop::take(&mut self.projection_files),
+            std::mem::ManuallyDrop::take(&mut self.projection_native),
+            std::mem::ManuallyDrop::take(&mut self.projection_refusals),
+            std::mem::ManuallyDrop::take(&mut self.destination_inputs),
+            std::mem::take(&mut self.destination_join),
+            std::mem::ManuallyDrop::take(&mut self.progress),
+        )};
+        lillux::custody::abandon("ryeos-state::released-live-state-startup", parts);
+    }
+}
 // Original failed-start frame after its redundant parent edges end. Retaining
 // this graph is a resumable source transfer, not a physical terminal receipt.
 pub struct ReleasedLiveStatePhysicalCustody {
@@ -2191,15 +2317,15 @@ impl ReleasedLiveStateStartup {
                 .require_original(factory, aggregate)
         });
         if let Err(error) = checked { return Err((self, error)); }
-        let Self { schema_pending, schema_definitions, projection_leases_retired: _,
+        let ReleasedLiveStateStartupParts { schema_pending, schema_definitions,
             projection_files, projection_native, projection_refusals, destination_inputs,
-            destination_join, progress } = self;
+            destination_join, progress } = self.into_parts();
         // Checked empty above.
-        drop(std::mem::ManuallyDrop::into_inner(destination_inputs));
+        drop(destination_inputs);
         let StartupCloseProgress { original, context, operational, operational_failure, operational_closed,
             operational_outside, projection_failure, projection_released, schema_failure,
             schema_released, schema_admission_custody, publication_custody, lease_setup_custody,
-            prior_refusal } = std::mem::ManuallyDrop::into_inner(progress);
+            prior_refusal } = progress;
         debug_assert!(operational.is_none() && operational_failure.is_none() && operational_closed.is_none()
             && projection_failure.is_none() && projection_released.is_none()
             && schema_failure.is_none() && schema_released.is_none());
@@ -2225,10 +2351,8 @@ impl ReleasedLiveStateStartup {
             parent_parts: std::mem::ManuallyDrop::new(None),
             process: std::process::id(), join: destination_join.into_inner().expect("checked failed State receiver"),
             _context: std::mem::ManuallyDrop::new(context),
-            _schema: std::mem::ManuallyDrop::new((std::mem::ManuallyDrop::into_inner(schema_pending),
-                std::mem::ManuallyDrop::into_inner(schema_definitions), schema_admission_custody)),
-            _projection: std::mem::ManuallyDrop::new((std::mem::ManuallyDrop::into_inner(projection_files),
-                std::mem::ManuallyDrop::into_inner(projection_native), std::mem::ManuallyDrop::into_inner(projection_refusals))),
+            _schema: std::mem::ManuallyDrop::new((schema_pending, schema_definitions, schema_admission_custody)),
+            _projection: std::mem::ManuallyDrop::new((projection_files, projection_native, projection_refusals)),
             operational: std::mem::ManuallyDrop::new(operational_outside),
             _refusal: std::mem::ManuallyDrop::new(prior_refusal),
             metadata_pins: StateMetadataPinRetirement::empty(),
@@ -2636,20 +2760,16 @@ impl ReleasedLiveStateStartup {
             Ok(census) => census,
             Err(error) => return Err((self, error)),
         };
-        let Self { schema_pending, schema_definitions, projection_leases_retired: _, projection_files,
-            projection_native, projection_refusals, destination_inputs, destination_join, progress } = self;
+        let ReleasedLiveStateStartupParts { schema_pending, schema_definitions, projection_files,
+            projection_native, projection_refusals, destination_inputs, destination_join, progress } =
+            self.into_parts();
         // Each vector is either checked empty above or carries terminals the
         // census now also holds.
-        drop((std::mem::ManuallyDrop::into_inner(schema_pending),
-            std::mem::ManuallyDrop::into_inner(schema_definitions),
-            std::mem::ManuallyDrop::into_inner(projection_files),
-            std::mem::ManuallyDrop::into_inner(projection_native),
-            std::mem::ManuallyDrop::into_inner(projection_refusals),
-            std::mem::ManuallyDrop::into_inner(destination_inputs), destination_join));
+        drop((schema_pending, schema_definitions, projection_files, projection_native,
+            projection_refusals, destination_inputs, destination_join));
         let StartupCloseProgress { original, context, operational, operational_failure, operational_closed,
             operational_outside, projection_failure, projection_released, schema_failure, schema_released,
-            schema_admission_custody, publication_custody, lease_setup_custody, prior_refusal } =
-            std::mem::ManuallyDrop::into_inner(progress);
+            schema_admission_custody, publication_custody, lease_setup_custody, prior_refusal } = progress;
         // Owners first, then the State parent that holds the roots and the
         // namespace exclusion.
         drop((operational, operational_failure, operational_closed, operational_outside,
@@ -2796,7 +2916,9 @@ fn advance_startup_close(progress: StartupCloseProgress)
         destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
         destination_join: std::sync::OnceLock::new(), progress };
     if released.native_terminals(&factory).is_err() {
-        return Err(retain(released.progress));
+        // Only the progress carries owners; the other slots are still empty.
+        let progress = std::mem::ManuallyDrop::new(released.into_parts().progress);
+        return Err(retain(progress));
     }
     Ok(released)
 }
@@ -2897,14 +3019,19 @@ impl LiveRecoveryPhysicalRegistrations {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
+        self.require_exhausted_holders()?;
+        if let Some(identity) = self.registry_identity.as_ref() {
+            registry.require_same_registry(identity)?;
+        }
+        Ok(())
+    }
+    /// The registry-free part of final exhaustion.
+    pub(super) fn require_exhausted_holders(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.process == std::process::id()
             && self.retired_sources_consumed
             && self.bindings.iter().all(Option::is_none)
             && self.owners.iter().all(Option::is_none),
             "live recovery registrations remain at final exhaustion");
-        if let Some(identity) = self.registry_identity.as_ref() {
-            registry.require_same_registry(identity)?;
-        }
         Ok(())
     }
 }
@@ -2922,8 +3049,14 @@ impl LiveStatePhysicalParent {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign State parent parts at exhaustion");
+        self.require_exhausted_holders()?;
         require_retired_root_receipt_registry(self.registry_identity.as_ref(), registry)?;
+        self.recovery_registrations.require_exhausted(registry)
+    }
+    /// The registry-free part of final exhaustion. The dropped parts settle
+    /// on exactly these checks.
+    pub(crate) fn require_exhausted_holders(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign State parent parts at exhaustion");
         anyhow::ensure!(self.retired_root_sources_consumed && self.recovery_owner_consumed
             && self._recovery.is_none()
             && self.registrations.iter().all(Option::is_none)
@@ -2931,25 +3064,14 @@ impl LiveStatePhysicalParent {
             && self.roots.iter().all(Option::is_none)
             && self._host.is_none() && self.retired_host.is_some(),
             "State parent parts retain a root, registration, host or recovery owner");
-        self.recovery_registrations.require_exhausted(registry)
+        self.recovery_registrations.require_exhausted_holders()
     }
 
-    /// Infallible consumption after `require_exhausted`. The RecoveryStore
-    /// was already taken by host-alias retirement, so its slot is empty.
+    /// Consumption after `require_exhausted`: the exhausted parts' own Drop
+    /// releases every slot normally. The RecoveryStore was already taken by
+    /// host-alias retirement, so its slot is empty.
     pub(crate) fn exhaust(self) {
-        let Self { process: _, runtime, namespace, roots, registrations, registry_identity: _,
-            retired_root_sources_consumed: _, _host, retired_host, _recovery,
-            recovery_owner_consumed: _, recovery_registrations, _trust, _join_link } = self;
-        drop(runtime);
-        drop(namespace);
-        drop(roots);
-        drop(registrations);
-        drop(std::mem::ManuallyDrop::into_inner(_host));
-        drop(retired_host);
-        drop(_recovery);
-        drop(recovery_registrations);
-        drop(std::mem::ManuallyDrop::into_inner(_trust));
-        drop(std::mem::ManuallyDrop::into_inner(_join_link));
+        drop(self);
     }
 }
 
@@ -2971,22 +3093,14 @@ impl ReleasedLiveStatePhysicalCustody {
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> std::result::Result<(), (Self, anyhow::Error)> {
         let checked = (|| -> anyhow::Result<()> {
-            anyhow::ensure!(self.process == std::process::id(), "foreign failed State frame at exhaustion");
+            self.require_exhausted_holders()?;
             self.native_retired.as_ref()
                 .context("failed State native-source receipt absent at exhaustion")?
                 .require_retired(prepay)?;
-            self.metadata_pins.require_exhausted()?;
-            self.projection_physical.require_exhausted()?;
-            anyhow::ensure!(self.parent.is_none(), "failed State parent body remains at exhaustion");
             (&*self.parent_parts).as_ref()
                 .context("failed State parent parts absent at exhaustion")?
                 .require_exhausted(registry)?;
             self.join.require_exhausted(registry)?;
-            anyhow::ensure!(self._context.is_none()
-                && self._schema.0.is_empty() && self._schema.1.is_empty() && self._schema.2.is_empty()
-                && self._projection.0.is_empty() && self._projection.1.is_empty()
-                && self._projection.2.is_empty() && self._refusal.is_none(),
-                "failed State frame retains a native, schema or projection owner");
             if let Some(operational) = (&*self.operational).as_ref() {
                 operational.require_exhausted(registry)?;
             }
@@ -2995,24 +3109,192 @@ impl ReleasedLiveStatePhysicalCustody {
         if let Err(error) = checked {
             return Err((self, error));
         }
-        let Self { process: _, projection_physical, parent, parent_parts, join, _context, _schema,
-            _projection, operational, _refusal, metadata_pins, native_retired } = self;
-        drop(std::mem::ManuallyDrop::into_inner(projection_physical));
-        drop(std::mem::ManuallyDrop::into_inner(parent));
-        if let Some(parts) = std::mem::ManuallyDrop::into_inner(parent_parts) {
-            parts.exhaust();
-        }
-        drop(join);
-        drop(std::mem::ManuallyDrop::into_inner(_context));
-        drop(std::mem::ManuallyDrop::into_inner(_schema));
-        drop(std::mem::ManuallyDrop::into_inner(_projection));
-        if let Some(operational) = std::mem::ManuallyDrop::into_inner(operational) {
-            operational.exhaust();
-        }
-        drop(std::mem::ManuallyDrop::into_inner(_refusal));
-        drop(metadata_pins);
-        drop(native_retired);
+        // The checks above include this frame's settled predicate, so its
+        // Drop releases every slot normally.
+        drop(self);
         Ok(())
+    }
+
+    /// The registry- and funding-free part of final exhaustion. The dropped
+    /// frame settles on exactly these checks.
+    fn require_exhausted_holders(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.process == std::process::id(), "foreign failed State frame at exhaustion");
+        self.native_retired.as_ref()
+            .context("failed State native-source receipt absent at exhaustion")?
+            .require_retired_holders()?;
+        self.metadata_pins.require_exhausted()?;
+        self.projection_physical.require_exhausted()?;
+        anyhow::ensure!(self.parent.is_none(), "failed State parent body remains at exhaustion");
+        (&*self.parent_parts).as_ref()
+            .context("failed State parent parts absent at exhaustion")?
+            .require_exhausted_holders()?;
+        self.join.require_exhausted_holders()?;
+        anyhow::ensure!(self._context.is_none()
+            && self._schema.0.is_empty() && self._schema.1.is_empty() && self._schema.2.is_empty()
+            && self._projection.0.is_empty() && self._projection.1.is_empty()
+            && self._projection.2.is_empty() && self._refusal.is_none(),
+            "failed State frame retains a native, schema or projection owner");
+        if let Some(operational) = (&*self.operational).as_ref() {
+            operational.require_exhausted_holders()?;
+        }
+        Ok(())
+    }
+}
+impl Drop for ReleasedLiveStatePhysicalCustody {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept the frame. Each
+        // retained slot is taken exactly once, here; otherwise every cached
+        // source, parent part, context, schema, projection and Operational
+        // owner stays retained together until the process exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.projection_physical),
+            std::mem::ManuallyDrop::take(&mut self.parent),
+            std::mem::ManuallyDrop::take(&mut self.parent_parts),
+            std::mem::ManuallyDrop::take(&mut self._context),
+            std::mem::ManuallyDrop::take(&mut self._schema),
+            std::mem::ManuallyDrop::take(&mut self._projection),
+            std::mem::ManuallyDrop::take(&mut self.operational),
+            std::mem::ManuallyDrop::take(&mut self._refusal),
+        )};
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
+        }
+        if settled {
+            drop(taken);
+        } else {
+            let metadata_pins = std::mem::replace(&mut self.metadata_pins, StateMetadataPinRetirement::empty());
+            lillux::custody::abandon("ryeos-state::released-live-state-physical-custody",
+                (taken, metadata_pins));
+        }
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const PARENT: &str = "ryeos-state::live-state-physical-parent";
+    const PHYSICAL: &str = "ryeos-state::released-live-state-physical-custody";
+    const STARTUP: &str = "ryeos-state::released-live-state-startup";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    #[test]
+    fn dropped_exhausted_parent_parts_release_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let parts = LiveStatePhysicalParent::exhausted_for_test();
+        parts.require_exhausted_holders().unwrap();
+        let trust = Arc::clone(&parts._trust);
+        let before = abandoned(PARENT);
+        drop(parts);
+        assert_eq!(abandoned(PARENT), before);
+        assert_eq!(Arc::strong_count(&trust), 1, "the trust alias was released");
+    }
+
+    #[test]
+    fn dropped_parent_parts_with_unconsumed_roots_are_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let mut parts = LiveStatePhysicalParent::exhausted_for_test();
+        parts.retired_root_sources_consumed = false;
+        assert!(parts.require_exhausted_holders().is_err());
+        let trust = Arc::clone(&parts._trust);
+        let before = abandoned(PARENT);
+        drop(parts);
+        assert_eq!(abandoned(PARENT), before + 1);
+        assert_eq!(Arc::strong_count(&trust), 2, "the trust alias stays retained");
+    }
+
+    fn physical_custody(native_retired: Option<StateNativeSourcesRetired>) -> ReleasedLiveStatePhysicalCustody {
+        ReleasedLiveStatePhysicalCustody {
+            process: std::process::id(),
+            projection_physical: std::mem::ManuallyDrop::new(LiveProjectionPhysicalCustody::exhausted_for_test()),
+            parent: std::mem::ManuallyDrop::new(None),
+            parent_parts: std::mem::ManuallyDrop::new(Some(LiveStatePhysicalParent::exhausted_for_test())),
+            join: super::super::destination_join::OriginalStateDestinationJoin::exhausted_for_test(),
+            _context: std::mem::ManuallyDrop::new(None),
+            _schema: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
+            _projection: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
+            operational: std::mem::ManuallyDrop::new(None),
+            _refusal: std::mem::ManuallyDrop::new(None),
+            metadata_pins: StateMetadataPinRetirement::empty(),
+            native_retired,
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_physical_custody_releases_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let frame = physical_custody(Some(StateNativeSourcesRetired::retired_for_test()));
+        frame.require_exhausted_holders().unwrap();
+        let before = (abandoned(PHYSICAL), abandoned(PARENT));
+        drop(frame);
+        assert_eq!((abandoned(PHYSICAL), abandoned(PARENT)), before);
+    }
+
+    #[test]
+    fn dropped_physical_custody_before_native_retirement_is_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let frame = physical_custody(None);
+        assert!(frame.require_exhausted_holders().is_err());
+        let before = (abandoned(PHYSICAL), abandoned(PARENT));
+        drop(frame);
+        // The frame is held whole; its exhausted parent parts inside it are
+        // never dropped, so they record nothing of their own.
+        assert_eq!((abandoned(PHYSICAL), abandoned(PARENT)), (before.0 + 1, before.1));
+    }
+
+    #[test]
+    fn dropped_released_startup_is_retained_with_its_state_parent() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_released_startup_is_retained_with_its_state_parent");
+        // The retained frame keeps the live State parent and its namespace
+        // exclusion, which only the process end releases, so the scenario
+        // runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "startup +1; parent retained", "{outcome}");
+            return;
+        }
+        let host = crate::test_support::shared_test_host();
+        let runtime = tempfile::tempdir().unwrap();
+        let state = crate::test_support::open_live_state(&host, runtime.path(), Arc::new(TrustStore::new())).unwrap();
+        let original = match &state.original_projection_context.as_ref().expect("live context").authority {
+            OriginalProjectionStateOwner::Live(owner) => Arc::clone(owner),
+            OriginalProjectionStateOwner::Offline(_) => panic!("a live State has a live parent"),
+        };
+        let parent = Arc::downgrade(&original);
+        let aliases = Arc::strong_count(&original);
+        let released = ReleasedLiveStateStartup {
+            schema_pending: std::mem::ManuallyDrop::new(Vec::new()),
+            schema_definitions: std::mem::ManuallyDrop::new(Vec::new()),
+            projection_leases_retired: false,
+            projection_files: std::mem::ManuallyDrop::new(Vec::new()),
+            projection_native: std::mem::ManuallyDrop::new(Vec::new()),
+            projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
+            destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
+            destination_join: std::sync::OnceLock::new(),
+            progress: std::mem::ManuallyDrop::new(StartupCloseProgress {
+                original, context: None, operational: None, operational_failure: None,
+                operational_closed: None, operational_outside: None, projection_failure: None,
+                projection_released: None, schema_failure: None, schema_released: None,
+                schema_admission_custody: Vec::new(), publication_custody: Vec::new(),
+                lease_setup_custody: Vec::new(), prior_refusal: None,
+            }),
+        };
+        let before = abandoned(STARTUP);
+        drop(released);
+        let delta = abandoned(STARTUP) - before;
+        // The upgrade adds one alias of its own.
+        let retained = parent.upgrade().is_some_and(|owner| Arc::strong_count(&owner) == aliases + 1);
+        lillux_sqlite::test_host::end_isolated_process(
+            (state, runtime, host),
+            &format!("startup +{delta}; parent {}", if retained { "retained" } else { "released" }),
+        )
     }
 }
 

@@ -241,7 +241,15 @@ impl ResponseMode for HandlerMode {
             });
         }
         let execution_principal_id = format!("route-handler:{}:{}", route_bundle_id, raw.id);
-        let execution_scopes = vec![handler_execute_scope(source_ref, &raw.id)?];
+        // The handler executes its one tool against a workspace this route
+        // creates fresh for each request and removes afterwards; the live
+        // project write authority it holds therefore covers only that
+        // throwaway directory, and dispatch requires it for every live
+        // execution.
+        let execution_scopes = vec![
+            handler_execute_scope(source_ref, &raw.id)?,
+            ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+        ];
 
         Ok(Arc::new(CompiledHandlerMode {
             source_ref: source_ref.to_string(),
@@ -333,8 +341,11 @@ impl CompiledResponseMode for CompiledHandlerMode {
                 workspace.display()
             ))
         })?;
+        // A route-declared handler takes no ref bindings from the request: the
+        // route names its tool, so the binding map is always empty here.
         let input = json!({
             "project_path": workspace.to_string_lossy(),
+            "ref_bindings": {},
             "parameters": parameters,
         });
 

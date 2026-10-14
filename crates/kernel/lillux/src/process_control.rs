@@ -32,18 +32,18 @@ mod scope;
 #[cfg(target_os = "linux")]
 pub(crate) use scope::SelectedScopePreparation;
 pub use host_capability::{
-    ACCOUNTING, AnyOfCapabilities, CapabilityEvidence, CapabilityRequirement, CgroupFacts,
-    CgroupLimit, HOST_FACTS_VERSION, HostCapabilities, HostFacts, MemlockFacts, ProbeOutcome,
-    ProofSource, RECOVERY_ENCLOSURE, RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES,
-    RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof,
-    RootStorageFacts, STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE,
-    TERMINATION_ENCLOSURE_TRUSTED_INIT, TRUSTED_GRADE_CAPABILITIES, SCOPE_LIMITS,
+    ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
+    CgroupLimit, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities, HostFacts,
+    ISOLATION_NAMESPACES, MemlockFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
+    RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED,
+    RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts,
+    STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, SCOPE_LIMITS,
     admit_enclosure_inits, current_host_generation, decide_durable_root, floor_entry_refusal,
-    is_scope_capability, is_weaker_grade, met_by_strongest, satisfies_local_requirement,
+    is_scope_capability, is_weaker_grade, met_by_strongest, satisfies,
 };
 pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
 pub use scope::{
-    ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
+    ControllerAccount, ProbeBarrier, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
     ProcessScopeProvider, ProcessScopeRecovery, ProcessScopeResourceLimits, QuiescedProcessScope,
     ResourceLimitedProcessScope, require_administrator,

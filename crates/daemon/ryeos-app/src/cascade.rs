@@ -87,7 +87,7 @@ pub fn cascade_descendants(
         report.extend(
             new_children
                 .iter()
-                .map(|child| signal_thread(state, child, mode)),
+                .map(|child| signal_descendant(state, child, mode)),
         );
     }
     anyhow::bail!(
@@ -278,6 +278,42 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
         }
     }
     report
+}
+
+/// Signal one descendant of a cascade. An inline in-process child is a
+/// descendant like any other thread in its parent's chain, but its handler is
+/// a daemon-owned task with no cancellation contract, so the store refuses a
+/// stop request on its row. The cascade therefore classifies it before asking
+/// for a stop: a terminal handler is already settled, and a running handler
+/// settles its own row through its owner guard or boot recovery. Neither is
+/// an unproven descendant stop. A direct stop of such a thread as the
+/// cascade target still goes through `signal_thread` and keeps the store's
+/// refusal.
+fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
+    let thread = match state.state_store.get_thread(thread_id) {
+        Ok(Some(thread)) => thread,
+        Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
+        Err(e) => {
+            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() });
+        }
+    };
+    let in_process_handler = thread
+        .runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.launch_driver)
+        == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
+    if !in_process_handler {
+        return signal_thread(state, thread_id, mode);
+    }
+    if crate::state_store::is_terminal_status(&thread.status) {
+        return json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status });
+    }
+    json!({
+        "thread_id": thread_id,
+        "skipped": "in_process_handler",
+        "status": thread.status,
+    })
 }
 
 /// Stop a thread and its live descendants: signal the target per `mode`, then

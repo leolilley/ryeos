@@ -360,6 +360,18 @@ impl OriginalStateDestinationJoin {
         &self,
         registry: &RetiredOriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
+        self.require_exhausted_holders()?;
+        let state = self.state.try_lock()
+            .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
+        if let Some(identity) = state.generated_root_registry.as_ref() {
+            registry.require_same_registry(identity)?;
+        }
+        Ok(())
+    }
+    /// The registry-free part of final exhaustion: every holder retired and
+    /// no generated-root registration left unconsumed. A dropped frame that
+    /// cached this join settles on exactly these checks.
+    pub(crate) fn require_exhausted_holders(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.holders_retired()?,
             "State destination join retains a holder at final exhaustion");
         let state = self.state.try_lock()
@@ -367,10 +379,26 @@ impl OriginalStateDestinationJoin {
         anyhow::ensure!(state.leaves.iter().all(|leaf| leaf.generated.as_ref()
                 .is_none_or(|owner| owner.registration.is_none())),
             "State destination join retains an unconsumed generated-root registration");
-        if let Some(identity) = state.generated_root_registry.as_ref() {
-            registry.require_same_registry(identity)?;
-        }
         Ok(())
+    }
+    /// A join in the shape a completed outside transfer leaves behind: census
+    /// closed, no parent, no live parent, nothing registered.
+    #[cfg(test)]
+    pub(crate) fn exhausted_for_test() -> Arc<Self> {
+        Arc::new(Self {
+            process: std::process::id(),
+            factory: std::sync::Weak::new(),
+            maximum: 1,
+            state: Mutex::new(JoinState {
+                parent: ManuallyDrop::new(None),
+                leaves: ManuallyDrop::new(Vec::new()),
+                census_closed: true,
+                live_parent: ManuallyDrop::new(None),
+                live_parent_outside_pending: false,
+                generated_root_registry: None,
+                generated_roots_retired: false,
+            }),
+        })
     }
     // Only ordinary wrapper aliases are retired here. The full canonical
     // parent remains cached, and every generated root/name/schema/generation

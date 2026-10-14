@@ -792,9 +792,7 @@ impl DaemonSelectedComposition {
             "accounting outside sources compete with already cached sources");
         let sources = ledger.take_outside_sources(terminal)
             .context("take accounting ledger outside sources")?;
-        let ryeos_app::accounting_db::AccountingNativeOutsideSources {
-            connection, reference, unused_reference,
-        } = sources;
+        let (connection, reference, unused_reference) = sources.into_parts();
         self.accounting_native_connection_parts = connection;
         self.accounting_native_reference_parts = reference;
         self.accounting_native_unused_reference = unused_reference;
@@ -3471,13 +3469,21 @@ async fn run(
             }
 
             // ── Two-phase node-config bootstrap ──
+            // The transport that delivered the binding is the provider the
+            // capability report attributes every per-scope proof to.
             let host_runtime = external_host_runtime
                 .as_ref()
-                .map(|runtime| runtime.binding())
+                .map(|runtime| ryeos_node::host_runtime::SelectedHostRuntime {
+                    binding: runtime.binding(),
+                    provider: runtime.binding().provider_id(),
+                })
                 .or_else(|| {
                     host_service
                         .as_ref()
-                        .map(|service| &service.binding.runtime)
+                        .map(|service| ryeos_node::host_runtime::SelectedHostRuntime {
+                            binding: &service.binding.runtime,
+                            provider: ryeos_node::host_runtime::HOST_SERVICE_PROVIDER,
+                        })
                 });
             let (engine, node_config_snapshot, node_policy_snapshot, isolation) =
                 bootstrap::load_node_config_two_phase_with_host_runtime(
@@ -6854,9 +6860,12 @@ fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<b
         for reservation in reservations {
             after_thread_id = Some(reservation.thread_id.clone());
             let thread_id = reservation.thread_id;
+            // An in-process handler may be an inline child in its parent's
+            // chain, so the snapshot is located through the handler's own
+            // runtime row rather than as a chain root.
             match state
                 .state_store
-                .get_authoritative_root_thread_snapshot(&thread_id)
+                .get_authoritative_in_process_handler_snapshot(&thread_id)
             {
                 Ok(Some(snapshot))
                     if ryeos_app::state_store::is_terminal_status(snapshot.status.as_str()) =>
@@ -6953,7 +6962,7 @@ fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<b
                     tracing::error!(
                         thread_id,
                         reservation_phase = ?reservation.phase,
-                        "shutdown drain found a live in-process reservation without an authoritative root"
+                        "shutdown drain found a live in-process reservation without an authoritative thread"
                     );
                 }
                 Err(error) => {

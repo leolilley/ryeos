@@ -190,6 +190,35 @@ impl OriginalFiniteScratchCustody {
         Ok(true)
     }
 }
+impl Drop for OriginalFiniteScratchCustody {
+    fn drop(&mut self) {
+        // Settled exactly when descriptors_retired holds: every directory
+        // owner and the removal receipt moved into retired registrations.
+        // Each slot is taken exactly once, here; otherwise the guard shell,
+        // directories, receipt and registrations stay retained together
+        // until the process exits.
+        let settled = self.descriptors_retired().is_ok_and(|retired| retired);
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.original),
+            std::mem::ManuallyDrop::take(&mut self.parent),
+            std::mem::ManuallyDrop::take(&mut self.root),
+            std::mem::ManuallyDrop::take(&mut self.receipt),
+            std::mem::ManuallyDrop::take(&mut self.receipt_parent),
+            std::mem::ManuallyDrop::take(&mut self.receipt_child),
+        )};
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
+            return;
+        }
+        if settled {
+            drop(taken);
+        } else {
+            let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+            lillux::custody::abandon("ryeos-app::finite-scratch-custody", (taken, registrations));
+        }
+    }
+}
 
 impl TempDirGuard {
     /// # Safety
@@ -1277,6 +1306,37 @@ mod tests {
                 + 2 * std::mem::size_of::<usize>()) as u64,
             steps: 16,
         });
+    }
+
+    #[test]
+    fn dropped_finite_scratch_custody_before_registration_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const KIND: &str = "ryeos-app::finite-scratch-custody";
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir(parent.path().join("scratch")).unwrap();
+        let parent_pin = lillux::PinnedDirectory::open(parent.path()).unwrap().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(&parent.path().join("scratch")).unwrap().unwrap());
+        // A guard shell whose path was already taken, as the completed
+        // finite removal leaves it: its Drop removes nothing.
+        let shell = TempDirGuard::new(parent.path().join("scratch"));
+        shell.inner.lock().unwrap().take();
+        let custody = OriginalFiniteScratchCustody {
+            process: std::process::id(),
+            original: std::mem::ManuallyDrop::new(shell),
+            parent: std::mem::ManuallyDrop::new(Some(Arc::new(parent_pin))),
+            root: std::mem::ManuallyDrop::new(Some(Arc::clone(&root))),
+            name: std::ffi::OsString::from("scratch"),
+            receipt: std::mem::ManuallyDrop::new(None),
+            receipt_parent: std::mem::ManuallyDrop::new(None),
+            receipt_child: std::mem::ManuallyDrop::new(None),
+            receipt_name: None,
+            registrations: std::array::from_fn(|_| None),
+        };
+        assert!(!custody.descriptors_retired().unwrap());
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(custody);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
     }
 
     #[test]

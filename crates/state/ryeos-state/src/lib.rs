@@ -15,6 +15,8 @@ pub mod bundle_events;
 pub mod bundle_outbox;
 pub mod capability;
 pub mod chain;
+#[cfg(test)]
+mod custody_drop_gate;
 pub mod event_types;
 pub mod external_content;
 pub mod external_execution;
@@ -126,7 +128,7 @@ pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
 pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
-    AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
+    AddThreadWithEventSuccessorRequest, AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
     AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
     AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,

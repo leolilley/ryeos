@@ -139,11 +139,14 @@ pub struct ActionSuccess {
     /// sub-graph) in the envelope's `cost` field. `None` for subprocess
     /// leaves, cache hits, and bare values — cost is never invented.
     pub cost: Option<RuntimeCost>,
-    /// The spawned child thread's id, when this dispatch launched a native
-    /// child thread (a directive or sub-graph). `None` for subprocess/tool
-    /// leaves, bare values, and cache hits — nothing new was spawned. The
-    /// walker emits a `child_thread_spawned` event from this so the dispatch
-    /// edge lands in the parent's portable braid.
+    /// The spawned child thread's id, when this dispatch launched a child
+    /// thread: a native child (a directive or sub-graph) or an inline
+    /// in-process service child, which the daemon records in this graph's
+    /// chain with the graph thread as upstream. `None` for subprocess/tool
+    /// leaves, unrecorded service reads, bare values, and cache hits —
+    /// nothing new was spawned. The walker emits a `child_thread_spawned`
+    /// event from this so the dispatch edge lands in the parent's portable
+    /// braid.
     pub child_thread_id: Option<String>,
     /// The durable effect record this result was replayed from, when the
     /// daemon substituted a recorded result for execution. Flows into the
@@ -286,10 +289,11 @@ pub async fn dispatch_action(
     // failure rather than a silent `null`. Only success peels to the bare
     // leaf value; a leaf that still requests inline continuation
     // (`continuation_id` at its top level) is then rejected loudly.
-    // A native child snapshot identifies a spawned directive/sub-graph child;
-    // capture its id BEFORE classifying `result` so the walker can emit a
-    // `child_thread_spawned` event. In-process service envelopes instead carry
-    // invocation/audit metadata and are explicitly excluded below.
+    // A native child snapshot identifies a spawned directive/sub-graph child
+    // and a recorded service envelope identifies an inline in-process child;
+    // capture the id BEFORE classifying `result` so the walker can emit a
+    // `child_thread_spawned` event. Unrecorded service envelopes carry only an
+    // invocation id for a hot read and are excluded below.
     let (child_thread_id, child_thread_id_error) = callback_child_thread_identity(&response.thread);
 
     response
@@ -410,16 +414,30 @@ pub async fn dispatch_action(
     }
 }
 
-/// Extract the identity of a native child launched by one callback action.
+/// Extract the identity of a child thread launched by one callback action.
 ///
-/// In-process services also return a `thread` object, but its `svc-*`
-/// identity is invocation/audit metadata rather than a spawned runtime child.
-/// The service envelope carries the explicit `recorded` discriminator, so it
-/// must never produce a graph lineage edge. Native child snapshots have no
-/// such discriminator and retain the strict runtime thread-id contract.
+/// Native child snapshots carry no `recorded` discriminator and retain the
+/// strict runtime thread-id contract. In-process service envelopes carry the
+/// daemon-authored `recorded` discriminator: an unrecorded service is a hot
+/// read whose `svc-*` id is invocation metadata, not a thread, so it never
+/// produces a lineage edge; a recorded service ran as a thread. When that
+/// thread has a runtime thread id it is the inline in-process child the
+/// callback pre-minted, recorded in this graph's chain with the graph thread
+/// as upstream, so it produces the same `child_thread_spawned` edge as a
+/// native child. A recorded `svc-*` id is a direct invocation's own chain
+/// root and is not a child of this graph.
 fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
     match thread.get("recorded") {
-        Some(Value::Bool(_)) => return (None, None),
+        Some(Value::Bool(false)) => return (None, None),
+        Some(Value::Bool(true)) => {
+            if thread
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .is_some_and(|thread_id| thread_id.starts_with("svc-"))
+            {
+                return (None, None);
+            }
+        }
         Some(_) => {
             return (
                 None,
@@ -1193,6 +1211,37 @@ mod tests {
             assert!(child.is_none());
             assert!(error.is_none());
         }
+    }
+
+    #[test]
+    fn recorded_inline_service_child_is_a_spawned_child() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "T-inline_child_1",
+            "recorded": true,
+            "kind": "service_run",
+        }));
+        assert_eq!(child.as_deref(), Some("T-inline_child_1"));
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn recorded_inline_service_child_retains_strict_runtime_identity() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "not a thread id",
+            "recorded": true,
+        }));
+        assert!(child.is_none());
+        assert!(error.is_some(), "a recorded non-invocation id must validate");
+    }
+
+    #[test]
+    fn unrecorded_service_read_never_spawns_a_child() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "T-inline_child_1",
+            "recorded": false,
+        }));
+        assert!(child.is_none());
+        assert!(error.is_none());
     }
 
     #[test]

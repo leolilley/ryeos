@@ -67,6 +67,19 @@ COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
 
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. tini stays
+# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
+# mounted root-owned) to this account, then re-executes itself as ryeos
+# before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /usr/sbin/nologin ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
 # Daemon + ops CLI + core tools (authorize-client, sign, identity, etc.).
 COPY --from=builder /build/target/release/ryeosd             /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos              /usr/local/bin/ryeos
@@ -94,6 +107,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 ENV RYEOS_INIT_NODE_PROFILE=full
 EXPOSE 8000
 

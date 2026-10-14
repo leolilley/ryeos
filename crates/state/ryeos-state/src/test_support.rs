@@ -573,3 +573,11 @@ impl Drop for TestOfflineState {
         }
     }
 }
+
+/// Serializes tests that compare the process-wide abandoned-custody counts
+/// before and after dropping an owner, so parallel tests of the same kind
+/// cannot shift each other's counts.
+pub fn abandoned_custody_serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}

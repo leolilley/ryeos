@@ -17474,6 +17474,22 @@ impl RuntimeDb {
         })
     }
 
+    /// The chain an auxiliary runtime row was established in. An in-process
+    /// handler reservation is born with this row, so it names the chain the
+    /// handler thread lives in: its own id for a direct invocation root, its
+    /// parent's chain for an inline in-process child.
+    pub fn thread_runtime_chain_root_id(&self, thread_id: &str) -> Result<Option<String>> {
+        self.conn.with_sql(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT chain_root_id FROM thread_runtime WHERE thread_id=?1",
+                    params![thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+    }
+
     pub fn in_process_handler_reservation(
         &self,
         thread_id: &str,

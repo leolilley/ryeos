@@ -614,6 +614,18 @@ pub enum ProcessScopeCapability {
 impl ProcessScopeCapability {
     pub const ALL: [Self; 3] = [Self::Quiescence, Self::Termination, Self::Recovery];
 
+    /// The guarantees one successful lifecycle probe qualifies, given how its
+    /// kernel barrier fared. Placement, kill and an observed empty scope
+    /// qualify termination and recovery; quiescence needs the barrier to
+    /// have been requested and held.
+    pub fn qualified_by_probe(barrier: &ProbeBarrier) -> BTreeSet<Self> {
+        let mut qualified: BTreeSet<Self> = [Self::Termination, Self::Recovery].into();
+        if matches!(barrier, ProbeBarrier::Held) {
+            qualified.insert(Self::Quiescence);
+        }
+        qualified
+    }
+
     /// Open capability name this per-scope guarantee is published under.
     pub const fn capability_name(self) -> &'static str {
         match self {
@@ -626,6 +638,20 @@ impl ProcessScopeCapability {
     pub fn from_capability_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|capability| capability.capability_name() == name)
     }
+}
+
+/// How the kernel barrier fared in one lifecycle probe. A probe that does
+/// not request the barrier never writes the freezer, so a host whose
+/// freezer is refused still qualifies termination and recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeBarrier {
+    /// The probe was asked not to exercise the barrier.
+    NotRequested,
+    /// The barrier froze the probe child before it was killed.
+    Held,
+    /// The barrier was requested and refused, for the reason given; the
+    /// probe child was still killed and the scope observed empty.
+    Refused(String),
 }
 
 /// Kernel-enforced ceilings for every task in one exact execution scope.
@@ -1390,8 +1416,15 @@ impl ProcessScopeProvider {
 
     /// Qualify this opened generation using one disposable kernel-only probe.
     /// The caller controls the deadline; reservation, probe and retirement
-    /// share it. Failure never returns an advertised capability set.
-    pub fn qualify(&self, timeout: Duration) -> Result<BTreeSet<ProcessScopeCapability>, String> {
+    /// share it. Placement, kill and an observed empty scope are always
+    /// probed; the kernel barrier only when `wanted` names quiescence, and
+    /// its refusal withholds quiescence alone. A failed placement, kill or
+    /// retirement qualifies nothing.
+    pub fn qualify(
+        &self,
+        timeout: Duration,
+        wanted: &BTreeSet<ProcessScopeCapability>,
+    ) -> Result<BTreeSet<ProcessScopeCapability>, String> {
         let started = std::time::Instant::now();
         let allocation = format!(
             "inspection-{}",
@@ -1399,10 +1432,16 @@ impl ProcessScopeProvider {
         );
         let mut probe = self.reserve(&allocation, timeout)?;
         let recovery = probe.recovery().clone();
-        let qualification = probe.probe_lifecycle(timeout.saturating_sub(started.elapsed()));
+        let barrier_wanted = wanted.contains(&ProcessScopeCapability::Quiescence);
+        let qualification =
+            probe.probe_lifecycle(timeout.saturating_sub(started.elapsed()), barrier_wanted);
         let retirement = self.retire(&recovery, timeout.saturating_sub(started.elapsed()));
         match (qualification, retirement) {
-            (Ok(()), Ok(())) => Ok(self.implemented_capabilities()),
+            (Ok(barrier), Ok(())) => Ok(self
+                .implemented_capabilities()
+                .intersection(&ProcessScopeCapability::qualified_by_probe(&barrier))
+                .copied()
+                .collect()),
             (qualification, retirement) => Err(format!(
                 "process scope qualification failed: {qualification:?}; retirement: {retirement:?}; retained recovery: {recovery:?}"
             )),
@@ -2047,12 +2086,13 @@ impl ProcessScope {
             _ => Err("process scope observation is unavailable on this OS".to_owned()),
         }
     }
-    /// Exercise placement and the kernel barrier in a disposable reservation,
-    /// without executing a workload or depending on a host executable. This
-    /// consumes the reservation's launch right even on failure. The caller
-    /// retains its recovery coordinate and must settle/retire the reservation.
-    /// A probe does not authorize a later workload or prove its confinement.
-    pub fn probe_lifecycle(&mut self, timeout: Duration) -> Result<(), String> {
+    /// Exercise placement and kill in a disposable reservation, and the
+    /// kernel barrier too when `barrier` asks for it, without executing a
+    /// workload or depending on a host executable. This consumes the
+    /// reservation's launch right even on failure. The caller retains its
+    /// recovery coordinate and must settle/retire the reservation. A probe
+    /// does not authorize a later workload or prove its confinement.
+    pub fn probe_lifecycle(&mut self, timeout: Duration, barrier: bool) -> Result<ProbeBarrier, String> {
         let timeout = timeout.min(self.recovery.control_timeout);
         if !self.launch_available {
             return Err("process scope probe requires an unused reservation".to_owned());
@@ -2060,12 +2100,12 @@ impl ProcessScope {
         self.launch_available = false;
         match &self.backend {
             #[cfg(target_os = "linux")]
-            ScopeBackend::LinuxCgroupV2(scope) => scope.probe_lifecycle(timeout),
+            ScopeBackend::LinuxCgroupV2(scope) => scope.probe_lifecycle(timeout, barrier),
             #[cfg(target_os = "linux")]
             ScopeBackend::LinuxCgroupV2Selected(_) => Err("selected allocation grants no probe lifecycle".into()),
             #[cfg(not(target_os = "linux"))]
             _ => {
-                let _ = timeout;
+                let _ = (timeout, barrier);
                 Err("process scope probing is unavailable on this OS".to_owned())
             }
         }
@@ -2293,6 +2333,21 @@ impl QuiescedProcessScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_probe_qualifies_quiescence_only_when_its_barrier_held() {
+        let always: BTreeSet<ProcessScopeCapability> =
+            [ProcessScopeCapability::Termination, ProcessScopeCapability::Recovery].into();
+        assert_eq!(ProcessScopeCapability::qualified_by_probe(&ProbeBarrier::NotRequested), always);
+        assert_eq!(
+            ProcessScopeCapability::qualified_by_probe(&ProbeBarrier::Refused("freezer refused".to_owned())),
+            always
+        );
+        assert_eq!(
+            ProcessScopeCapability::qualified_by_probe(&ProbeBarrier::Held),
+            ProcessScopeCapability::ALL.into()
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2692,9 +2747,9 @@ mod tests {
             )
             .unwrap();
         let probe_recovery = probe.recovery().clone();
-        probe.probe_lifecycle(Duration::from_secs(5)).unwrap();
+        assert_eq!(probe.probe_lifecycle(Duration::from_secs(5), true).unwrap(), ProbeBarrier::Held);
         assert!(
-            probe.probe_lifecycle(Duration::from_secs(5)).is_err(),
+            probe.probe_lifecycle(Duration::from_secs(5), true).is_err(),
             "probe launch authority must be one-shot"
         );
         provider
@@ -2705,6 +2760,17 @@ mod tests {
         provider
             .retire(&probe_recovery, Duration::from_secs(5))
             .unwrap();
+        // Qualification exercises the barrier only for a floor that wants
+        // quiescence; without it, termination and recovery still qualify.
+        let termination_only: BTreeSet<ProcessScopeCapability> = [ProcessScopeCapability::Termination].into();
+        assert_eq!(
+            provider.qualify(Duration::from_secs(5), &termination_only).unwrap(),
+            [ProcessScopeCapability::Termination, ProcessScopeCapability::Recovery].into()
+        );
+        assert_eq!(
+            provider.qualify(Duration::from_secs(5), &ProcessScopeCapability::ALL.into()).unwrap(),
+            ProcessScopeCapability::ALL.into()
+        );
         let fixture = tempfile::tempdir().unwrap();
         let marker = fixture.path().join("ran");
         // Ordinary host programs construct the test workload only. They are

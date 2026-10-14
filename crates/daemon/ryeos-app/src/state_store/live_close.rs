@@ -278,9 +278,190 @@ struct StoreCloseProgress {
     state_closed: Option<ryeos_state::state_db::ClosedLiveState>,
     state_physical: Option<ryeos_state::state_db::ClosedLiveStatePhysicalCustody>,
 }
+impl StoreCloseProgress {
+    /// The registry-free part of final exhaustion: every owner slot consumed,
+    /// the destination receiver completed, and every packet, source and
+    /// admission exhausted. A dropped progress settles on exactly these
+    /// checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        let p = self;
+        anyhow::ensure!(p.store_parent.is_none() && p.store_parent_parts.is_none()
+            && p.store_parent_finalization.is_none() && p.physical_registry.is_none()
+            && p.auxiliary_physical_sources.is_none()
+            && p.metadata.original.is_none() && p.metadata.authority.is_none()
+            && p.metadata._thread_authority.is_none(),
+            "closed Store retains a parent, registry or metadata source at exhaustion");
+        anyhow::ensure!(p.runtime.is_none() && p.runtime_failure.is_none()
+            && p.runtime_closed.is_none() && p.runtime_outside.is_none()
+            && p.state.is_none() && p.state_failure.is_none() && p.state_closed.is_none()
+            && p.state_physical.is_none(),
+            "closed Store retains a State or Runtime frame at exhaustion");
+        p.store_destination_join.get()
+            .context("closed Store destination receiver absent at exhaustion")?
+            .require_parent_completed_holders()?;
+        for packets in [&p.runtime_packet_parts, &p.operational_packet_parts, &p.scheduler_packet_parts] {
+            super::live_outside::require_original_packets_exhausted(packets)?;
+        }
+        super::live_outside::require_sql_custody_exhausted(&p.operational_sql_custody)?;
+        super::live_outside::require_sql_custody_exhausted(&p.runtime_sql_custody)?;
+        if let Some(database) = p.scheduler_unopened_database.as_ref() {
+            database.require_exhausted()?;
+        }
+        if let Some(reference) = p.scheduler_unopened_schema_reference.as_ref() {
+            reference.require_exhausted()?;
+        }
+        if let Some(admission) = p.scheduler_admission_sources.as_ref() {
+            admission.require_exhausted()?;
+        }
+        if let Some(reference) = p.accounting_unopened_schema_reference.as_ref() {
+            reference.require_exhausted()?;
+        }
+        Ok(())
+    }
+}
+/// Every field of a StoreCloseProgress moved out of its owner, unwrapped.
+struct StoreCloseProgressParts {
+    store_parent: Option<live_native::LiveStateOpen>,
+    store_parent_parts: Option<live_native::LiveStorePhysicalParent>,
+    store_parent_finalization: Option<live_native::LiveStoreParentFinalizationParts>,
+    store_destination_join: std::sync::OnceLock<Arc<super::live_destination_join::LiveStoreDestinationJoin>>,
+    runtime_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    operational_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    scheduler_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    scheduler_unopened_database: Option<super::live_outside::UnopenedSchedulerDatabaseProgress>,
+    scheduler_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
+    accounting_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
+    scheduler_admission_sources: Option<super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
+    operational_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    runtime_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    physical_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
+    auxiliary_physical_sources: Option<StoreAuxiliaryPhysicalSources>,
+    metadata: StoreCloseMetadata,
+    runtime: Option<runtime_db::RuntimeDb>,
+    runtime_failure: Option<runtime_db::OriginalRuntimeCloseFailure>,
+    runtime_closed: Option<runtime_db::OriginalRuntimeClosed>,
+    runtime_outside: Option<runtime_db::OriginalLiveRuntimeOutsideCustody>,
+    state: Option<StateDb>,
+    state_failure: Option<ryeos_state::state_db::LiveStateCloseFailure>,
+    state_closed: Option<ryeos_state::state_db::ClosedLiveState>,
+    state_physical: Option<ryeos_state::state_db::ClosedLiveStatePhysicalCustody>,
+}
+impl StoreCloseProgress {
+    /// Move every field out exactly once; the emptied shell is never dropped.
+    fn into_parts(self) -> StoreCloseProgressParts {
+        let mut progress = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            StoreCloseProgressParts {
+                store_parent: std::mem::ManuallyDrop::take(&mut progress.store_parent),
+                store_parent_parts: std::mem::ManuallyDrop::take(&mut progress.store_parent_parts),
+                store_parent_finalization: std::ptr::read(&progress.store_parent_finalization),
+                store_destination_join: std::ptr::read(&progress.store_destination_join),
+                runtime_packet_parts: std::ptr::read(&progress.runtime_packet_parts).map(std::mem::ManuallyDrop::into_inner),
+                operational_packet_parts: std::ptr::read(&progress.operational_packet_parts).map(std::mem::ManuallyDrop::into_inner),
+                scheduler_packet_parts: std::ptr::read(&progress.scheduler_packet_parts).map(std::mem::ManuallyDrop::into_inner),
+                scheduler_unopened_database: std::ptr::read(&progress.scheduler_unopened_database),
+                scheduler_unopened_schema_reference: std::ptr::read(&progress.scheduler_unopened_schema_reference),
+                accounting_unopened_schema_reference: std::ptr::read(&progress.accounting_unopened_schema_reference),
+                scheduler_admission_sources: std::ptr::read(&progress.scheduler_admission_sources),
+                operational_sql_custody: std::ptr::read(&progress.operational_sql_custody).map(std::mem::ManuallyDrop::into_inner),
+                runtime_sql_custody: std::ptr::read(&progress.runtime_sql_custody).map(std::mem::ManuallyDrop::into_inner),
+                physical_registry: std::ptr::read(&progress.physical_registry),
+                auxiliary_physical_sources: std::ptr::read(&progress.auxiliary_physical_sources),
+                metadata: std::ptr::read(&progress.metadata),
+                runtime: std::ptr::read(&progress.runtime),
+                runtime_failure: std::ptr::read(&progress.runtime_failure),
+                runtime_closed: std::ptr::read(&progress.runtime_closed),
+                runtime_outside: std::ptr::read(&progress.runtime_outside),
+                state: std::ptr::read(&progress.state),
+                state_failure: std::ptr::read(&progress.state_failure),
+                state_closed: std::ptr::read(&progress.state_closed),
+                state_physical: std::ptr::read(&progress.state_physical),
+            }
+        }
+    }
+}
+impl Drop for StoreCloseProgress {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept this progress
+        // without a registry. Each retained slot is taken exactly once, here;
+        // otherwise every parent, packet, registry, Runtime and State owner,
+        // with the metadata's Store alias and authorities, stays retained
+        // together until the process exits. The metadata's projection health,
+        // barrier, bookkeeping, abort handles, handler controls and signer
+        // are process memory and own no descriptor.
+        let settled = self.require_exhausted_holders().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.store_parent),
+            std::mem::ManuallyDrop::take(&mut self.store_parent_parts),
+            self.runtime_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
+            self.operational_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
+            self.scheduler_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
+            self.operational_sql_custody.take().map(std::mem::ManuallyDrop::into_inner),
+            self.runtime_sql_custody.take().map(std::mem::ManuallyDrop::into_inner),
+        )};
+        if settled {
+            drop(taken);
+        } else {
+            let rest = (
+                self.store_parent_finalization.take(),
+                std::mem::take(&mut self.store_destination_join),
+                self.scheduler_unopened_database.take(),
+                self.scheduler_unopened_schema_reference.take(),
+                self.accounting_unopened_schema_reference.take(),
+                self.scheduler_admission_sources.take(),
+                self.physical_registry.take(),
+                self.auxiliary_physical_sources.take(),
+                (self.metadata.original.take(), self.metadata.authority.take(), self.metadata._thread_authority.take()),
+                self.runtime.take(),
+                self.runtime_failure.take(),
+                self.runtime_closed.take(),
+                self.runtime_outside.take(),
+                self.state.take(),
+                self.state_failure.take(),
+                self.state_closed.take(),
+                self.state_physical.take(),
+            );
+            lillux::custody::abandon("ryeos-app::store-close-progress", (taken, rest));
+        }
+    }
+}
 /// Actual State and Runtime terminal holders plus their original authority.
 /// This is neither aggregate native shutdown nor durable reservation settlement.
 pub struct ClosedLiveStateStore { progress: std::mem::ManuallyDrop<StoreCloseProgress>, prior_refusal: Option<anyhow::Error> }
+impl ClosedLiveStateStore {
+    /// Move the progress and the prior refusal out exactly once; the emptied
+    /// shell is never dropped.
+    fn into_parts(self) -> (StoreCloseProgress, Option<anyhow::Error>) {
+        let mut closed = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            (std::mem::ManuallyDrop::take(&mut closed.progress), std::ptr::read(&closed.prior_refusal))
+        }
+    }
+
+    /// The registry-free part of final exhaustion: the progress holders and
+    /// a prior refusal that retains no owner. A dropped frame settles on
+    /// exactly these checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        self.progress.require_exhausted_holders()?;
+        ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
+    }
+}
+impl Drop for ClosedLiveStateStore {
+    fn drop(&mut self) {
+        // Settled exactly when the progress inside would settle and the prior
+        // refusal retains nothing. The progress is taken exactly once, here;
+        // otherwise it stays retained whole, with the refusal, until the
+        // process exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
+        if settled {
+            drop(progress);
+        } else {
+            let prior_refusal = self.prior_refusal.take();
+            lillux::custody::abandon("ryeos-app::closed-store", (progress, prior_refusal));
+        }
+    }
+}
 impl ClosedLiveStateStore {
     pub(super) fn physical_registry_slot(&mut self)
         -> &mut Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
@@ -478,39 +659,10 @@ impl ClosedLiveStateStore {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        let p = &*self.progress;
-        anyhow::ensure!(p.store_parent.is_none() && p.store_parent_parts.is_none()
-            && p.store_parent_finalization.is_none() && p.physical_registry.is_none()
-            && p.auxiliary_physical_sources.is_none()
-            && p.metadata.original.is_none() && p.metadata.authority.is_none()
-            && p.metadata._thread_authority.is_none(),
-            "closed Store retains a parent, registry or metadata source at exhaustion");
-        anyhow::ensure!(p.runtime.is_none() && p.runtime_failure.is_none()
-            && p.runtime_closed.is_none() && p.runtime_outside.is_none()
-            && p.state.is_none() && p.state_failure.is_none() && p.state_closed.is_none()
-            && p.state_physical.is_none(),
-            "closed Store retains a State or Runtime frame at exhaustion");
-        p.store_destination_join.get()
+        self.require_exhausted_holders()?;
+        self.progress.store_destination_join.get()
             .context("closed Store destination receiver absent at exhaustion")?
-            .require_parent_completed_in_retired_registry(registry)?;
-        for packets in [&p.runtime_packet_parts, &p.operational_packet_parts, &p.scheduler_packet_parts] {
-            super::live_outside::require_original_packets_exhausted(packets)?;
-        }
-        super::live_outside::require_sql_custody_exhausted(&p.operational_sql_custody)?;
-        super::live_outside::require_sql_custody_exhausted(&p.runtime_sql_custody)?;
-        if let Some(database) = p.scheduler_unopened_database.as_ref() {
-            database.require_exhausted()?;
-        }
-        if let Some(reference) = p.scheduler_unopened_schema_reference.as_ref() {
-            reference.require_exhausted()?;
-        }
-        if let Some(admission) = p.scheduler_admission_sources.as_ref() {
-            admission.require_exhausted()?;
-        }
-        if let Some(reference) = p.accounting_unopened_schema_reference.as_ref() {
-            reference.require_exhausted()?;
-        }
-        ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
+            .require_parent_completed_in_retired_registry(registry)
     }
 
     /// Final consumption of the closed Store graph. Every owner slot must
@@ -525,16 +677,16 @@ impl ClosedLiveStateStore {
             Ok(exhausted) => exhausted,
             Err(error) => return Err((self, error)),
         };
-        let Self { progress, prior_refusal } = self;
-        let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
+        let (progress, prior_refusal) = self.into_parts();
+        let StoreCloseProgressParts { store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
             physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
             runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
-            = std::mem::ManuallyDrop::into_inner(progress);
-        drop(std::mem::ManuallyDrop::into_inner(store_parent));
-        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+            = progress.into_parts();
+        drop(store_parent);
+        drop(store_parent_parts);
         drop(store_parent_finalization);
         drop(store_destination_join);
         super::live_outside::exhaust_original_packets(runtime_packet_parts);
@@ -1216,24 +1368,23 @@ impl ClosedLiveStateStore {
             Err(failure) => {
                 let error = anyhow!("in-process State census refused: {failure}");
                 self.progress.state_failure = Some(failure);
-                let Self { progress, prior_refusal } = self;
+                let (progress, prior_refusal) = self.into_parts();
                 return Err(LiveStateStoreCloseFailure { error: prior_refusal.unwrap_or(error), factory,
-                    custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Progress(
-                        std::mem::ManuallyDrop::into_inner(progress)))) });
+                    custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Progress(progress))) });
             }
         };
-        let Self { progress, prior_refusal } = self;
-        let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
+        let (progress, prior_refusal) = self.into_parts();
+        let StoreCloseProgressParts { store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
             physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
             runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
-            = std::mem::ManuallyDrop::into_inner(progress);
+            = progress.into_parts();
         // Every outside slot was checked empty above; the census holds every
         // native owner, and the Runtime close context ends with its roots.
-        drop(std::mem::ManuallyDrop::into_inner(store_parent));
-        drop(std::mem::ManuallyDrop::into_inner(store_parent_parts));
+        drop(store_parent);
+        drop(store_parent_parts);
         drop((store_parent_finalization, store_destination_join, runtime_packet_parts,
             operational_packet_parts, scheduler_packet_parts, scheduler_unopened_database,
             scheduler_unopened_schema_reference, accounting_unopened_schema_reference,
@@ -1258,6 +1409,32 @@ impl ClosedLiveStateStore {
 
 enum StoreCloseCustody { Shared(Arc<StateStore>), Store(StateStore), Progress(StoreCloseProgress), Closed(ClosedLiveStateStore) }
 pub struct LiveStateStoreCloseFailure { error: anyhow::Error, factory: Arc<OriginalNativeFactory>, custody: std::mem::ManuallyDrop<Mutex<StoreCloseCustody>> }
+impl LiveStateStoreCloseFailure {
+    /// Move every field out exactly once; the emptied shell is never dropped.
+    fn into_parts(self) -> (anyhow::Error, Arc<OriginalNativeFactory>, Mutex<StoreCloseCustody>) {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            (std::ptr::read(&failure.error), std::ptr::read(&failure.factory),
+                std::mem::ManuallyDrop::take(&mut failure.custody))
+        }
+    }
+}
+impl Drop for LiveStateStoreCloseFailure {
+    fn drop(&mut self) {
+        // No drop settles a refused close: the custody always holds the live
+        // Store, its close progress or its closed frame, each owning the
+        // namespace exclusion and native owners that only a retried close,
+        // the returned Store or a census may end. The whole custody stays
+        // retained until the process exits.
+        let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
+        if self.factory.require_original_process().is_err() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(custody);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::store-close-failure", custody);
+    }
+}
 impl std::fmt::Debug for LiveStateStoreCloseFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveStateStoreCloseFailure").field("error", &self.error).finish_non_exhaustive()
@@ -1273,8 +1450,8 @@ impl LiveStateStoreCloseFailure {
     /// owner has transferred, only the retained close retry is permitted.
     pub fn into_unstarted(self) -> std::result::Result<Arc<StateStore>, Self> {
         if self.factory.require_original_process().is_err() { return Err(self); }
-        let Self { error, factory, custody } = self;
-        let custody = std::mem::ManuallyDrop::into_inner(custody).into_inner().unwrap_or_else(|p| p.into_inner());
+        let (error, factory, custody) = self.into_parts();
+        let custody = custody.into_inner().unwrap_or_else(|p| p.into_inner());
         match custody {
             StoreCloseCustody::Shared(store) => Ok(store),
             StoreCloseCustody::Store(store) => Ok(Arc::new(store)),
@@ -1284,8 +1461,8 @@ impl LiveStateStoreCloseFailure {
 
     pub fn retry(self) -> std::result::Result<ClosedLiveStateStore, Self> {
         if self.factory.require_original_process().is_err() { return Err(self); }
-        let Self { error, factory, custody } = self;
-        advance_close(factory, std::mem::ManuallyDrop::into_inner(custody).into_inner().unwrap_or_else(|p| p.into_inner()), Some(error))
+        let (error, factory, custody) = self.into_parts();
+        advance_close(factory, custody.into_inner().unwrap_or_else(|p| p.into_inner()), Some(error))
     }
 }
 fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody,
@@ -1439,5 +1616,63 @@ impl StateStore {
     pub fn close_live(self: Arc<Self>, factory: Arc<OriginalNativeFactory>)
         -> std::result::Result<ClosedLiveStateStore, LiveStateStoreCloseFailure> {
         advance_close(factory, StoreCloseCustody::Shared(self), None)
+    }
+}
+
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const CLOSED: &str = "ryeos-app::closed-store";
+    const FAILURE: &str = "ryeos-app::store-close-failure";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    #[test]
+    fn dropped_closed_store_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_closed_store_is_retained");
+        // The retained frame keeps the Store's namespace exclusion and native
+        // context, which only the process end releases, so the scenario runs
+        // in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "closed +1", "{outcome}");
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        let (closed, retained) = super::super::test_native::closed_store_for_test(app_root.path());
+        assert!(closed.require_exhausted_holders().is_err());
+        let before = abandoned(CLOSED);
+        drop(closed);
+        let delta = abandoned(CLOSED) - before;
+        lillux_sqlite::test_host::end_isolated_process((app_root, retained), &format!("closed +{delta}"))
+    }
+
+    #[test]
+    fn dropped_close_failure_is_retained_whole() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_close_failure_is_retained_whole");
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "failure +1; closed +0", "{outcome}");
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        let (closed, retained) = super::super::test_native::closed_store_for_test(app_root.path());
+        let failure = LiveStateStoreCloseFailure {
+            error: anyhow!("census refused"),
+            factory: Arc::clone(&retained.0),
+            custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Closed(closed))),
+        };
+        let before = (abandoned(FAILURE), abandoned(CLOSED));
+        drop(failure);
+        let after = (abandoned(FAILURE), abandoned(CLOSED));
+        lillux_sqlite::test_host::end_isolated_process(
+            (app_root, retained),
+            &format!("failure +{}; closed +{}", after.0 - before.0, after.1 - before.1),
+        )
     }
 }

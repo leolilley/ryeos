@@ -28,9 +28,50 @@
 # a tight loop, and so an operator can open a shell in the container and clear
 # it while no daemon holds the node's state lock.
 
+#
+# Every ryeos command here runs as the image's node account, ryeos
+# (uid 10000, gid 10000), never as root: lillux refuses root as the recorded
+# actor of `ryeos node allow-restart` and `ryeos node capacity reissue`, so a
+# node run as root could never have its inhibition cleared in place. tini
+# starts this script as root; the first thing it does is hand /data (a
+# platform volume, mounted root-owned) to the node account and re-execute
+# itself as that account. An operator shell that clears an inhibition must
+# run as the same account: `setpriv --reuid=10000 --regid=10000
+# --clear-groups ryeos node allow-restart --app-root /data/app`.
+
 set -euo pipefail
 
 RESTART_INHIBITED_HOLD_SECONDS=30
+NODE_UID=10000
+NODE_GID=10000
+
+# Re-execute this script as the node account before any ryeos command. As
+# root: own /data and the app root for the node account (the platform mounts
+# the volume root-owned on every boot, so this is per boot, not per image),
+# then drop every privilege, supplementary groups included. Already the node
+# account: continue. Any other non-root account is the platform's choice and
+# is kept, but named. The external host-runtime route is administrator-owned
+# (the protected binding fixes its account) and is left as it starts.
+run_as_node_account() {
+  local uid
+  uid="$(id -u)"
+  if [[ "$uid" == "$NODE_UID" ]]; then
+    return 0
+  fi
+  if [[ "$uid" != 0 ]]; then
+    echo "[entrypoint] running as uid $uid (platform-selected), not the image's node account $NODE_UID" >&2
+    return 0
+  fi
+  if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
+    return 0
+  fi
+  mkdir -p /data/app
+  chown "$NODE_UID:$NODE_GID" /data
+  chown -R "$NODE_UID:$NODE_GID" /data/app
+  echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
+  exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
+    -- "${BASH_SOURCE[0]}" "$@"
+}
 
 # Fill TRUST_ARGS only after an operator explicitly opts in to trusting
 # publisher documents baked into the image. Release images need no trust
@@ -202,6 +243,7 @@ hold_while_restart_inhibited() {
 
 main() {
   local effective_bind
+  run_as_node_account "$@"
   effective_bind="$(container_bind)"
 
   build_ryeos_daemon_args /data/app
@@ -233,7 +275,11 @@ main() {
 
   hold_while_restart_inhibited /data/app
 
-  echo "[entrypoint] bootstrap check complete, starting daemon"
+  if [[ "$(id -u)" == 0 ]]; then
+    echo "[entrypoint] refusing to start ryeosd as root; the node account is uid $NODE_UID" >&2
+    return 1
+  fi
+  echo "[entrypoint] bootstrap check complete, starting daemon as uid $(id -u)"
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce
   # (e.g. public-identity.json, vault keypair). Idempotent — no-op when
   # already written.

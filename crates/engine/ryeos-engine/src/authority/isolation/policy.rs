@@ -1,7 +1,10 @@
 use ryeos_isolation_protocol::{FixedParentViewLimits, IsolationBackendSelection};
 use serde::{Deserialize, Serialize};
 
-pub const ISOLATION_POLICY_VERSION: u32 = 8;
+pub const ISOLATION_POLICY_VERSION: u32 = 9;
+/// Required outright, together with the nested proc ceiling, this host
+/// capability is the node's permission to grant a nested sandbox.
+pub use lillux::process_control::ISOLATION_NAMESPACES;
 #[cfg(any(test, feature = "test-support"))]
 pub const TEST_ISOLATION_POLICY_RELATIVE_PATH: &str = "test-fixtures/isolation-policy.yaml";
 
@@ -33,20 +36,33 @@ pub struct IsolationPolicy {
 }
 
 impl IsolationPolicy {
-    /// Per-scope guarantees this policy's capability floor requires outright.
-    /// A set of alternatives never names one, which validation enforces.
+    /// Per-scope guarantees this policy's capability floor requires outright:
+    /// the set the scope provider is asked to qualify, and nothing more. A
+    /// set of alternatives never names one, which validation enforces.
     pub fn required_process_scope_capabilities(
         &self,
     ) -> std::collections::BTreeSet<lillux::ProcessScopeCapability> {
         self.requires_capabilities
             .iter()
-            .filter_map(|entry| match entry {
-                lillux::process_control::CapabilityRequirement::Name(name) => {
-                    lillux::ProcessScopeCapability::from_capability_name(name)
-                }
-                lillux::process_control::CapabilityRequirement::AnyOf(_) => None,
+            .filter_map(|entry| {
+                let [name] = entry.names() else {
+                    return None;
+                };
+                lillux::ProcessScopeCapability::from_capability_name(name)
             })
             .collect()
+    }
+
+    /// Node permission to grant scoped launches a nested sandbox, derived
+    /// from the floor requiring `isolation:namespaces` outright together
+    /// with the `pid_namespace_nested` proc ceiling. Validation keeps the
+    /// two in step, so neither alone ever means it. This is permission, not
+    /// evidence that a particular launch has a scope.
+    pub fn nested_sandbox(&self) -> bool {
+        nested_sandbox_from(
+            &self.requires_capabilities,
+            self.filesystem.proc_filesystem,
+        )
     }
 
     /// Explicit policy-free authoring/test boundary. Running nodes compile
@@ -113,12 +129,28 @@ pub enum IsolationProcessScopePolicy {
     Unconfigured {},
     Required {
         control_timeout_ms: u64,
-        /// Node permission, not evidence that a particular launch has a scope.
-        /// Requires the explicit pid_namespace_nested proc ceiling and a
-        /// qualified adapter capability. Ordinary unscoped launches still
-        /// receive only read-only task-only proc, not this broader surface.
-        nested_sandbox: bool,
     },
+}
+
+/// Whether `floor` requires `name` outright: as the only name of an entry,
+/// never as one alternative in a set.
+pub fn floor_requires_outright(
+    floor: &[lillux::process_control::CapabilityRequirement],
+    name: &str,
+) -> bool {
+    floor
+        .iter()
+        .any(|entry| matches!(entry.names(), [only] if only == name))
+}
+
+/// Nested-sandbox permission as [`IsolationPolicy::nested_sandbox`] derives
+/// it, for callers holding the floor and proc ceiling apart from the policy.
+pub fn nested_sandbox_from(
+    floor: &[lillux::process_control::CapabilityRequirement],
+    proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem,
+) -> bool {
+    floor_requires_outright(floor, ISOLATION_NAMESPACES)
+        && proc_filesystem == ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,4 +224,87 @@ pub struct IsolationLimitsPolicy {
     pub verified_artifact_file_bytes: u64,
     pub verified_artifact_total_bytes: u64,
     pub verified_artifact_files: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::process_control::{CapabilityRequirement, CapabilityRequirementSpec};
+
+    fn outright(name: &str, providers: &[&str]) -> CapabilityRequirement {
+        CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: Some(name.to_owned()),
+            any_of: Vec::new(),
+            accept: Vec::new(),
+            providers: providers.iter().map(|id| (*id).to_owned()).collect(),
+        })
+    }
+
+    fn any_of(names: &[&str]) -> CapabilityRequirement {
+        CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: None,
+            any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+            accept: Vec::new(),
+            providers: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn per_scope_requirements_count_only_when_required_outright() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.requires_capabilities = vec![
+            any_of(&["accounting", "residency:swap_absent"]),
+            outright("quiescence:scope", &["host_service"]),
+            "recovery:scope".into(),
+            "termination:scope".into(),
+        ];
+        assert_eq!(
+            policy.required_process_scope_capabilities(),
+            std::collections::BTreeSet::from([
+                lillux::ProcessScopeCapability::Quiescence,
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ])
+        );
+        policy.requires_capabilities = vec![any_of(&["recovery:scope", "termination:scope"])];
+        assert!(policy.required_process_scope_capabilities().is_empty());
+    }
+
+    #[test]
+    fn nested_sandbox_needs_both_the_floor_entry_and_the_nested_proc() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        assert!(!policy.nested_sandbox());
+        policy.requires_capabilities = vec![ISOLATION_NAMESPACES.into()];
+        assert!(!policy.nested_sandbox());
+        policy.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        assert!(policy.nested_sandbox());
+        policy.requires_capabilities = vec![outright(ISOLATION_NAMESPACES, &["host"])];
+        assert!(policy.nested_sandbox());
+        policy.requires_capabilities = vec![any_of(&[ISOLATION_NAMESPACES, "time"])];
+        assert!(!policy.nested_sandbox());
+        policy.requires_capabilities = Vec::new();
+        assert!(!policy.nested_sandbox());
+        assert!(!floor_requires_outright(&policy.requires_capabilities, ISOLATION_NAMESPACES));
+    }
+
+    #[test]
+    fn the_removed_nested_sandbox_key_is_refused() {
+        let error = serde_json::from_value::<IsolationProcessScopePolicy>(serde_json::json!({
+            "mode": "required", "control_timeout_ms": 1000, "nested_sandbox": true,
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nested_sandbox"), "{error}");
+        let required: IsolationProcessScopePolicy = serde_json::from_value(serde_json::json!({
+            "mode": "required", "control_timeout_ms": 1000,
+        }))
+        .unwrap();
+        assert_eq!(
+            required,
+            IsolationProcessScopePolicy::Required {
+                control_timeout_ms: 1000
+            }
+        );
+    }
 }

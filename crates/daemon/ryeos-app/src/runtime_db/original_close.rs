@@ -334,6 +334,32 @@ impl OriginalUnusedRuntimeBoundParts {
     fn aliases_transferred(&self) -> bool {
         self.registration.is_some() && self.root.is_none() && self.authority.is_none() && self.inspection.is_none()
     }
+    /// Every alias transferred and the registration consumed: the retired
+    /// root frame left nothing behind.
+    fn retired(&self) -> bool {
+        self.root.is_none() && self.authority.is_none() && self.inspection.is_none() && self.registration.is_none()
+    }
+}
+impl Drop for OriginalUnusedRuntimeBoundParts {
+    fn drop(&mut self) {
+        // Settled exactly when retired holds: no root, authority, inspection
+        // or registration remains. Each slot is taken exactly once, here;
+        // otherwise the unused bound root, its authority alias, inspection
+        // lease and registration stay retained together until the process
+        // exits.
+        let settled = self.retired();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.root),
+            std::mem::ManuallyDrop::take(&mut self.authority),
+            std::mem::ManuallyDrop::take(&mut self.inspection),
+        )};
+        if settled {
+            drop(taken);
+        } else {
+            let registration = self.registration.take();
+            lillux::custody::abandon("ryeos-app::unused-runtime-bound-parts", (taken, registration));
+        }
+    }
 }
 struct OriginalRuntimeOutsideHostContext {
     process: u32,
@@ -444,9 +470,7 @@ impl OriginalRuntimeOutsideHostContext {
         match &self.semantics {
             OriginalRuntimeOutsideSemantics::Closed { .. } => true,
             OriginalRuntimeOutsideSemantics::Refused { unused_inputs, unused_parts, .. } =>
-                unused_inputs.is_none() && unused_parts.as_ref().is_none_or(|parts|
-                    parts.root.is_none() && parts.authority.is_none()
-                        && parts.inspection.is_none() && parts.registration.is_none()),
+                unused_inputs.is_none() && unused_parts.as_ref().is_none_or(OriginalUnusedRuntimeBoundParts::retired),
         }
     }
 
@@ -995,30 +1019,45 @@ impl OriginalRuntimeOutsideHostContext {
         Ok(())
     }
 
+    /// End an exhausted host frame. Its Drop settles on the exhaustion check
+    /// the caller already passed, so every slot is released normally.
     fn exhaust(self) {
-        let Self { process: _, factory: _, directory, shared_directory_identity: _, namespace,
-            semantics, registrations, retired_roots_consumed: _ } = self;
-        drop(std::mem::ManuallyDrop::into_inner(directory));
-        drop(std::mem::ManuallyDrop::into_inner(namespace));
-        drop(registrations);
-        match semantics {
-            OriginalRuntimeOutsideSemantics::Closed { target, incarnation, domain: _ } => {
-                drop(target);
-                drop(incarnation);
-            }
-            OriginalRuntimeOutsideSemantics::Refused { error, unused_inputs, unused_parts } => {
-                drop(std::mem::ManuallyDrop::into_inner(error));
-                drop(std::mem::ManuallyDrop::into_inner(unused_inputs));
-                if let Some(parts) = std::mem::ManuallyDrop::into_inner(unused_parts) {
-                    let OriginalUnusedRuntimeBoundParts { root, authority, inspection, name,
-                        mode: _, domain: _, registration } = parts;
-                    drop(std::mem::ManuallyDrop::into_inner(root));
-                    drop(std::mem::ManuallyDrop::into_inner(authority));
-                    drop(std::mem::ManuallyDrop::into_inner(inspection));
-                    drop(name);
-                    drop(registration);
-                }
-            }
+        drop(self);
+    }
+}
+impl Drop for OriginalRuntimeOutsideHostContext {
+    fn drop(&mut self) {
+        // Settled exactly when exhaustion would accept the frame: retired
+        // roots consumed, no directory, namespace, registration or unused
+        // source left, and a refusal that retains no owner. Each slot is
+        // taken exactly once, here; otherwise the directory, namespace,
+        // refusal and unused source stay retained together until the process
+        // exits.
+        let settled = self.require_exhausted().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.directory),
+            std::mem::ManuallyDrop::take(&mut self.namespace),
+        )};
+        let refused = match &mut self.semantics {
+            OriginalRuntimeOutsideSemantics::Closed { target: _, incarnation: _, domain: _ } => None,
+            OriginalRuntimeOutsideSemantics::Refused { error, unused_inputs, unused_parts } => unsafe {
+                Some((
+                    std::mem::ManuallyDrop::take(error),
+                    std::mem::ManuallyDrop::take(unused_inputs),
+                    std::mem::ManuallyDrop::take(unused_parts),
+                ))
+            },
+        };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((taken, refused));
+            return;
+        }
+        if settled {
+            drop((taken, refused));
+        } else {
+            let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+            lillux::custody::abandon("ryeos-app::runtime-outside-host-context", (taken, refused, registrations));
         }
     }
 }
@@ -1030,13 +1069,31 @@ impl LiveRuntimeNativeSources {
         Ok(())
     }
 
+    /// End exhausted sources. Their Drop settles on the exhaustion check the
+    /// caller already passed, so every slot is released normally.
     fn exhaust(self) {
-        let Self { main, schema, schema_definition, native_failure, packets } = self;
-        drop(std::mem::ManuallyDrop::into_inner(main));
-        drop(std::mem::ManuallyDrop::into_inner(schema));
-        drop(std::mem::ManuallyDrop::into_inner(schema_definition));
-        drop(std::mem::ManuallyDrop::into_inner(native_failure));
-        drop(std::mem::ManuallyDrop::into_inner(packets));
+        drop(self);
+    }
+}
+impl Drop for LiveRuntimeNativeSources {
+    fn drop(&mut self) {
+        // Settled exactly when exhaustion would accept the sources: no main,
+        // schema or failed source and no undelivered packet. Each slot is
+        // taken exactly once, here; otherwise the terminals, definition,
+        // failure and packets stay retained together until the process exits.
+        let settled = self.require_exhausted().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.main),
+            std::mem::ManuallyDrop::take(&mut self.schema),
+            std::mem::ManuallyDrop::take(&mut self.schema_definition),
+            std::mem::ManuallyDrop::take(&mut self.native_failure),
+            std::mem::ManuallyDrop::take(&mut self.packets),
+        )};
+        if settled {
+            drop(taken);
+        } else {
+            lillux::custody::abandon("ryeos-app::live-runtime-native-sources", taken);
+        }
     }
 }
 
@@ -1044,25 +1101,50 @@ impl OriginalLiveRuntimeOutsideCustody {
     /// Consume the closed Runtime frame after its shared-root receipts.
     /// Refusal returns the frame intact; success leaves no owner.
     pub(crate) fn into_exhausted(self) -> std::result::Result<(), (Self, anyhow::Error)> {
-        let checked = (|| -> Result<()> {
-            ensure!(self.process == std::process::id(), "foreign Runtime frame at exhaustion");
-            ensure!(self.context.is_none(), "Runtime close context remains at exhaustion");
-            self.sources.require_exhausted()?;
-            self.host.as_ref().context("Runtime host frame absent at exhaustion")?
-                .require_exhausted()?;
-            ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
-        })();
-        if let Err(error) = checked {
+        if let Err(error) = self.require_exhausted_holders() {
             return Err((self, error));
         }
-        let Self { process: _, context, host, sources, prior_refusal } = self;
-        drop(std::mem::ManuallyDrop::into_inner(context));
-        if let Some(host) = std::mem::ManuallyDrop::into_inner(host) {
-            host.exhaust();
-        }
-        sources.exhaust();
-        drop(std::mem::ManuallyDrop::into_inner(prior_refusal));
+        // The check above is this frame's settled predicate, so its Drop
+        // releases the context slot, host frame, sources and refusal normally.
+        drop(self);
         Ok(())
+    }
+
+    /// Final exhaustion: this process, no close context, sources and host
+    /// frame exhausted, and a refusal that retains no owner. A dropped frame
+    /// settles on exactly these checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        ensure!(self.process == std::process::id(), "foreign Runtime frame at exhaustion");
+        ensure!(self.context.is_none(), "Runtime close context remains at exhaustion");
+        self.sources.require_exhausted()?;
+        self.host.as_ref().context("Runtime host frame absent at exhaustion")?
+            .require_exhausted()?;
+        ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
+    }
+}
+impl Drop for OriginalLiveRuntimeOutsideCustody {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept the frame. Each
+        // slot is taken exactly once, here; otherwise the close context, host
+        // frame, native sources and refusal stay retained together until the
+        // process exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.context),
+            std::mem::ManuallyDrop::take(&mut self.host),
+            std::mem::ManuallyDrop::take(&mut self.prior_refusal),
+        )};
+        let sources = std::mem::replace(&mut self.sources, LiveRuntimeNativeSources::new(None));
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((taken, sources));
+            return;
+        }
+        if settled {
+            drop((taken, sources));
+        } else {
+            lillux::custody::abandon("ryeos-app::live-runtime-outside-custody", (taken, sources));
+        }
     }
 }
 
@@ -1070,23 +1152,47 @@ impl OriginalRuntimeAcquisitionOutsideCustody {
     /// Consume the refused-acquisition Runtime frame after its shared-root
     /// and unused-root receipts. Refusal returns the frame intact.
     pub(crate) fn into_exhausted(self) -> std::result::Result<(), (Self, anyhow::Error)> {
-        let checked = (|| -> Result<()> {
-            ensure!(self.process == std::process::id(), "foreign refused Runtime frame at exhaustion");
-            ensure!(self.body.is_none(), "refused Runtime acquisition body remains at exhaustion");
-            self.sources.require_exhausted()?;
-            self.host.as_ref().context("refused Runtime host frame absent at exhaustion")?
-                .require_exhausted()
-        })();
-        if let Err(error) = checked {
+        if let Err(error) = self.require_exhausted_holders() {
             return Err((self, error));
         }
-        let Self { process: _, body, host, sources } = self;
-        drop(std::mem::ManuallyDrop::into_inner(body));
-        if let Some(host) = std::mem::ManuallyDrop::into_inner(host) {
-            host.exhaust();
-        }
-        sources.exhaust();
+        // The check above is this frame's settled predicate, so its Drop
+        // releases the body slot, host frame and sources normally.
+        drop(self);
         Ok(())
+    }
+
+    /// Final exhaustion: this process, no refused body, sources and host
+    /// frame exhausted. A dropped frame settles on exactly these checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        ensure!(self.process == std::process::id(), "foreign refused Runtime frame at exhaustion");
+        ensure!(self.body.is_none(), "refused Runtime acquisition body remains at exhaustion");
+        self.sources.require_exhausted()?;
+        self.host.as_ref().context("refused Runtime host frame absent at exhaustion")?
+            .require_exhausted()
+    }
+}
+impl Drop for OriginalRuntimeAcquisitionOutsideCustody {
+    fn drop(&mut self) {
+        // Settled exactly when final exhaustion would accept the frame. Each
+        // slot is taken exactly once, here; otherwise the refused body, host
+        // frame and native sources stay retained together until the process
+        // exits.
+        let settled = self.require_exhausted_holders().is_ok();
+        let taken = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.body),
+            std::mem::ManuallyDrop::take(&mut self.host),
+        )};
+        let sources = std::mem::replace(&mut self.sources, LiveRuntimeNativeSources::new(None));
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((taken, sources));
+            return;
+        }
+        if settled {
+            drop((taken, sources));
+        } else {
+            lillux::custody::abandon("ryeos-app::runtime-acquisition-outside-custody", (taken, sources));
+        }
     }
 }
 
@@ -1119,3 +1225,212 @@ mod outside_quote_tests {
     }
 }
 
+#[cfg(test)]
+mod custody_drop_tests {
+    use super::*;
+
+    const UNUSED_PARTS: &str = "ryeos-app::unused-runtime-bound-parts";
+    const HOST: &str = "ryeos-app::runtime-outside-host-context";
+    const SOURCES: &str = "ryeos-app::live-runtime-native-sources";
+    const LIVE: &str = "ryeos-app::live-runtime-outside-custody";
+    const ACQUISITION: &str = "ryeos-app::runtime-acquisition-outside-custody";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    /// Unused bound parts of never-opened inputs on a fresh directory, with
+    /// the root retained inside when `keep_root` holds. No ticket is issued,
+    /// so the shared host releases its arena whatever becomes of the parts.
+    fn unused_parts(
+        host: &lillux_sqlite::test_host::TestNativeHost,
+        root: Arc<lillux::PinnedDirectory>,
+        keep_root: bool,
+    ) -> OriginalUnusedRuntimeBoundParts {
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                root, std::ffi::OsStr::new("runtime.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeRuntime, host.destination(), None,
+            )
+        }
+        .unwrap();
+        let lillux_sqlite::OriginalNativeOutsideBoundParts { root, name, mode, domain, authority, inspection } =
+            inputs.into_original_parts().ok().expect("fresh inputs split in their own process");
+        drop((authority, inspection));
+        OriginalUnusedRuntimeBoundParts {
+            root: std::mem::ManuallyDrop::new(keep_root.then_some(root)),
+            authority: std::mem::ManuallyDrop::new(None),
+            inspection: std::mem::ManuallyDrop::new(None),
+            name, mode, domain, registration: None,
+        }
+    }
+
+    #[test]
+    fn dropped_retired_unused_parts_release_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let parts = unused_parts(&host, Arc::clone(&root), false);
+        assert!(parts.retired());
+        let before = abandoned(UNUSED_PARTS);
+        drop(parts);
+        assert_eq!(abandoned(UNUSED_PARTS), before);
+        assert_eq!(Arc::strong_count(&root), 1, "the root alias was released");
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_unused_parts_with_root_are_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let parts = unused_parts(&host, Arc::clone(&root), true);
+        assert!(!parts.retired());
+        let before = abandoned(UNUSED_PARTS);
+        drop(parts);
+        assert_eq!(abandoned(UNUSED_PARTS), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    /// A refused host frame whose roots were consumed, holding `directory`.
+    fn host_context(directory: Option<Arc<lillux::PinnedDirectory>>) -> OriginalRuntimeOutsideHostContext {
+        OriginalRuntimeOutsideHostContext {
+            process: std::process::id(),
+            factory: std::sync::Weak::new(),
+            directory: std::mem::ManuallyDrop::new(directory.map(OriginalRuntimeOutsideDirectory::Shared)),
+            shared_directory_identity: None,
+            namespace: std::mem::ManuallyDrop::new(None),
+            semantics: OriginalRuntimeOutsideSemantics::Refused {
+                error: std::mem::ManuallyDrop::new(anyhow::anyhow!("runtime acquisition refused")),
+                unused_inputs: std::mem::ManuallyDrop::new(None),
+                unused_parts: std::mem::ManuallyDrop::new(None),
+            },
+            registrations: std::array::from_fn(|_| None),
+            retired_roots_consumed: true,
+        }
+    }
+
+    #[test]
+    fn dropped_exhausted_host_context_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = host_context(None);
+        host.require_exhausted().unwrap();
+        let before = abandoned(HOST);
+        host.exhaust();
+        assert_eq!(abandoned(HOST), before);
+    }
+
+    #[test]
+    fn dropped_host_context_with_directory_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let host = host_context(Some(Arc::clone(&root)));
+        assert!(host.require_exhausted().is_err());
+        let before = abandoned(HOST);
+        drop(host);
+        assert_eq!(abandoned(HOST), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the directory alias stays retained");
+    }
+
+    #[test]
+    fn dropped_empty_native_sources_release_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let sources = LiveRuntimeNativeSources::new(None);
+        sources.require_exhausted().unwrap();
+        let before = abandoned(SOURCES);
+        sources.exhaust();
+        assert_eq!(abandoned(SOURCES), before);
+    }
+
+    #[test]
+    fn dropped_native_sources_with_terminal_are_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_native_sources_with_terminal_are_retained");
+        // The retained terminal aliases a closed native connection whose
+        // host cannot finish while the alias survives, so the scenario runs
+        // in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "sources +1", "{outcome}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let host = lillux_sqlite::test_host::TestNativeHost::acquire();
+        let (ledger, db) = crate::accounting_db::AccountingDb::open_native_for_test(
+            Arc::clone(host.factory()), &root, host.destination()).unwrap();
+        drop(db.expect("fresh native ledger opens"));
+        ledger.close().unwrap();
+        let terminal = ledger.native_terminals(host.factory()).unwrap().remove(0);
+        let sources = LiveRuntimeNativeSources::new(Some(terminal));
+        assert!(sources.require_exhausted().is_err());
+        let before = abandoned(SOURCES);
+        drop(sources);
+        let delta = abandoned(SOURCES) - before;
+        lillux_sqlite::test_host::end_isolated_process((dir, root, ledger, host), &format!("sources +{delta}"))
+    }
+
+    fn live_outside_custody(host: Option<OriginalRuntimeOutsideHostContext>) -> OriginalLiveRuntimeOutsideCustody {
+        OriginalLiveRuntimeOutsideCustody {
+            process: std::process::id(),
+            context: std::mem::ManuallyDrop::new(None),
+            host: std::mem::ManuallyDrop::new(host),
+            sources: LiveRuntimeNativeSources::new(None),
+            prior_refusal: std::mem::ManuallyDrop::new(None),
+        }
+    }
+
+    #[test]
+    fn exhausted_live_outside_custody_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let custody = live_outside_custody(Some(host_context(None)));
+        let before = (abandoned(LIVE), abandoned(HOST));
+        custody.into_exhausted().map_err(|(_, error)| error).unwrap();
+        assert_eq!((abandoned(LIVE), abandoned(HOST)), before);
+    }
+
+    #[test]
+    fn dropped_live_outside_custody_without_host_frame_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let custody = live_outside_custody(None);
+        assert!(custody.require_exhausted_holders().is_err());
+        let before = abandoned(LIVE);
+        drop(custody);
+        assert_eq!(abandoned(LIVE), before + 1);
+    }
+
+    fn acquisition_outside_custody(host: Option<OriginalRuntimeOutsideHostContext>)
+        -> OriginalRuntimeAcquisitionOutsideCustody {
+        OriginalRuntimeAcquisitionOutsideCustody {
+            process: std::process::id(),
+            body: std::mem::ManuallyDrop::new(None),
+            host: std::mem::ManuallyDrop::new(host),
+            sources: LiveRuntimeNativeSources::new(None),
+        }
+    }
+
+    #[test]
+    fn exhausted_acquisition_outside_custody_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let custody = acquisition_outside_custody(Some(host_context(None)));
+        let before = (abandoned(ACQUISITION), abandoned(HOST));
+        custody.into_exhausted().map_err(|(_, error)| error).unwrap();
+        assert_eq!((abandoned(ACQUISITION), abandoned(HOST)), before);
+    }
+
+    #[test]
+    fn dropped_acquisition_outside_custody_without_host_frame_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let custody = acquisition_outside_custody(None);
+        assert!(custody.require_exhausted_holders().is_err());
+        let before = abandoned(ACQUISITION);
+        drop(custody);
+        assert_eq!(abandoned(ACQUISITION), before + 1);
+    }
+}

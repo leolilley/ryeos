@@ -165,6 +165,17 @@ pub struct IsolationInspection {
     pub limits: IsolationLimitsPolicy,
 }
 
+impl IsolationInspection {
+    /// Node permission to grant scoped launches a nested sandbox, read from
+    /// the signed floor and proc ceiling exactly as the policy derives it.
+    pub fn nested_sandbox(&self) -> bool {
+        super::policy::nested_sandbox_from(
+            &self.requires_capabilities,
+            self.filesystem.proc_filesystem,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct IsolationBackendInspection {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,7 +210,6 @@ mod tests {
     fn required_policy() -> IsolationProcessScopePolicy {
         IsolationProcessScopePolicy::Required {
             control_timeout_ms: 1_000,
-            nested_sandbox: false,
         }
     }
 
@@ -275,7 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn quiescence_is_demanded_only_when_the_floor_names_it() {
+    fn quiescence_is_probed_only_when_wanted() {
+        // The wanted set handed to the provider is the floor's per-scope
+        // part; a floor that does not name quiescence:scope asks for no
+        // freeze, and readiness does not miss what was never wanted.
+        let mut policy = super::super::IsolationPolicy::disabled_for_authoring();
+        policy.process_scopes = required_policy();
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        let wanted = policy.required_process_scope_capabilities();
+        assert_eq!(wanted, floor());
+        assert!(!wanted.contains(&lillux::ProcessScopeCapability::Quiescence));
+        policy.requires_capabilities =
+            vec!["quiescence:scope".into(), "recovery:scope".into(), "termination:scope".into()];
+        assert_eq!(policy.required_process_scope_capabilities(), complete_capabilities());
+
         let without_freeze: BTreeSet<_> = [
             lillux::ProcessScopeCapability::Termination,
             lillux::ProcessScopeCapability::Recovery,

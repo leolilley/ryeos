@@ -691,12 +691,39 @@ struct OriginalSchedulerContext {
 }
 /// Dropping a store never closes or disposes its owners, in this process or
 /// a forked copy: native and stopped/offline owners end only through their
-/// explicit close or release and the factory census.
+/// explicit close or release and the factory census. A store dropped while
+/// it still holds any of them keeps them retained until the process exits.
 pub struct SchedulerDb {
     inner: ManuallyDrop<std::sync::Mutex<DbOwner>>,
     original: ManuallyDrop<Option<OriginalSchedulerContext>>,
     original_process: u32,
     outbox_drain: std::sync::Mutex<()>,
+}
+impl Drop for SchedulerDb {
+    fn drop(&mut self) {
+        // Each retained field is taken exactly once, here; the consuming
+        // transfers bypass this Drop after taking them themselves.
+        let owner = unsafe { ManuallyDrop::take(&mut self.inner) }
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let context = unsafe { ManuallyDrop::take(&mut self.original) };
+        if self.original_process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((owner, context));
+            return;
+        }
+        // Settled exactly when a stopped/offline retirement has released or
+        // aborted its source: no original native context and no owner left in
+        // the slot. A live store settles only through its consuming transfers,
+        // so any other phase, a checked-out slot included, stays retained.
+        let settled = context.is_none() && matches!(owner, DbOwner::Closed);
+        if settled {
+            drop(owner);
+            drop(context);
+        } else {
+            lillux::custody::abandon("ryeos-scheduler::store", (owner, context));
+        }
+    }
 }
 
 /// The exact stopped live Scheduler owner after its database terminal has
@@ -715,6 +742,50 @@ pub struct SchedulerNativeFinalizationOwner {
     schema_refusal: Option<sqlite_schema::NativeSchemaSqlReferenceOutsideFailure>,
     original_process: u32,
     outside_handoff_id: Option<SchedulerNativeStoreHandoffId>,
+}
+impl Drop for SchedulerNativeFinalizationOwner {
+    fn drop(&mut self) {
+        // Each retained field is taken exactly once, here. Settled exactly
+        // when finish_outside_handoff would accept this owner: every source,
+        // custody packet and refusal has transferred and the database phase
+        // slot is checked out. Otherwise the database phase, factory alias,
+        // schema reference and every outside source or refusal stay retained
+        // until the process exits.
+        let settled = self.outside_sources_transferred();
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+        let factory = unsafe { ManuallyDrop::take(&mut self.factory) };
+        let schema_reference = unsafe { ManuallyDrop::take(&mut self.schema_reference) };
+        let database_outside = unsafe { ManuallyDrop::take(&mut self.database_outside) };
+        let database_outside_custody =
+            unsafe { ManuallyDrop::take(&mut self.database_outside_custody) };
+        let database_never_opened = unsafe { ManuallyDrop::take(&mut self.database_never_opened) };
+        let database_refusal = self.database_refusal.take();
+        let schema_outside = unsafe { ManuallyDrop::take(&mut self.schema_outside) };
+        let schema_outside_custody = unsafe { ManuallyDrop::take(&mut self.schema_outside_custody) };
+        let schema_refusal = self.schema_refusal.take();
+        let retained = (
+            inner,
+            factory,
+            schema_reference,
+            database_outside,
+            database_outside_custody,
+            database_never_opened,
+            database_refusal,
+            schema_outside,
+            schema_outside_custody,
+            schema_refusal,
+        );
+        if self.original_process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(retained);
+            return;
+        }
+        if settled {
+            drop(retained);
+        } else {
+            lillux::custody::abandon("ryeos-scheduler::native-finalization-owner", retained);
+        }
+    }
 }
 
 /// Opaque identity shared by one Scheduler finalization owner and the exact
@@ -776,6 +847,40 @@ pub enum SchedulerNativeDatabaseSource {
     Connection(ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>),
     NeverOpened(ManuallyDrop<OriginalNativeBoundInputs>),
 }
+/// The payload of one database source moved out of its retaining owner,
+/// for the Store progress that accepts it or hands it back.
+pub enum TakenSchedulerNativeDatabaseSource {
+    Connection(lillux_sqlite::OriginalNativeOutsideConnectionParts),
+    NeverOpened(OriginalNativeBoundInputs),
+}
+impl SchedulerNativeDatabaseSource {
+    /// Move the payload out exactly once; the emptied shell is never dropped.
+    pub fn into_taken(self) -> TakenSchedulerNativeDatabaseSource {
+        let mut source = ManuallyDrop::new(self);
+        match &mut *source {
+            Self::Connection(parts) => {
+                TakenSchedulerNativeDatabaseSource::Connection(unsafe { ManuallyDrop::take(parts) })
+            }
+            Self::NeverOpened(inputs) => {
+                TakenSchedulerNativeDatabaseSource::NeverOpened(unsafe { ManuallyDrop::take(inputs) })
+            }
+        }
+    }
+}
+impl Drop for SchedulerNativeDatabaseSource {
+    fn drop(&mut self) {
+        // No drop settles a database source: outside its handoff wrapper it
+        // always holds the closed connection's parts or the never-opened
+        // inputs, which only the Store progress accepts. The payload is
+        // taken exactly once, here, and stays retained until the process
+        // exits; a copied process relinquishes it through the same call.
+        const KIND: &str = "ryeos-scheduler::native-database-source";
+        match self {
+            Self::Connection(parts) => lillux::custody::abandon(KIND, unsafe { ManuallyDrop::take(parts) }),
+            Self::NeverOpened(inputs) => lillux::custody::abandon(KIND, unsafe { ManuallyDrop::take(inputs) }),
+        }
+    }
+}
 
 #[must_use = "Scheduler sources must remain in custody until Store acceptance is proved"]
 pub struct SchedulerNativeOutsideSources {
@@ -783,6 +888,27 @@ pub struct SchedulerNativeOutsideSources {
     handoff_id: SchedulerNativeStoreHandoffId,
     database: ManuallyDrop<Option<SchedulerNativeDatabaseSource>>,
     schema: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+}
+impl Drop for SchedulerNativeOutsideSources {
+    fn drop(&mut self) {
+        // Each retained slot is taken exactly once, here. Settled exactly
+        // when is_empty holds: both sources were accepted by the Store
+        // progress and never restored. A source still in a slot stays
+        // retained until the process exits.
+        let database = unsafe { ManuallyDrop::take(&mut self.database) };
+        let schema = unsafe { ManuallyDrop::take(&mut self.schema) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((database, schema));
+            return;
+        }
+        if database.is_none() && schema.is_none() {
+            drop(database);
+            drop(schema);
+        } else {
+            lillux::custody::abandon("ryeos-scheduler::outside-sources", (database, schema));
+        }
+    }
 }
 
 impl SchedulerNativeOutsideSources {
@@ -1044,7 +1170,23 @@ impl SchedulerNativeFinalizationOwner {
                 .context("Scheduler Store handoff identity absent")?;
             anyhow::ensure!(receipt.id.same_handoff(handoff_id),
                 "Scheduler Store handoff proof names another source set");
-            anyhow::ensure!((&*self.factory).is_none()
+            anyhow::ensure!(self.outside_sources_cleared(),
+                "Scheduler finalization owner still retains outside sources");
+            anyhow::ensure!(matches!(&*self.inner, DbOwner::CheckedOut),
+                "Scheduler finalization owner still retains its database phase");
+            Ok(())
+        })();
+        if let Err(error) = checked { return Err((self, error)); }
+        // Every source has transferred and the phase slot is checked out, so
+        // this owner's Drop releases its emptied slots normally.
+        drop(self);
+        Ok(())
+    }
+
+    /// Whether no outside source, custody packet, refusal, factory alias or
+    /// schema reference remains in this owner.
+    fn outside_sources_cleared(&self) -> bool {
+        (&*self.factory).is_none()
             && (&*self.schema_reference).is_none()
             && (&*self.database_outside).is_none()
             && (&*self.database_outside_custody).is_none()
@@ -1052,16 +1194,13 @@ impl SchedulerNativeFinalizationOwner {
             && self.database_refusal.is_none()
             && (&*self.schema_outside).is_none()
             && (&*self.schema_outside_custody).is_none()
-            && self.schema_refusal.is_none(),
-                "Scheduler finalization owner still retains outside sources");
-            anyhow::ensure!(matches!(&*self.inner, DbOwner::CheckedOut),
-                "Scheduler finalization owner still retains its database phase");
-            Ok(())
-        })();
-        if let Err(error) = checked { return Err((self, error)); }
-        let inner = ManuallyDrop::into_inner(self.inner);
-        drop(inner);
-        Ok(())
+            && self.schema_refusal.is_none()
+    }
+
+    /// Whether this owner holds nothing at all: every outside source has
+    /// transferred and its database phase slot is checked out.
+    fn outside_sources_transferred(&self) -> bool {
+        self.outside_sources_cleared() && matches!(&*self.inner, DbOwner::CheckedOut)
     }
 }
 
@@ -1110,9 +1249,29 @@ impl std::fmt::Debug for RetainedSchedulerRetirementInputs {
 impl RetainedSchedulerRetirementInputs {
     pub fn into_inputs(mut self) -> std::result::Result<OriginalSchedulerRetirementInputs, Self> {
         if self.original_process != std::process::id() { return Err(self); }
-        // SAFETY: exclusive original-process transfer, with no authority effect.
-        let inputs = unsafe { ManuallyDrop::take(&mut self.inputs) };
+        // Exclusive original-process transfer, with no authority effect. The
+        // slot is left empty, so this owner's Drop then releases nothing.
+        let inputs = self.inputs.take();
         Ok(inputs.expect("actual retained retirement inputs"))
+    }
+}
+impl Drop for RetainedSchedulerRetirementInputs {
+    fn drop(&mut self) {
+        // Settled exactly when the inputs have transferred out of the slot.
+        // Inputs still retained here keep their authority lifeline until the
+        // process exits.
+        let inputs = unsafe { ManuallyDrop::take(&mut self.inputs) };
+        if self.original_process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(inputs);
+            return;
+        }
+        match inputs {
+            None => {}
+            Some(inputs) => {
+                lillux::custody::abandon("ryeos-scheduler::retirement-inputs", inputs);
+            }
+        }
     }
 }
 enum OpenCustody {
@@ -1629,8 +1788,9 @@ impl SchedulerDb {
         }
         let previous = std::mem::replace(&mut *guard, DbOwner::CheckedOut);
         let owner = match previous { DbOwner::Live(owner) | DbOwner::Stale(owner) => owner, _ => unreachable!() };
-        // SAFETY: original-process input transfers exactly once to SAME owner.
-        let inputs = unsafe { ManuallyDrop::take(&mut retained.inputs) }.expect("actual input");
+        // The original-process input transfers exactly once to the same
+        // owner, leaving the retained slot empty for its Drop.
+        let inputs = retained.inputs.take().expect("actual input");
         match owner.begin_scheduler_retirement(inputs) {
             Ok((owner, facts)) => {
                 *guard = DbOwner::NativeRetirement { generation, phase: NativeRetirementPhase::Owned(owner) };
@@ -4813,5 +4973,225 @@ mod tests {
         let stale = db.find_stale_dispatched_fires(30).unwrap();
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].fire_id, "sched@1000");
+    }
+
+    #[test]
+    fn dropped_released_stopped_store_settles_without_abandoning() {
+        const KIND: &str = "ryeos-scheduler::store";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let db = SchedulerDb {
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::Closed)),
+            original: ManuallyDrop::new(None),
+            original_process: std::process::id(),
+            outbox_drain: std::sync::Mutex::new(()),
+        };
+        drop(db);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_checked_out_store_is_abandoned() {
+        const KIND: &str = "ryeos-scheduler::store";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let db = SchedulerDb {
+            inner: ManuallyDrop::new(std::sync::Mutex::new(DbOwner::CheckedOut)),
+            original: ManuallyDrop::new(None),
+            original_process: std::process::id(),
+            outbox_drain: std::sync::Mutex::new(()),
+        };
+        drop(db);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn released_stopped_retirement_store_drops_without_abandoning() {
+        use lillux_sqlite::StoppedSqliteRoleSource;
+        const KIND: &str = "ryeos-scheduler::store";
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().join("scheduler.sqlite3");
+        let host = TestSchedulerHost::acquire();
+        create_closed_test_path(&host, &canonical);
+        let runtime = Arc::new(PinnedDirectory::open(directory.path()).unwrap().unwrap());
+        let plan = stopped_fixture_plan(
+            &runtime,
+            directory.path(),
+            [StoppedSqliteRoleSource::Canonical; 3],
+        );
+        let db = host.cleanup_scope(|| {
+            SchedulerDb::capture_stopped_projection(runtime, plan).unwrap()
+        });
+        host.scope(|| {
+            db.drain_projection_retirement().unwrap();
+            for role in [SqliteRole::Main, SqliteRole::Wal, SqliteRole::Shm] {
+                db.quarantine_projection_role(role).unwrap();
+                db.purge_projection_role(role).unwrap();
+            }
+            db.release_projection_retirement().unwrap();
+        });
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(db);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    fn emptied_finalization_owner() -> SchedulerNativeFinalizationOwner {
+        SchedulerNativeFinalizationOwner {
+            inner: ManuallyDrop::new(DbOwner::CheckedOut),
+            factory: ManuallyDrop::new(None),
+            schema_reference: ManuallyDrop::new(None),
+            database_outside: ManuallyDrop::new(None),
+            database_outside_custody: ManuallyDrop::new(None),
+            database_never_opened: ManuallyDrop::new(None),
+            database_refusal: None,
+            schema_outside: ManuallyDrop::new(None),
+            schema_outside_custody: ManuallyDrop::new(None),
+            schema_refusal: None,
+            original_process: std::process::id(),
+            outside_handoff_id: None,
+        }
+    }
+
+    #[test]
+    fn dropped_transferred_finalization_owner_settles_without_abandoning() {
+        const KIND: &str = "ryeos-scheduler::native-finalization-owner";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        drop(emptied_finalization_owner());
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_finalization_owner_with_database_phase_is_abandoned() {
+        const KIND: &str = "ryeos-scheduler::native-finalization-owner";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let mut owner = emptied_finalization_owner();
+        *owner.inner = DbOwner::Closed;
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+    }
+
+    #[test]
+    fn finish_outside_handoff_refusal_keeps_its_owner_unabandoned() {
+        const KIND: &str = "ryeos-scheduler::native-finalization-owner";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let owner = emptied_finalization_owner();
+        let id = SchedulerNativeStoreHandoffId::new(std::process::id());
+        let receipt = unsafe { SchedulerNativeStoreHandoffReceipt::from_store_source_join(&(), id) }.unwrap();
+        // No handoff identity was ever issued for this owner, so the receipt
+        // names another source set and the owner comes back whole.
+        let (mut owner, _error) = owner.finish_outside_handoff(receipt).unwrap_err();
+        assert!(owner.outside_sources_transferred());
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+        let id = owner.outside_handoff_id.get_or_insert_with(||
+            SchedulerNativeStoreHandoffId::new(std::process::id())).clone();
+        let receipt = unsafe { SchedulerNativeStoreHandoffReceipt::from_store_source_join(&(), id) }.unwrap();
+        owner.finish_outside_handoff(receipt).map_err(|(_, error)| error).unwrap();
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_empty_outside_sources_settle_without_abandoning() {
+        const KIND: &str = "ryeos-scheduler::outside-sources";
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let sources = SchedulerNativeOutsideSources {
+            process: std::process::id(),
+            handoff_id: SchedulerNativeStoreHandoffId::new(std::process::id()),
+            database: ManuallyDrop::new(None),
+            schema: ManuallyDrop::new(None),
+        };
+        assert!(sources.is_empty());
+        drop(sources);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_outside_sources_with_unaccepted_database_are_abandoned() {
+        const KIND: &str = "ryeos-scheduler::outside-sources";
+        let dir = tempfile::tempdir().unwrap();
+        let host = ryeos_state::test_support::shared_test_host();
+        let runtime = Arc::new(PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        // Never-opened inputs hold no ticket, so the host still releases
+        // its arena while the abandoned source keeps them.
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeBoundInputs::issued(
+                runtime,
+                std::ffi::OsStr::new("scheduler.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeScheduler,
+                host.destination(),
+                None,
+            )
+        }
+        .unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let sources = SchedulerNativeOutsideSources {
+            process: std::process::id(),
+            handoff_id: SchedulerNativeStoreHandoffId::new(std::process::id()),
+            database: ManuallyDrop::new(Some(SchedulerNativeDatabaseSource::NeverOpened(
+                ManuallyDrop::new(inputs),
+            ))),
+            schema: ManuallyDrop::new(None),
+        };
+        assert!(!sources.is_empty());
+        drop(sources);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_database_source_outside_its_wrapper_is_abandoned() {
+        const KIND: &str = "ryeos-scheduler::native-database-source";
+        let dir = tempfile::tempdir().unwrap();
+        let host = ryeos_state::test_support::shared_test_host();
+        let runtime = Arc::new(PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeBoundInputs::issued(
+                runtime,
+                std::ffi::OsStr::new("scheduler.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeScheduler,
+                host.destination(),
+                None,
+            )
+        }
+        .unwrap();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        // Taking the payload leaves nothing for the shell to retain.
+        let taken = SchedulerNativeDatabaseSource::NeverOpened(ManuallyDrop::new(inputs)).into_taken();
+        let TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) = taken else {
+            panic!("never-opened inputs come back as never-opened");
+        };
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+        drop(SchedulerNativeDatabaseSource::NeverOpened(ManuallyDrop::new(inputs)));
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn transferred_retirement_inputs_drop_without_abandoning() {
+        const KIND: &str = "ryeos-scheduler::retirement-inputs";
+        let host = TestSchedulerHost::acquire();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let retained = RetainedSchedulerRetirementInputs {
+            inputs: ManuallyDrop::new(Some(host.retirement_inputs([7; 16]))),
+            original_process: std::process::id(),
+        };
+        let inputs = retained.into_inputs().map_err(|_| "refused").unwrap();
+        assert_eq!(inputs.generation(), [7; 16]);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before);
+    }
+
+    #[test]
+    fn dropped_retained_retirement_inputs_are_abandoned() {
+        const KIND: &str = "ryeos-scheduler::retirement-inputs";
+        let host = TestSchedulerHost::acquire();
+        let before = lillux::custody::abandoned_custody().count(KIND);
+        let retained = RetainedSchedulerRetirementInputs {
+            inputs: ManuallyDrop::new(Some(host.retirement_inputs([8; 16]))),
+            original_process: std::process::id(),
+        };
+        drop(retained);
+        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
     }
 }

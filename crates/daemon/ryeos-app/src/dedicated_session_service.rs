@@ -4408,9 +4408,20 @@ fn workload_child_execution_facts(
     let owner = session.owner_principal.as_str();
     let mut children = Vec::with_capacity(dispatches.len());
     for dispatch in dispatches {
-        let child = state
+        // The intent's mode names where its child lives: an inline child is a
+        // thread in the placement's chain with the placement as upstream, an
+        // awaited or detached child is its own chain root.
+        let child_chain_root_id = match dispatch.mode {
+            crate::runtime_db::RuntimeActionMode::Inline => session.chain_root_id.as_str(),
+            crate::runtime_db::RuntimeActionMode::AwaitedRoot
+            | crate::runtime_db::RuntimeActionMode::Detached => dispatch.child_thread_id.as_str(),
+        };
+        let (child, _last_event, _chain_head_hash) = state
             .state_store
-            .get_authoritative_root_thread_snapshot(&dispatch.child_thread_id)?
+            .get_authoritative_thread_snapshot_with_last_event(
+                child_chain_root_id,
+                &dispatch.child_thread_id,
+            )?
             .ok_or_else(|| {
                 anyhow!(
                     "workload child dispatch `{}` has no authoritative snapshot",
@@ -4419,10 +4430,16 @@ fn workload_child_execution_facts(
             })?;
         validate_workload_child_identity(
             owner,
+            dispatch.mode,
+            &session.placement_thread_id,
+            &session.chain_root_id,
             &dispatch.child_thread_id,
-            &child.thread_id,
-            &child.chain_root_id,
-            child.requested_by.as_deref(),
+            WorkloadChildPlacement {
+                thread_id: &child.thread_id,
+                chain_root_id: &child.chain_root_id,
+                upstream_thread_id: child.upstream_thread_id.as_deref(),
+                requested_by: child.requested_by.as_deref(),
+            },
         )?;
         children.push(json!({
             "operation_id": dispatch.operation_id,
@@ -4442,17 +4459,41 @@ fn workload_child_execution_facts(
     Ok(Value::Array(children))
 }
 
+/// A workload child must be the exact thread its intent dispatched, owned by
+/// the placement owner, at the placement the intent's mode implies: an inline
+/// child in the placement's chain with the placement thread as upstream, an
+/// awaited or detached child as its own chain root.
+/// The authoritative placement facts of one workload child thread.
+struct WorkloadChildPlacement<'a> {
+    thread_id: &'a str,
+    chain_root_id: &'a str,
+    upstream_thread_id: Option<&'a str>,
+    requested_by: Option<&'a str>,
+}
+
 fn validate_workload_child_identity(
     owner: &str,
+    mode: crate::runtime_db::RuntimeActionMode,
+    placement_thread_id: &str,
+    placement_chain_root_id: &str,
     dispatched_child_thread_id: &str,
-    child_thread_id: &str,
-    child_chain_root_id: &str,
-    child_requested_by: Option<&str>,
+    child: WorkloadChildPlacement<'_>,
 ) -> Result<()> {
-    if child_thread_id != dispatched_child_thread_id
-        || child_chain_root_id != dispatched_child_thread_id
-        || child_requested_by != Some(owner)
-    {
+    if child.thread_id != dispatched_child_thread_id || child.requested_by != Some(owner) {
+        bail!("workload child dispatch contradicts its placement ownership");
+    }
+    let placed = match mode {
+        crate::runtime_db::RuntimeActionMode::Inline => {
+            child.chain_root_id == placement_chain_root_id
+                && child.chain_root_id != child.thread_id
+                && child.upstream_thread_id == Some(placement_thread_id)
+        }
+        crate::runtime_db::RuntimeActionMode::AwaitedRoot
+        | crate::runtime_db::RuntimeActionMode::Detached => {
+            child.chain_root_id == dispatched_child_thread_id
+        }
+    };
+    if !placed {
         bail!("workload child dispatch contradicts its placement ownership");
     }
     Ok(())
@@ -6083,26 +6124,55 @@ mod tests {
 
     #[test]
     fn workload_child_identity_refuses_thread_root_and_owner_contradictions() {
-        assert!(
+        use crate::runtime_db::RuntimeActionMode;
+        let check = |mode, thread: &str, root: &str, upstream: Option<&str>, owner| {
             validate_workload_child_identity(
                 "fp:owner",
+                mode,
+                "T-placement",
+                "T-root",
                 "T-child",
+                WorkloadChildPlacement {
+                    thread_id: thread,
+                    chain_root_id: root,
+                    upstream_thread_id: upstream,
+                    requested_by: owner,
+                },
+            )
+        };
+        // An awaited or detached child is its own chain root.
+        for mode in [RuntimeActionMode::AwaitedRoot, RuntimeActionMode::Detached] {
+            assert!(check(mode, "T-child", "T-child", None, Some("fp:owner")).is_ok());
+            for (thread, root, owner) in [
+                ("T-other", "T-child", Some("fp:owner")),
+                ("T-child", "T-root", Some("fp:owner")),
+                ("T-child", "T-child", Some("fp:other")),
+                ("T-child", "T-child", None),
+            ] {
+                assert!(check(mode, thread, root, None, owner).is_err());
+            }
+        }
+        // An inline child lives in the placement's chain with the placement
+        // thread as upstream.
+        assert!(
+            check(
+                RuntimeActionMode::Inline,
                 "T-child",
-                "T-child",
+                "T-root",
+                Some("T-placement"),
                 Some("fp:owner")
             )
             .is_ok()
         );
-        for (thread, root, owner) in [
-            ("T-other", "T-child", Some("fp:owner")),
-            ("T-child", "T-parent", Some("fp:owner")),
-            ("T-child", "T-child", Some("fp:other")),
-            ("T-child", "T-child", None),
+        for (thread, root, upstream, owner) in [
+            ("T-other", "T-root", Some("T-placement"), Some("fp:owner")),
+            ("T-child", "T-child", Some("T-placement"), Some("fp:owner")),
+            ("T-child", "T-root", None, Some("fp:owner")),
+            ("T-child", "T-root", Some("T-other"), Some("fp:owner")),
+            ("T-child", "T-root", Some("T-placement"), Some("fp:other")),
+            ("T-child", "T-root", Some("T-placement"), None),
         ] {
-            assert!(
-                validate_workload_child_identity("fp:owner", "T-child", thread, root, owner)
-                    .is_err()
-            );
+            assert!(check(RuntimeActionMode::Inline, thread, root, upstream, owner).is_err());
         }
     }
 

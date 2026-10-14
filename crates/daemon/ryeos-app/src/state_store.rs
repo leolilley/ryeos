@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use ryeos_runtime::RuntimeJsonArrayBudget;
 use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
+use ryeos_state::AddThreadWithEventSuccessorRequest;
 use ryeos_state::CreateChainWithEventSuccessorRequest;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
@@ -2863,6 +2864,18 @@ impl std::fmt::Debug for StateStore {
             .field("inner", &"<Mutex<Inner>>")
             .finish()
     }
+}
+
+/// The chain an in-process handler thread was reserved into. The reservation
+/// is born with the thread's auxiliary runtime row, so that row names the
+/// chain whether the handler is a direct invocation root or an inline
+/// in-process child in its parent's chain.
+fn in_process_handler_chain_root_locked(g: &Inner, thread_id: &str) -> Result<String> {
+    g.runtime_db
+        .thread_runtime_chain_root_id(thread_id)?
+        .ok_or_else(|| {
+            anyhow!("in-process handler {thread_id} has no runtime row naming its chain")
+        })
 }
 
 fn thread_detail_from_committed_snapshot(
@@ -5731,6 +5744,29 @@ impl StateStore {
             persisted,
             effective: Box::new(effective),
         })
+    }
+
+    /// Read an in-process handler thread's authoritative snapshot at the chain
+    /// its reservation was born into: its own id for a direct invocation
+    /// root, its parent's chain for an inline in-process child. `None` when
+    /// the chain head does not carry the thread (an unpublished birth).
+    /// The chain an in-process handler thread belongs to, read from its own
+    /// runtime row. That row is written before the authoritative birth commit
+    /// and outlives the rebuildable projection, so terminal repair can locate
+    /// the chain after the projection row has been lost.
+    pub fn in_process_handler_chain_root_id(&self, thread_id: &str) -> Result<String> {
+        let g = self.lock()?;
+        in_process_handler_chain_root_locked(&g, thread_id)
+    }
+
+    pub fn get_authoritative_in_process_handler_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ThreadSnapshot>> {
+        let g = self.lock()?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
+        g.state_db
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)
     }
 
     /// Read a root snapshot directly from authoritative CAS without requiring
@@ -10207,6 +10243,195 @@ impl StateStore {
         .map(|publication| publication.persisted)
     }
 
+    /// Publish an in-process handler thread as a member of its parent's chain
+    /// while its exact daemon task owner is registered. An inline in-process
+    /// child is a thread in its parent's chain with the parent as upstream,
+    /// exactly like an inline tool leaf; this is the birth that makes it so.
+    /// The owner contract is the root birth's: the durable reservation is
+    /// established before the commit, the created→running transition commits
+    /// with the birth under the parent chain's signed head, and the owner's
+    /// birth proof is marked only once that head carries the member. The
+    /// registry lock is released before the authoritative commit, as above.
+    pub fn create_in_process_child_with_events_and_launch_metadata(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &InProcessHandlerControl,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        if thread.thread_id == thread.chain_root_id || thread.upstream_thread_id.is_none() {
+            bail!("in-process child birth requires a chain member record with an upstream parent");
+        }
+        if thread.captured_history_policy.is_some() {
+            bail!("non-root threads cannot carry a captured history policy");
+        }
+        if initial_events
+            .iter()
+            .any(|event| event.storage_class == "ephemeral")
+        {
+            bail!("in-process child initial events must be durable");
+        }
+        if initial_events.len() != 1
+            || initial_events[0].event_type != ryeos_state::event_types::THREAD_STARTED
+        {
+            bail!("in-process child birth requires exactly one thread_started successor event");
+        }
+        if launch_metadata.launch_driver
+            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process child birth requires the in-process handler launch driver");
+        }
+        let permit = self.acquire_write_permit()?;
+        self.ensure_in_process_handler_owner(&thread.thread_id, owner)?;
+        let birth_snapshot = attach_admitted_launch_capsule(
+            &self.state_authority,
+            permit.cas_guard(),
+            build_snapshot(thread),
+            Some(launch_metadata),
+        )?;
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("thread creation is closed for daemon shutdown");
+        }
+        validate_facet_event_admission(&g, &thread.thread_id, &initial_events)?;
+        let mut payload = json!({
+            "kind": &thread.kind,
+            "item_ref": &thread.item_ref,
+            "executor_ref": &thread.executor_ref,
+            "launch_mode": &thread.launch_mode,
+        });
+        if let Some(usage_subject) = &thread.usage_subject {
+            usage_subject.validate()?;
+            payload["usage_subject"] =
+                serde_json::to_value(usage_subject).context("failed to encode usage_subject")?;
+            if let Some(asserted_by) = &thread.usage_subject_asserted_by {
+                payload["usage_subject_asserted_by"] = json!(asserted_by);
+            }
+        }
+        let mut events = Vec::with_capacity(initial_events.len() + 1);
+        events.push(NewEventRecord {
+            event_type: ryeos_state::event_types::THREAD_CREATED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload,
+        });
+        events.extend(initial_events);
+        let thread_events = convert_events(&events, &thread.chain_root_id, &thread.thread_id);
+        let mut running = birth_snapshot.clone();
+        running.status = ThreadStatus::Running;
+        let started_at = lillux::time::iso8601_now();
+        running.started_at = Some(started_at.clone());
+        running.updated_at = started_at;
+        // The auxiliary runtime row and the pending reservation precede the
+        // authoritative commit, inside the parent chain's runtime pin, like
+        // every other member birth. A proven pre-commit failure removes them;
+        // an ambiguous acknowledgement or an observable committed member
+        // preserves them for exact settlement.
+        {
+            let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+            g.runtime_db.reserve_in_process_handler_birth(
+                &thread.thread_id,
+                &thread.chain_root_id,
+                launch_metadata,
+            )?;
+        }
+        let committed = g.state_db.add_thread_with_event_successor_admitted(
+            AddThreadWithEventSuccessorRequest {
+                chain_root_id: &thread.chain_root_id,
+                genesis_snapshot: birth_snapshot,
+                event_successor_snapshot: running,
+                events: thread_events,
+                signer: g.signer.as_ref(),
+                runtime_liveness: &g.runtime_db,
+                cas_mutation_guard: permit.cas_guard(),
+            },
+        );
+        let result = match committed {
+            Ok(committed) => committed_value(committed),
+            Err(error) => {
+                // The parent chain head is the only authority on whether the
+                // member was published. A readable head without the member
+                // proves the write never landed; a member at running status
+                // is the exact birth this owner authored; anything else keeps
+                // ownership for reconciliation.
+                match g
+                    .state_db
+                    .read_authoritative_thread_snapshot(&thread.chain_root_id, &thread.thread_id)
+                {
+                    Ok(Some(snapshot)) if snapshot.status == ThreadStatus::Running => {
+                        owner.mark_birth_committed();
+                        if let Err(reservation_error) = g
+                            .runtime_db
+                            .mark_in_process_handler_birth_running(&thread.thread_id)
+                        {
+                            return Err(anyhow!(
+                                "in-process child birth committed despite its returned error, but its reservation could not advance: {reservation_error:#}; original error: {error:#}"
+                            ));
+                        }
+                        return Err(anyhow!(
+                            "in-process child birth committed authoritative state despite its returned error; its armed owner must settle the row: {error:#}"
+                        ));
+                    }
+                    Ok(Some(snapshot)) => {
+                        owner.mark_birth_committed();
+                        return Err(anyhow!(
+                            "in-process child birth left member {} at status {} after its returned error; preserving runtime ownership for reconciliation: {error:#}",
+                            thread.thread_id,
+                            snapshot.status.as_str()
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(readback_error) => {
+                        owner.mark_birth_committed();
+                        return Err(anyhow!(
+                            "in-process child birth failed and authoritative readback was unavailable; preserving runtime ownership for reconciliation: write error: {error:#}; readback error: {readback_error:#}"
+                        ));
+                    }
+                }
+                let cleanup = self
+                    .selected_mutation_permit(
+                        &g,
+                        SelectedMutationOperation::DiscardBirth(&thread.thread_id),
+                    )
+                    .and_then(|selected| {
+                        g.runtime_db
+                            .discard_pending_in_process_handler_birth(&selected, &thread.thread_id)
+                    })
+                    .and_then(|deleted| {
+                        if deleted {
+                            Ok(())
+                        } else {
+                            bail!(
+                                "pending in-process birth reservation disappeared before failed-member cleanup"
+                            )
+                        }
+                    });
+                if let Err(cleanup_error) = cleanup {
+                    tracing::error!(
+                        thread_id = %thread.thread_id,
+                        chain_root_id = %thread.chain_root_id,
+                        error = %cleanup_error,
+                        "failed to remove auxiliary runtime row after in-process child birth failed"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        owner.mark_birth_committed();
+        g.runtime_db
+            .mark_in_process_handler_birth_running(&thread.thread_id)
+            .with_context(|| {
+                format!(
+                    "advance committed in-process birth reservation for {}",
+                    thread.thread_id
+                )
+            })?;
+        persisted_from_add_thread_with_events(&result, &events)
+            .context("reconstruct committed in-process child events before handler effects")
+    }
+
     fn create_root_thread_with_events_and_launch_metadata_owned(
         &self,
         thread: &NewThreadRecord,
@@ -10958,13 +11183,14 @@ impl StateStore {
             .ok_or_else(|| {
                 anyhow!("ownerless in-process handler {thread_id} has no durable reservation")
             })?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         if reservation.phase == runtime_db::InProcessHandlerReservationPhase::TerminalConfirmed {
             let snapshot = g
                 .state_db
-                .read_authoritative_thread_snapshot(thread_id, thread_id)?
+                .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
                 .ok_or_else(|| {
                     anyhow!(
-                        "terminal-confirmed in-process handler {thread_id} has no authoritative root"
+                        "terminal-confirmed in-process handler {thread_id} has no authoritative thread"
                     )
                 })?;
             if !snapshot.status.is_terminal() {
@@ -10979,9 +11205,9 @@ impl StateStore {
         }
         let snapshot = g
             .state_db
-            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
             .ok_or_else(|| {
-                anyhow!("ownerless in-process handler {thread_id} has no authoritative root")
+                anyhow!("ownerless in-process handler {thread_id} has no authoritative thread")
             })?;
         if snapshot.status.is_terminal() {
             return Ok(Some(FinalizeIfNonterminalOutcome::AlreadyTerminal {
@@ -20381,11 +20607,14 @@ impl StateStore {
     pub fn discard_uncommitted_in_process_handler_birth(&self, thread_id: &str) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         if g.state_db
-            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
             .is_some()
         {
-            bail!("refusing to discard in-process birth `{thread_id}` with an authoritative root");
+            bail!(
+                "refusing to discard in-process birth `{thread_id}` with an authoritative thread"
+            );
         }
         g.runtime_db.discard_pending_in_process_handler_birth(
             &self
@@ -20399,11 +20628,12 @@ impl StateStore {
     pub fn reconcile_in_process_handler_birth_running(&self, thread_id: &str) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         let snapshot = g
             .state_db
-            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
             .ok_or_else(|| {
-                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+                anyhow!("in-process reservation `{thread_id}` has no authoritative thread")
             })?;
         if snapshot.status != ThreadStatus::Running {
             bail!(
@@ -20421,11 +20651,12 @@ impl StateStore {
         thread_id: &str,
     ) -> Result<bool> {
         let g = self.lock()?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         let snapshot = g
             .state_db
-            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
             .ok_or_else(|| {
-                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+                anyhow!("in-process reservation `{thread_id}` has no authoritative thread")
             })?;
         if !snapshot.status.is_terminal() {
             bail!(
@@ -20471,11 +20702,12 @@ impl StateStore {
         thread_id: &str,
     ) -> Result<bool> {
         let g = self.lock()?;
+        let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         let snapshot = g
             .state_db
-            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .read_authoritative_thread_snapshot(&chain_root_id, thread_id)?
             .ok_or_else(|| {
-                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+                anyhow!("in-process reservation `{thread_id}` has no authoritative thread")
             })?;
         if !snapshot.status.is_terminal() {
             bail!(

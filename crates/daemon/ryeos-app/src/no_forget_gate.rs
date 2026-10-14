@@ -23,7 +23,11 @@
 //!
 //! Every binding must be taken back by name through one of those disposals:
 //! the ordered consuming disposal, where a method destructures the owner and
-//! releases each field in a fixed order. A disposal inside a test module (one
+//! releases each field in a fixed order. A shell binding, `let shell =
+//! ManuallyDrop::new(self)` in a method that moves every field out of an
+//! owner with its own `Drop`, is taken when a disposal or `ptr::read` takes
+//! one of its fields (`ManuallyDrop::take(&mut shell.field)`), since the
+//! emptied shell is never dropped. A disposal inside a test module (one
 //! under a `#[cfg(..)]` whose predicate names `test` other than as
 //! `not(test)`) covers only a binding inside a test module, and a production
 //! disposal only a production binding, so a test can never vouch for
@@ -275,6 +279,15 @@ fn violations(source: &str) -> Vec<String> {
         accepted.extend(token_in(whole.start(), whole.end()));
         taken.push((capture[1].to_owned(), in_test(whole.start())));
     }
+    // A shell whose field is moved out by name is itself taken.
+    let shell_field = Regex::new(&format!(
+        r"\b(?:{path}ManuallyDrop::(?:into_inner|take|drop)|(?:(?:::)?(?:std|core)::)?ptr::read)\s*\(\s*&\s*(?:mut\s+)?(\w+)\.\w+"
+    ))
+    .unwrap();
+    for capture in shell_field.captures_iter(&code) {
+        let whole = capture.get(0).unwrap();
+        taken.push((capture[1].to_owned(), in_test(whole.start())));
+    }
     for hit in token.find_iter(&code) {
         if !accepted.contains(&hit.start()) {
             found.push(format!(
@@ -418,6 +431,21 @@ fn gate_accepts_ordered_into_inner_disposal() {
     // Removing one step of the ordered disposal leaves that field leaking.
     let partial = source.replace("drop(std::mem::ManuallyDrop::into_inner(host));", "drop(host);");
     assert_eq!(violations(&partial), vec!["4: ManuallyDrop `host` is never taken by a consuming disposal"]);
+}
+
+#[test]
+fn gate_accepts_a_shell_whose_fields_are_taken() {
+    let shell = "struct Owner { lock: ManuallyDrop<Lock>, name: String }\n\
+        impl Owner {\n\
+            fn into_parts(self) -> (Lock, String) {\n\
+                let mut owner = std::mem::ManuallyDrop::new(self);\n\
+                unsafe { (std::mem::ManuallyDrop::take(&mut owner.lock), std::ptr::read(&owner.name)) }\n\
+            }\n\
+        }";
+    assert!(violations(shell).is_empty(), "{:?}", violations(shell));
+    // A shell nothing is taken from is an untaken wrapper.
+    let untaken = "fn f(o: Owner) { let shell = ManuallyDrop::new(o); }";
+    assert_eq!(violations(untaken), vec!["1: ManuallyDrop `shell` is never taken by a consuming disposal"]);
 }
 
 #[test]

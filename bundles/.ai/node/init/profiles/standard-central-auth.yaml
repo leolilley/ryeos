@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T18:22:27Z:c057de4c452ccbc1aef7f0d393214fba030039ff4c93ec3f2af21894b1737b05:gdpOld75uhL71pRKu+iHLMDWMo8DeSeoOCKKm+bDjmiWZMSaTW5cz6mBjXXrFFbo+Bacf4+5fL9HwW0PtMpuBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-13T23:52:06Z:f16f4de029b64901636c1fbdc4f64cddeee2de54edcfba324c1f6c44c45eca4c:Y6jffXqH48MNB76X12R3K3uSsaCtQkFkVMdfVgZleQmd+NM8F45hYO3f4HP8rz1lRqDHwthEJGOn+YR/ttOLCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above Standard; source-only, admission pending.
 schema: 1
 exact_bundles:
@@ -241,7 +241,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 8
+      version: 9
       # Capabilities this node must prove on its host before it starts.
       # `ryeos node doctor` shows what the host proves and what is missing.
       requires_capabilities: [accounting, storage:durable_root, time]

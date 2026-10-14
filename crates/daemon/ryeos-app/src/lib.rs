@@ -31,6 +31,8 @@ pub mod execution_comparison;
 pub mod execution_history_reset;
 #[cfg(test)]
 mod no_forget_gate;
+#[cfg(test)]
+mod custody_drop_gate;
 pub mod execution_identity_probe;
 pub mod execution_policy;
 pub mod execution_provenance;

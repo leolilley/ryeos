@@ -3099,10 +3099,27 @@ pub async fn dispatch_service(
                 ctx,
                 state,
                 service_executor::ServiceRecordingContext {
-                    authority_source:
-                        service_executor::ServiceRecordingAuthoritySource::Execution {
-                            provenance: &request.provenance,
-                        },
+                    // A callback action that pre-minted its child identity
+                    // under a running parent is an inline in-process child:
+                    // recorded in the parent's chain with the parent as
+                    // upstream, exactly like an inline tool leaf. Every other
+                    // service dispatch records as its own chain root.
+                    authority_source: match (
+                        request.parent_execution_context.as_ref(),
+                        request.pre_minted_thread_id.as_deref(),
+                    ) {
+                        (Some(parent), Some(_)) => {
+                            service_executor::ServiceRecordingAuthoritySource::InlineCallbackChild {
+                                provenance: &request.provenance,
+                                parent_thread_id: &parent.parent_thread_id,
+                            }
+                        }
+                        (Some(_), None) | (None, _) => {
+                            service_executor::ServiceRecordingAuthoritySource::Execution {
+                                provenance: &request.provenance,
+                            }
+                        }
+                    },
                     usage_subject: request.usage_subject.as_ref(),
                     usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
                 },

@@ -62,6 +62,41 @@ pub struct AccountingNativeLedger {
     process: u32,
     state: ManuallyDrop<Mutex<LedgerNativeState>>,
 }
+impl AccountingNativeLedger {
+    /// Move the custody state out exactly once; the emptied shell is never
+    /// dropped.
+    fn into_state(self) -> Mutex<LedgerNativeState> {
+        let mut ledger = ManuallyDrop::new(self);
+        unsafe { ManuallyDrop::take(&mut ledger.state) }
+    }
+}
+impl Drop for AccountingNativeLedger {
+    fn drop(&mut self) {
+        // Settled exactly when sources_taken holds: the factory alias is gone
+        // and both legs left for the node finalizer. The state is taken
+        // exactly once, here; otherwise its live, closing, terminal or
+        // refused owners stay retained together until the process exits.
+        let state = unsafe { ManuallyDrop::take(&mut self.state) };
+        if self.process != std::process::id() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(state);
+            return;
+        }
+        let settled = holders_taken(&state.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        if settled {
+            drop(state);
+        } else {
+            lillux::custody::abandon("ryeos-app::accounting-native-ledger", state);
+        }
+    }
+}
+
+/// Every native owner has left for the node finalizer.
+fn holders_taken(state: &LedgerNativeState) -> bool {
+    state.factory.is_none()
+        && matches!(state.connection, LedgerConnection::Taken)
+        && matches!(state.reference, LedgerReference::Taken)
+}
 
 /// Acknowledged outside sources of one ledger owner, ready to join the
 /// Store's physical inventory. Each present owner must reach that join.
@@ -70,6 +105,39 @@ pub struct AccountingNativeOutsideSources {
     pub connection: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
     pub reference: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
     pub unused_reference: Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+}
+impl AccountingNativeOutsideSources {
+    /// Move every present owner out, in slot order, for the node finalizer's
+    /// cached source slots. Each slot is left empty, so the emptied owner
+    /// settles and releases nothing.
+    pub fn into_parts(mut self) -> (
+        Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
+        Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
+        Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+    ) {
+        (self.connection.take(), self.reference.take(), self.unused_reference.take())
+    }
+}
+impl Drop for AccountingNativeOutsideSources {
+    fn drop(&mut self) {
+        // Settled exactly when every slot is empty: each present owner joined
+        // the Store graph and was taken from here. Each slot is taken exactly
+        // once, here; otherwise the terminals and unused inputs stay retained
+        // together until the process exits.
+        let taken = unsafe {(
+            self.connection.as_mut().map(|parts| ManuallyDrop::take(parts)),
+            self.reference.as_mut().map(|parts| ManuallyDrop::take(parts)),
+            self.unused_reference.as_mut().map(|inputs| ManuallyDrop::take(inputs)),
+        )};
+        self.connection = None;
+        self.reference = None;
+        self.unused_reference = None;
+        if taken.0.is_none() && taken.1.is_none() && taken.2.is_none() {
+            drop(taken);
+        } else {
+            lillux::custody::abandon("ryeos-app::accounting-native-outside-sources", taken);
+        }
+    }
 }
 
 /// A scope that ended in refusal with its transaction still open leaves the
@@ -397,8 +465,8 @@ impl AccountingNativeLedger {
                 return Err((shared, anyhow::anyhow!("accounting ledger still has aliases")));
             }
         };
-        let Self { process: _, state } = owner;
-        let LedgerNativeState { factory: _, connection, reference } = ManuallyDrop::into_inner(state)
+        let LedgerNativeState { factory: _, connection, reference } = owner
+            .into_state()
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut terminals = Vec::with_capacity(2);
@@ -580,11 +648,7 @@ impl AccountingNativeLedger {
 
     /// True once every native owner has left for the node finalizer.
     pub fn sources_taken(&self) -> bool {
-        self.lock_custody_state().is_ok_and(|state| {
-            state.factory.is_none()
-                && matches!(state.connection, LedgerConnection::Taken)
-                && matches!(state.reference, LedgerReference::Taken)
-        })
+        self.lock_custody_state().is_ok_and(|state| holders_taken(&state))
     }
 
     /// Move both terminals out for a test host's census, ending this owner's
@@ -753,6 +817,109 @@ mod tests {
         assert!(ledger.is_closed());
         retire(&host, &ledger);
         assert_eq!(host.ticket_census(), (2, 2));
+    }
+
+    const LEDGER: &str = "ryeos-app::accounting-native-ledger";
+    const SOURCES: &str = "ryeos-app::accounting-native-outside-sources";
+
+    fn abandoned(kind: &str) -> usize {
+        lillux::custody::abandoned_custody().count(kind)
+    }
+
+    #[test]
+    fn dropped_ledger_with_sources_taken_releases_normally() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let host = TestNativeHost::acquire();
+        let (ledger, db) = open_on(&host, &root, false);
+        drop(db.expect("fresh native ledger opens"));
+        retire(&host, &ledger);
+        assert!(ledger.sources_taken());
+        let before = abandoned(LEDGER);
+        drop(ledger);
+        assert_eq!(abandoned(LEDGER), before);
+        assert_eq!(host.ticket_census(), (2, 2));
+    }
+
+    #[test]
+    fn dropped_open_ledger_is_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_open_ledger_is_retained");
+        // The retained ledger keeps its live connection and tickets, which
+        // only the process end releases, so the scenario runs in a child.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "ledger +1", "{outcome}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        let host = TestNativeHost::acquire();
+        let (ledger, db) = open_on(&host, &root, false);
+        drop(db.expect("fresh native ledger opens"));
+        assert!(!ledger.sources_taken());
+        let before = abandoned(LEDGER);
+        drop(ledger);
+        let delta = abandoned(LEDGER) - before;
+        lillux_sqlite::test_host::end_isolated_process((dir, root, host), &format!("ledger +{delta}"))
+    }
+
+    #[test]
+    fn outside_sources_taken_into_parts_settle_without_abandoning() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let reference = unsafe {
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::NodeAccountingSchemaReference,
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let before = abandoned(SOURCES);
+        let sources = AccountingNativeOutsideSources {
+            connection: None,
+            reference: None,
+            unused_reference: Some(ManuallyDrop::new(reference)),
+        };
+        let (connection, reference, unused_reference) = sources.into_parts();
+        assert!(connection.is_none() && reference.is_none() && unused_reference.is_some());
+        assert_eq!(abandoned(SOURCES), before);
+        drop(unused_reference.map(ManuallyDrop::into_inner));
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    #[test]
+    fn dropped_empty_outside_sources_settle_without_abandoning() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let before = abandoned(SOURCES);
+        drop(AccountingNativeOutsideSources { connection: None, reference: None, unused_reference: None });
+        assert_eq!(abandoned(SOURCES), before);
+    }
+
+    #[test]
+    fn dropped_outside_sources_with_unused_reference_are_retained() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        // Unused transient inputs hold no ticket, so the host still releases
+        // its arena while the abandoned sources keep them.
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let reference = unsafe {
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::NodeAccountingSchemaReference,
+                host.destination(),
+            )
+        }
+        .unwrap();
+        let before = abandoned(SOURCES);
+        drop(AccountingNativeOutsideSources {
+            connection: None,
+            reference: None,
+            unused_reference: Some(ManuallyDrop::new(reference)),
+        });
+        assert_eq!(abandoned(SOURCES), before + 1);
+        ryeos_state::test_support::release_shared_test_host(host);
     }
 
     #[test]
