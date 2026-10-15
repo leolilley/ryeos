@@ -2133,7 +2133,8 @@ pub struct FinalizedLiveNative {
 }
 impl FinalizedLiveNative {
     pub fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign finalized live native record");
+        ensure!(!lillux::exec::in_forked_child() && self.process == std::process::id(),
+            "foreign finalized live native record");
         Ok(())
     }
 }
@@ -2897,26 +2898,41 @@ impl Drop for LiveNativeCapacityReservation {
         // Settled exactly when final consumption would accept this
         // reservation without a registry: its admission inputs moved into
         // settled finalizer custody, the release receipt is present and no
-        // account, native, region or registry owner remains. The input and
-        // account slots are taken exactly once, here; otherwise the original
-        // admission descriptors and the capacity account stay retained
-        // together until the process exits.
+        // account, native, region or registry owner remains. Every owning
+        // slot is taken exactly once, here, and the slots travel together:
+        // settled, they drop normally; otherwise the whole reservation's
+        // contents (admission inputs, account, budgets, region, exclusion,
+        // host storage, late control and registry) stay retained until the
+        // process exits, so no part of an unsettled reservation is released.
+        // What remains in the shell (an atomic flag, a generation number and
+        // empty locks) owns nothing.
         const KIND: &str = "ryeos-node::native-capacity-reservation";
-        if lillux::exec::in_forked_child() {
+        // Read before any lock, error or allocation: a forked child touches
+        // nothing copied beyond moving the slots out.
+        let forked = lillux::exec::in_forked_child();
+        let settled = !forked && self.require_settled_holders().is_ok();
+        let owner = (
+            self.inputs.take().map(std::mem::ManuallyDrop::into_inner),
+            self.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+            self.budget.take(),
+            self.raw_budget.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+            self.region.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+            self.release_exclusion.take(),
+            self.seal_failure.take(),
+            self.host_storage.take(),
+            self.host_release_credit.take(),
+            self.released.take(),
+            self.late.take(),
+            self.physical_registry.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take(),
+            self.rollover_claim.take(),
+        );
+        if forked {
             // A copy in another process holds none of these owners.
-            let inputs = self.inputs.take();
-            let account = self.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-            lillux::custody::relinquish_in_foreign_process((inputs, account));
-            return;
-        }
-        let settled = self.require_settled_holders().is_ok();
-        let inputs = self.inputs.take().map(std::mem::ManuallyDrop::into_inner);
-        let account = self.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        if settled {
-            drop(inputs);
-            drop(account);
+            lillux::custody::relinquish_in_foreign_process(owner);
+        } else if settled {
+            drop(owner);
         } else {
-            lillux::custody::abandon(KIND, (inputs, account));
+            lillux::custody::abandon(KIND, owner);
         }
     }
 }

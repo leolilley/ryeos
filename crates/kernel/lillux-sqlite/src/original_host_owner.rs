@@ -46,7 +46,7 @@ impl Gate {
 }
 impl Drop for Gate {
     fn drop(&mut self) {
-        if !self.armed || self.process != std::process::id() { return; }
+        if !self.armed || crate::foreign_process(self.process) { return; }
         // No foreign callback, allocation, destructor or fallible arithmetic
         // runs in this gate. Only complete primitive metadata transitions.
         unsafe { self.header.as_ref() }.gate.store(UNLOCKED, Ordering::Release);
@@ -73,7 +73,7 @@ fn try_gate(header: NonNull<RegionHeader>, process: u32, generation: u64) -> Res
 }
 fn claim_gate(header: NonNull<RegionHeader>, process: u32, generation: u64, wait: bool)
     -> Result<Gate, FixedHostRefusal> {
-    if process != std::process::id() { return Err(FixedHostRefusal::Process); }
+    if crate::foreign_process(process) { return Err(FixedHostRefusal::Process); }
     let h = unsafe { header.as_ref() };
     if h.process != process || h.generation != generation { return Err(FixedHostRefusal::Provenance); }
     let mut spins = 0u32;
@@ -107,7 +107,7 @@ pub struct OriginalNativeRegionInitializationFailure {
 }
 impl OriginalNativeRegionInitializationFailure {
     pub fn into_budget(self) -> Result<OriginalNativeBudget, Self> {
-        if self.process != std::process::id() { return Err(self); }
+        if crate::foreign_process(self.process) { return Err(self); }
         // The refusal and process are copied facts; only the budget moves out,
         // so this failure's own Drop must not run on the emptied slot.
         let mut failure = ManuallyDrop::new(self);
@@ -120,7 +120,7 @@ impl Drop for OriginalNativeRegionInitializationFailure {
         // is the sole genuine budget; it stays retained until the process
         // exits rather than end outside its original controller.
         let budget = unsafe { ManuallyDrop::take(&mut self.budget) };
-        if self.process != std::process::id() {
+        if crate::foreign_process(self.process) {
             // A copy in another process holds no issued counter.
             lillux::custody::relinquish_in_foreign_process(budget);
             return;
@@ -141,7 +141,7 @@ impl OriginalNativeRegionOwner {
         process: u32, generation: u64) -> Result<Self, OriginalNativeRegionInitializationFailure> {
         let mut retained = ManuallyDrop::new(budget);
         let attempt = (|| {
-            if process != std::process::id() { return Err(FixedHostRefusal::Process); }
+            if crate::foreign_process(process) { return Err(FixedHostRefusal::Process); }
             if generation == 0 { return Err(FixedHostRefusal::Provenance); }
             let quote = original_native_region_layout()?;
             if bytes < quote.layout.size() || storage.as_ptr() as usize % quote.layout.align() != 0
@@ -221,7 +221,7 @@ pub struct OriginalNativeRegionCensus { pub closing: bool, pub handles: usize,
 pub struct OriginalNativeRegionSealFailure { pub refusal: FixedHostRefusal, owner: ManuallyDrop<OriginalNativeRegionOwner> }
 impl OriginalNativeRegionSealFailure {
     pub fn into_owner(self) -> Result<OriginalNativeRegionOwner, Self> {
-        if self.owner.process != std::process::id() { return Err(self); }
+        if crate::foreign_process(self.owner.process) { return Err(self); }
         // The refusal is a copied fact; only the owner moves out, so this
         // failure's own Drop must not run on the emptied slot.
         let mut failure = ManuallyDrop::new(self);
@@ -234,7 +234,7 @@ impl Drop for OriginalNativeRegionSealFailure {
         // controller token stays retained until the process exits, so the
         // region can never be sealed or released through a lost owner.
         let owner = unsafe { ManuallyDrop::take(&mut self.owner) };
-        if owner.process != std::process::id() {
+        if crate::foreign_process(owner.process) {
             // A copy in another process holds no controller token.
             lillux::custody::relinquish_in_foreign_process(owner);
             return;
@@ -254,14 +254,14 @@ unsafe impl Send for OriginalNativeRegionReleaseExclusion {}
 unsafe impl Sync for OriginalNativeRegionReleaseExclusion {}
 impl OriginalNativeRegionReleaseExclusion {
     fn require_physical_mapping(&self, base: usize, bytes: usize) -> Result<(), FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         if self.base != base || self.bytes != bytes { return Err(FixedHostRefusal::Provenance); }
         Ok(())
     }
     /// Concrete resident data has no native cleanup destructor. This ends its
     /// Rust lifetime once; all authority/account callbacks remain outside it.
     pub fn dispose(&mut self) -> Result<(), FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         if self.disposition == 2 { return Ok(()); }
         if self.disposition == 1 { return Err(FixedHostRefusal::TerminalRequired); }
         self.disposition = 1;
@@ -270,11 +270,11 @@ impl OriginalNativeRegionReleaseExclusion {
         Ok(())
     }
     pub fn original_generation(&self) -> Result<u64, FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         Ok(self.generation)
     }
     pub fn ready_for_physical_release(&self) -> Result<(), FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         if self.disposition != 2 { return Err(FixedHostRefusal::TerminalRequired); }
         Ok(())
     }
@@ -294,7 +294,7 @@ impl OriginalNativeRegionHandle {
     }
     pub(crate) fn original_process(&self) -> u32 { self.process }
     pub fn require_original_process(&self) -> Result<(), FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         Ok(())
     }
     pub fn same_region(&self, other: &Self) -> bool {
@@ -345,7 +345,7 @@ impl OriginalNativeRegionHandle {
 pub(crate) struct OriginalNativeRegionRustBorrow<'a> { header: NonNull<RegionHeader>, payload: NonNull<NativeResidentState>, process: u32, generation: u64, _handle: PhantomData<&'a OriginalNativeRegionHandle> }
 impl OriginalNativeRegionRustBorrow<'_> {
     pub(crate) fn state(&self) -> Result<&NativeResidentState, FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         Ok(unsafe { self.payload.as_ref() })
     }
 }
@@ -354,13 +354,13 @@ unsafe impl Send for OriginalNativeRegionCBorrow {}
 unsafe impl Sync for OriginalNativeRegionCBorrow {}
 impl OriginalNativeRegionCBorrow {
     pub(crate) fn budget_pointer(&self) -> Result<*const OriginalNativeBudget, FixedHostRefusal> {
-        if self.process != std::process::id() { return Err(FixedHostRefusal::Process); }
+        if crate::foreign_process(self.process) { return Err(FixedHostRefusal::Process); }
         Ok(&unsafe { self.payload.as_ref() }.budget)
     }
 }
 enum LoanKind { Handle, Rust, C }
 fn retire(header: NonNull<RegionHeader>, process: u32, generation: u64, kind: LoanKind) {
-    if process != std::process::id() { return; }
+    if crate::foreign_process(process) { return; }
     let h = unsafe { header.as_ref() };
     let pending = match kind { LoanKind::Handle => &h.pending_handles, LoanKind::Rust => &h.pending_rust, LoanKind::C => &h.pending_c };
     let Ok(_guard) = try_gate(header, process, generation) else { pending.fetch_add(1, Ordering::Release); return; };
@@ -399,6 +399,70 @@ mod custody_drop_controls {
         let before = abandoned(KIND);
         drop(failure);
         assert_eq!(abandoned(KIND), before + 1);
+    }
+
+    /// A gate held by another thread past its wait bound refuses every
+    /// region-gate caller as contention, which never latches service refusal;
+    /// once released the same calls succeed, and a genuine refusal still
+    /// latches.
+    #[test]
+    fn contended_gate_refuses_every_caller_without_latching() {
+        use crate::native::native_refusal_is_fact;
+        use crate::SqliteInspectionProductionKind;
+        let _serial = crate::test_host::serial_guard();
+        let quote = original_native_region_layout().unwrap();
+        // SAFETY: a fresh aligned allocation of the quoted layout, used only by
+        // this region and never freed while the test process runs.
+        let storage = NonNull::new(unsafe { std::alloc::alloc_zeroed(quote.layout) }).unwrap();
+        let owner = match unsafe {
+            OriginalNativeRegionOwner::initialize(storage, quote.layout.size(), raw(), std::process::id(), 1)
+        } {
+            Ok(owner) => owner,
+            Err(failure) => panic!("initialization refused: {}", failure.refusal),
+        };
+        let handle = owner.handle().unwrap();
+        // Mirrors the service latch: only a fact refusal sets it.
+        let latch = |refusal: FixedHostRefusal, what: &'static str| {
+            native_refusal_is_fact(&anyhow::Error::new(refusal).context(what))
+        };
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (header, process, generation) = (owner.header.as_ptr() as usize, owner.process, owner.generation);
+        let holder = std::thread::spawn(move || {
+            let header = NonNull::new(header as *mut RegionHeader).unwrap();
+            let guard = gate(header, process, generation).unwrap();
+            held_tx.send(()).unwrap();
+            // Holds the gate, as a descheduled holder would, until released.
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        held_rx.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let refusal = handle.claim_producer_control(SqliteInspectionProductionKind::Native)
+            .err().expect("a held gate must refuse the producer-control claim");
+        assert!(started.elapsed() >= GATE_WAIT, "the claim waited out its bound before refusing");
+        assert_eq!(refusal, FixedHostRefusal::Contended);
+        assert!(!latch(refusal, "producer control claim"));
+        let refusal = handle.try_clone().err().expect("a held gate must refuse a handle clone");
+        assert_eq!(refusal, FixedHostRefusal::Contended);
+        assert!(!latch(refusal, "region handle clone"));
+        let refusal = owner.handle().err().expect("a held gate must refuse a new handle");
+        assert_eq!(refusal, FixedHostRefusal::Contended);
+        assert!(!latch(refusal, "region handle"));
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let control = handle.claim_producer_control(SqliteInspectionProductionKind::Native)
+            .expect("the released gate admits the claim");
+        drop(control);
+
+        // A genuine refusal through the same caller still latches.
+        owner.begin_close().unwrap();
+        let refusal = handle.try_clone().err().expect("a closing region refuses a clone");
+        assert_eq!(refusal, FixedHostRefusal::Closed);
+        assert!(latch(refusal, "region handle clone"));
     }
 
     #[test]

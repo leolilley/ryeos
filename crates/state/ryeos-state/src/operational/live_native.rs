@@ -41,7 +41,7 @@ impl LiveOperationalInitializationRetirement {
     ) -> Result<()> {
         match self {
             Self::NotIssued { process, reason, factory: actual } => {
-                anyhow::ensure!(*process == std::process::id(),
+                anyhow::ensure!(!crate::foreign_process(*process),
                     "Operational no-ticket receipt belongs to another process");
                 anyhow::ensure!(matches!(reason,
                     NotIssuedReason::EstablishedBeforeThisOpen | NotIssuedReason::PreSyncFailure),
@@ -181,6 +181,9 @@ pub(super) struct LiveOperationalSchemaReferences {
 }
 impl LiveOperationalSchemaReferences {
     pub(super) fn original_source_count(&self) -> usize { self.entries.len() }
+    /// Move every entry out, leaving an empty set. Allocation-free, so a
+    /// forked child may call it while giving up a copied frame.
+    pub(super) fn take(&mut self) -> Self { Self { entries: std::mem::take(&mut self.entries) } }
     #[cfg(test)]
     pub(super) fn empty_for_test() -> Self { Self { entries: Vec::new() } }
     pub(super) fn retirement_capacity(&self) -> usize { self.entries.capacity() }
@@ -477,7 +480,7 @@ struct OperationalStartupCloseProgress {
     native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
     sql_custody: std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
     schema_refusal: std::mem::ManuallyDrop<Option<anyhow::Error>>,
-    custody: LiveOperationalOpenCustody,
+    custody: std::mem::ManuallyDrop<LiveOperationalOpenCustody>,
     close_failure: Option<lillux_sqlite::OriginalNativeCloseFailure>,
     closed: Option<Arc<lillux_sqlite::ClosedOriginalNativeConnection>>,
     released: Option<Arc<lillux_sqlite::ReleasedOriginalNativeAcquisition>>,
@@ -497,7 +500,7 @@ pub struct ReleasedLiveOperationalStartup {
 pub struct ReleasedLiveOperationalPhysicalCustody {
     process: u32,
     factory_identity: Weak<lillux_sqlite::OriginalNativeFactory>,
-    join: Arc<crate::state_db::OriginalStateDestinationJoin>,
+    join: std::mem::ManuallyDrop<Arc<crate::state_db::OriginalStateDestinationJoin>>,
     parent: std::mem::ManuallyDrop<Option<LiveStateNativeOwner>>,
     parent_parts: std::mem::ManuallyDrop<Option<crate::state_db::live_native::LiveStatePhysicalParent>>,
     _metadata: std::mem::ManuallyDrop<OperationalStartupPhysicalMetadata>,
@@ -531,26 +534,45 @@ impl OperationalStartupPhysicalMetadata {
             (&*self._schema_refusal).iter().chain(self._prior_refusal.iter()))
     }
 }
+impl OperationalStartupPhysicalMetadata {
+    /// Move every owned field out of the metadata, in declaration order,
+    /// leaving only emptied slots and plain copied facts. Nothing here
+    /// allocates, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            self._references.take(),
+            self._initialization_retirement.take(),
+            self._marker.take(),
+            std::mem::ManuallyDrop::take(&mut self._sources),
+            std::mem::ManuallyDrop::take(&mut self._sql_custody),
+            std::mem::ManuallyDrop::take(&mut self._schema_refusal),
+            self._partial_durability.take(),
+            self._prior_refusal.take(),
+        )}
+    }
+}
 impl Drop for OperationalStartupPhysicalMetadata {
     fn drop(&mut self) {
-        // Each retained slot is taken exactly once, here. Settled exactly when
-        // final exhaustion would accept the metadata; otherwise its sources,
-        // packets, references, marker descriptor and refusals stay retained
-        // together until the process exits.
+        // Settled exactly when final exhaustion would accept the metadata; it
+        // then releases normally. Otherwise its sources, packets, references,
+        // marker descriptor and refusals stay retained together until the
+        // process exits.
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before the settled check, which may allocate.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
         let settled = self.require_exhausted().is_ok();
-        let sources = unsafe { std::mem::ManuallyDrop::take(&mut self._sources) };
-        let sql_custody = unsafe { std::mem::ManuallyDrop::take(&mut self._sql_custody) };
-        let schema_refusal = unsafe { std::mem::ManuallyDrop::take(&mut self._schema_refusal) };
+        let whole = unsafe { self.take_whole() };
         if settled {
-            drop(sources);
-            drop(sql_custody);
-            drop(schema_refusal);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::operational-startup-physical-metadata", (
-                sources, sql_custody, schema_refusal,
-                self._references.take(), self._initialization_retirement.take(),
-                self._marker.take(), self._prior_refusal.take(),
-            ));
+            lillux::custody::abandon("ryeos-state::operational-startup-physical-metadata", whole);
         }
     }
 }
@@ -572,59 +594,85 @@ struct OperationalStartupCloseParts {
     prior_refusal: Option<anyhow::Error>,
 }
 impl OperationalStartupCloseProgress {
+    fn new(custody: LiveOperationalOpenCustody) -> Self {
+        Self {
+            destination_join: std::sync::OnceLock::new(),
+            native_sources_started: false, native_sources: std::mem::ManuallyDrop::new(Vec::new()),
+            native_failure: None, sql_custody: std::mem::ManuallyDrop::new(Vec::new()),
+            schema_refusal: std::mem::ManuallyDrop::new(None),
+            custody: std::mem::ManuallyDrop::new(custody), close_failure: None,
+            closed: None, released: None, schema_failure: None, schema_released: None,
+            partial_durability: None, initialization_retirement: None, prior_refusal: None }
+    }
     /// Move every field out exactly once; the emptied shell is never dropped.
     /// Whether the native sources started is a plain copied fact.
     fn into_parts(self) -> OperationalStartupCloseParts {
         let mut progress = std::mem::ManuallyDrop::new(self);
+        unsafe { progress.take_whole() }
+    }
+    /// Move every owned field out of the progress, leaving only emptied slots
+    /// and the plain started fact. Nothing here allocates, so a forked child
+    /// may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop` or on a shell that is never dropped:
+    /// the taken `ManuallyDrop` slots must never be read again.
+    unsafe fn take_whole(&mut self) -> OperationalStartupCloseParts {
         unsafe {
             OperationalStartupCloseParts {
-                destination_join: std::ptr::read(&progress.destination_join),
-                native_sources: std::mem::ManuallyDrop::take(&mut progress.native_sources),
-                native_failure: std::ptr::read(&progress.native_failure),
-                sql_custody: std::mem::ManuallyDrop::take(&mut progress.sql_custody),
-                schema_refusal: std::mem::ManuallyDrop::take(&mut progress.schema_refusal),
-                custody: std::ptr::read(&progress.custody),
-                close_failure: std::ptr::read(&progress.close_failure),
-                closed: std::ptr::read(&progress.closed),
-                released: std::ptr::read(&progress.released),
-                schema_failure: std::ptr::read(&progress.schema_failure),
-                schema_released: std::ptr::read(&progress.schema_released),
-                partial_durability: std::ptr::read(&progress.partial_durability),
-                initialization_retirement: std::ptr::read(&progress.initialization_retirement),
-                prior_refusal: std::ptr::read(&progress.prior_refusal),
+                destination_join: std::mem::take(&mut self.destination_join),
+                native_sources: std::mem::ManuallyDrop::take(&mut self.native_sources),
+                native_failure: self.native_failure.take(),
+                sql_custody: std::mem::ManuallyDrop::take(&mut self.sql_custody),
+                schema_refusal: std::mem::ManuallyDrop::take(&mut self.schema_refusal),
+                custody: std::mem::ManuallyDrop::take(&mut self.custody),
+                close_failure: self.close_failure.take(),
+                closed: self.closed.take(),
+                released: self.released.take(),
+                schema_failure: self.schema_failure.take(),
+                schema_released: self.schema_released.take(),
+                partial_durability: self.partial_durability.take(),
+                initialization_retirement: self.initialization_retirement.take(),
+                prior_refusal: self.prior_refusal.take(),
             }
         }
     }
-    /// The retained slots hold no native owner: no source keeps a terminal,
-    /// no packet remains and the schema refusal carries no owner. This is the
-    /// part of the physical and census transfers' checks that concerns the
-    /// slots this progress retains by hand; the dropped progress settles on
-    /// exactly these checks.
+    /// No retained source keeps a native terminal and no native transfer
+    /// refusal holds one. Every consumer of the post-aggregate sources
+    /// requires exactly this, and the dropped progress settles on it.
+    fn native_sources_exhausted(&self) -> bool {
+        self.native_failure.is_none()
+            && self.native_sources.iter().all(|source| source.terminal.is_none())
+    }
+    /// The retained slots hold no native owner: the native sources are
+    /// exhausted, no packet remains and the schema refusal carries no owner.
+    /// This is the part of the physical and census transfers' checks that
+    /// concerns the slots this progress retains by hand; the dropped progress
+    /// settles on exactly these checks.
     fn require_retained_slots_empty(&self) -> Result<()> {
-        anyhow::ensure!(self.native_sources.iter().all(|source| source.terminal.is_none())
-            && self.sql_custody.is_empty(),
-            "Operational startup progress retains a native terminal or packet");
+        anyhow::ensure!(self.native_sources_exhausted() && self.sql_custody.is_empty(),
+            "Operational startup progress retains a native terminal, refusal or packet");
         crate::state_db::live_native::require_exhausted_refusals(self.schema_refusal.iter())
     }
 }
 impl Drop for OperationalStartupCloseProgress {
     fn drop(&mut self) {
-        // Each retained slot is taken exactly once, here. Settled when no
-        // retained slot holds a native owner; the open custody and every
-        // typed failure field release through their own supervised drops.
-        // Otherwise the sources, packets and refusal stay retained together
-        // until the process exits.
+        // Settled when no retained slot holds a native owner; the progress
+        // then releases normally, the open custody and every typed failure
+        // field through their own supervised drops. Otherwise the whole
+        // progress stays retained together until the process exits.
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before the settled check, which may allocate.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
         let settled = self.require_retained_slots_empty().is_ok();
-        let native_sources = unsafe { std::mem::ManuallyDrop::take(&mut self.native_sources) };
-        let sql_custody = unsafe { std::mem::ManuallyDrop::take(&mut self.sql_custody) };
-        let schema_refusal = unsafe { std::mem::ManuallyDrop::take(&mut self.schema_refusal) };
+        let whole = unsafe { self.take_whole() };
         if settled {
-            drop(native_sources);
-            drop(sql_custody);
-            drop(schema_refusal);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::operational-startup-close-progress",
-                (native_sources, sql_custody, schema_refusal, self.native_failure.take()));
+            lillux::custody::abandon("ryeos-state::operational-startup-close-progress", whole);
         }
     }
 }
@@ -638,9 +686,15 @@ impl ReleasedLiveOperationalStartup {
 impl Drop for ReleasedLiveOperationalStartup {
     fn drop(&mut self) {
         // Settled exactly when its progress retains no native owner; the
-        // progress then releases normally through its own Drop. Otherwise
-        // the whole progress stays retained until the process exits.
+        // progress then releases normally. Otherwise the whole progress stays
+        // retained until the process exits.
         let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before the settled check, which may allocate.
+            lillux::custody::relinquish_in_foreign_process(progress);
+            return;
+        }
         if progress.require_retained_slots_empty().is_ok() {
             drop(progress);
         } else {
@@ -652,7 +706,7 @@ impl ReleasedLiveOperationalPhysicalCustody {
     pub fn require_parent_registered(&self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational parent root inventory");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational parent root inventory");
         let quote = super::original::quote_operational_membership(registry, 1)?;
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
         self.marker_source.require_registered(Some(&self._metadata._marker), registry, true)?;
@@ -662,7 +716,7 @@ impl ReleasedLiveOperationalPhysicalCustody {
 
     pub fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational physical frame");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational physical frame");
         self.join.require_original(factory, aggregate)
     }
 
@@ -673,7 +727,7 @@ impl ReleasedLiveOperationalPhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational root custody");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational root custody");
         self.parent_parts.as_mut().context("actual Operational State parent parts absent")?
             .consume_retired_root_sources(registry, prepay)?;
         self.marker_source.consume_retired(
@@ -686,7 +740,7 @@ impl ReleasedLiveOperationalPhysicalCustody {
         &mut self,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational metadata retirement");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational metadata retirement");
         if self.startup_metadata_retired {
             let metadata = &*self._metadata;
             anyhow::ensure!(metadata._references.is_none()
@@ -807,8 +861,7 @@ impl ReleasedLiveOperationalStartup {
             aggregate.require_original(factory)?;
             self.progress.custody.original.require_original_store_parent(store, factory)?;
             let p = &self.progress;
-            anyhow::ensure!(p.native_sources_started && p.native_failure.is_none()
-                && p.native_sources.iter().all(|s| s.terminal.is_none()) && p.sql_custody.is_empty()
+            anyhow::ensure!(p.native_sources_started && p.native_sources_exhausted() && p.sql_custody.is_empty()
                 && p.close_failure.is_none() && p.closed.is_none() && p.released.is_none()
                 && p.schema_failure.is_none() && p.schema_released.is_none()
                 && p.custody.owner.is_none() && p.custody.acquisition.is_none()
@@ -830,7 +883,7 @@ impl ReleasedLiveOperationalStartup {
         });
         if let Err(error) = checked { return Err((self, error)); }
         let OperationalStartupCloseParts { destination_join, native_sources,
-            native_failure: _, sql_custody, schema_refusal, mut custody, close_failure: _, closed: _,
+            native_failure, sql_custody, schema_refusal, mut custody, close_failure: _, closed: _,
             released: _, schema_failure: _, schema_released: _, partial_durability,
             initialization_retirement, prior_refusal } = self.into_progress().into_parts();
         let metadata = OperationalStartupPhysicalMetadata {
@@ -842,9 +895,11 @@ impl ReleasedLiveOperationalStartup {
             _schema_refusal: std::mem::ManuallyDrop::new(schema_refusal),
             _partial_durability: partial_durability, _prior_refusal: prior_refusal,
         };
+        // Checked absent above.
+        drop(native_failure);
         let frame = ReleasedLiveOperationalPhysicalCustody {
             process: std::process::id(), factory_identity: Arc::downgrade(factory),
-            join: destination_join.into_inner().expect("checked actual State receiver"),
+            join: std::mem::ManuallyDrop::new(destination_join.into_inner().expect("checked actual State receiver")),
             parent: std::mem::ManuallyDrop::new(None), parent_parts: std::mem::ManuallyDrop::new(None),
             _metadata: std::mem::ManuallyDrop::new(metadata),
             marker_source: super::original::OperationalMarkerSource::new(),
@@ -903,8 +958,7 @@ impl ReleasedLiveOperationalStartup {
             "Operational startup retains unclosed native sources");
         anyhow::ensure!(p.closed.is_none() || p.released.is_none(),
             "Operational startup retains conflicting main receipts");
-        if p.native_sources_started && p.native_failure.is_none()
-            && p.native_sources.iter().all(|source| source.terminal.is_none())
+        if p.native_sources_started && p.native_sources_exhausted()
             && p.closed.is_none() && p.released.is_none() && p.schema_released.is_none()
             && p.custody.references.as_ref().is_none_or(|r| r.original_source_count() == 0)
         {
@@ -1030,8 +1084,7 @@ impl ReleasedLiveOperationalStartup {
         self.progress.custody.original.require_original(factory)?;
         self.progress.custody.original.require_original_store_parent(store, factory)?;
         anyhow::ensure!(self.progress.native_sources_started
-            && self.progress.native_failure.is_none()
-            && self.progress.native_sources.iter().all(|s| s.terminal.is_none())
+            && self.progress.native_sources_exhausted()
             && self.progress.closed.is_none() && self.progress.released.is_none()
             && self.progress.schema_released.is_none()
             && self.progress.custody.references.as_ref().is_none_or(|r| r.original_source_count() == 0),
@@ -1045,7 +1098,7 @@ impl ReleasedLiveOperationalStartup {
         -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         self.progress.custody.original.require_original(factory)?;
         anyhow::ensure!(!self.progress.native_sources_started
-            && self.progress.native_sources.is_empty() && self.progress.native_failure.is_none()
+            && self.progress.native_sources.is_empty() && self.progress.native_sources_exhausted()
             && self.progress.sql_custody.is_empty(),
             "Operational startup receipts already entered post-aggregate custody");
         let mut terminals = Vec::new();
@@ -1106,9 +1159,41 @@ impl ReleasedLiveOperationalStartup {
 enum OperationalStartupRecoveryCustody {
     Opening(LiveOperationalOpenFailure),
     Closing { factory: Arc<lillux_sqlite::OriginalNativeFactory>,
-        progress: std::mem::ManuallyDrop<Mutex<OperationalStartupCloseProgress>> },
+        progress: Mutex<OperationalStartupCloseProgress> },
 }
-pub struct LiveOperationalStartupRecoveryFailure { custody: OperationalStartupRecoveryCustody }
+pub struct LiveOperationalStartupRecoveryFailure {
+    custody: std::mem::ManuallyDrop<OperationalStartupRecoveryCustody>,
+}
+impl LiveOperationalStartupRecoveryFailure {
+    fn new(custody: OperationalStartupRecoveryCustody) -> Self {
+        Self { custody: std::mem::ManuallyDrop::new(custody) }
+    }
+    /// Move the whole custody out exactly once; the emptied shell is never
+    /// dropped.
+    fn into_custody(self) -> OperationalStartupRecoveryCustody {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        unsafe { std::mem::ManuallyDrop::take(&mut failure.custody) }
+    }
+}
+impl Drop for LiveOperationalStartupRecoveryFailure {
+    fn drop(&mut self) {
+        // No drop settles a refused recovery. An opening failure retains its
+        // own checkout through that checkout's Drop; a closing progress stays
+        // retained whole, with its factory alias, until the process exits.
+        let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(custody);
+            return;
+        }
+        match custody {
+            OperationalStartupRecoveryCustody::Opening(failure) => drop(failure),
+            OperationalStartupRecoveryCustody::Closing { factory, progress } => lillux::custody::abandon(
+                "ryeos-state::operational-startup-recovery-failure", (factory, progress)),
+        }
+    }
+}
 impl std::fmt::Debug for LiveOperationalStartupRecoveryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveOperationalStartupRecoveryFailure").finish_non_exhaustive()
@@ -1123,17 +1208,11 @@ impl std::error::Error for LiveOperationalStartupRecoveryFailure {}
 impl LiveOperationalOpenFailure {
     pub fn close_retained(self) -> std::result::Result<ReleasedLiveOperationalStartup, LiveOperationalStartupRecoveryFailure> {
         if self.factory.require_original_process().is_err() {
-            return Err(LiveOperationalStartupRecoveryFailure { custody: OperationalStartupRecoveryCustody::Opening(self) });
+            return Err(LiveOperationalStartupRecoveryFailure::new(OperationalStartupRecoveryCustody::Opening(self)));
         }
         let Self { error, factory: _, _custody } = self;
         let custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut progress = OperationalStartupCloseProgress {
-            destination_join: std::sync::OnceLock::new(),
-            native_sources_started: false, native_sources: std::mem::ManuallyDrop::new(Vec::new()),
-            native_failure: None, sql_custody: std::mem::ManuallyDrop::new(Vec::new()),
-            schema_refusal: std::mem::ManuallyDrop::new(None), custody, close_failure: None,
-            closed: None, released: None, schema_failure: None, schema_released: None,
-            partial_durability: None, initialization_retirement: None, prior_refusal: None };
+        let mut progress = OperationalStartupCloseProgress::new(custody);
         match error.downcast::<sqlite_schema::NativeSchemaSqlReferenceFailure>() {
             Ok(failure) => progress.schema_failure = Some(failure),
             Err(error) => progress.prior_refusal = Some(error),
@@ -1143,28 +1222,41 @@ impl LiveOperationalOpenFailure {
 }
 impl LiveOperationalStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveOperationalStartup, Self> {
-        match self.custody {
+        match self.into_custody() {
             OperationalStartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             OperationalStartupRecoveryCustody::Closing { factory, progress } => {
                 if factory.require_original_process().is_err() {
-                    return Err(Self { custody: OperationalStartupRecoveryCustody::Closing { factory, progress } });
+                    return Err(Self::new(OperationalStartupRecoveryCustody::Closing { factory, progress }));
                 }
-                advance_operational_startup_close(std::mem::ManuallyDrop::into_inner(progress)
-                    .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                advance_operational_startup_close(progress.into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner))
             }
         }
     }
 }
+/// Kind under which an Operational startup close progress unwound mid-step
+/// is retained.
+const OPERATIONAL_STARTUP_CLOSE_UNWIND: &str = "ryeos-state::operational-startup-close-unwind";
+/// A later startup-close refusal, layered over the refusal already retained
+/// when there was one. The result is classified by the later refusal alone;
+/// the earlier one is kept for display.
+fn startup_refusal_over_prior(error: anyhow::Error, prior: Option<anyhow::Error>) -> anyhow::Error {
+    use lillux_sqlite::RefusalSupersedes as _;
+    match prior {
+        Some(earlier) => error.superseding(earlier),
+        None => error,
+    }
+}
 fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
     -> std::result::Result<ReleasedLiveOperationalStartup, LiveOperationalStartupRecoveryFailure> {
-    // Every native effect runs outside the retention mutex. Protect the actual
-    // checkout during unwind; retries transfer it rather than reconstruct it.
-    let mut progress = std::mem::ManuallyDrop::new(progress);
-    let retain = |progress: std::mem::ManuallyDrop<OperationalStartupCloseProgress>| {
-        let progress = std::mem::ManuallyDrop::into_inner(progress);
-        LiveOperationalStartupRecoveryFailure { custody: OperationalStartupRecoveryCustody::Closing {
-            factory: Arc::clone(progress.custody.original.factory()),
-            progress: std::mem::ManuallyDrop::new(Mutex::new(progress)) } }
+    // Every native effect runs outside the retention mutex. The guard retains
+    // the actual checkout if a step panics; retries transfer it rather than
+    // reconstruct it.
+    let mut progress = crate::unwind_custody::UnwindRetained::new(OPERATIONAL_STARTUP_CLOSE_UNWIND, progress);
+    let retain = |progress: crate::unwind_custody::UnwindRetained<OperationalStartupCloseProgress>| {
+        let progress = progress.into_inner();
+        LiveOperationalStartupRecoveryFailure::new(OperationalStartupRecoveryCustody::Closing {
+            factory: Arc::clone(progress.custody.original.factory()), progress: Mutex::new(progress) })
     };
     let factory = Arc::clone(progress.custody.original.factory());
     if factory.require_original_process().is_err()
@@ -1183,10 +1275,7 @@ fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
         if failure.retained_admission().is_some() {
             if let Err(error) = failure.recover_retained_admission() {
                 progress.custody.acquisition = Some(failure);
-                progress.prior_refusal = Some(match progress.prior_refusal.take() {
-                    Some(prior) => error.context(prior),
-                    None => error,
-                });
+                progress.prior_refusal = Some(startup_refusal_over_prior(error, progress.prior_refusal.take()));
                 return Err(retain(progress));
             }
         }
@@ -1213,9 +1302,10 @@ fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
             Err(failure) => { progress.schema_failure = Some(failure); return Err(retain(progress)); }
         }
     }
-    let released = ReleasedLiveOperationalStartup { progress };
+    let released = ReleasedLiveOperationalStartup { progress: std::mem::ManuallyDrop::new(progress.into_inner()) };
     if released.native_terminals(&factory).is_err() {
-        let progress = std::mem::ManuallyDrop::new(released.into_progress());
+        let progress = crate::unwind_custody::UnwindRetained::new(
+            OPERATIONAL_STARTUP_CLOSE_UNWIND, released.into_progress());
         return Err(retain(progress));
     }
     Ok(released)
@@ -1297,7 +1387,7 @@ impl ReleasedLiveOperationalPhysicalCustody {
     /// The registry-free part of final exhaustion. The dropped frame settles
     /// on exactly these checks.
     fn require_exhausted_holders(&self) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign failed-start Operational frame at exhaustion");
         anyhow::ensure!(self.parent.is_none(),
             "failed-start Operational parent body remains at exhaustion");
@@ -1312,27 +1402,42 @@ impl ReleasedLiveOperationalPhysicalCustody {
 }
 impl Drop for ReleasedLiveOperationalPhysicalCustody {
     fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept the frame. Each
-        // retained slot is taken exactly once, here; otherwise the parent
-        // body, its parts and the startup metadata stay retained together
-        // until the process exits.
-        let settled = self.require_exhausted_holders().is_ok();
-        let parent = unsafe { std::mem::ManuallyDrop::take(&mut self.parent) };
-        let parent_parts = unsafe { std::mem::ManuallyDrop::take(&mut self.parent_parts) };
-        let metadata = unsafe { std::mem::ManuallyDrop::take(&mut self._metadata) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((parent, parent_parts, metadata));
+        // Settled exactly when final exhaustion would accept the frame; it then
+        // releases normally. Otherwise the parent body, its parts, the
+        // receiver, the startup metadata and the marker source stay retained
+        // together until the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before the settled check, which may allocate.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
+        let settled = self.require_exhausted_holders().is_ok();
+        let whole = unsafe { self.take_whole() };
         if settled {
-            drop(parent);
-            drop(parent_parts);
-            drop(metadata);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::released-live-operational-physical-custody",
-                (parent, parent_parts, metadata));
+            lillux::custody::abandon("ryeos-state::released-live-operational-physical-custody", whole);
         }
+    }
+}
+impl ReleasedLiveOperationalPhysicalCustody {
+    /// Move every owned field out of the frame, in declaration order, leaving
+    /// only emptied slots and plain copied facts. The replacements allocate
+    /// nothing, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            std::mem::replace(&mut self.factory_identity, Weak::new()),
+            std::mem::ManuallyDrop::take(&mut self.join),
+            std::mem::ManuallyDrop::take(&mut self.parent),
+            std::mem::ManuallyDrop::take(&mut self.parent_parts),
+            std::mem::ManuallyDrop::take(&mut self._metadata),
+            self.marker_source.take(),
+        )}
     }
 }
 
@@ -1344,6 +1449,7 @@ mod custody_drop_tests {
     const PHYSICAL: &str = "ryeos-state::released-live-operational-physical-custody";
     const PROGRESS: &str = "ryeos-state::operational-startup-close-progress";
     const STARTUP: &str = "ryeos-state::released-live-operational-startup";
+    const RECOVERY: &str = "ryeos-state::operational-startup-recovery-failure";
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
@@ -1380,7 +1486,7 @@ mod custody_drop_tests {
         ReleasedLiveOperationalPhysicalCustody {
             process: std::process::id(),
             factory_identity: Weak::new(),
-            join: crate::state_db::OriginalStateDestinationJoin::exhausted_for_test(),
+            join: std::mem::ManuallyDrop::new(crate::state_db::OriginalStateDestinationJoin::exhausted_for_test()),
             parent: std::mem::ManuallyDrop::new(None),
             parent_parts: std::mem::ManuallyDrop::new(Some(
                 crate::state_db::live_native::LiveStatePhysicalParent::exhausted_for_test())),
@@ -1420,12 +1526,12 @@ mod custody_drop_tests {
             native_failure: None,
             sql_custody: std::mem::ManuallyDrop::new(Vec::new()),
             schema_refusal: std::mem::ManuallyDrop::new(None),
-            custody: LiveOperationalOpenCustody {
+            custody: std::mem::ManuallyDrop::new(LiveOperationalOpenCustody {
                 original, references: None, acquisition: None, owner: None, sync_failure: None,
                 initialization: None,
                 initialization_phase: LiveOperationalInitializationPhase::NotEntered { established_marker: None },
                 marker: None, marker_entered: false,
-            },
+            }),
             close_failure: None, closed: None, released: None, schema_failure: None,
             schema_released: None, partial_durability: None, initialization_retirement: None,
             prior_refusal: None,
@@ -1486,5 +1592,54 @@ mod custody_drop_tests {
             (original, state, runtime, host),
             &format!("progress +{progress_delta}; startup +{startup_delta}"),
         )
+    }
+
+    #[test]
+    fn dropped_recovery_failure_while_closing_is_retained_whole() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_recovery_failure_while_closing_is_retained_whole");
+        // The retained progress keeps a State-parent alias that only the
+        // process end releases, so the scenario runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "recovery +1; progress +0", "{outcome}");
+            return;
+        }
+        let host = crate::test_support::shared_test_host();
+        let runtime = tempfile::tempdir().unwrap();
+        let state = crate::test_support::open_live_state(&host, runtime.path(), Arc::new(crate::refs::TrustStore::new())).unwrap();
+        let original = state.live_native_owner_for_test();
+        let failure = LiveOperationalStartupRecoveryFailure::new(OperationalStartupRecoveryCustody::Closing {
+            factory: Arc::clone(original.factory()),
+            progress: Mutex::new(progress(Arc::clone(&original), Vec::new())),
+        });
+        let before = (abandoned(RECOVERY), abandoned(PROGRESS));
+        drop(failure);
+        let after = (abandoned(RECOVERY), abandoned(PROGRESS));
+        lillux_sqlite::test_host::end_isolated_process(
+            (original, state, runtime, host),
+            &format!("recovery +{}; progress +{}", after.0 - before.0, after.1 - before.1),
+        )
+    }
+}
+
+#[cfg(test)]
+mod startup_refusal_tests {
+    use super::startup_refusal_over_prior;
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended};
+
+    /// A retained-admission recovery refusal met during a startup close is
+    /// classified by itself, not by the refusal retained before it.
+    #[test]
+    fn a_later_startup_refusal_classifies_over_the_earlier_one() {
+        let fact = || anyhow::anyhow!("retained Operational admission recovery refused");
+        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("Operational startup sync");
+        let later_fact = startup_refusal_over_prior(fact(), Some(contended()));
+        assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
+        assert!(format!("{later_fact:#}").contains("Operational startup sync"));
+        let later_contention = startup_refusal_over_prior(anyhow::Error::new(NativeCheckContended), Some(fact()));
+        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(native_refusal_is_fact(&startup_refusal_over_prior(fact(), None)));
     }
 }

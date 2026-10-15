@@ -240,7 +240,7 @@ impl OriginalLiveRuntimeOutsideCustody {
                 directory: std::mem::ManuallyDrop::new(Some(OriginalRuntimeOutsideDirectory::Owned(directory))),
                 shared_directory_identity: None,
                 namespace: std::mem::ManuallyDrop::new(Some(namespace)),
-                semantics: OriginalRuntimeOutsideSemantics::Closed { target, incarnation, domain },
+                semantics: OriginalRuntimeOutsideSemantics::Closed { target, incarnation: Some(incarnation), domain },
                 registrations: std::array::from_fn(|_| None),
                 retired_roots_consumed: false,
             });
@@ -314,12 +314,43 @@ enum OriginalRuntimeOutsideDirectory {
     Shared(Arc<lillux::PinnedDirectory>),
 }
 enum OriginalRuntimeOutsideSemantics {
-    Closed { target: PathBuf, incarnation: RuntimeDbIncarnation, domain: OriginalNativeDomain },
+    // The incarnation is present until the host frame's Drop takes it, so a
+    // forked copy can relinquish it, with the target, unfreed.
+    Closed { target: PathBuf, incarnation: Option<RuntimeDbIncarnation>, domain: OriginalNativeDomain },
     Refused {
-        error: std::mem::ManuallyDrop<anyhow::Error>,
-        unused_inputs: std::mem::ManuallyDrop<Option<lillux_sqlite::OriginalNativeBoundInputs>>,
-        unused_parts: std::mem::ManuallyDrop<Option<OriginalUnusedRuntimeBoundParts>>,
+        // Present until the host frame's Drop takes it. A refusal may wrap a
+        // native owner, so it stays with the frame: retained whole with an
+        // unsettled frame, relinquished whole by a forked copy.
+        error: Option<anyhow::Error>,
+        unused_inputs: UnusedRuntimeBoundInputs,
+        // Its own Drop releases retired parts and retains unretired ones.
+        unused_parts: Option<OriginalUnusedRuntimeBoundParts>,
     },
+}
+/// The refused acquisition's unused bound input. It leaves only by `take`,
+/// to become unused bound parts; dropped while still holding it, wherever
+/// its frame or semantics are dropped or replaced, it retains the input for
+/// the life of the process, counted.
+struct UnusedRuntimeBoundInputs {
+    inputs: Option<lillux_sqlite::OriginalNativeBoundInputs>,
+}
+impl std::ops::Deref for UnusedRuntimeBoundInputs {
+    type Target = Option<lillux_sqlite::OriginalNativeBoundInputs>;
+    fn deref(&self) -> &Self::Target { &self.inputs }
+}
+impl std::ops::DerefMut for UnusedRuntimeBoundInputs {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inputs }
+}
+impl Drop for UnusedRuntimeBoundInputs {
+    fn drop(&mut self) {
+        let Some(inputs) = self.inputs.take() else { return };
+        if lillux::exec::in_forked_child() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(inputs);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::unused-runtime-bound-inputs", inputs);
+    }
 }
 struct OriginalUnusedRuntimeBoundParts {
     root: std::mem::ManuallyDrop<Option<Arc<lillux::PinnedDirectory>>>,
@@ -347,7 +378,8 @@ impl Drop for OriginalUnusedRuntimeBoundParts {
         // otherwise the unused bound root, its authority alias, inspection
         // lease and registration stay retained together until the process
         // exits.
-        let settled = self.retired();
+        let forked = lillux::exec::in_forked_child();
+        let settled = !forked && self.retired();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.root),
             std::mem::ManuallyDrop::take(&mut self.authority),
@@ -355,8 +387,13 @@ impl Drop for OriginalUnusedRuntimeBoundParts {
         )};
         if settled {
             drop(taken);
+            return;
+        }
+        let registration = self.registration.take();
+        if forked {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((taken, registration));
         } else {
-            let registration = self.registration.take();
             lillux::custody::abandon("ryeos-app::unused-runtime-bound-parts", (taken, registration));
         }
     }
@@ -706,7 +743,7 @@ impl OriginalRuntimeAcquisitionOutsideCustody {
                     bail!("actual unused Runtime bound input extraction refused");
                 }
             };
-            **unused_parts = Some(OriginalUnusedRuntimeBoundParts {
+            *unused_parts = Some(OriginalUnusedRuntimeBoundParts {
                 root: std::mem::ManuallyDrop::new(Some(original.root)),
                 authority: std::mem::ManuallyDrop::new(Some(original.authority)),
                 inspection: std::mem::ManuallyDrop::new(original.inspection),
@@ -770,7 +807,7 @@ impl OriginalRuntimeAcquisitionOutsideCustody {
                 shared_directory_identity: Some(Arc::downgrade(&root)),
                 directory: std::mem::ManuallyDrop::new(Some(OriginalRuntimeOutsideDirectory::Shared(root))),
                 namespace: std::mem::ManuallyDrop::new(Some(namespace)),
-                semantics: OriginalRuntimeOutsideSemantics::Refused { error: std::mem::ManuallyDrop::new(error), unused_inputs: std::mem::ManuallyDrop::new(_unused_inputs), unused_parts: std::mem::ManuallyDrop::new(None) },
+                semantics: OriginalRuntimeOutsideSemantics::Refused { error: Some(error), unused_inputs: UnusedRuntimeBoundInputs { inputs: _unused_inputs }, unused_parts: None },
                 registrations: std::array::from_fn(|_| None),
                 retired_roots_consumed: false,
             });
@@ -1013,8 +1050,8 @@ impl OriginalRuntimeOutsideHostContext {
             && self.shared_directory_identity.is_none()
             && self.unused_runtime_source_is_retired(),
             "Runtime host frame retains a root, namespace or registration at exhaustion");
-        if let OriginalRuntimeOutsideSemantics::Refused { error, .. } = &self.semantics {
-            ryeos_state::state_db::require_exhausted_refusals(std::iter::once(&**error))?;
+        if let OriginalRuntimeOutsideSemantics::Refused { error, unused_inputs: _, unused_parts: _ } = &self.semantics {
+            ryeos_state::state_db::require_exhausted_refusals(error.iter())?;
         }
         Ok(())
     }
@@ -1032,32 +1069,36 @@ impl Drop for OriginalRuntimeOutsideHostContext {
         // source left, and a refusal that retains no owner. Each slot is
         // taken exactly once, here; otherwise the directory, namespace,
         // refusal and unused source stay retained together until the process
-        // exits.
-        let settled = self.require_exhausted().is_ok();
+        // exits. Settlement is evaluated only in the original process: the
+        // check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.require_exhausted().is_ok();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.directory),
             std::mem::ManuallyDrop::take(&mut self.namespace),
         )};
-        let refused = match &mut self.semantics {
-            OriginalRuntimeOutsideSemantics::Closed { target: _, incarnation: _, domain: _ } => None,
-            OriginalRuntimeOutsideSemantics::Refused { error, unused_inputs, unused_parts } => unsafe {
-                Some((
-                    std::mem::ManuallyDrop::take(error),
-                    std::mem::ManuallyDrop::take(unused_inputs),
-                    std::mem::ManuallyDrop::take(unused_parts),
-                ))
-            },
+        let (closed, refused) = match &mut self.semantics {
+            OriginalRuntimeOutsideSemantics::Closed { target, incarnation, domain: _ } =>
+                (Some((std::mem::take(target), incarnation.take())), None),
+            OriginalRuntimeOutsideSemantics::Refused { error, unused_inputs, unused_parts } =>
+                (None, Some((error.take(), unused_inputs.take(), unused_parts.take()))),
         };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((taken, refused));
+        if settled {
+            drop((taken, refused, closed));
             return;
         }
-        if settled {
-            drop((taken, refused));
+        let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+        if forked {
+            // A copy in another process holds none of these owners: every slot, the
+            // refusal and the registrations included, is relinquished whole.
+            let identities = (std::mem::replace(&mut self.factory, std::sync::Weak::new()),
+                self.shared_directory_identity.take());
+            lillux::custody::relinquish_in_foreign_process((taken, refused, closed, registrations, identities));
         } else {
-            let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+            // A closed frame's target and incarnation are process memory,
+            // released normally in the original process.
             lillux::custody::abandon("ryeos-app::runtime-outside-host-context", (taken, refused, registrations));
+            drop(closed);
         }
     }
 }
@@ -1081,7 +1122,10 @@ impl Drop for LiveRuntimeNativeSources {
         // schema or failed source and no undelivered packet. Each slot is
         // taken exactly once, here; otherwise the terminals, definition,
         // failure and packets stay retained together until the process exits.
-        let settled = self.require_exhausted().is_ok();
+        // Settlement is evaluated only in the original process: the check may
+        // allocate its refusal.
+        let forked = lillux::exec::in_forked_child();
+        let settled = !forked && self.require_exhausted().is_ok();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.main),
             std::mem::ManuallyDrop::take(&mut self.schema),
@@ -1091,6 +1135,9 @@ impl Drop for LiveRuntimeNativeSources {
         )};
         if settled {
             drop(taken);
+        } else if forked {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(taken);
         } else {
             lillux::custody::abandon("ryeos-app::live-runtime-native-sources", taken);
         }
@@ -1127,15 +1174,17 @@ impl Drop for OriginalLiveRuntimeOutsideCustody {
         // Settled exactly when final exhaustion would accept the frame. Each
         // slot is taken exactly once, here; otherwise the close context, host
         // frame, native sources and refusal stay retained together until the
-        // process exits.
-        let settled = self.require_exhausted_holders().is_ok();
+        // process exits. Settlement is evaluated only in the original
+        // process: the check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.require_exhausted_holders().is_ok();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.context),
             std::mem::ManuallyDrop::take(&mut self.host),
             std::mem::ManuallyDrop::take(&mut self.prior_refusal),
         )};
         let sources = std::mem::replace(&mut self.sources, LiveRuntimeNativeSources::new(None));
-        if self.process != std::process::id() {
+        if forked {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process((taken, sources));
             return;
@@ -1176,14 +1225,16 @@ impl Drop for OriginalRuntimeAcquisitionOutsideCustody {
         // Settled exactly when final exhaustion would accept the frame. Each
         // slot is taken exactly once, here; otherwise the refused body, host
         // frame and native sources stay retained together until the process
-        // exits.
-        let settled = self.require_exhausted_holders().is_ok();
+        // exits. Settlement is evaluated only in the original process: the
+        // check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.require_exhausted_holders().is_ok();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.body),
             std::mem::ManuallyDrop::take(&mut self.host),
         )};
         let sources = std::mem::replace(&mut self.sources, LiveRuntimeNativeSources::new(None));
-        if self.process != std::process::id() {
+        if forked {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process((taken, sources));
             return;
@@ -1297,6 +1348,51 @@ mod custody_drop_tests {
         ryeos_state::test_support::release_shared_test_host(host);
     }
 
+    const UNUSED_INPUTS: &str = "ryeos-app::unused-runtime-bound-inputs";
+
+    /// Refused semantics holding never-opened bound inputs on `root`, or no
+    /// inputs when `with_inputs` is false. No ticket is issued.
+    fn refused_semantics(
+        host: &lillux_sqlite::test_host::TestNativeHost,
+        root: Arc<lillux::PinnedDirectory>,
+        with_inputs: bool,
+    ) -> OriginalRuntimeOutsideSemantics {
+        // SAFETY: test-only issuance under the shared host's own funded factory.
+        let inputs = with_inputs.then(|| unsafe {
+            lillux_sqlite::OriginalNativeBoundInputs::issued(
+                root, std::ffi::OsStr::new("runtime.sqlite3"),
+                lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate,
+                OriginalNativeDomain::NodeRuntime, host.destination(), None,
+            )
+        }.unwrap());
+        OriginalRuntimeOutsideSemantics::Refused {
+            error: Some(anyhow::anyhow!("runtime acquisition refused")),
+            unused_inputs: UnusedRuntimeBoundInputs { inputs },
+            unused_parts: None,
+        }
+    }
+
+    #[test]
+    fn dropped_refused_semantics_retain_their_unused_inputs() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
+        // Semantics dropped on their own, outside any host frame, still
+        // retain unused inputs, counted.
+        let semantics = refused_semantics(&host, Arc::clone(&root), true);
+        let before = abandoned(UNUSED_INPUTS);
+        drop(semantics);
+        assert_eq!(abandoned(UNUSED_INPUTS), before + 1);
+        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
+        // With no inputs left there is nothing to retain.
+        let semantics = refused_semantics(&host, Arc::clone(&root), false);
+        let before = abandoned(UNUSED_INPUTS);
+        drop(semantics);
+        assert_eq!(abandoned(UNUSED_INPUTS), before);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
     /// A refused host frame whose roots were consumed, holding `directory`.
     fn host_context(directory: Option<Arc<lillux::PinnedDirectory>>) -> OriginalRuntimeOutsideHostContext {
         OriginalRuntimeOutsideHostContext {
@@ -1306,9 +1402,9 @@ mod custody_drop_tests {
             shared_directory_identity: None,
             namespace: std::mem::ManuallyDrop::new(None),
             semantics: OriginalRuntimeOutsideSemantics::Refused {
-                error: std::mem::ManuallyDrop::new(anyhow::anyhow!("runtime acquisition refused")),
-                unused_inputs: std::mem::ManuallyDrop::new(None),
-                unused_parts: std::mem::ManuallyDrop::new(None),
+                error: Some(anyhow::anyhow!("runtime acquisition refused")),
+                unused_inputs: UnusedRuntimeBoundInputs { inputs: None },
+                unused_parts: None,
             },
             registrations: std::array::from_fn(|_| None),
             retired_roots_consumed: true,

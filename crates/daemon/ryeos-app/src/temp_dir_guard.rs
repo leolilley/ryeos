@@ -196,8 +196,10 @@ impl Drop for OriginalFiniteScratchCustody {
         // owner and the removal receipt moved into retired registrations.
         // Each slot is taken exactly once, here; otherwise the guard shell,
         // directories, receipt and registrations stay retained together
-        // until the process exits.
-        let settled = self.descriptors_retired().is_ok_and(|retired| retired);
+        // until the process exits. Settlement is evaluated only in the
+        // original process: the check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.descriptors_retired().is_ok_and(|retired| retired);
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.original),
             std::mem::ManuallyDrop::take(&mut self.parent),
@@ -206,15 +208,18 @@ impl Drop for OriginalFiniteScratchCustody {
             std::mem::ManuallyDrop::take(&mut self.receipt_parent),
             std::mem::ManuallyDrop::take(&mut self.receipt_child),
         )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
         if settled {
             drop(taken);
+            return;
+        }
+        let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
+        if forked {
+            // A copy in another process holds none of these owners: every slot, the
+            // registrations and the copied names included, is relinquished
+            // whole.
+            let names = (std::mem::take(&mut self.name), self.receipt_name.take());
+            lillux::custody::relinquish_in_foreign_process((taken, registrations, names));
         } else {
-            let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
             lillux::custody::abandon("ryeos-app::finite-scratch-custody", (taken, registrations));
         }
     }

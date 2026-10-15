@@ -471,38 +471,63 @@ enum NativeSchemaReferenceCustody {
     Terminal(lillux_sqlite::OriginalNativeConnectionTerminal),
 }
 pub struct NativeSchemaSqlReferenceFailure {
-    error: anyhow::Error,
-    factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    // The issuing process, a plain copied fact.
+    process: u32,
+    error: std::mem::ManuallyDrop<anyhow::Error>,
+    factory: std::mem::ManuallyDrop<std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>,
     // A future recovery consumer must take this actual checkout before effects.
     // Discarding a failure cannot close SQLite or release its original owners.
     _custody: std::mem::ManuallyDrop<std::sync::Mutex<NativeSchemaReferenceCustody>>,
     _definition: Option<SchemaSqlDefinition>,
 }
 impl std::fmt::Debug for NativeSchemaSqlReferenceFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("NativeSchemaSqlReferenceFailure").field("error", &self.error).finish_non_exhaustive() }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("NativeSchemaSqlReferenceFailure").field("error", &*self.error).finish_non_exhaustive() }
 }
 impl std::fmt::Display for NativeSchemaSqlReferenceFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "native schema reference retained: {}", self.error) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "native schema reference retained: {}", *self.error) }
 }
 impl std::error::Error for NativeSchemaSqlReferenceFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some((*self.error).as_ref()) }
 }
+/// Every field of a refused schema reference moved out of its owner.
+type NativeSchemaSqlReferenceFailureParts = (
+    anyhow::Error,
+    std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    std::sync::Mutex<NativeSchemaReferenceCustody>,
+    Option<SchemaSqlDefinition>,
+);
 impl NativeSchemaSqlReferenceFailure {
+    fn new(
+        error: anyhow::Error,
+        factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        custody: NativeSchemaReferenceCustody,
+        definition: Option<SchemaSqlDefinition>,
+    ) -> Self {
+        Self {
+            process: std::process::id(),
+            error: std::mem::ManuallyDrop::new(error),
+            factory: std::mem::ManuallyDrop::new(factory),
+            _custody: std::mem::ManuallyDrop::new(std::sync::Mutex::new(custody)),
+            _definition: definition,
+        }
+    }
     /// Move every field out exactly once; the emptied shell is never dropped.
-    fn into_parts(self) -> (
-        anyhow::Error,
-        std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
-        std::sync::Mutex<NativeSchemaReferenceCustody>,
-        Option<SchemaSqlDefinition>,
-    ) {
+    fn into_parts(self) -> NativeSchemaSqlReferenceFailureParts {
         let mut failure = std::mem::ManuallyDrop::new(self);
-        let custody = unsafe { std::mem::ManuallyDrop::take(&mut failure._custody) };
-        let (error, factory, definition) = unsafe {(
-            std::ptr::read(&failure.error),
-            std::ptr::read(&failure.factory),
-            std::ptr::read(&failure._definition),
-        )};
-        (error, factory, custody, definition)
+        unsafe { failure.take_whole() }
+    }
+    /// Move every owned field out of this frame, leaving only emptied slots.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop` or on a shell that is never dropped:
+    /// the taken `ManuallyDrop` slots must never be read again.
+    unsafe fn take_whole(&mut self) -> NativeSchemaSqlReferenceFailureParts {
+        unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.error),
+            std::mem::ManuallyDrop::take(&mut self.factory),
+            std::mem::ManuallyDrop::take(&mut self._custody),
+            self._definition.take(),
+        )}
     }
 }
 impl Drop for NativeSchemaSqlReferenceFailure {
@@ -510,22 +535,23 @@ impl Drop for NativeSchemaSqlReferenceFailure {
         // Only close_retained settles a refused schema reference. A custody
         // that holds no transient inputs, open failure, connection, close
         // failure or terminal owns nothing and releases normally; every other
-        // phase stays retained until the process exits, since SQLite can only
-        // close through its supervised terminal.
-        let mut custody = unsafe { std::mem::ManuallyDrop::take(&mut self._custody) };
-        if self.factory.require_original_process().is_err() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(custody);
+        // phase keeps the whole frame retained until the process exits, since
+        // SQLite can only close through its supervised terminal.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
         let holds_nothing = matches!(
-            custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
+            self._custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
             NativeSchemaReferenceCustody::BeforeOpen(None)
         );
+        let whole = unsafe { self.take_whole() };
         if holds_nothing {
-            drop(custody);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::schema-reference-failure", custody);
+            lillux::custody::abandon("ryeos-state::schema-reference-failure", whole);
         }
     }
 }
@@ -533,10 +559,12 @@ impl Drop for NativeSchemaSqlReferenceFailure {
 /// Disposal evidence from a refused schema construction. It grants no schema
 /// definition or service admission, even if construction had observed data.
 pub struct ReleasedNativeSchemaSqlReference {
-    factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+    // The issuing process, a plain copied fact.
+    process: u32,
+    factory: std::mem::ManuallyDrop<std::sync::Arc<lillux_sqlite::OriginalNativeFactory>>,
     terminal: Option<lillux_sqlite::OriginalNativeConnectionTerminal>,
     unused_transient_inputs: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
-    prior_refusal: anyhow::Error,
+    prior_refusal: std::mem::ManuallyDrop<anyhow::Error>,
     _definition: Option<SchemaSqlDefinition>,
     outside_custody: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
     outside_failure: Option<lillux_sqlite::OriginalNativeOutsideCustodyFailure>,
@@ -552,43 +580,69 @@ struct ReleasedNativeSchemaSqlReferenceParts {
     outside_failure: Option<lillux_sqlite::OriginalNativeOutsideCustodyFailure>,
 }
 impl ReleasedNativeSchemaSqlReference {
+    fn new(
+        factory: std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
+        terminal: Option<lillux_sqlite::OriginalNativeConnectionTerminal>,
+        unused_transient_inputs: Option<lillux_sqlite::OriginalNativeTransientInputs>,
+        prior_refusal: anyhow::Error,
+        definition: Option<SchemaSqlDefinition>,
+    ) -> Self {
+        Self {
+            process: std::process::id(),
+            factory: std::mem::ManuallyDrop::new(factory),
+            terminal,
+            unused_transient_inputs: unused_transient_inputs.map(std::mem::ManuallyDrop::new),
+            prior_refusal: std::mem::ManuallyDrop::new(prior_refusal),
+            _definition: definition,
+            outside_custody: None,
+            outside_failure: None,
+        }
+    }
     /// Move every field out exactly once; the emptied shell is never dropped.
     fn into_parts(self) -> ReleasedNativeSchemaSqlReferenceParts {
         let mut released = std::mem::ManuallyDrop::new(self);
-        let unused_transient_inputs = released.unused_transient_inputs.take()
+        unsafe { released.take_whole() }
+    }
+    /// Move every owned field out of this frame, leaving only emptied slots.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop` or on a shell that is never dropped:
+    /// the taken `ManuallyDrop` slots must never be read again.
+    unsafe fn take_whole(&mut self) -> ReleasedNativeSchemaSqlReferenceParts {
+        let unused_transient_inputs = self.unused_transient_inputs.take()
             .map(std::mem::ManuallyDrop::into_inner);
-        let (factory, terminal, prior_refusal, definition, outside_custody, outside_failure) = unsafe {(
-            std::ptr::read(&released.factory),
-            std::ptr::read(&released.terminal),
-            std::ptr::read(&released.prior_refusal),
-            std::ptr::read(&released._definition),
-            std::ptr::read(&released.outside_custody),
-            std::ptr::read(&released.outside_failure),
+        let (factory, prior_refusal) = unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.factory),
+            std::mem::ManuallyDrop::take(&mut self.prior_refusal),
         )};
-        ReleasedNativeSchemaSqlReferenceParts { factory, terminal, unused_transient_inputs,
-            prior_refusal, definition, outside_custody, outside_failure }
+        ReleasedNativeSchemaSqlReferenceParts { factory, terminal: self.terminal.take(),
+            unused_transient_inputs, prior_refusal, definition: self._definition.take(),
+            outside_custody: self.outside_custody.take(), outside_failure: self.outside_failure.take() }
+    }
+    /// Settled exactly when into_original_parts would accept it: no unused
+    /// transient inputs, outside custody or outside refusal remain. A terminal
+    /// alone releases through its own supervised drop.
+    fn holds_only_terminal(&self) -> bool {
+        self.unused_transient_inputs.is_none() && self.outside_custody.is_none()
+            && self.outside_failure.is_none()
     }
 }
 impl Drop for ReleasedNativeSchemaSqlReference {
     fn drop(&mut self) {
-        // Settled exactly when into_original_parts would accept it: no unused
-        // transient inputs, outside custody or outside refusal remain. A
-        // terminal alone releases through its own supervised drop. Otherwise
-        // every native holder stays retained together until the process exits.
-        let inputs = self.unused_transient_inputs.take().map(std::mem::ManuallyDrop::into_inner);
-        let outside_custody = self.outside_custody.take();
-        let outside_failure = self.outside_failure.take();
-        let terminal = self.terminal.take();
-        if self.factory.require_original_process().is_err() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((inputs, outside_custody, outside_failure, terminal));
+        // Settled exactly when holds_only_terminal; otherwise the whole frame
+        // stays retained together until the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
-        if inputs.is_none() && outside_custody.is_none() && outside_failure.is_none() {
-            drop(terminal);
+        let settled = self.holds_only_terminal();
+        let whole = unsafe { self.take_whole() };
+        if settled {
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::released-schema-reference",
-                (inputs, outside_custody, outside_failure, terminal));
+            lillux::custody::abandon("ryeos-state::released-schema-reference", whole);
         }
     }
 }
@@ -599,8 +653,7 @@ impl ReleasedNativeSchemaSqlReference {
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal)
         -> std::result::Result<(Option<SchemaSqlDefinition>, Option<lillux_sqlite::OriginalNativeConnectionTerminal>, anyhow::Error), Self> {
-        if self.outside_custody.is_some() || self.outside_failure.is_some()
-            || self.unused_transient_inputs.is_some() {
+        if !self.holds_only_terminal() {
             return Err(self);
         }
         if factory.require_original_process().and_then(|_| aggregate.require_original(factory))
@@ -641,6 +694,7 @@ impl ReleasedNativeSchemaSqlReference {
             return Err((self, anyhow::anyhow!(
                 "released schema reference holds a native terminal; it belongs to the census")));
         }
+        let process = self.process;
         let ReleasedNativeSchemaSqlReferenceParts { factory: original_factory, terminal,
             unused_transient_inputs, prior_refusal, definition: _definition, outside_custody,
             outside_failure } = self.into_parts();
@@ -655,8 +709,9 @@ impl ReleasedNativeSchemaSqlReference {
                 Ok(prior_refusal)
             }
             Err(inputs) => Err((
-                Self { factory: original_factory, terminal,
-                    unused_transient_inputs: Some(std::mem::ManuallyDrop::new(inputs)), prior_refusal,
+                Self { process, factory: std::mem::ManuallyDrop::new(original_factory), terminal,
+                    unused_transient_inputs: Some(std::mem::ManuallyDrop::new(inputs)),
+                    prior_refusal: std::mem::ManuallyDrop::new(prior_refusal),
                     _definition, outside_custody, outside_failure },
                 anyhow::anyhow!("unused schema reference inputs belong to another process"),
             )),
@@ -758,8 +813,8 @@ impl NativeSchemaSqlReferenceFailure {
         if self.factory.require_original_process().is_err() { return Err(self); }
         let (error, factory, custody, _definition) = self.into_parts();
         let custody = custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let retain = |custody, error, _definition| Self { error, factory: std::sync::Arc::clone(&factory),
-            _custody: std::mem::ManuallyDrop::new(std::sync::Mutex::new(custody)), _definition };
+        let retain = |custody, error, _definition|
+            Self::new(error, std::sync::Arc::clone(&factory), custody, _definition);
         let mut unused_transient_inputs = None;
         let terminal = match custody {
             NativeSchemaReferenceCustody::BeforeOpen(Some(inputs)) => {
@@ -772,7 +827,7 @@ impl NativeSchemaSqlReferenceFailure {
             NativeSchemaReferenceCustody::Open(mut failure) => {
                 if failure.retained_admission().is_some() {
                     if let Err(refusal) = failure.recover_retained_admission() {
-                        return Err(retain(NativeSchemaReferenceCustody::Open(failure), refusal.context(error), _definition));
+                        return Err(retain(NativeSchemaReferenceCustody::Open(failure), lillux_sqlite::RefusalSupersedes::superseding(refusal, error), _definition));
                     }
                 }
                 match failure.retry_close() {
@@ -797,8 +852,8 @@ impl NativeSchemaSqlReferenceFailure {
             }
         }
         // The refusal is preserved, never converted into successful schema work.
-        Ok(ReleasedNativeSchemaSqlReference { factory, terminal, unused_transient_inputs,
-            prior_refusal: error, _definition, outside_custody: None, outside_failure: None })
+        Ok(ReleasedNativeSchemaSqlReference::new(factory, terminal,
+            unused_transient_inputs.map(std::mem::ManuallyDrop::into_inner), error, _definition))
     }
 }
 
@@ -860,8 +915,8 @@ pub fn prepare_native_schema_sql_reference(
         factory.require_ready()
     })();
     if let Err(error) = result {
-        return Err(NativeSchemaSqlReferenceFailure { error, factory,
-            _custody: std::mem::ManuallyDrop::new(std::sync::Mutex::new(std::mem::ManuallyDrop::into_inner(custody))), _definition: definition });
+        return Err(NativeSchemaSqlReferenceFailure::new(error, factory,
+            std::mem::ManuallyDrop::into_inner(custody), definition));
     }
     // Validate the data half before transferring the inert terminal owner.
     let definition = definition.expect("actual reference observation");
@@ -1043,7 +1098,7 @@ mod native_host_tests {
 mod custody_drop_tests {
     use super::{NativeSchemaReferenceCustody, NativeSchemaSqlReferenceFailure, ReleasedNativeSchemaSqlReference};
     use crate::test_support::{release_shared_test_host, shared_test_host};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     const FAILURE: &str = "ryeos-state::schema-reference-failure";
     const RELEASED: &str = "ryeos-state::released-schema-reference";
@@ -1056,27 +1111,16 @@ mod custody_drop_tests {
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         custody: NativeSchemaReferenceCustody,
     ) -> NativeSchemaSqlReferenceFailure {
-        NativeSchemaSqlReferenceFailure {
-            error: anyhow::anyhow!("schema reference refused"),
-            factory: Arc::clone(factory),
-            _custody: std::mem::ManuallyDrop::new(Mutex::new(custody)),
-            _definition: None,
-        }
+        NativeSchemaSqlReferenceFailure::new(
+            anyhow::anyhow!("schema reference refused"), Arc::clone(factory), custody, None)
     }
 
     fn released(
         factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
         inputs: Option<lillux_sqlite::OriginalNativeTransientInputs>,
     ) -> ReleasedNativeSchemaSqlReference {
-        ReleasedNativeSchemaSqlReference {
-            factory: Arc::clone(factory),
-            terminal: None,
-            unused_transient_inputs: inputs.map(std::mem::ManuallyDrop::new),
-            prior_refusal: anyhow::anyhow!("schema reference refused"),
-            _definition: None,
-            outside_custody: None,
-            outside_failure: None,
-        }
+        ReleasedNativeSchemaSqlReference::new(Arc::clone(factory), None, inputs,
+            anyhow::anyhow!("schema reference refused"), None)
     }
 
     #[test]
@@ -1122,5 +1166,24 @@ mod custody_drop_tests {
             (factory, host),
             &format!("failure +{failure_delta}; released +{released_delta}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod refusal_layer_tests {
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+
+    /// An admission recovery refusal met while settling a schema reference
+    /// open refusal is classified by itself, not by the open refusal.
+    #[test]
+    fn a_later_refusal_classifies_over_the_earlier_one() {
+        let fact = || anyhow::anyhow!("retained admission recovery refused");
+        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("schema reference open");
+        let later_fact = fact().superseding(contended());
+        assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
+        let later_contention = anyhow::Error::new(NativeCheckContended).superseding(fact());
+        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(format!("{later_fact:#}").contains("schema reference open"));
     }
 }

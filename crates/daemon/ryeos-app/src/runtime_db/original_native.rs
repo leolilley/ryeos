@@ -131,7 +131,7 @@ impl OriginalRuntimeAcquisitionFailure {
             AcquisitionCustody::Open(mut owner) => {
                 if owner.retained_admission().is_some() {
                     if let Err(refusal) = owner.recover_retained_admission() {
-                        error = refusal.context(error);
+                        error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
                         Err(AcquisitionCustody::Open(owner))
                     } else {
                         owner.retry_close()
@@ -171,14 +171,14 @@ impl OriginalRuntimeAcquisitionFailure {
                     None => AcquisitionCustody::NotAcquired,
                 },
             };
-            return Err(Self::retained(refusal.context(error), factory, root, namespace,
+            return Err(Self::retained(lillux_sqlite::RefusalSupersedes::superseding(refusal, error), factory, root, namespace,
                 custody, schema_reference));
         }
         // A namespace refusal does not undo an actual native close. Retain it
         // as failure evidence alongside the same physical owners, allowing the
         // outside supervisor to retire those holders without admitting use.
         if let Err(refusal) = namespace.ensure_protects(&root).and_then(|()| root.ensure_path_binding()) {
-            error = refusal.context(error);
+            error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
         }
         Ok(OriginalRuntimeAcquisitionReleased {
             error,
@@ -457,5 +457,24 @@ mod release_tests {
         assert_eq!(Arc::strong_count(&factory), base);
         assert_eq!(Arc::strong_count(&root), 1);
         assert!(!namespace_held(&root));
+    }
+}
+
+#[cfg(test)]
+mod refusal_layer_tests {
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+
+    /// A recovery, terminal or namespace refusal met while settling an acquisition
+    /// refusal is classified by itself, not by the acquisition refusal.
+    #[test]
+    fn a_later_refusal_classifies_over_the_earlier_one() {
+        let fact = || anyhow::anyhow!("namespace no longer protects the runtime root");
+        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("original acquisition");
+        let later_fact = fact().superseding(contended());
+        assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
+        let later_contention = anyhow::Error::new(NativeCheckContended).superseding(fact());
+        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(format!("{later_fact:#}").contains("original acquisition"));
     }
 }

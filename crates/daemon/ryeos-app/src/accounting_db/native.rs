@@ -44,9 +44,34 @@ enum LedgerReference {
     OutsideCustody(OriginalNativeOutsideConnectionCustody),
     Parts {
         parts: Option<OriginalNativeOutsideConnectionParts>,
-        unused: Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+        unused: UnusedLedgerReference,
     },
     Taken,
+}
+
+/// An unused schema reference input waiting in the ledger's parts phase. It
+/// leaves only through `into_outside`, which hands it to the outside
+/// sources. Dropped while still holding it, wherever its reference slot is
+/// dropped or replaced, it retains the input for the life of the process,
+/// counted.
+struct UnusedLedgerReference {
+    inputs: Option<OriginalNativeTransientInputs>,
+}
+impl UnusedLedgerReference {
+    fn into_outside(mut self) -> Option<ManuallyDrop<OriginalNativeTransientInputs>> {
+        self.inputs.take().map(ManuallyDrop::new)
+    }
+}
+impl Drop for UnusedLedgerReference {
+    fn drop(&mut self) {
+        let Some(inputs) = self.inputs.take() else { return };
+        if lillux::exec::in_forked_child() {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process(inputs);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::accounting-unused-reference", inputs);
+    }
 }
 
 struct LedgerNativeState {
@@ -63,10 +88,12 @@ pub struct AccountingNativeLedger {
     state: ManuallyDrop<Mutex<LedgerNativeState>>,
 }
 impl AccountingNativeLedger {
-    /// Move the custody state out exactly once; the emptied shell is never
-    /// dropped.
+    /// Move every field out exactly once, returning the custody state; the
+    /// emptied shell is never dropped, and the recorded process is a copied
+    /// number that owns nothing.
     fn into_state(self) -> Mutex<LedgerNativeState> {
         let mut ledger = ManuallyDrop::new(self);
+        let _process: u32 = ledger.process;
         unsafe { ManuallyDrop::take(&mut ledger.state) }
     }
 }
@@ -77,7 +104,7 @@ impl Drop for AccountingNativeLedger {
         // exactly once, here; otherwise its live, closing, terminal or
         // refused owners stay retained together until the process exits.
         let state = unsafe { ManuallyDrop::take(&mut self.state) };
-        if self.process != std::process::id() {
+        if lillux::exec::in_forked_child() || self.process != std::process::id() {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(state);
             return;
@@ -588,7 +615,10 @@ impl AccountingNativeLedger {
             },
             LedgerReference::Released(released) => {
                 match released.into_outside_parts(&factory, aggregate) {
-                    Ok((parts, unused, _prior_refusal)) => LedgerReference::Parts { parts, unused },
+                    Ok((parts, unused, _prior_refusal)) => LedgerReference::Parts {
+                        parts,
+                        unused: UnusedLedgerReference { inputs: unused.map(ManuallyDrop::into_inner) },
+                    },
                     Err((released, error)) => {
                         state.reference = LedgerReference::Released(released);
                         return Err(error.context("accounting released schema reference retained"));
@@ -597,7 +627,7 @@ impl AccountingNativeLedger {
             }
             LedgerReference::Unused(inputs) => LedgerReference::Parts {
                 parts: None,
-                unused: Some(ManuallyDrop::new(inputs)),
+                unused: UnusedLedgerReference { inputs: Some(inputs) },
             },
             other => other,
         };
@@ -606,7 +636,7 @@ impl AccountingNativeLedger {
             LedgerReference::OutsideCustody(custody) => match custody.into_original_parts() {
                 Ok(parts) => LedgerReference::Parts {
                     parts: Some(parts),
-                    unused: None,
+                    unused: UnusedLedgerReference { inputs: None },
                 },
                 Err(custody) => {
                     state.reference = LedgerReference::OutsideCustody(custody);
@@ -642,7 +672,7 @@ impl AccountingNativeLedger {
         Ok(AccountingNativeOutsideSources {
             connection: Some(ManuallyDrop::new(connection)),
             reference: reference.map(ManuallyDrop::new),
-            unused_reference: unused,
+            unused_reference: unused.into_outside(),
         })
     }
 
@@ -887,6 +917,40 @@ mod tests {
         assert!(connection.is_none() && reference.is_none() && unused_reference.is_some());
         assert_eq!(abandoned(SOURCES), before);
         drop(unused_reference.map(ManuallyDrop::into_inner));
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    const UNUSED_REFERENCE: &str = "ryeos-app::accounting-unused-reference";
+
+    #[test]
+    fn dropped_parts_reference_retains_its_unused_input() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let issue = || {
+            // SAFETY: test-only issuance under the shared host's own funded factory.
+            unsafe {
+                OriginalNativeTransientInputs::issued(
+                    OriginalNativeDomain::NodeAccountingSchemaReference,
+                    host.destination(),
+                )
+            }
+            .unwrap()
+        };
+        // A parts-phase reference dropped with its unused input still in it,
+        // outside any ledger, retains the input, counted.
+        let before = abandoned(UNUSED_REFERENCE);
+        drop(LedgerReference::Parts {
+            parts: None,
+            unused: UnusedLedgerReference { inputs: Some(issue()) },
+        });
+        assert_eq!(abandoned(UNUSED_REFERENCE), before + 1);
+        // Handed to the outside sources, it leaves without being retained.
+        let unused = UnusedLedgerReference { inputs: Some(issue()) };
+        let before = abandoned(UNUSED_REFERENCE);
+        let outside = unused.into_outside();
+        assert!(outside.is_some());
+        assert_eq!(abandoned(UNUSED_REFERENCE), before);
+        drop(outside.map(ManuallyDrop::into_inner));
         ryeos_state::test_support::release_shared_test_host(host);
     }
 

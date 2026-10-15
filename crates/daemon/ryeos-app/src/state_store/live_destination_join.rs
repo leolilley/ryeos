@@ -316,15 +316,24 @@ impl Drop for LiveStoreDestinationJoin {
         // Settled exactly when parent completion would accept this receiver
         // without a registry: no outside completion pending and no parent
         // body retained. The slot is taken exactly once, here; otherwise the
-        // parent body stays retained until the process exits.
+        // parent body stays retained until the process exits. Exclusive
+        // access reaches the slot without entering its mutex.
+        if lillux::exec::in_forked_child() || self.process != std::process::id() {
+            // A copy in another process holds none of these owners: the parent body, the
+            // factory edge and the captured registry identity are
+            // relinquished whole.
+            let original = unsafe { std::mem::ManuallyDrop::take(self.original.get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)) };
+            let factory = std::mem::replace(&mut self.factory, Weak::new());
+            let identity = std::mem::take(&mut self.parent_registry_identity);
+            lillux::custody::relinquish_in_foreign_process((original, factory, identity));
+            return;
+        }
+        // Settlement is evaluated only in the original process: the check
+        // may allocate its refusal.
         let settled = self.require_parent_completed_holders().is_ok();
         let original = unsafe { std::mem::ManuallyDrop::take(self.original.get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(original);
-            return;
-        }
         if settled {
             drop(original);
         } else {

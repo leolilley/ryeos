@@ -26,7 +26,7 @@ pub(crate) struct OriginalGenerationLease {
     // the outside metadata owner must not keep resident storage alive.
     process: u32,
     factory: Weak<OriginalNativeFactory>,
-    root: lillux::PinnedDirectory,
+    root: ManuallyDrop<lillux::PinnedDirectory>,
     name: OsString,
     identity: (u64, u64),
     custody: ManuallyDrop<Mutex<LeaseCustody>>,
@@ -76,7 +76,7 @@ impl OriginalGenerationLease {
         Ok(Arc::new(Self {
             process: std::process::id(),
             factory: Arc::downgrade(&factory),
-            root,
+            root: ManuallyDrop::new(root),
             name,
             identity,
             custody: ManuallyDrop::new(Mutex::new(LeaseCustody::Prepared(inputs))),
@@ -87,7 +87,7 @@ impl OriginalGenerationLease {
     pub(crate) fn try_into_metadata_root(
         self: Arc<Self>,
     ) -> std::result::Result<lillux::PinnedDirectory, Arc<Self>> {
-        if self.process != std::process::id() {
+        if crate::foreign_process(self.process) {
             return Err(self);
         }
         let retired = match self.custody.try_lock() {
@@ -105,12 +105,7 @@ impl OriginalGenerationLease {
                 // does not close a host owner. The process and identity are
                 // plain copied facts.
                 let mut owner = ManuallyDrop::new(owner);
-                let custody = unsafe { ManuallyDrop::take(&mut owner.custody) };
-                let (root, factory, name) = unsafe {(
-                    std::ptr::read(&owner.root),
-                    std::ptr::read(&owner.factory),
-                    std::ptr::read(&owner.name),
-                )};
+                let (factory, root, name, custody) = unsafe { owner.take_whole() };
                 drop(custody);
                 drop(factory);
                 drop(name);
@@ -118,6 +113,22 @@ impl OriginalGenerationLease {
             }
             Err(owner) => Err(owner),
         }
+    }
+    /// Move every owned field out of this owner, leaving only emptied slots
+    /// and plain copied facts. The replacements allocate nothing, so a forked
+    /// child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop` or on a shell that is never dropped:
+    /// the taken `ManuallyDrop` slots must never be read again.
+    unsafe fn take_whole(&mut self)
+        -> (Weak<OriginalNativeFactory>, lillux::PinnedDirectory, OsString, Mutex<LeaseCustody>) {
+        unsafe {(
+            std::mem::replace(&mut self.factory, Weak::new()),
+            ManuallyDrop::take(&mut self.root),
+            std::mem::take(&mut self.name),
+            ManuallyDrop::take(&mut self.custody),
+        )}
     }
     fn require_coordinate(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         factory.require_original_process()?;
@@ -315,21 +326,23 @@ impl Drop for OriginalGenerationLease {
         // Settled exactly when try_into_metadata_root would accept it: retired
         // in its issuing process. Every other phase holds prepared inputs, a
         // live native lock, a refusal, a closed disposition or an effect
-        // checkout, so the custody stays retained until the process exits.
-        let mut custody = unsafe { ManuallyDrop::take(&mut self.custody) };
-        if self.process != std::process::id() {
-            // A copy in another process holds no native lock owner.
-            lillux::custody::relinquish_in_foreign_process(custody);
+        // checkout, so the whole owner, its pinned root included, stays
+        // retained until the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds no native lock
+            // owner or root; it gives them up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
         let retired = matches!(
-            custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
+            self.custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
             LeaseCustody::Retired
         );
+        let whole = unsafe { self.take_whole() };
         if retired {
-            drop(custody);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::generation-lease", custody);
+            lillux::custody::abandon("ryeos-state::generation-lease", whole);
         }
     }
 }
@@ -346,7 +359,7 @@ mod custody_drop_tests {
         OriginalGenerationLease {
             process: std::process::id(),
             factory: Weak::new(),
-            root,
+            root: ManuallyDrop::new(root),
             name: OsString::from("generated.sqlite3.lease"),
             identity: (0, 0),
             custody: ManuallyDrop::new(Mutex::new(custody)),

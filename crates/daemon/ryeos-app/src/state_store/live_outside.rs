@@ -225,7 +225,8 @@ fn producer_metadata_pin_phase(
 struct OriginalPacketBoundResources {
     _root: ManuallyDrop<Option<std::sync::Arc<lillux::PinnedDirectory>>>,
     registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
-    _name: lillux_sqlite::OriginalNativeOutsideBoundCoordinate,
+    // Taken by Drop so a forked copy can relinquish it unfreed.
+    _name: ManuallyDrop<lillux_sqlite::OriginalNativeOutsideBoundCoordinate>,
     _mode: lillux_sqlite::OriginalNativeBoundMode,
     _domain: lillux_sqlite::OriginalNativeDomain,
     _inspection: ManuallyDrop<Option<(lillux_sqlite::SqliteCopyLease,
@@ -243,16 +244,27 @@ impl Drop for OriginalPacketBoundResources {
         // Settled exactly when no root, inspection or registration remains.
         // Each slot is taken exactly once, here; otherwise the bound root and
         // inspection lease stay retained together until the process exits.
-        let settled = self.holders_retired();
+        // The bound coordinate is process memory, released normally in the
+        // original process.
+        let forked = lillux::exec::in_forked_child();
+        let settled = !forked && self.holders_retired();
+        let name = unsafe { ManuallyDrop::take(&mut self._name) };
         let taken = unsafe {(
             ManuallyDrop::take(&mut self._root),
             ManuallyDrop::take(&mut self._inspection),
         )};
         if settled {
-            drop(taken);
+            drop((taken, name));
+            return;
+        }
+        let registration = self.registration.take();
+        if forked {
+            // A copy in another process holds none of these owners and frees nothing:
+            // the coordinate is relinquished with them.
+            lillux::custody::relinquish_in_foreign_process((taken, registration, name));
         } else {
-            let registration = self.registration.take();
             lillux::custody::abandon("ryeos-app::packet-bound-resources", (taken, registration));
+            drop(name);
         }
     }
 }
@@ -491,7 +503,7 @@ impl OriginalPacketPartsProgress {
                     root, name, mode, domain, authority, inspection } = bound;
                 *self.bound = Some(OriginalPacketBoundResources {
                     _root: ManuallyDrop::new(Some(root)), registration: None,
-                    _name: name, _mode: mode,
+                    _name: ManuallyDrop::new(name), _mode: mode,
                     _domain: domain, _inspection: ManuallyDrop::new(inspection) });
                 *self.authority = Some(authority);
             } else { *self.authority = parts.transient.take(); }
@@ -1184,22 +1196,27 @@ impl Drop for UnopenedSchedulerDatabaseProgress {
         // joined, registration consumed and no root, authority or inspection
         // owner left. Each slot is taken exactly once, here; otherwise the
         // bound root, authority alias and inspection lease stay retained
-        // together until the process exits.
-        let settled = self.require_exhausted().is_ok();
+        // together until the process exits. Settlement is evaluated only in
+        // the original process: the check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.require_exhausted().is_ok();
         let taken = unsafe {(
             ManuallyDrop::take(&mut self.root),
             ManuallyDrop::take(&mut self.authority),
             ManuallyDrop::take(&mut self.inspection),
         )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
         if settled {
             drop(taken);
+            return;
+        }
+        let registration = self.registration.take();
+        if forked {
+            // A copy in another process holds none of these owners: every slot, the
+            // registration and the bound coordinate included, is
+            // relinquished whole.
+            let coordinates = (self.handoff_id.take(), self.name.take(), self.mode.take(), self.domain.take());
+            lillux::custody::relinquish_in_foreign_process((taken, registration, coordinates));
         } else {
-            let registration = self.registration.take();
             lillux::custody::abandon("ryeos-app::unopened-scheduler-database", (taken, registration));
         }
     }
@@ -1285,13 +1302,13 @@ impl Drop for UnopenedNativeTransientProgress {
         // Settled exactly when is_joined holds: the authority alias joined
         // the inventory and left this slot. The slot is taken exactly once,
         // here; otherwise the alias stays retained until the process exits.
-        let settled = self.is_joined();
         let authority = unsafe { ManuallyDrop::take(&mut self.authority) };
-        if self.process != std::process::id() {
+        if lillux::exec::in_forked_child() || self.process != std::process::id() {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(authority);
             return;
         }
+        let settled = self.is_joined();
         if settled {
             drop(authority);
         } else {
@@ -1323,8 +1340,10 @@ impl Drop for OriginalPacketPartsProgress {
         // Settled exactly when exhaustion would accept the packet: source
         // parts consumed and no source, destination, root or pin owner left.
         // Each slot is taken exactly once, here; otherwise every owner stays
-        // retained together until the process exits.
-        let settled = self.require_exhausted().is_ok();
+        // retained together until the process exits. Settlement is evaluated
+        // only in the original process: the check may allocate its refusal.
+        let forked = lillux::exec::in_forked_child() || self.process != std::process::id();
+        let settled = !forked && self.require_exhausted().is_ok();
         let taken = unsafe {(
             ManuallyDrop::take(&mut self.bound),
             ManuallyDrop::take(&mut self.authority),
@@ -1335,15 +1354,19 @@ impl Drop for OriginalPacketPartsProgress {
             ManuallyDrop::take(&mut self.raw),
             ManuallyDrop::take(&mut self.parts),
         )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
         if settled {
             drop(taken);
+            return;
+        }
+        let refusal = self.refusal.take();
+        if forked {
+            // A copy in another process holds none of these owners: every slot, the
+            // refusal and the copied census and identities included, is
+            // relinquished whole.
+            let copied = (self.optional_source_census.take(), self.scheduler_handoff.take(),
+                self.native_domain.take(), self.metadata_pin_registry_identity.take());
+            lillux::custody::relinquish_in_foreign_process((taken, refusal, copied));
         } else {
-            let refusal = self.refusal.take();
             lillux::custody::abandon("ryeos-app::packet-parts-progress", (taken, refusal));
         }
     }
@@ -2069,7 +2092,7 @@ impl Drop for LiveStateStoreOutsideCustody {
         // or the final exhaustion consume. The source is taken exactly once,
         // here, and stays retained until the process exits.
         let source = unsafe { ManuallyDrop::take(&mut self._source) };
-        if self.process != std::process::id() {
+        if lillux::exec::in_forked_child() || self.process != std::process::id() {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(source);
             return;
@@ -3272,7 +3295,7 @@ mod custody_drop_tests {
         drop((authority, inspection));
         OriginalPacketBoundResources {
             _root: ManuallyDrop::new(keep_root.then_some(root)),
-            registration: None, _name: name, _mode: mode, _domain: domain,
+            registration: None, _name: ManuallyDrop::new(name), _mode: mode, _domain: domain,
             _inspection: ManuallyDrop::new(None),
         }
     }

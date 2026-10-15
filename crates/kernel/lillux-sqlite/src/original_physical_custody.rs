@@ -23,7 +23,7 @@ impl OriginalPhysicalCallbackPanic {
     /// with the actual supervisor. Busy/foreign-process refusal keeps it here.
     pub fn take_original_payload(&self) -> Result<Option<Box<dyn std::any::Any + Send>>> {
         ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original physical panic custody"
         );
         let mut payload = self
@@ -156,8 +156,8 @@ impl OriginalPhysicalRegistration {
     /// Matching source roles or descriptor identities do not make memberships
     /// equivalent across registries.
     pub fn same_member(&self, other: &Self) -> Result<bool> {
-        ensure!(self.observation.process == std::process::id()
-            && other.observation.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.observation.process)
+            && !crate::foreign_process(other.observation.process),
             "foreign original physical membership");
         Ok(Arc::ptr_eq(&self.observation, &other.observation))
     }
@@ -169,8 +169,8 @@ impl OriginalPhysicalRegistration {
     /// from another inventory.
     pub fn source_slot_in(&self, expected: &OriginalPhysicalRegistryIdentity) -> Result<usize> {
         ensure!(
-            self.observation.process == std::process::id()
-                && expected.process == std::process::id()
+            !crate::foreign_process(self.observation.process)
+                && !crate::foreign_process(expected.process)
                 && Arc::ptr_eq(&self.observation.registry, &expected.identity),
             "original physical registration belongs to another registry"
         );
@@ -182,13 +182,13 @@ impl OriginalPhysicalRegistration {
     /// Ordinary descriptor retirement must leave this role pending until the
     /// original account finishes durable work under the retained lock.
     pub fn is_operator_lock(&self) -> Result<bool> {
-        ensure!(self.observation.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.observation.process),
             "foreign original physical membership");
         Ok(self.observation.operator)
     }
     #[cfg(target_os = "linux")]
     pub fn operator_target_retired(&self) -> Result<bool> {
-        ensure!(self.observation.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.observation.process),
             "foreign original physical membership");
         Ok(self.observation.operator && self.observation.operator_target_retired.get().is_some())
     }
@@ -196,13 +196,13 @@ impl OriginalPhysicalRegistration {
     /// evidence. The complete original registry must still establish membership
     /// and census; a decoded matching identity never substitutes for its owner.
     pub fn observed_source_identity(&self) -> Result<OriginalPhysicalSourceIdentity> {
-        ensure!(self.observation.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.observation.process),
             "foreign original physical source observation");
         Ok(self.observation.source_identity)
     }
     pub fn owner(&self) -> Result<Arc<RetainedOriginalFinalizerFile>> {
         ensure!(
-            self.observation.process == std::process::id(),
+            !crate::foreign_process(self.observation.process),
             "foreign original physical membership"
         );
         self.observation
@@ -215,7 +215,7 @@ impl OriginalPhysicalRegistration {
     }
     pub fn receipt(&self) -> Result<Arc<RetiredOriginalFinalizerFile>> {
         ensure!(
-            self.observation.process == std::process::id(),
+            !crate::foreign_process(self.observation.process),
             "foreign original physical membership"
         );
         let owner = self.owner()?;
@@ -235,7 +235,7 @@ impl OriginalPhysicalRegistration {
         &self,
         retired_registry: &RetiredOriginalPhysicalRegistry,
     ) -> Result<Arc<RetiredOriginalFinalizerFile>> {
-        ensure!(self.observation.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.observation.process),
             "foreign original physical membership");
         retired_registry.require_same_identity_token(&self.observation.registry)?;
         self.receipt()
@@ -269,8 +269,8 @@ impl OriginalPhysicalRegistryIdentity {
     /// pre-disposal join must later be matched to the exact retired inventory.
     pub fn require_same_registry(&self, other: &Self) -> Result<()> {
         ensure!(
-            self.process == std::process::id()
-                && other.process == std::process::id()
+            !crate::foreign_process(self.process)
+                && !crate::foreign_process(other.process)
                 && Arc::ptr_eq(&self.identity, &other.identity),
             "original physical registry identities differ"
         );
@@ -293,7 +293,7 @@ impl RetiredOriginalPhysicalRegistry {
     /// post-disposal owners use this only to make receipt consumption
     /// idempotent for the same physical inventory.
     pub fn identity(&self) -> Result<OriginalPhysicalRegistryIdentity> {
-        ensure!(self.process == std::process::id(),
+        ensure!(!crate::foreign_process(self.process),
             "foreign retired original physical registry");
         Ok(OriginalPhysicalRegistryIdentity {
             process: self.process,
@@ -306,8 +306,8 @@ impl RetiredOriginalPhysicalRegistry {
         expected: &OriginalPhysicalRegistryIdentity,
     ) -> Result<()> {
         ensure!(
-            self.process == std::process::id()
-                && expected.process == std::process::id()
+            !crate::foreign_process(self.process)
+                && !crate::foreign_process(expected.process)
                 && Arc::ptr_eq(&self.identity, &expected.identity),
             "retired physical registry differs from the exact original registry"
         );
@@ -316,7 +316,7 @@ impl RetiredOriginalPhysicalRegistry {
 
     pub(crate) fn require_same_identity_token(&self, expected: &Arc<()>) -> Result<()> {
         ensure!(
-            self.process == std::process::id() && Arc::ptr_eq(&self.identity, expected),
+            !crate::foreign_process(self.process) && Arc::ptr_eq(&self.identity, expected),
             "retired physical registry differs from the exact original identity"
         );
         Ok(())
@@ -449,7 +449,7 @@ impl OriginalPhysicalRegistry {
     }
     fn require_process(&self) -> Result<()> {
         ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original physical registry"
         );
         Ok(())
@@ -1123,7 +1123,7 @@ impl OriginalPhysicalRegistry {
     /// remains in the SAME inventory and prevents full descriptor completion.
     /// This is not a native-disposal, account-settlement or lock-close receipt.
     pub fn non_account_descriptors_retired(&self) -> bool {
-        self.process == std::process::id()
+        !crate::foreign_process(self.process)
             && self.sealed
             && !self.slots.is_empty()
             && self.slots.iter().filter(|slot| !slot.observation.operator).all(|slot| {
@@ -1144,7 +1144,7 @@ impl OriginalPhysicalRegistry {
         })
     }
     pub fn descriptors_retired(&self) -> bool {
-        self.process == std::process::id()
+        !crate::foreign_process(self.process)
             && self.sealed
             && !self.slots.is_empty()
             && self.slots.iter().all(|slot| {
@@ -1162,7 +1162,7 @@ impl Drop for OriginalPhysicalRegistry {
         // all releases its slots normally. Otherwise its sources, close owners
         // and operator locks stay retained until the process exits.
         let slots = unsafe { ManuallyDrop::take(&mut self.slots) };
-        if self.process != std::process::id() {
+        if crate::foreign_process(self.process) {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(slots);
             return;

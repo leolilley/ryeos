@@ -20,6 +20,17 @@ pub use native::*;
 use rusqlite::{Connection, OpenFlags};
 use std::{ffi::OsStr, sync::Arc};
 
+/// Whether the running process is a copy of the process recorded as an
+/// owner's issuer. The child of a protected fork is recognized by lillux's
+/// fork barrier, which holds even when a nested PID namespace hands the child
+/// the same pid its parent had; the pid comparison additionally refuses a copy
+/// made by a fork lillux did not supervise. Reads one atomic and makes one
+/// `getpid` call: no allocation and no lock, so a destructor may consult it
+/// before touching anything copied.
+pub(crate) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
+
 /// Read bounded evidence from an exact no-follow child without disturbing
 /// any descriptor tracked by this process's SQLite backend. The native gate
 /// excludes role aliases and spans the data open, read and close; only bytes
@@ -425,8 +436,11 @@ pub trait SqliteInspectionCopyWork: Send + Sync {
 
 /// One original output descriptor. Arc aliases refer to this owner, never File.
 pub struct RetainedSqliteDestinationRole {
-    root: lillux::PinnedDirectoryIdentity,
-    name: std::ffi::OsString,
+    process: u32,
+    // Both are taken exactly once, by this role's `Drop`, so a copy in
+    // another process can give up the whole role without freeing anything.
+    root: std::mem::ManuallyDrop<lillux::PinnedDirectoryIdentity>,
+    name: std::mem::ManuallyDrop<std::ffi::OsString>,
     identity: std::sync::OnceLock<(u64, u64)>,
     state: std::sync::Mutex<DestinationRoleState>,
 }
@@ -449,8 +463,9 @@ impl RetainedSqliteDestinationRole {
         name: std::ffi::OsString,
     ) -> Self {
         Self {
-            root,
-            name,
+            process: std::process::id(),
+            root: std::mem::ManuallyDrop::new(root),
+            name: std::mem::ManuallyDrop::new(name),
             identity: std::sync::OnceLock::new(),
             state: std::sync::Mutex::new(DestinationRoleState::Open(file)),
         }
@@ -469,7 +484,7 @@ impl RetainedSqliteDestinationRole {
     }
     pub fn require_original(&self, root: &PinnedDirectory, name: &OsStr) -> Result<()> {
         ensure!(
-            root.identity()? == self.root && self.name == name,
+            root.identity()? == *self.root && *self.name == *name,
             "output selects another original root or role"
         );
         Ok(())
@@ -561,7 +576,7 @@ impl RetainedSqliteDestinationRole {
         ensure_role_cleanup_names(&self.name, source, quarantine).map_err(fail)?;
         (|| -> Result<()> {
             ensure!(
-                root.identity()? == self.root,
+                root.identity()? == *self.root,
                 "planned removal selects foreign root"
             );
             Ok(())
@@ -671,16 +686,26 @@ impl RetainedSqliteDestinationRole {
 impl Drop for RetainedSqliteDestinationRole {
     fn drop(&mut self) {
         // Unsupervised last-drop is preservation, never alias-close evidence.
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poison) => poison.into_inner(),
-        };
-        if let DestinationRoleState::Open(file) =
-            std::mem::replace(state, DestinationRoleState::Retired)
-        {
+        // The coordinate and the held state are taken exactly once, here,
+        // without a lock: the mutex is reached through exclusive access.
+        let root = unsafe { std::mem::ManuallyDrop::take(&mut self.root) };
+        let name = unsafe { std::mem::ManuallyDrop::take(&mut self.name) };
+        let state = std::mem::replace(
+            self.state.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
+            DestinationRoleState::Retired,
+        );
+        if crate::foreign_process(self.process) {
+            // A copy in another process holds no descriptor of the original;
+            // the whole copied role is relinquished without allocating,
+            // locking or running a destructor.
+            lillux::custody::relinquish_in_foreign_process((root, name, state));
+            return;
+        }
+        if let DestinationRoleState::Open(file) = state {
             retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::DestinationRole, file);
         }
         // PendingRaw is also preserved. No close of an unverified numeric FD.
+        drop((root, name));
     }
 }
 /// What kind of SQLite owner was retained without supervised close.
@@ -834,7 +859,7 @@ impl SqliteInspectionBodyAuthority {
             "cleanup selects nonoriginal role owner"
         );
         ensure!(
-            role.root == self.root.identity()?,
+            *role.root == self.root.identity()?,
             "cleanup selects foreign original inode root"
         );
         Ok(())
@@ -877,10 +902,19 @@ struct OriginalWitnessRemovalState {
 }
 impl Drop for OriginalWitnessRemovalState {
     fn drop(&mut self) {
-        // Only the transfer after durable removal and witness retirement ends
-        // the retained cleanup parent. Without it the parent directory stays
-        // held until the process exits.
-        if let Some(parent) = unsafe { std::mem::ManuallyDrop::take(&mut self.parent) } {
+        // A cleanup parent still present here belongs to a removal that never
+        // settled: the owning witness releases it first once the original is
+        // durably removed and its descriptor retired. An unsettled parent
+        // directory stays held until the process exits. In a forked child
+        // the whole copied state is relinquished, its name and work handle
+        // included, without allocating or running a destructor.
+        let parent = unsafe { std::mem::ManuallyDrop::take(&mut self.parent) };
+        if lillux::exec::in_forked_child() {
+            lillux::custody::relinquish_in_foreign_process(
+                (parent, self.quarantine.take(), self.work.take()));
+            return;
+        }
+        if let Some(parent) = parent {
             lillux::custody::abandon("lillux-sqlite::witness-removal-parent", parent);
         }
     }
@@ -890,6 +924,30 @@ pub struct RetainedOriginalWitnessFile {
     process: u32,
     original: RetainedSqliteDestinationRole,
     removal: std::sync::Mutex<Option<OriginalWitnessRemovalState>>,
+}
+impl Drop for RetainedOriginalWitnessFile {
+    fn drop(&mut self) {
+        // Settled exactly when the original is durably removed and its
+        // descriptor retired: the cleanup parent has no remaining use and is
+        // released here. Any other removal leaves the parent in place, so the
+        // removal state's own drop retains it. A copy in another process
+        // relinquishes its copied removal state whole, parent included,
+        // without allocating, locking or running that state's destructor.
+        let removal = self.removal.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if crate::foreign_process(self.process) {
+            lillux::custody::relinquish_in_foreign_process(removal.take());
+            return;
+        }
+        let retired = matches!(
+            *self.original.state.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
+            DestinationRoleState::Retired
+        );
+        if let Some(removal) = removal {
+            if retired && removal.phase == OriginalWitnessRemovalPhase::RemovedDurable {
+                drop(removal.parent.take());
+            }
+        }
+    }
 }
 impl std::fmt::Debug for RetainedOriginalWitnessFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -917,7 +975,7 @@ impl RetainedOriginalWitnessFile {
         }
     }
     fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original witness owner");
+        ensure!(!crate::foreign_process(self.process), "foreign original witness owner");
         Ok(())
     }
     pub fn identity_original(&self) -> Result<lillux::OpenFileIdentity> {
@@ -992,7 +1050,7 @@ impl RetainedOriginalWitnessFile {
             }
             if original.quarantine.is_none() {
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
-                quarantine.push(&self.original.name);
+                quarantine.push(&*self.original.name);
                 original.quarantine = Some(quarantine);
             }
             Ok(())
@@ -1047,7 +1105,7 @@ impl RetainedOriginalWitnessFile {
                 self.require_original_process()?;
                 *original.parent = Some(Arc::new(parent.try_clone()?));
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
-                quarantine.push(&self.original.name);
+                quarantine.push(&*self.original.name);
                 original.quarantine = Some(quarantine);
             }
             let retained_parent = original.parent.as_ref().expect("cached original witness parent").clone();
@@ -1085,7 +1143,7 @@ impl RetainedOriginalWitnessFile {
                         };
                         if let Some(progress) = self.original_removal_progress(original, &work) {
                             if let Err(callback) = work.retain_original_witness_progress(&progress) {
-                                return Err(callback.context(error));
+                                return Err(crate::RefusalSupersedes::superseding(callback, anyhow::Error::new(error)));
                             }
                         }
                         return Err(anyhow::Error::new(error));
@@ -7245,6 +7303,9 @@ mod guarded_inspection_copy_controls {
     }
     #[test]
     fn dropped_witness_with_prepared_parent_retains_the_parent() {
+        // The witness tests that count this abandoned kind run under the same
+        // native-host serial guard, so no count here races another.
+        let _host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
         let name = OsStr::new("prepared.original");
@@ -7304,6 +7365,8 @@ mod guarded_inspection_copy_controls {
             steps: std::sync::atomic::AtomicU64::new(0),
         });
         let cleanup: Arc<dyn OriginalWitnessCleanupWork> = work.clone();
+        let kind = "lillux-sqlite::witness-removal-parent";
+        let retained_before = lillux::custody::abandoned_custody().count(kind);
         let removed = owner
             .remove_original_planned(cleanup, &root, work.deadline)
             .unwrap();
@@ -7336,6 +7399,45 @@ mod guarded_inspection_copy_controls {
         assert!(alias.metadata_original().is_err());
         assert!(alias.read_original(8192).is_err());
         assert_eq!(foreign.read_original(8192).unwrap(), b"foreign witness");
+        // Durably removed and retired is settled: the last drop releases the
+        // cleanup parent and nothing is retained for the process lifetime.
+        drop(retired);
+        drop(removed);
+        drop(alias);
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(kind), retained_before);
+        // The never-removed foreign fixture still holds its open original and
+        // is dropped only after the settled-owner assertion.
+        drop(foreign);
+    }
+    #[test]
+    fn dropped_witness_removed_but_unretired_retains_the_parent() {
+        let host = crate::test_host::TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = pin(tmp.path());
+        let (initialize, ticket) = armed_stock(&host, &tmp.path().join("initialize.sqlite3"));
+        close_armed(&host, initialize, ticket);
+        let name = OsStr::new("unretired.original");
+        let owner = Arc::new(RetainedOriginalWitnessFile::created(
+            root.atomic_create_regular(name, b"unretired witness", 0o600, crate::SQLITE_TEMP_PURPOSE)
+                .unwrap()
+                .unwrap(),
+            root.identity().unwrap(),
+            name.to_os_string(),
+        ));
+        let work = Arc::new(MechanismWitnessWork {
+            parent: root.try_clone().unwrap(),
+            deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
+            steps: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cleanup: Arc<dyn OriginalWitnessCleanupWork> = work.clone();
+        let removed = owner.remove_original_planned(cleanup, &root, work.deadline).unwrap();
+        assert!(root.entry_no_follow(name).unwrap().is_none());
+        let kind = "lillux-sqlite::witness-removal-parent";
+        let before = lillux::custody::abandoned_custody().count(kind);
+        drop(removed);
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(kind), before + 1);
     }
     #[test]
     fn native_production_requires_genuine_terminal_acknowledgement() {

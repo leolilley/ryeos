@@ -49,6 +49,14 @@ pub mod state_db;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+mod unwind_custody;
+
+/// Whether an owner recorded in process `process` is only a copy here: this
+/// is a forked child, supervised or not, or another process altogether. Reads
+/// one atomic and the process id; no lock and no allocation.
+pub(crate) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
 pub mod verify;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};

@@ -1400,33 +1400,47 @@ struct RetiredLiveStateHostAliases {
 }
 impl Drop for LiveStatePhysicalParent {
     fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept these parts.
-        // Each retained slot is taken exactly once, here; otherwise the host,
-        // trust map, join link and every root, registration and recovery
-        // owner stay retained together until the process exits.
-        let settled = self.require_exhausted_holders().is_ok();
-        let host = unsafe { std::mem::ManuallyDrop::take(&mut self._host) };
-        let trust = unsafe { std::mem::ManuallyDrop::take(&mut self._trust) };
-        let join_link = unsafe { std::mem::ManuallyDrop::take(&mut self._join_link) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((host, trust, join_link));
+        // Settled exactly when final exhaustion would accept these parts; they
+        // then release normally. Otherwise the host, trust map, join link and
+        // every root, registration and recovery owner stay retained together
+        // until the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before the settled check, which may allocate or lock.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
+        let settled = self.require_exhausted_holders().is_ok();
+        let whole = unsafe { self.take_whole() };
         if settled {
-            drop(host);
-            drop(trust);
-            drop(join_link);
+            drop(whole);
         } else {
-            lillux::custody::abandon("ryeos-state::live-state-physical-parent", (
-                host, trust, join_link,
-                self.runtime.take(), self.namespace.take(),
-                std::mem::replace(&mut self.roots, std::array::from_fn(|_| None)),
-                std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None)),
-                self.retired_host.take(), self._recovery.take(),
-                std::mem::replace(&mut self.recovery_registrations, LiveRecoveryPhysicalRegistrations::empty()),
-            ));
+            lillux::custody::abandon("ryeos-state::live-state-physical-parent", whole);
         }
+    }
+}
+impl LiveStatePhysicalParent {
+    /// Move every owned field out of these parts, in declaration order,
+    /// leaving only emptied slots and plain copied facts. The replacements
+    /// allocate nothing, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            self.runtime.take(),
+            self.namespace.take(),
+            std::mem::replace(&mut self.roots, std::array::from_fn(|_| None)),
+            std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None)),
+            self.registry_identity.take(),
+            std::mem::ManuallyDrop::take(&mut self._host),
+            self.retired_host.take(),
+            self._recovery.take(),
+            std::mem::replace(&mut self.recovery_registrations, LiveRecoveryPhysicalRegistrations::empty()),
+            std::mem::ManuallyDrop::take(&mut self._trust),
+            std::mem::ManuallyDrop::take(&mut self._join_link),
+        )}
     }
 }
 impl LiveStatePhysicalParent {
@@ -1991,8 +2005,29 @@ impl ReleasedLiveStateStartup {
                 projection_native: std::mem::ManuallyDrop::take(&mut released.projection_native),
                 projection_refusals: std::mem::ManuallyDrop::take(&mut released.projection_refusals),
                 destination_inputs: std::mem::ManuallyDrop::take(&mut released.destination_inputs),
-                destination_join: std::ptr::read(&released.destination_join),
+                destination_join: std::mem::take(&mut released.destination_join),
                 progress: std::mem::ManuallyDrop::take(&mut released.progress),
+            }
+        }
+    }
+    /// Move every owned field out of this frame, leaving only emptied slots
+    /// and the plain retired fact. Nothing here allocates, so a forked child
+    /// may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> ReleasedLiveStateStartupParts {
+        unsafe {
+            ReleasedLiveStateStartupParts {
+                schema_pending: std::mem::ManuallyDrop::take(&mut self.schema_pending),
+                schema_definitions: std::mem::ManuallyDrop::take(&mut self.schema_definitions),
+                projection_files: std::mem::ManuallyDrop::take(&mut self.projection_files),
+                projection_native: std::mem::ManuallyDrop::take(&mut self.projection_native),
+                projection_refusals: std::mem::ManuallyDrop::take(&mut self.projection_refusals),
+                destination_inputs: std::mem::ManuallyDrop::take(&mut self.destination_inputs),
+                destination_join: std::mem::take(&mut self.destination_join),
+                progress: std::mem::ManuallyDrop::take(&mut self.progress),
             }
         }
     }
@@ -2002,19 +2037,16 @@ impl Drop for ReleasedLiveStateStartup {
         // No drop settles a released startup: its progress always holds the
         // State parent, whose namespace exclusion, roots and host authority
         // end only through the physical-custody or census transfer that
-        // consumes this frame whole. Each slot is taken exactly once, here,
-        // and everything stays retained until the process exits.
-        let parts = unsafe {(
-            std::mem::ManuallyDrop::take(&mut self.schema_pending),
-            std::mem::ManuallyDrop::take(&mut self.schema_definitions),
-            std::mem::ManuallyDrop::take(&mut self.projection_files),
-            std::mem::ManuallyDrop::take(&mut self.projection_native),
-            std::mem::ManuallyDrop::take(&mut self.projection_refusals),
-            std::mem::ManuallyDrop::take(&mut self.destination_inputs),
-            std::mem::take(&mut self.destination_join),
-            std::mem::ManuallyDrop::take(&mut self.progress),
-        )};
-        lillux::custody::abandon("ryeos-state::released-live-state-startup", parts);
+        // consumes this frame whole. The whole frame stays retained until the
+        // process exits.
+        let whole = unsafe { self.take_whole() };
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(whole);
+            return;
+        }
+        lillux::custody::abandon("ryeos-state::released-live-state-startup", whole);
     }
 }
 // Original failed-start frame after its redundant parent edges end. Retaining
@@ -2024,7 +2056,7 @@ pub struct ReleasedLiveStatePhysicalCustody {
     projection_physical: std::mem::ManuallyDrop<super::live_native::LiveProjectionPhysicalCustody>,
     parent: std::mem::ManuallyDrop<Option<super::live_native::LiveStateNativeOwner>>,
     parent_parts: std::mem::ManuallyDrop<Option<super::live_native::LiveStatePhysicalParent>>,
-    join: Arc<super::destination_join::OriginalStateDestinationJoin>,
+    join: std::mem::ManuallyDrop<Arc<super::destination_join::OriginalStateDestinationJoin>>,
     _context: std::mem::ManuallyDrop<Option<RetiredStartupProjectionContext>>,
     _schema: std::mem::ManuallyDrop<(Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>,
         Vec<crate::sqlite_schema::SchemaSqlDefinition>,
@@ -2349,7 +2381,8 @@ impl ReleasedLiveStateStartup {
             projection_physical: std::mem::ManuallyDrop::new(super::live_native::LiveProjectionPhysicalCustody::empty()),
             parent: std::mem::ManuallyDrop::new(None),
             parent_parts: std::mem::ManuallyDrop::new(None),
-            process: std::process::id(), join: destination_join.into_inner().expect("checked failed State receiver"),
+            process: std::process::id(),
+            join: std::mem::ManuallyDrop::new(destination_join.into_inner().expect("checked failed State receiver")),
             _context: std::mem::ManuallyDrop::new(context),
             _schema: std::mem::ManuallyDrop::new((schema_pending, schema_definitions, schema_admission_custody)),
             _projection: std::mem::ManuallyDrop::new((projection_files, projection_native, projection_refusals)),
@@ -2783,9 +2816,39 @@ impl ReleasedLiveStateStartup {
 }
 enum StartupRecoveryCustody {
     Opening(LiveStateDatabaseOpenFailure),
-    Closing { factory: Arc<OriginalNativeFactory>, progress: std::mem::ManuallyDrop<Mutex<StartupCloseProgress>> },
+    Closing { factory: Arc<OriginalNativeFactory>, progress: Mutex<StartupCloseProgress> },
 }
-pub struct LiveStateStartupRecoveryFailure { custody: StartupRecoveryCustody }
+pub struct LiveStateStartupRecoveryFailure { custody: std::mem::ManuallyDrop<StartupRecoveryCustody> }
+impl LiveStateStartupRecoveryFailure {
+    fn new(custody: StartupRecoveryCustody) -> Self {
+        Self { custody: std::mem::ManuallyDrop::new(custody) }
+    }
+    /// Move the whole custody out exactly once; the emptied shell is never
+    /// dropped.
+    fn into_custody(self) -> StartupRecoveryCustody {
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        unsafe { std::mem::ManuallyDrop::take(&mut failure.custody) }
+    }
+}
+impl Drop for LiveStateStartupRecoveryFailure {
+    fn drop(&mut self) {
+        // No drop settles a refused recovery. An opening failure retains its
+        // own checkout through that checkout's Drop; a closing progress stays
+        // retained whole, with its factory alias, until the process exits.
+        let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(custody);
+            return;
+        }
+        match custody {
+            StartupRecoveryCustody::Opening(failure) => drop(failure),
+            StartupRecoveryCustody::Closing { factory, progress } =>
+                lillux::custody::abandon("ryeos-state::state-startup-recovery-failure", (factory, progress)),
+        }
+    }
+}
 impl std::fmt::Debug for LiveStateStartupRecoveryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveStateStartupRecoveryFailure").finish_non_exhaustive()
@@ -2798,7 +2861,7 @@ impl std::error::Error for LiveStateStartupRecoveryFailure {}
 impl LiveStateDatabaseOpenFailure {
     pub fn close_retained(self) -> std::result::Result<ReleasedLiveStateStartup, LiveStateStartupRecoveryFailure> {
         if self.factory.require_original_process().is_err() {
-            return Err(LiveStateStartupRecoveryFailure { custody: StartupRecoveryCustody::Opening(self) });
+            return Err(LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Opening(self)));
         }
         let Self { error, factory: _, _custody } = self;
         let mut custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2848,29 +2911,29 @@ impl LiveStateDatabaseOpenFailure {
 }
 impl LiveStateStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveStateStartup, Self> {
-        match self.custody {
+        match self.into_custody() {
             StartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             StartupRecoveryCustody::Closing { factory, progress } => {
                 if factory.require_original_process().is_err() {
-                    return Err(Self { custody: StartupRecoveryCustody::Closing { factory, progress } });
+                    return Err(Self::new(StartupRecoveryCustody::Closing { factory, progress }));
                 }
-                advance_startup_close(std::mem::ManuallyDrop::into_inner(progress)
-                    .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                advance_startup_close(progress.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
             }
         }
     }
 }
+/// Kind under which a startup close progress unwound mid-step is retained.
+const STARTUP_CLOSE_UNWIND: &str = "ryeos-state::state-startup-close-unwind";
 fn advance_startup_close(progress: StartupCloseProgress)
     -> std::result::Result<ReleasedLiveStateStartup, LiveStateStartupRecoveryFailure> {
-    // Unwind cannot implicitly drop active SQL or generation custody. Normal
-    // success/refusal explicitly transfers this one actual checkout.
-    let mut progress = std::mem::ManuallyDrop::new(progress);
-    let retain = |progress: std::mem::ManuallyDrop<StartupCloseProgress>| {
-        let progress = std::mem::ManuallyDrop::into_inner(progress);
-        LiveStateStartupRecoveryFailure {
-            custody: StartupRecoveryCustody::Closing { factory: Arc::clone(progress.original.factory()),
-                progress: std::mem::ManuallyDrop::new(Mutex::new(progress)) },
-        }
+    // Unwind cannot implicitly drop active SQL or generation custody: the
+    // guard retains this one actual checkout if a step panics. Normal
+    // success/refusal explicitly transfers it.
+    let mut progress = crate::unwind_custody::UnwindRetained::new(STARTUP_CLOSE_UNWIND, progress);
+    let retain = |progress: crate::unwind_custody::UnwindRetained<StartupCloseProgress>| {
+        let progress = progress.into_inner();
+        LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Closing {
+            factory: Arc::clone(progress.original.factory()), progress: Mutex::new(progress) })
     };
     let factory = Arc::clone(progress.original.factory());
     let validated = (|| -> anyhow::Result<_> {
@@ -2914,10 +2977,12 @@ fn advance_startup_close(progress: StartupCloseProgress)
         projection_native: std::mem::ManuallyDrop::new(Vec::new()),
         projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
         destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
-        destination_join: std::sync::OnceLock::new(), progress };
+        destination_join: std::sync::OnceLock::new(),
+        progress: std::mem::ManuallyDrop::new(progress.into_inner()) };
     if released.native_terminals(&factory).is_err() {
         // Only the progress carries owners; the other slots are still empty.
-        let progress = std::mem::ManuallyDrop::new(released.into_parts().progress);
+        let progress = crate::unwind_custody::UnwindRetained::new(
+            STARTUP_CLOSE_UNWIND, released.into_parts().progress);
         return Err(retain(progress));
     }
     Ok(released)
@@ -3142,33 +3207,47 @@ impl ReleasedLiveStatePhysicalCustody {
 }
 impl Drop for ReleasedLiveStatePhysicalCustody {
     fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept the frame. Each
-        // retained slot is taken exactly once, here; otherwise every cached
-        // source, parent part, context, schema, projection and Operational
-        // owner stays retained together until the process exits.
+        // Settled exactly when final exhaustion would accept the frame; it then
+        // releases normally. Otherwise every cached source, parent part,
+        // context, schema, projection, Operational owner and receipt stays
+        // retained together until the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before the settled check, which may allocate or lock.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
         let settled = self.require_exhausted_holders().is_ok();
-        let taken = unsafe {(
+        let whole = unsafe { self.take_whole() };
+        if settled {
+            drop(whole);
+        } else {
+            lillux::custody::abandon("ryeos-state::released-live-state-physical-custody", whole);
+        }
+    }
+}
+impl ReleasedLiveStatePhysicalCustody {
+    /// Move every owned field out of this frame, in declaration order, leaving
+    /// only emptied slots and plain copied facts. The replacements allocate
+    /// nothing, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
             std::mem::ManuallyDrop::take(&mut self.projection_physical),
             std::mem::ManuallyDrop::take(&mut self.parent),
             std::mem::ManuallyDrop::take(&mut self.parent_parts),
+            std::mem::ManuallyDrop::take(&mut self.join),
             std::mem::ManuallyDrop::take(&mut self._context),
             std::mem::ManuallyDrop::take(&mut self._schema),
             std::mem::ManuallyDrop::take(&mut self._projection),
             std::mem::ManuallyDrop::take(&mut self.operational),
             std::mem::ManuallyDrop::take(&mut self._refusal),
-        )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
-        if settled {
-            drop(taken);
-        } else {
-            let metadata_pins = std::mem::replace(&mut self.metadata_pins, StateMetadataPinRetirement::empty());
-            lillux::custody::abandon("ryeos-state::released-live-state-physical-custody",
-                (taken, metadata_pins));
-        }
+            std::mem::replace(&mut self.metadata_pins, StateMetadataPinRetirement::empty()),
+            self.native_retired.take(),
+        )}
     }
 }
 
@@ -3179,6 +3258,7 @@ mod custody_drop_tests {
     const PARENT: &str = "ryeos-state::live-state-physical-parent";
     const PHYSICAL: &str = "ryeos-state::released-live-state-physical-custody";
     const STARTUP: &str = "ryeos-state::released-live-state-startup";
+    const RECOVERY: &str = "ryeos-state::state-startup-recovery-failure";
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
@@ -3215,7 +3295,8 @@ mod custody_drop_tests {
             projection_physical: std::mem::ManuallyDrop::new(LiveProjectionPhysicalCustody::exhausted_for_test()),
             parent: std::mem::ManuallyDrop::new(None),
             parent_parts: std::mem::ManuallyDrop::new(Some(LiveStatePhysicalParent::exhausted_for_test())),
-            join: super::super::destination_join::OriginalStateDestinationJoin::exhausted_for_test(),
+            join: std::mem::ManuallyDrop::new(
+                super::super::destination_join::OriginalStateDestinationJoin::exhausted_for_test()),
             _context: std::mem::ManuallyDrop::new(None),
             _schema: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
             _projection: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
@@ -3246,6 +3327,43 @@ mod custody_drop_tests {
         // The frame is held whole; its exhausted parent parts inside it are
         // never dropped, so they record nothing of their own.
         assert_eq!((abandoned(PHYSICAL), abandoned(PARENT)), (before.0 + 1, before.1));
+    }
+
+    #[test]
+    fn dropped_recovery_failure_while_closing_is_retained_whole() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_recovery_failure_while_closing_is_retained_whole");
+        // The retained progress keeps the live State parent and its namespace
+        // exclusion, which only the process end releases, so the scenario
+        // runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "recovery +1; parent retained", "{outcome}");
+            return;
+        }
+        let host = crate::test_support::shared_test_host();
+        let runtime = tempfile::tempdir().unwrap();
+        let state = crate::test_support::open_live_state(&host, runtime.path(), Arc::new(TrustStore::new())).unwrap();
+        let original = state.live_native_owner_for_test();
+        let parent = Arc::downgrade(&original);
+        let failure = LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Closing {
+            factory: Arc::clone(original.factory()),
+            progress: Mutex::new(StartupCloseProgress {
+                original, context: None, operational: None, operational_failure: None,
+                operational_closed: None, operational_outside: None, projection_failure: None,
+                projection_released: None, schema_failure: None, schema_released: None,
+                schema_admission_custody: Vec::new(), publication_custody: Vec::new(),
+                lease_setup_custody: Vec::new(), prior_refusal: None,
+            }),
+        });
+        let before = abandoned(RECOVERY);
+        drop(failure);
+        let delta = abandoned(RECOVERY) - before;
+        let retained = if parent.upgrade().is_some() { "parent retained" } else { "parent released" };
+        lillux_sqlite::test_host::end_isolated_process(
+            (state, runtime, host),
+            &format!("recovery +{delta}; {retained}"),
+        )
     }
 
     #[test]

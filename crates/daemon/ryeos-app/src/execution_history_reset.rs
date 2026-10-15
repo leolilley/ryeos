@@ -306,7 +306,7 @@ impl SchedulerResetPreview<'_> {
                 controller.retain_unproven_scheduler_terminal(factory, terminal);
                 let refusal = anyhow!("scheduler inspection terminal carries no copy proof");
                 let refusal = match accounting {
-                    Err(error) => error.context(refusal),
+                    Err(error) => lillux_sqlite::RefusalSupersedes::superseding(refusal, error),
                     Ok(_) => refusal,
                 };
                 return Err(refuse(
@@ -5056,5 +5056,31 @@ mod tests {
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
             assert_eq!(recovery_entries(tmp.path()), recovery_before, "refusal records no recovery state");
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_layer_tests {
+    use super::SchedulerCopyRefusal;
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+
+    /// A terminal that carries no copy proof is a later refusal over the
+    /// inspection's own accounting refusal: the copy refusal that carries
+    /// both is classified by the later refusal, and still names the earlier.
+    #[test]
+    fn a_missing_copy_proof_classifies_over_the_accounting_refusal() {
+        let wrap = |error: anyhow::Error| anyhow::Error::new(SchedulerCopyRefusal {
+            error,
+            _sql: None,
+            _namespace: None,
+        });
+        let accounting = || anyhow::Error::new(FixedHostRefusal::Contended).context("scheduler accounting read");
+        let refusal = || anyhow::anyhow!("scheduler inspection terminal carries no copy proof");
+        let fact = wrap(refusal().superseding(accounting()));
+        assert!(native_refusal_is_fact(&fact), "{fact:#}");
+        assert!(format!("{fact:#}").contains("scheduler accounting read"), "{fact:#}");
+        let contention = wrap(anyhow::Error::new(NativeCheckContended).superseding(refusal()));
+        assert!(!native_refusal_is_fact(&contention), "{contention:#}");
     }
 }

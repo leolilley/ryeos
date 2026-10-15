@@ -3,6 +3,14 @@
 use super::*;
 use lillux_sqlite::{OriginalNativeConnectionTerminal, OriginalNativeFactory};
 
+/// Whether an owner recorded in process `process` is only a copy here: this
+/// is a forked child, supervised or not, or another process altogether. Reads
+/// one atomic and the process id; no lock and no allocation, so a destructor
+/// may consult it before touching anything copied.
+pub(super) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
+
 struct StoreCloseMetadata {
     original: Option<Arc<live_native::LiveStateOpen>>,
     authority: Option<ryeos_state::PinnedStateAuthority>,
@@ -43,7 +51,7 @@ impl AuxiliaryDirectorySource {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store metadata directory source");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store metadata directory source");
         if !self.required {
             anyhow::ensure!(self.pinned.is_none() && self.shared.is_none() && self.registration.is_none(),
                 "absent Store metadata directory acquired a physical source");
@@ -68,7 +76,7 @@ impl AuxiliaryDirectorySource {
                 .checked_add(2 * std::mem::size_of::<usize>())
                 .context("Store metadata directory source quote overflow")?;
             registry.prepay_transfer(prepay, u64::try_from(bytes)?, 2)?;
-            anyhow::ensure!(self.process == std::process::id(), "foreign Store metadata source after funding");
+            anyhow::ensure!(!foreign_process(self.process), "foreign Store metadata source after funding");
             self.pinned.take().map(Arc::new).expect("checked Store metadata directory source")
         };
         match unsafe { registry.register_directory(owner, prepay) } {
@@ -92,7 +100,7 @@ impl AuxiliaryDirectorySource {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store metadata directory receipt");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store metadata directory receipt");
         if !self.required {
             anyhow::ensure!(self.pinned.is_none() && self.shared.is_none() && self.registration.is_none(),
                 "absent Store metadata directory acquired a physical source");
@@ -122,7 +130,7 @@ impl AuxiliaryNamespaceSource {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store namespace source");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store namespace source");
         if !self.required {
             anyhow::ensure!(self.owner.is_none() && self.registration.is_none(),
                 "absent Store namespace acquired a physical source");
@@ -140,7 +148,7 @@ impl AuxiliaryNamespaceSource {
         }
         self.owner.as_ref().context("Store namespace source absent")?;
         registry.prepay_transfer(prepay, 0, 2)?;
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store namespace after funding");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store namespace after funding");
         let owner = self.owner.take().expect("checked Store namespace source");
         match unsafe { registry.register_namespace(owner, prepay) } {
             Ok(binding) => {
@@ -158,7 +166,7 @@ impl AuxiliaryNamespaceSource {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store metadata namespace receipt");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store metadata namespace receipt");
         if !self.required {
             anyhow::ensure!(self.owner.is_none() && self.registration.is_none(),
                 "absent Store metadata namespace acquired a physical source");
@@ -221,7 +229,7 @@ impl StoreAuxiliaryPhysicalSources {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store auxiliary physical sources");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store auxiliary physical sources");
         for source in self.state_directories.iter_mut().chain(self.thread_directories.iter_mut()) {
             source.register(registry, prepay)?;
         }
@@ -234,7 +242,7 @@ impl StoreAuxiliaryPhysicalSources {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store recovery aliases");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store recovery aliases");
         state.retire_recovery_aliases(&mut self.state_recovery, registry, prepay)
     }
 
@@ -242,7 +250,7 @@ impl StoreAuxiliaryPhysicalSources {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store auxiliary receipt frame");
+        anyhow::ensure!(!foreign_process(self.process), "foreign Store auxiliary receipt frame");
         anyhow::ensure!(self.state_recovery.is_none(),
             "retired Store metadata retains a RecoveryStore alias");
         for source in self.state_directories.iter().chain(self.thread_directories.iter()) {
@@ -253,6 +261,8 @@ impl StoreAuxiliaryPhysicalSources {
 }
 
 struct StoreCloseProgress {
+    /// The process that built this progress; any other process holds a copy.
+    process: u32,
     store_parent: std::mem::ManuallyDrop<Option<live_native::LiveStateOpen>>,
     store_parent_parts: std::mem::ManuallyDrop<Option<live_native::LiveStorePhysicalParent>>,
     store_parent_finalization: Option<live_native::LiveStoreParentFinalizationParts>,
@@ -268,7 +278,7 @@ struct StoreCloseProgress {
     runtime_sql_custody: Option<std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
     physical_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
     auxiliary_physical_sources: Option<StoreAuxiliaryPhysicalSources>,
-    metadata: StoreCloseMetadata,
+    metadata: std::mem::ManuallyDrop<StoreCloseMetadata>,
     runtime: Option<runtime_db::RuntimeDb>,
     runtime_failure: Option<runtime_db::OriginalRuntimeCloseFailure>,
     runtime_closed: Option<runtime_db::OriginalRuntimeClosed>,
@@ -321,6 +331,7 @@ impl StoreCloseProgress {
 }
 /// Every field of a StoreCloseProgress moved out of its owner, unwrapped.
 struct StoreCloseProgressParts {
+    process: u32,
     store_parent: Option<live_native::LiveStateOpen>,
     store_parent_parts: Option<live_native::LiveStorePhysicalParent>,
     store_parent_finalization: Option<live_native::LiveStoreParentFinalizationParts>,
@@ -352,6 +363,7 @@ impl StoreCloseProgress {
         let mut progress = std::mem::ManuallyDrop::new(self);
         unsafe {
             StoreCloseProgressParts {
+                process: progress.process,
                 store_parent: std::mem::ManuallyDrop::take(&mut progress.store_parent),
                 store_parent_parts: std::mem::ManuallyDrop::take(&mut progress.store_parent_parts),
                 store_parent_finalization: std::ptr::read(&progress.store_parent_finalization),
@@ -367,7 +379,7 @@ impl StoreCloseProgress {
                 runtime_sql_custody: std::ptr::read(&progress.runtime_sql_custody).map(std::mem::ManuallyDrop::into_inner),
                 physical_registry: std::ptr::read(&progress.physical_registry),
                 auxiliary_physical_sources: std::ptr::read(&progress.auxiliary_physical_sources),
-                metadata: std::ptr::read(&progress.metadata),
+                metadata: std::mem::ManuallyDrop::take(&mut progress.metadata),
                 runtime: std::ptr::read(&progress.runtime),
                 runtime_failure: std::ptr::read(&progress.runtime_failure),
                 runtime_closed: std::ptr::read(&progress.runtime_closed),
@@ -386,10 +398,16 @@ impl Drop for StoreCloseProgress {
         // without a registry. Each retained slot is taken exactly once, here;
         // otherwise every parent, packet, registry, Runtime and State owner,
         // with the metadata's Store alias and authorities, stays retained
-        // together until the process exits. The metadata's projection health,
-        // barrier, bookkeeping, abort handles, handler controls and signer
-        // are process memory and own no descriptor.
-        let settled = self.require_exhausted_holders().is_ok();
+        // together until the process exits. The rest of the metadata
+        // (projection health, barrier, bookkeeping, abort handles, handler
+        // controls, signer and launch owners) is process memory owning no
+        // descriptor, released normally in the original process. A forked
+        // copy releases nothing: it relinquishes every slot and the whole
+        // metadata. Settlement is evaluated only in the original process: the
+        // check may allocate its refusal.
+        let forked = foreign_process(self.process);
+        let settled = !forked && self.require_exhausted_holders().is_ok();
+        let mut metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.metadata) };
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.store_parent),
             std::mem::ManuallyDrop::take(&mut self.store_parent_parts),
@@ -401,6 +419,27 @@ impl Drop for StoreCloseProgress {
         )};
         if settled {
             drop(taken);
+            drop(metadata);
+        } else if forked {
+            let rest = (
+                self.store_parent_finalization.take(),
+                std::mem::take(&mut self.store_destination_join),
+                self.scheduler_unopened_database.take(),
+                self.scheduler_unopened_schema_reference.take(),
+                self.accounting_unopened_schema_reference.take(),
+                self.scheduler_admission_sources.take(),
+                self.physical_registry.take(),
+                self.auxiliary_physical_sources.take(),
+                self.runtime.take(),
+                self.runtime_failure.take(),
+                self.runtime_closed.take(),
+                self.runtime_outside.take(),
+                self.state.take(),
+                self.state_failure.take(),
+                self.state_closed.take(),
+                self.state_physical.take(),
+            );
+            lillux::custody::relinquish_in_foreign_process((taken, metadata, rest));
         } else {
             let rest = (
                 self.store_parent_finalization.take(),
@@ -411,7 +450,7 @@ impl Drop for StoreCloseProgress {
                 self.scheduler_admission_sources.take(),
                 self.physical_registry.take(),
                 self.auxiliary_physical_sources.take(),
-                (self.metadata.original.take(), self.metadata.authority.take(), self.metadata._thread_authority.take()),
+                (metadata.original.take(), metadata.authority.take(), metadata._thread_authority.take()),
                 self.runtime.take(),
                 self.runtime_failure.take(),
                 self.runtime_closed.take(),
@@ -422,6 +461,7 @@ impl Drop for StoreCloseProgress {
                 self.state_physical.take(),
             );
             lillux::custody::abandon("ryeos-app::store-close-progress", (taken, rest));
+            drop(metadata);
         }
     }
 }
@@ -451,13 +491,20 @@ impl Drop for ClosedLiveStateStore {
         // Settled exactly when the progress inside would settle and the prior
         // refusal retains nothing. The progress is taken exactly once, here;
         // otherwise it stays retained whole, with the refusal, until the
-        // process exits.
-        let settled = self.require_exhausted_holders().is_ok();
+        // process exits. Settlement is evaluated only in the original
+        // process: the check may allocate its refusal.
+        let forked = foreign_process(self.progress.process);
+        let settled = !forked && self.require_exhausted_holders().is_ok();
         let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
         if settled {
             drop(progress);
+            return;
+        }
+        let prior_refusal = self.prior_refusal.take();
+        if forked {
+            // A copy in another process holds none of these owners.
+            lillux::custody::relinquish_in_foreign_process((progress, prior_refusal));
         } else {
-            let prior_refusal = self.prior_refusal.take();
             lillux::custody::abandon("ryeos-app::closed-store", (progress, prior_refusal));
         }
     }
@@ -678,7 +725,7 @@ impl ClosedLiveStateStore {
             Err(error) => return Err((self, error)),
         };
         let (progress, prior_refusal) = self.into_parts();
-        let StoreCloseProgressParts { store_parent, store_parent_parts, store_parent_finalization,
+        let StoreCloseProgressParts { process: _, store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
@@ -1374,7 +1421,7 @@ impl ClosedLiveStateStore {
             }
         };
         let (progress, prior_refusal) = self.into_parts();
-        let StoreCloseProgressParts { store_parent, store_parent_parts, store_parent_finalization,
+        let StoreCloseProgressParts { process: _, store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
@@ -1427,7 +1474,7 @@ impl Drop for LiveStateStoreCloseFailure {
         // the returned Store or a census may end. The whole custody stays
         // retained until the process exits.
         let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
-        if self.factory.require_original_process().is_err() {
+        if lillux::exec::in_forked_child() {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(custody);
             return;
@@ -1465,6 +1512,9 @@ impl LiveStateStoreCloseFailure {
         advance_close(factory, custody.into_inner().unwrap_or_else(|p| p.into_inner()), Some(error))
     }
 }
+/// Kind under which a close progress is retained when the close unwinds
+/// before handing it back.
+const STORE_CLOSE_UNWOUND_KIND: &str = "ryeos-app::store-close-unwound";
 fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody,
     prior: Option<anyhow::Error>) -> std::result::Result<ClosedLiveStateStore, LiveStateStoreCloseFailure> {
     let retain = |error, custody| LiveStateStoreCloseFailure { error, factory: Arc::clone(&factory), custody: std::mem::ManuallyDrop::new(Mutex::new(custody)) };
@@ -1476,7 +1526,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         },
         other => other,
     };
-    let mut progress = match custody {
+    let progress = match custody {
         StoreCloseCustody::Store(store) => {
             let checked = (|| -> Result<()> {
                 store.live_native_open.as_ref().context("actual live Store opening owner absent")?.require_close_factory(&factory)?;
@@ -1500,6 +1550,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
             // retention/SQL mutex is held through the consuming close below.
             let Inner { state_db, runtime_db, signer, active_launch_owners } = inner.into_inner().unwrap_or_else(|p| p.into_inner());
             StoreCloseProgress {
+                process: std::process::id(),
                 store_parent: std::mem::ManuallyDrop::new(None), store_parent_parts: std::mem::ManuallyDrop::new(None),
                 store_parent_finalization: None,
                 store_destination_join: std::sync::OnceLock::new(),
@@ -1512,13 +1563,13 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
                 runtime_sql_custody: None,
                 physical_registry: None,
                 auxiliary_physical_sources: None,
-                metadata: StoreCloseMetadata { original: Some(live_native_open.expect("validated actual live opening owner")),
+                metadata: std::mem::ManuallyDrop::new(StoreCloseMetadata { original: Some(live_native_open.expect("validated actual live opening owner")),
                     authority: Some(state_authority), _thread_authority: thread_runtime_authority,
                     _projection_health: projection_health, _mode: (read_only, allow_projection_rebuild),
                     _barrier: write_barrier, _attachment_gate: process_attachment_admission_open,
                     _attachment_closed: process_attachment_admission_closed, _attached: attached_processes, _live_workers: live_workers,
                     _selected: selected_invocations, _launches: launch_task_abort_handles,
-                    _handlers: active_in_process_handlers, _signer: signer, _active_launch_owners: active_launch_owners },
+                    _handlers: active_in_process_handlers, _signer: signer, _active_launch_owners: active_launch_owners }),
                 runtime: Some(runtime_db), runtime_failure: None, runtime_closed: None, runtime_outside: None,
                 state: Some(state_db), state_failure: None, state_closed: None, state_physical: None,
             }
@@ -1530,9 +1581,10 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         }
         StoreCloseCustody::Shared(_) => unreachable!("shared custody resolved before native close"),
     };
-    let mut progress = std::mem::ManuallyDrop::new(progress);
+    // An unwind through the close retains the progress whole, counted.
+    let mut progress = live_native::RetainedUntilTaken::new(STORE_CLOSE_UNWOUND_KIND, progress);
     if let Err(error) = progress.metadata.original().and_then(|original| original.require_close_factory(&factory)) {
-        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(std::mem::ManuallyDrop::into_inner(progress))));
+        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress.into_inner())));
     }
     // Resolve the real CAS guard before taking either SQL owner, preserving
     // both unchanged if the exact existing anchor cannot be acquired.
@@ -1540,7 +1592,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         .context("actual Store pinned authority absent before close")
         .and_then(|authority| authority.acquire_exclusive_guard(false)) {
         Ok(guard) => guard,
-        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(std::mem::ManuallyDrop::into_inner(progress)))),
+        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress.into_inner()))),
     };
     if let Some(runtime) = progress.runtime.take() {
         match runtime.close_original_runtime(Arc::clone(&factory)) {
@@ -1554,7 +1606,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         }
     }
     if progress.runtime_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(std::mem::ManuallyDrop::into_inner(progress))));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(progress.into_inner())));
     }
     if let Some(state) = progress.state.take() {
         match state.close_live(Arc::clone(&factory), &guard) {
@@ -1568,9 +1620,9 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         }
     }
     if progress.state_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(std::mem::ManuallyDrop::into_inner(progress))));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(progress.into_inner())));
     }
-    let closed = ClosedLiveStateStore { progress, prior_refusal: prior };
+    let closed = ClosedLiveStateStore { progress: std::mem::ManuallyDrop::new(progress.into_inner()), prior_refusal: prior };
     if let Err(error) = closed.native_terminals(&factory) { return Err(retain(error, StoreCloseCustody::Closed(closed))); }
     Ok(closed)
 }

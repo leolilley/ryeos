@@ -127,6 +127,17 @@ impl OperationalMarkerSource {
             state: OperationalMarkerState::Unobserved,
         }
     }
+    /// Move this whole source out of its slot, leaving an unobserved source
+    /// with the same copied process. Allocation-free, so a forked child may
+    /// call it while giving up a copied frame.
+    pub(super) fn take(&mut self) -> Self {
+        let process = self.process;
+        std::mem::replace(self, Self {
+            process,
+            registry_identity: None,
+            state: OperationalMarkerState::Unobserved,
+        })
+    }
     /// A source whose marker receipt is already consumed, for frames built
     /// directly in tests.
     #[cfg(test)]
@@ -157,7 +168,7 @@ impl OperationalMarkerSource {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         absence_allowed: bool,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational marker source");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational marker source");
         let identity = registry.identity()?;
         self.bind_registry(identity.clone())?;
         match &self.state {
@@ -193,7 +204,7 @@ impl OperationalMarkerSource {
             let quote = quote_operational_marker_owner()?;
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
                 prepay(quote.bytes, quote.steps))?;
-            anyhow::ensure!(self.process == std::process::id(), "foreign Operational marker after funding");
+            anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational marker after funding");
             self.registry_identity.as_ref()
                 .context("Operational marker registry identity disappeared after funding")?
                 .require_same_registry(&registry.identity()?)?;
@@ -232,7 +243,7 @@ impl OperationalMarkerSource {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         absence_allowed: bool,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Operational marker census");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign Operational marker census");
         let identity = registry.identity()?;
         self.registry_identity.as_ref()
             .context("Operational marker registry identity absent")?
@@ -260,14 +271,14 @@ impl OperationalMarkerSource {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         absence_allowed: bool,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign retired Operational marker");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign retired Operational marker");
         let identity = self.registry_identity.as_ref()
             .context("Operational marker registry identity absent before retirement")?;
         registry.require_same_registry(identity)?;
         let quote = quote_operational_marker_receipt();
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        anyhow::ensure!(self.process == std::process::id(), "foreign retired Operational marker after funding");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign retired Operational marker after funding");
         registry.require_same_registry(self.registry_identity.as_ref()
             .context("Operational marker registry identity disappeared after funding")?)?;
         anyhow::ensure!(marker.as_ref().is_none_or(|slot| slot.is_none()),
@@ -295,7 +306,7 @@ impl OperationalMarkerSource {
     }
 
     pub(super) fn retired_or_absent(&self, absence_allowed: bool) -> bool {
-        if self.process != std::process::id() { return false; }
+        if crate::foreign_process(self.process) { return false; }
         match &self.state {
             OperationalMarkerState::Consumed { had_descriptor: true } => true,
             OperationalMarkerState::Consumed { had_descriptor: false } => absence_allowed,
@@ -374,34 +385,70 @@ struct LiveOperationalSchemaSource {
 struct LiveClosedOperationalContext {
     schema_sources: Vec<LiveOperationalSchemaSource>,
     schema_native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
-    original: Arc<crate::state_db::live_native::LiveStateNativeOwner>,
+    original: std::mem::ManuallyDrop<Arc<crate::state_db::live_native::LiveStateNativeOwner>>,
     references: super::live_native::LiveOperationalSchemaReferences,
     initialization_phase: super::live_native::LiveOperationalInitializationPhase,
     _initialization: Option<lillux_sqlite::DurableLiveOperationalInitialization>,
     initialization_retirement: Option<super::live_native::LiveOperationalInitializationRetirement>,
     _marker: Option<File>,
 }
-impl Drop for LiveClosedOperationalContext {
-    fn drop(&mut self) {
-        release_or_abandon_schema_sources(
-            "ryeos-state::operational-live-context-schema-sources",
+/// Every owned field of a live closed Operational context moved out of it.
+/// The initialization phase is a plain copied fact and stays behind.
+type LiveClosedOperationalContextParts = (
+    Vec<LiveOperationalSchemaSource>,
+    Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
+    Arc<crate::state_db::live_native::LiveStateNativeOwner>,
+    super::live_native::LiveOperationalSchemaReferences,
+    Option<lillux_sqlite::DurableLiveOperationalInitialization>,
+    Option<super::live_native::LiveOperationalInitializationRetirement>,
+    Option<File>,
+);
+impl LiveClosedOperationalContext {
+    /// Move every owned field out of this context, in declaration order,
+    /// leaving only emptied slots and the plain phase. Nothing here
+    /// allocates, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop` or on a shell that is never dropped:
+    /// the taken `ManuallyDrop` slot must never be read again.
+    unsafe fn take_whole(&mut self) -> LiveClosedOperationalContextParts {
+        (
             std::mem::take(&mut self.schema_sources),
-            |source| source.terminal.is_some(),
-        );
+            self.schema_native_failure.take(),
+            unsafe { std::mem::ManuallyDrop::take(&mut self.original) },
+            self.references.take(),
+            self._initialization.take(),
+            self.initialization_retirement.take(),
+            self._marker.take(),
+        )
+    }
+    /// No schema source keeps its native receipt and no schema transfer
+    /// refusal holds one: only the outside native transfer may end either.
+    fn schema_sources_settled(&self) -> bool {
+        self.schema_native_failure.is_none()
+            && self.schema_sources.iter().all(|source| source.terminal.is_none())
     }
 }
-/// Release schema sources whose native receipts have all moved outside. A set
-/// still holding a receipt stays retained until the process exits: only the
-/// outside native transfer may end a receipt.
-fn release_or_abandon_schema_sources<S: Send + 'static>(
-    kind: &'static str,
-    sources: Vec<S>,
-    receipt_retained: impl Fn(&S) -> bool,
-) {
-    if sources.iter().any(receipt_retained) {
-        lillux::custody::abandon(kind, sources);
-    } else {
-        drop(sources);
+impl Drop for LiveClosedOperationalContext {
+    fn drop(&mut self) {
+        // Settled when no schema source or schema transfer refusal still
+        // holds a native receipt; the context then releases normally, its
+        // parent alias, references, initialization and marker through their
+        // own drops. Otherwise the whole context stays retained until the
+        // process exits.
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
+        let settled = self.schema_sources_settled();
+        let whole = unsafe { self.take_whole() };
+        if settled {
+            drop(whole);
+        } else {
+            lillux::custody::abandon("ryeos-state::operational-live-context", whole);
+        }
     }
 }
 // Full live semantic/descriptor custody after the duplicate State-parent
@@ -415,31 +462,51 @@ struct LiveOperationalMetadataCustody {
     _initialization_retirement: std::mem::ManuallyDrop<Option<super::live_native::LiveOperationalInitializationRetirement>>,
     _marker: std::mem::ManuallyDrop<Option<File>>,
 }
+impl LiveOperationalMetadataCustody {
+    /// Move every owned field out of this custody, in declaration order,
+    /// leaving only emptied slots. Nothing here allocates, so a forked child
+    /// may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            std::mem::replace(&mut self.parent, std::sync::Weak::new()),
+            std::mem::replace(&mut self.factory, std::sync::Weak::new()),
+            std::mem::take(&mut self.schema_sources),
+            self.schema_native_failure.take(),
+            std::mem::ManuallyDrop::take(&mut self.references),
+            std::mem::ManuallyDrop::take(&mut self._initialization_retirement),
+            std::mem::ManuallyDrop::take(&mut self._marker),
+        )}
+    }
+    /// Settled exactly when live metadata retirement would accept it: no
+    /// schema native failure, no schema receipt, no original schema reference
+    /// and no marker descriptor remain.
+    fn settled(&self) -> bool {
+        self.schema_native_failure.is_none()
+            && self.schema_sources.iter().all(|source| source.terminal.is_none())
+            && self.references.original_source_count() == 0
+            && self._marker.is_none()
+    }
+}
 impl Drop for LiveOperationalMetadataCustody {
     fn drop(&mut self) {
-        // Each retained field is taken exactly once, here.
-        let schema_sources = std::mem::take(&mut self.schema_sources);
-        let references = unsafe { std::mem::ManuallyDrop::take(&mut self.references) };
-        let initialization_retirement =
-            unsafe { std::mem::ManuallyDrop::take(&mut self._initialization_retirement) };
-        let marker = unsafe { std::mem::ManuallyDrop::take(&mut self._marker) };
-        // Settled exactly when live metadata retirement would accept it: no
-        // schema native failure, no schema receipt, no original schema
-        // reference and no marker descriptor remain.
-        let settled = self.schema_native_failure.is_none()
-            && schema_sources.iter().all(|source| source.terminal.is_none())
-            && references.original_source_count() == 0
-            && marker.is_none();
+        // Settled custody releases normally; otherwise the whole custody stays
+        // retained until the process exits.
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
+        let settled = self.settled();
+        let whole = unsafe { self.take_whole() };
         if settled {
-            drop(schema_sources);
-            drop(references);
-            drop(initialization_retirement);
-            drop(marker);
+            drop(whole);
         } else {
-            lillux::custody::abandon(
-                "ryeos-state::operational-live-metadata",
-                (schema_sources, references, initialization_retirement, marker),
-            );
+            lillux::custody::abandon("ryeos-state::operational-live-metadata", whole);
         }
     }
 }
@@ -709,19 +776,10 @@ impl OutsideOriginalOperationalCustody {
         let factory_identity = Arc::downgrade(factory);
         let mut live = std::mem::ManuallyDrop::new(
             self.live.take().expect("validated retained live Operational context"));
-        // Every field is named so none can be skipped, and each is read out
-        // exactly once; the emptied shell is never dropped.
-        // The initialization phase is a plain copied fact with no owner.
-        let LiveClosedOperationalContext { schema_sources, schema_native_failure,
-            original, references, initialization_phase: _, _initialization,
-            initialization_retirement, _marker } = &mut *live;
+        // Every owned field is read out exactly once; the emptied shell is
+        // never dropped. The initialization phase is a plain copied fact.
         let (schema_sources, schema_native_failure, original, references,
-            _initialization, initialization_retirement, _marker) = unsafe {(
-            std::ptr::read(schema_sources), std::ptr::read(schema_native_failure),
-            std::ptr::read(original), std::ptr::read(references),
-            std::ptr::read(_initialization),
-            std::ptr::read(initialization_retirement), std::ptr::read(_marker),
-        )};
+            _initialization, initialization_retirement, _marker) = unsafe { live.take_whole() };
         drop(_initialization);
         *self.live_metadata = Some(LiveOperationalMetadataCustody {
             parent: parent_identity, factory: factory_identity, schema_sources,
@@ -845,7 +903,7 @@ impl OutsideOriginalOperationalCustody {
         // The live context was borrowed in the original process. Do not read
         // or mutate it after a funding callback unless that process still owns
         // the entire retained graph.
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign Operational schema custody after funding callback");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
@@ -885,7 +943,7 @@ impl OutsideOriginalOperationalCustody {
     }
     fn require_process(&self) -> Result<()> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign Operational outside custody"
         );
         Ok(())
@@ -1184,7 +1242,7 @@ impl OutsideOriginalOperationalCustody {
     }
     /// Only actual descriptor obligations, not durable/account settlement.
     pub fn descriptors_retired(&self) -> bool {
-        self.process == std::process::id()
+        !crate::foreign_process(self.process)
             && self.live.is_none()
             && self.live_metadata.is_none()
             && self.root.is_none()
@@ -1231,6 +1289,32 @@ fn require_no_duplicate_keepers(db: &OperationalDb) -> Result<()> {
     Ok(())
 }
 
+/// The refusal of a close the native failure still retains. The failure keeps
+/// its typed cause for its own next retry, so this owned refusal carries the
+/// cause's text and its class: a cause that is not a fact (contention, an
+/// unobservable check, a momentary host-resource shortage) refuses as an
+/// unobservable check and does not latch, and a fact cause refuses as a fact.
+fn close_pending_refusal(what: &str, cause: Option<&anyhow::Error>) -> anyhow::Error {
+    match cause {
+        Some(cause) if !lillux_sqlite::native_refusal_is_fact(cause) => {
+            anyhow::Error::new(lillux_sqlite::NativeCheckUnobservable).context(format!("{what}: {cause:#}"))
+        }
+        Some(cause) => anyhow::anyhow!("{what}: {cause:#}"),
+        None => anyhow::anyhow!("{what}"),
+    }
+}
+
+/// This close attempt's refusal, layered over an earlier attempt's refusal
+/// when there was one. The result is classified by this attempt's refusal
+/// alone; the earlier one is kept for display.
+fn close_refusal_over_prior(error: anyhow::Error, prior: Option<anyhow::Error>) -> anyhow::Error {
+    use lillux_sqlite::RefusalSupersedes as _;
+    match prior {
+        Some(earlier) => error.superseding(earlier),
+        None => error,
+    }
+}
+
 fn advance_close(
     mut context: ContextOwner,
     custody: Custody,
@@ -1260,7 +1344,7 @@ fn advance_close(
             .map(OriginalNativeConnectionTerminal::Closed)
             .map_err(|owner| {
                 (
-                    anyhow::anyhow!("Operational close pending"),
+                    close_pending_refusal("Operational close pending", owner.error()),
                     Custody::Close(owner),
                 )
             }),
@@ -1299,7 +1383,7 @@ fn advance_close(
                     context.live = Some(LiveClosedOperationalContext {
                         schema_sources: Vec::new(),
                         schema_native_failure: None,
-                        original: live.original,
+                        original: std::mem::ManuallyDrop::new(live.original),
                         references: live.references,
                         initialization_phase: live.initialization_phase,
                         _initialization: live.initialization,
@@ -1314,7 +1398,7 @@ fn advance_close(
                 .map(OriginalNativeConnectionTerminal::Closed)
                 .map_err(|owner| {
                     (
-                        anyhow::anyhow!("Operational close pending"),
+                        close_pending_refusal("Operational close pending", owner.error()),
                         Custody::Close(owner),
                     )
                 })
@@ -1324,7 +1408,7 @@ fn advance_close(
             .map(OriginalNativeConnectionTerminal::Closed)
             .map_err(|owner| {
                 (
-                    anyhow::anyhow!("Operational native close retry pending"),
+                    close_pending_refusal("Operational native close retry pending", owner.error()),
                     Custody::Close(owner),
                 )
             }),
@@ -1334,10 +1418,7 @@ fn advance_close(
         Ok(terminal) => terminal,
         Err((error, custody)) => {
             return Err(OriginalOperationalFailure {
-                error: match prior {
-                    Some(previous) => error.context(previous),
-                    None => error,
-                },
+                error: close_refusal_over_prior(error, prior),
                 context,
                 custody: Mutex::new(custody),
             });
@@ -1537,37 +1618,11 @@ impl OperationalDb {
 
 #[cfg(test)]
 mod abandoned_schema_source_tests {
-    use super::{LiveOperationalMetadataCustody, release_or_abandon_schema_sources};
+    use super::{LiveClosedOperationalContext, LiveOperationalMetadataCustody};
     use std::sync::Arc;
 
-    const SOURCES: &str = "ryeos-state::operational-test-schema-sources";
+    const CONTEXT: &str = "ryeos-state::operational-live-context";
     const METADATA: &str = "ryeos-state::operational-live-metadata";
-
-    struct Source {
-        receipt: Option<Arc<()>>,
-    }
-
-    #[test]
-    fn settled_schema_sources_release_normally() {
-        let receipt = Arc::new(());
-        let before = lillux::custody::abandoned_custody().count(SOURCES);
-        release_or_abandon_schema_sources(SOURCES,
-            vec![Source { receipt: None }, Source { receipt: None }],
-            |source| source.receipt.is_some());
-        drop(receipt);
-        assert_eq!(lillux::custody::abandoned_custody().count(SOURCES), before);
-    }
-
-    #[test]
-    fn schema_sources_with_a_receipt_are_retained_whole() {
-        let receipt = Arc::new(());
-        let before = lillux::custody::abandoned_custody().count(SOURCES);
-        release_or_abandon_schema_sources(SOURCES,
-            vec![Source { receipt: None }, Source { receipt: Some(Arc::clone(&receipt)) }],
-            |source| source.receipt.is_some());
-        assert_eq!(lillux::custody::abandoned_custody().count(SOURCES), before + 1);
-        assert_eq!(Arc::strong_count(&receipt), 2);
-    }
 
     fn metadata(marker: Option<std::fs::File>) -> LiveOperationalMetadataCustody {
         LiveOperationalMetadataCustody {
@@ -1595,6 +1650,31 @@ mod abandoned_schema_source_tests {
         let before = lillux::custody::abandoned_custody().count(METADATA);
         drop(metadata(Some(marker)));
         assert_eq!(lillux::custody::abandoned_custody().count(METADATA), before + 1);
+    }
+
+    #[test]
+    fn settled_live_context_releases_normally() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let runtime = tempfile::tempdir().unwrap();
+        let state = crate::test_support::TestState::open(runtime.path(),
+            Arc::new(crate::refs::TrustStore::new())).unwrap();
+        let original = state.live_native_owner_for_test();
+        let aliases = Arc::strong_count(&original);
+        let before = lillux::custody::abandoned_custody().count(CONTEXT);
+        drop(LiveClosedOperationalContext {
+            schema_sources: Vec::new(),
+            schema_native_failure: None,
+            original: std::mem::ManuallyDrop::new(Arc::clone(&original)),
+            references: super::super::live_native::LiveOperationalSchemaReferences::empty_for_test(),
+            initialization_phase: super::super::live_native::LiveOperationalInitializationPhase::Failed,
+            _initialization: None,
+            initialization_retirement: None,
+            _marker: None,
+        });
+        assert_eq!(lillux::custody::abandoned_custody().count(CONTEXT), before);
+        assert_eq!(Arc::strong_count(&original), aliases, "the parent alias was released");
+        drop(original);
+        state.close().unwrap();
     }
 }
 
@@ -1812,38 +1892,50 @@ impl OutsideOriginalOperationalCustody {
 }
 impl Drop for OutsideOriginalOperationalCustody {
     fn drop(&mut self) {
-        // Each retained slot is taken exactly once, here. Settled exactly when
-        // final exhaustion would accept the frame: shared roots consumed, every
-        // descriptor, root, marker, terminal, packet and live body retired and
-        // no owner-bearing refusal left. Otherwise the whole graph stays
-        // retained until the process exits.
-        let live = unsafe { std::mem::ManuallyDrop::take(&mut self.live) };
-        let live_metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.live_metadata) };
-        let terminal = unsafe { std::mem::ManuallyDrop::take(&mut self.terminal) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((live, live_metadata, terminal));
+        // Settled exactly when final exhaustion would accept the frame: shared
+        // roots consumed, every descriptor, root, marker, terminal, packet and
+        // live body retired and no owner-bearing refusal left. The settled
+        // fact is read while every slot is still in place; the frame then
+        // releases normally. Otherwise the whole graph stays retained until
+        // the process exits.
+        if crate::foreign_process(self.process) {
+            // A copy in another process, forked or not, holds none of these
+            // owners; it gives them up before the settled check, which may allocate.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
             return;
         }
-        if self.require_exhausted_holders().is_ok() {
-            drop(live);
-            drop(live_metadata);
-            drop(terminal);
+        let settled = self.require_exhausted_holders().is_ok();
+        let whole = unsafe { self.take_whole() };
+        if settled {
+            drop(whole);
         } else {
-            let root = self.root.take();
-            let namespace = self.namespace.take();
-            let native_failure = self.native_failure.take();
-            let sql_custody = std::mem::take(&mut self.sql_custody);
-            let shared_registrations = std::mem::replace(&mut self.shared_registrations,
-                std::array::from_fn(|_| None));
-            let descriptor_owners = std::mem::take(&mut self.descriptor_owners);
-            let descriptor_receipts = std::mem::take(&mut self.descriptor_receipts);
-            let prior_refusal = self.prior_refusal.take();
-            lillux::custody::abandon("ryeos-state::outside-operational-custody", (
-                live, live_metadata, terminal, root, namespace, native_failure, sql_custody,
-                shared_registrations, descriptor_owners, descriptor_receipts, prior_refusal,
-            ));
+            lillux::custody::abandon("ryeos-state::outside-operational-custody", whole);
         }
+    }
+}
+impl OutsideOriginalOperationalCustody {
+    /// Move every owned field out of the frame, in declaration order, leaving
+    /// only emptied slots and plain copied facts. The replacements allocate
+    /// nothing, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            std::mem::ManuallyDrop::take(&mut self.live),
+            std::mem::ManuallyDrop::take(&mut self.live_metadata),
+            self.root.take(),
+            self.namespace.take(),
+            std::mem::ManuallyDrop::take(&mut self.terminal),
+            self.native_failure.take(),
+            std::mem::take(&mut self.sql_custody),
+            std::mem::replace(&mut self.shared_registrations, std::array::from_fn(|_| None)),
+            self.shared_registry_identity.take(),
+            self.marker_source.take(),
+            std::mem::take(&mut self.descriptor_owners),
+            (std::mem::take(&mut self.descriptor_receipts), self.prior_refusal.take()),
+        )}
     }
 }
 
@@ -1894,5 +1986,50 @@ mod outside_custody_drop_tests {
         let before = lillux::custody::abandoned_custody().count(KIND);
         drop(frame);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
+    }
+}
+
+#[cfg(test)]
+mod close_refusal_tests {
+    use super::{close_pending_refusal, close_refusal_over_prior};
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended};
+
+    fn fact() -> anyhow::Error {
+        anyhow::anyhow!("Operational close changed original purpose/factory")
+    }
+    fn contended() -> anyhow::Error {
+        anyhow::Error::new(FixedHostRefusal::Contended).context("producer control claim")
+    }
+
+    /// A later close refusal is classified by itself over an earlier one.
+    #[test]
+    fn a_later_close_refusal_classifies_over_the_earlier_one() {
+        let later_fact = close_refusal_over_prior(fact(), Some(contended()));
+        assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
+        assert!(format!("{later_fact:#}").contains("producer control claim"));
+        let later_contention = close_refusal_over_prior(anyhow::Error::new(NativeCheckContended), Some(fact()));
+        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(native_refusal_is_fact(&close_refusal_over_prior(fact(), None)));
+    }
+
+    /// A pending close keeps its retained cause's text and class.
+    #[test]
+    fn a_pending_close_keeps_the_retained_cause() {
+        let held_by_contention = close_pending_refusal("Operational native close retry pending", Some(&contended()));
+        assert!(!native_refusal_is_fact(&held_by_contention), "{held_by_contention:#}");
+        assert!(format!("{held_by_contention:#}").contains("producer control claim"));
+        let held_by_fact = close_pending_refusal("Operational native close retry pending", Some(&fact()));
+        assert!(native_refusal_is_fact(&held_by_fact), "{held_by_fact:#}");
+        assert!(format!("{held_by_fact:#}").contains("changed original purpose/factory"));
+
+        // A failed retry held by contention, over an earlier fact, does not
+        // latch; a failed retry held by a fact, over earlier contention, does.
+        let retry_contended = close_refusal_over_prior(
+            close_pending_refusal("Operational native close retry pending", Some(&contended())), Some(fact()));
+        assert!(!native_refusal_is_fact(&retry_contended), "{retry_contended:#}");
+        let retry_fact = close_refusal_over_prior(
+            close_pending_refusal("Operational native close retry pending", Some(&fact())), Some(contended()));
+        assert!(native_refusal_is_fact(&retry_fact), "{retry_fact:#}");
     }
 }

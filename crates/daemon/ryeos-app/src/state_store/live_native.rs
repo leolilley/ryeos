@@ -60,22 +60,70 @@ impl Drop for LiveStorePhysicalParent {
     fn drop(&mut self) {
         // No drop settles a physical parent: it always holds the Store host
         // with its factory, lease authority and exclusion lease, which only
-        // the finalization-parts transfer consumes. The host is taken exactly
-        // once, here, and every root, namespace and registration stays
-        // retained with it until the process exits.
+        // the finalization-parts transfer consumes. The host and every root,
+        // namespace and registration are taken exactly once, here, and stay
+        // retained together until the process exits.
         let host = unsafe { std::mem::ManuallyDrop::take(&mut self.host) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(host);
-            return;
-        }
         let directories = std::mem::replace(&mut self.directories, std::array::from_fn(|_| None));
         let namespace = self.namespace.take();
         let registrations = std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None));
-        lillux::custody::abandon("ryeos-app::store-physical-parent",
-            (host, directories, namespace, registrations));
+        let owner = (host, directories, namespace, registrations);
+        if super::live_close::foreign_process(self.process) {
+            // A copy in another process holds none of these owners. Dropping any part,
+            // such as the namespace lock whose unlock acts on the open file
+            // description shared with the original, would release the
+            // original's custody, so the whole owner is relinquished.
+            lillux::custody::relinquish_in_foreign_process(owner);
+            return;
+        }
+        lillux::custody::abandon("ryeos-app::store-physical-parent", owner);
     }
 }
+
+/// Holds one owner across a stretch of fallible work. `into_inner` hands it
+/// back whole; a guard dropped while still holding it, as when a panic
+/// unwinds the stretch, retains the owner for the life of the process under
+/// its kind, where it is counted, instead of releasing or losing it.
+pub(super) struct RetainedUntilTaken<T: Send + 'static> {
+    kind: &'static str,
+    held: Option<T>,
+}
+impl<T: Send + 'static> RetainedUntilTaken<T> {
+    pub(super) fn new(kind: &'static str, owner: T) -> Self {
+        Self { kind, held: Some(owner) }
+    }
+    pub(super) fn into_inner(mut self) -> T {
+        self.held.take().expect("a retained owner leaves only through into_inner")
+    }
+}
+impl<T: Send + 'static> std::ops::Deref for RetainedUntilTaken<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.held.as_ref().expect("a retained owner is present until taken")
+    }
+}
+impl<T: Send + 'static> std::ops::DerefMut for RetainedUntilTaken<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.held.as_mut().expect("a retained owner is present until taken")
+    }
+}
+impl<T: Send + 'static> Drop for RetainedUntilTaken<T> {
+    fn drop(&mut self) {
+        // Still holding means the owner was never handed back: retain it
+        // whole. In a forked child `abandon` only relinquishes the copy,
+        // without allocating or locking.
+        if let Some(owner) = self.held.take() {
+            lillux::custody::abandon(self.kind, owner);
+        }
+    }
+}
+
+/// Kinds under which an owner held across a fallible stretch is retained
+/// when the stretch unwinds before handing it back.
+const SCHEDULER_ADMISSION_UNWOUND_KIND: &str = "ryeos-app::scheduler-admission-unwound";
+const STORE_STARTUP_CLOSE_UNWOUND_KIND: &str = "ryeos-app::store-startup-close-unwound";
+/// Kind under which a refused startup recovery retains its close progress.
+const STORE_STARTUP_RECOVERY_KIND: &str = "ryeos-app::store-startup-recovery-failure";
 struct LiveStorePhysicalHost {
     _outside_join: Mutex<std::sync::Weak<super::live_destination_join::LiveStoreDestinationJoin>>,
     exclusion_alias: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
@@ -239,7 +287,7 @@ pub fn quote_store_parent_finalization_parts()
 impl LiveStorePhysicalParent {
     pub(super) fn require_original(&self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store physical parent");
+        anyhow::ensure!(!super::live_close::foreign_process(self.process), "foreign Store physical parent");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         anyhow::ensure!(self.host.factory.same_original(factory), "Store physical parent changed factory");
@@ -522,7 +570,7 @@ impl LiveStoreParentFinalizationParts {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store finalization parts");
+        anyhow::ensure!(!super::live_close::foreign_process(self.process), "foreign Store finalization parts");
         if self.native_authorities_retired {
             anyhow::ensure!(self.factory.is_none() && self.lease_authority.is_none(),
                 "retired Store native authority reappeared");
@@ -585,7 +633,7 @@ impl LiveStoreParentFinalizationParts {
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store finalization parts");
+        anyhow::ensure!(!super::live_close::foreign_process(self.process), "foreign Store finalization parts");
         anyhow::ensure!(self.native_authorities_retired
             && self.factory.is_none() && self.lease_authority.is_none(),
             "retired Store parent retains native-dependent authorities");
@@ -629,7 +677,7 @@ impl LiveStoreParentFinalizationParts {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store finalization parts");
+        anyhow::ensure!(!super::live_close::foreign_process(self.process), "foreign Store finalization parts");
         if self.exclusion_alias.is_none() && admission_alias.is_none() {
             return Ok(());
         }
@@ -643,7 +691,7 @@ impl LiveStoreParentFinalizationParts {
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 8 },
         )?;
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-        anyhow::ensure!(self.process == std::process::id(), "foreign Store finalization after funding");
+        anyhow::ensure!(!super::live_close::foreign_process(self.process), "foreign Store finalization after funding");
         anyhow::ensure!(registry.non_account_descriptors_retired(),
             "Store non-operator retirement changed after alias funding");
         let canonical = self.exclusion_identity.upgrade()
@@ -779,8 +827,9 @@ impl LiveStateOpen {
             Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| anyhow::anyhow!("original scheduler admission already issued or closed"))?;
         attempt.claimed = true;
-        // No fallible operation occurs between claim and inert custody.
-        let mut attempt = std::mem::ManuallyDrop::new(attempt);
+        // No fallible operation occurs between claim and retained custody; an
+        // unwind through issuance retains the claimed attempt, counted.
+        let mut attempt = RetainedUntilTaken::new(SCHEDULER_ADMISSION_UNWOUND_KIND, attempt);
         let result = (|| -> Result<()> {
             let authority: Arc<dyn OriginalNativeDestinationAuthority> = self.clone();
             // SAFETY: same actual StateStore namespace, process, trusted node
@@ -801,10 +850,10 @@ impl LiveStateOpen {
         })();
         if let Err(error) = result {
             return Err(anyhow::Error::new(LiveSchedulerNativeAdmissionFailure {
-                error, custody: attempt,
+                error, custody: std::mem::ManuallyDrop::new(attempt.into_inner()),
             }));
         }
-        let mut attempt = std::mem::ManuallyDrop::into_inner(attempt);
+        let mut attempt = attempt.into_inner();
         Ok(LiveSchedulerNativeAdmission {
             factory: Arc::clone(&attempt.original.factory),
             inputs: attempt.inputs.take().expect("prepared fixed scheduler inputs"),
@@ -970,7 +1019,8 @@ impl OriginalNativeDestinationAuthority for LiveStateOpen {
         // Failing to read this process's own identity says nothing about the
         // original; the mismatch below is the fact.
         let process = lillux::process_control::capture_current_process_identity()
-            .map_err(|error| anyhow::Error::msg(error).context(lillux_sqlite::NativeCheckUnobservable))?;
+            // The class is the root, so it survives any wrapper a caller adds.
+            .map_err(|error| anyhow::Error::new(lillux_sqlite::NativeCheckUnobservable).context(error))?;
         anyhow::ensure!(
             process == self.process && Arc::ptr_eq(factory, &self.factory),
             "live State admission differs from original process/factory"
@@ -1173,7 +1223,7 @@ impl Drop for LiveSchedulerNativeAdmissionFailure {
         // outside-sources transfer consumes. The attempt is taken exactly
         // once, here, and stays retained until the process exits.
         let attempt = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
-        if attempt.original.factory.require_original_process().is_err() {
+        if lillux::exec::in_forked_child() {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(attempt);
             return;
@@ -1217,7 +1267,7 @@ impl LiveSchedulerNativeAdmissionOutsideSources {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!super::live_close::foreign_process(self.process),
             "foreign failed Scheduler admission source");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
@@ -1267,7 +1317,7 @@ impl LiveSchedulerNativeAdmissionOutsideSources {
     }
 
     pub(super) fn is_joined(&self) -> bool {
-        self.process == std::process::id() && self.joined
+        !super::live_close::foreign_process(self.process) && self.joined
             && (&*self.original).is_none() && self.bound_inputs.is_none()
             && self.transient_inputs.is_none()
             && self.unopened_database.as_ref().is_none_or(
@@ -1284,7 +1334,7 @@ impl LiveSchedulerNativeAdmissionOutsideSources {
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id() && self.joined
+        anyhow::ensure!(!super::live_close::foreign_process(self.process) && self.joined
             && (&*self.original).is_none() && self.bound_inputs.is_none()
             && self.transient_inputs.is_none(),
             "failed Scheduler admission did not join the Store inventory");
@@ -1295,7 +1345,7 @@ impl LiveSchedulerNativeAdmissionOutsideSources {
     }
 
     pub(super) fn require_exhausted(&self) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id() && self.joined
+        anyhow::ensure!(!super::live_close::foreign_process(self.process) && self.joined
             && (&*self.original).is_none() && self.bound_inputs.is_none()
             && self.transient_inputs.is_none(),
             "failed Scheduler admission retains a source at exhaustion");
@@ -1320,22 +1370,24 @@ impl Drop for LiveSchedulerNativeAdmissionOutsideSources {
         // no Store alias or unused input left, and every nested unopened
         // source exhausted. Each slot is taken exactly once, here; otherwise
         // the alias, inputs and nested sources stay retained together until
-        // the process exits.
-        let settled = self.require_exhausted().is_ok();
+        // the process exits. Settlement is evaluated only in the original
+        // process: the check may allocate its refusal.
+        let forked = super::live_close::foreign_process(self.process);
+        let settled = !forked && self.require_exhausted().is_ok();
         let taken = unsafe {(
             std::mem::ManuallyDrop::take(&mut self.original),
             self.bound_inputs.take().map(|inputs| std::mem::ManuallyDrop::into_inner(inputs)),
             self.transient_inputs.take().map(|inputs| std::mem::ManuallyDrop::into_inner(inputs)),
         )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
         if settled {
             drop(taken);
+            return;
+        }
+        let nested = (self.unopened_database.take(), self.unopened_reference.take());
+        if forked {
+            // A copy in another process holds none of these owners, nested ones included.
+            lillux::custody::relinquish_in_foreign_process((taken, nested));
         } else {
-            let nested = (self.unopened_database.take(), self.unopened_reference.take());
             lillux::custody::abandon("ryeos-app::scheduler-admission-outside-sources", (taken, nested));
         }
     }
@@ -1548,7 +1600,7 @@ impl FailedStartupAuxiliaryReceipt {
     ) -> Result<()> {
         match self {
             Self::NotConstructed { process, retired_registry } => {
-                anyhow::ensure!(*process == std::process::id(),
+                anyhow::ensure!(!super::live_close::foreign_process(*process),
                     "foreign failed-start Store auxiliary receipt");
                 let identity = registry.identity()?;
                 if let Some(retired) = retired_registry {
@@ -1603,7 +1655,7 @@ impl StoreStartupCloseProgress {
             .require_parent_completed_holders()?;
         match &p.failed_auxiliary_sources {
             FailedStartupAuxiliaryReceipt::NotConstructed { process, retired_registry } => {
-                anyhow::ensure!(*process == std::process::id(),
+                anyhow::ensure!(!super::live_close::foreign_process(*process),
                     "foreign failed-start Store auxiliary receipt at exhaustion");
                 anyhow::ensure!(retired_registry.is_some(),
                     "failed-start Store auxiliary receipt was not consumed");
@@ -1732,7 +1784,10 @@ impl Drop for StoreStartupCloseProgress {
         // without a registry. Each retained slot is taken exactly once, here;
         // otherwise every parent, packet, Runtime, State, Operational and
         // schema owner stays retained together until the process exits.
-        let settled = self.require_exhausted_holders().is_ok();
+        // Settlement is evaluated only in the original process: the check may
+        // allocate its refusal.
+        let forked = super::live_close::foreign_process(self.process());
+        let settled = !forked && self.require_exhausted_holders().is_ok();
         let taken = unsafe {(
             std::mem::replace(&mut self.runtime_packet_parts, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
             std::mem::replace(&mut self.operational_packet_parts, std::array::from_fn(|_| None)).map(|slot| slot.map(std::mem::ManuallyDrop::into_inner)),
@@ -1744,11 +1799,6 @@ impl Drop for StoreStartupCloseProgress {
             std::mem::ManuallyDrop::take(&mut self.store_parent),
             std::mem::ManuallyDrop::take(&mut self.store_parent_parts),
         )};
-        if self.process() != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
         if settled {
             drop(taken);
         } else {
@@ -1786,7 +1836,13 @@ impl Drop for StoreStartupCloseProgress {
                 self.schema_released.take(),
                 self.prior_refusal.take(),
             );
-            lillux::custody::abandon("ryeos-app::store-startup-close-progress", (taken, rest));
+            if forked {
+                // A copy in another process holds none of these owners: every slot,
+                // including the original Store alias, is relinquished whole.
+                lillux::custody::relinquish_in_foreign_process((taken, rest));
+            } else {
+                lillux::custody::abandon("ryeos-app::store-startup-close-progress", (taken, rest));
+            }
         }
     }
 }
@@ -1804,13 +1860,13 @@ impl Drop for ReleasedLiveStateStoreStartup {
         // Settled exactly when the progress inside would settle. The progress
         // is taken exactly once, here; otherwise it stays retained whole
         // until the process exits.
-        let settled = self.progress.require_exhausted_holders().is_ok();
         let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
-        if progress.process() != std::process::id() {
+        if super::live_close::foreign_process(progress.process()) {
             // A copy in another process holds none of these owners.
             lillux::custody::relinquish_in_foreign_process(progress);
             return;
         }
+        let settled = progress.require_exhausted_holders().is_ok();
         if settled {
             drop(progress);
         } else {
@@ -3148,13 +3204,14 @@ impl ReleasedLiveStateStoreStartup {
     /// the retained close progress for [`LiveStateStoreStartupRecoveryFailure::retry`].
     pub fn into_census(self, factory: Arc<OriginalNativeFactory>)
         -> std::result::Result<super::StateStoreCensus, LiveStateStoreStartupRecoveryFailure> {
-        let retain = |progress: std::mem::ManuallyDrop<StoreStartupCloseProgress>| {
-            LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody::Closing {
+        let retain = |progress: RetainedUntilTaken<StoreStartupCloseProgress>, refusal: anyhow::Error| {
+            LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
                 factory: Arc::clone(&factory),
-                progress: std::mem::ManuallyDrop::new(Mutex::new(std::mem::ManuallyDrop::into_inner(progress))),
-            } }
+                progress: Mutex::new(progress.into_inner()),
+                refusal,
+            })
         };
-        let mut progress = std::mem::ManuallyDrop::new(self.into_progress());
+        let mut progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, self.into_progress());
         let checked = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
             factory.require_original_process()?;
             progress.original()?.require_close_factory(&factory)?;
@@ -3188,7 +3245,7 @@ impl ReleasedLiveStateStoreStartup {
         })();
         let mut terminals = match checked {
             Ok(terminals) => terminals,
-            Err(_) => return Err(retain(progress)),
+            Err(error) => return Err(retain(progress, error)),
         };
         let mut leases = Vec::new();
         let mut lease_retirements = Vec::new();
@@ -3205,7 +3262,8 @@ impl ReleasedLiveStateStoreStartup {
                 }
                 Err(failure) => {
                     progress.state_failure = Some(failure);
-                    return Err(retain(progress));
+                    return Err(retain(progress, anyhow::anyhow!(
+                        "closed State refused its census; its close remains pending")));
                 }
             }
         }
@@ -3219,18 +3277,18 @@ impl ReleasedLiveStateStoreStartup {
                     lease_retirements.push(lease_retirement);
                     prior_refusals.extend(prior_refusal);
                 }
-                Err((released, _error)) => {
+                Err((released, error)) => {
                     progress.state_released = Some(released);
-                    return Err(retain(progress));
+                    return Err(retain(progress, error));
                 }
             }
         }
         if let Some(released) = progress.operational_released.take() {
             match released.into_census(&factory) {
                 Ok(operational) => terminals.extend(operational),
-                Err((released, _error)) => {
+                Err((released, error)) => {
                     progress.operational_released = Some(released);
-                    return Err(retain(progress));
+                    return Err(retain(progress, error));
                 }
             }
         }
@@ -3241,12 +3299,16 @@ impl ReleasedLiveStateStoreStartup {
             match has_terminal {
                 Ok(false) => match released.release_unused(&factory) {
                     Ok(prior) => prior_refusals.push(prior),
-                    Err((released, _error)) => {
+                    Err((released, error)) => {
                         progress.schema_released = Some(released);
-                        return Err(retain(progress));
+                        return Err(retain(progress, error));
                     }
                 },
-                Ok(true) | Err(_) => progress.schema_released = Some(released),
+                Ok(true) => progress.schema_released = Some(released),
+                Err(error) => {
+                    progress.schema_released = Some(released);
+                    return Err(retain(progress, error));
+                }
             }
         }
         let StoreStartupCloseProgressParts { store_destination_join, runtime_packet_parts, operational_packet_parts,
@@ -3260,7 +3322,7 @@ impl ReleasedLiveStateStoreStartup {
             state_open_failure, state_recovery_failure, state_released, state_physical,
             operational_open_failure, operational_recovery_failure, operational_released,
             operational_physical, schema_failure, schema_released, prior_refusal }
-            = std::mem::ManuallyDrop::into_inner(progress).into_parts();
+            = progress.into_inner().into_parts();
         // Every outside slot was checked empty above and every native owner's
         // terminal is in the census; the facades and opening roots end here.
         drop(store_parent);
@@ -3282,31 +3344,58 @@ impl ReleasedLiveStateStoreStartup {
 }
 enum StoreStartupRecoveryCustody {
     Opening(LiveStateStoreOpenFailure),
-    Closing { factory: Arc<OriginalNativeFactory>, progress: std::mem::ManuallyDrop<Mutex<StoreStartupCloseProgress>> },
+    /// A close in progress, with the refusal that stopped its latest attempt.
+    Closing {
+        factory: Arc<OriginalNativeFactory>,
+        progress: Mutex<StoreStartupCloseProgress>,
+        refusal: anyhow::Error,
+    },
 }
-pub struct LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody }
+pub struct LiveStateStoreStartupRecoveryFailure {
+    /// The process that built this failure; any other process holds a copy.
+    process: u32,
+    custody: std::mem::ManuallyDrop<StoreStartupRecoveryCustody>,
+}
 impl LiveStateStoreStartupRecoveryFailure {
+    fn new(custody: StoreStartupRecoveryCustody) -> Self {
+        Self { process: std::process::id(), custody: std::mem::ManuallyDrop::new(custody) }
+    }
+    /// Why the recovery is refused: the opening refusal while no close has
+    /// begun, otherwise the refusal that stopped the latest close attempt.
+    pub fn refusal(&self) -> &anyhow::Error {
+        match &*self.custody {
+            StoreStartupRecoveryCustody::Opening(failure) => &failure.error,
+            StoreStartupRecoveryCustody::Closing { factory: _, progress: _, refusal } => refusal,
+        }
+    }
     /// Move the whole custody out exactly once; the emptied shell is never
     /// dropped.
     fn into_custody(self) -> StoreStartupRecoveryCustody {
-        let failure = std::mem::ManuallyDrop::new(self);
-        unsafe { std::ptr::read(&failure.custody) }
+        let mut failure = std::mem::ManuallyDrop::new(self);
+        // The recording process is a plain copied fact; a new failure built
+        // from the custody records its own.
+        let _process: u32 = failure.process;
+        unsafe { std::mem::ManuallyDrop::take(&mut failure.custody) }
     }
 }
 impl Drop for LiveStateStoreStartupRecoveryFailure {
     fn drop(&mut self) {
         // No drop settles a refused recovery. An opening failure retains its
-        // own checkout through that checkout's Drop; a closing progress is
-        // taken exactly once, here, and stays retained whole until the
-        // process exits.
-        if let StoreStartupRecoveryCustody::Closing { factory, progress } = &mut self.custody {
-            let progress = unsafe { std::mem::ManuallyDrop::take(progress) };
-            if factory.require_original_process().is_err() {
-                // A copy in another process holds none of these owners.
-                lillux::custody::relinquish_in_foreign_process(progress);
-                return;
+        // own checkout through that checkout's Drop; a closing progress stays
+        // retained whole, with its factory alias, until the process exits.
+        let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
+        if super::live_close::foreign_process(self.process) {
+            // A copy in another process holds none of these owners; it gives them up
+            // before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(custody);
+            return;
+        }
+        match custody {
+            StoreStartupRecoveryCustody::Opening(failure) => drop(failure),
+            StoreStartupRecoveryCustody::Closing { factory, progress, refusal } => {
+                lillux::custody::abandon(STORE_STARTUP_RECOVERY_KIND, (factory, progress));
+                drop(refusal);
             }
-            lillux::custody::abandon("ryeos-app::store-startup-recovery-failure", progress);
         }
     }
 }
@@ -3316,17 +3405,23 @@ impl std::fmt::Debug for LiveStateStoreStartupRecoveryFailure {
     }
 }
 impl std::fmt::Display for LiveStateStoreStartupRecoveryFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("actual Store startup cleanup remains pending") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "actual Store startup cleanup remains pending: {}", self.refusal())
+    }
 }
-impl std::error::Error for LiveStateStoreStartupRecoveryFailure {}
+impl std::error::Error for LiveStateStoreStartupRecoveryFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.refusal().as_ref()) }
+}
 impl LiveStateStoreOpenFailure {
     pub fn close_retained(self) -> std::result::Result<ReleasedLiveStateStoreStartup, LiveStateStoreStartupRecoveryFailure> {
         if self.factory.require_original_process().is_err() {
-            return Err(LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody::Opening(self) });
+            return Err(LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Opening(self)));
         }
-        let Self { error, factory: _, _custody } = self;
+        let Self { error, factory, _custody } = self;
         let mut custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = custody.original.take().expect("typed Store failure retains actual opening owner");
+        // An opening owner already handed outside leaves the close nothing to
+        // begin from; the close below refuses that plainly and retains the rest.
+        let original = custody.original.take();
         let mut progress = StoreStartupCloseProgress { store_destination_join: std::sync::OnceLock::new(), runtime_packet_parts: std::array::from_fn(|_| None),
             operational_packet_parts: std::array::from_fn(|_| None), scheduler_packet_parts: None,
             scheduler_unopened_database: None, scheduler_unopened_schema_reference: None,
@@ -3334,7 +3429,7 @@ impl LiveStateStoreOpenFailure {
             runtime_unopened_schema_reference: None, runtime_schema_refusal: None,
             scheduler_admission_sources: None,
             failed_auxiliary_sources: FailedStartupAuxiliaryReceipt::not_constructed_at_close_retained(),
-            operational_sql_custody: std::array::from_fn(|_| None), runtime_sql_custody: std::array::from_fn(|_| None), physical_registry: None, original: Some(original), store_parent: std::mem::ManuallyDrop::new(None), store_parent_parts: std::mem::ManuallyDrop::new(None), store_parent_finalization: None, store_parent_finalization_retired: false, runtime: custody.runtime.take(),
+            operational_sql_custody: std::array::from_fn(|_| None), runtime_sql_custody: std::array::from_fn(|_| None), physical_registry: None, original, store_parent: std::mem::ManuallyDrop::new(None), store_parent_parts: std::mem::ManuallyDrop::new(None), store_parent_finalization: None, store_parent_finalization_retired: false, runtime: custody.runtime.take(),
             runtime_failure: None, runtime_closed: None, runtime_outside: None, runtime_open_failure: None, runtime_released: None, runtime_released_outside: None, state: custody.state.take(), state_failure: None,
             state_closed: None, state_open_failure: None, state_recovery_failure: None, state_released: None, state_physical: None,
             operational_open_failure: None, operational_recovery_failure: None, operational_released: None, operational_physical: None,
@@ -3352,33 +3447,39 @@ impl LiveStateStoreOpenFailure {
                 },
             },
         }
-        advance_store_startup_close(progress)
+        advance_store_startup_close(factory, progress)
     }
 }
 impl LiveStateStoreStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveStateStoreStartup, Self> {
         match self.into_custody() {
             StoreStartupRecoveryCustody::Opening(failure) => failure.close_retained(),
-            StoreStartupRecoveryCustody::Closing { factory, progress } => {
+            StoreStartupRecoveryCustody::Closing { factory, progress, refusal } => {
                 if factory.require_original_process().is_err() {
-                    return Err(Self { custody: StoreStartupRecoveryCustody::Closing { factory, progress } });
+                    return Err(Self::new(StoreStartupRecoveryCustody::Closing { factory, progress, refusal }));
                 }
-                advance_store_startup_close(std::mem::ManuallyDrop::into_inner(progress)
-                    .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                // A new attempt reports its own refusal.
+                drop(refusal);
+                advance_store_startup_close(factory, progress.into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner))
             }
         }
     }
 }
-fn advance_store_startup_close(progress: StoreStartupCloseProgress)
+/// Advance a failed start's close under the factory its failure retains. A
+/// progress whose opening owner already left it (an outside handoff began),
+/// or whose owner belongs to another factory, is refused plainly and
+/// retained whole.
+fn advance_store_startup_close(factory: Arc<OriginalNativeFactory>, progress: StoreStartupCloseProgress)
     -> std::result::Result<ReleasedLiveStateStoreStartup, LiveStateStoreStartupRecoveryFailure> {
-    let mut progress = std::mem::ManuallyDrop::new(progress);
-    let retain = |progress: std::mem::ManuallyDrop<StoreStartupCloseProgress>| {
-        let progress = std::mem::ManuallyDrop::into_inner(progress);
-        LiveStateStoreStartupRecoveryFailure { custody: StoreStartupRecoveryCustody::Closing {
-            factory: Arc::clone(&progress.original.as_ref().expect("startup close precedes parent transfer").factory), progress: std::mem::ManuallyDrop::new(Mutex::new(progress)) } }
+    let mut progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, progress);
+    let retain = |progress: RetainedUntilTaken<StoreStartupCloseProgress>, refusal: anyhow::Error| {
+        LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
+            factory: Arc::clone(&factory), progress: Mutex::new(progress.into_inner()), refusal })
     };
-    let factory = Arc::clone(&progress.original.as_ref().expect("startup close precedes parent transfer").factory);
-    if progress.original.as_ref().expect("startup close precedes parent transfer").require_close_factory(&factory).is_err() { return Err(retain(progress)); }
+    if let Err(error) = progress.original().and_then(|original| original.require_close_factory(&factory)) {
+        return Err(retain(progress, error));
+    }
     if let Some(runtime) = progress.runtime.take() {
         match runtime.close_original_runtime(Arc::clone(&factory)) {
             Ok(closed) => progress.runtime_closed = Some(closed),
@@ -3390,11 +3491,16 @@ fn advance_store_startup_close(progress: StoreStartupCloseProgress)
             Err(failure) => progress.runtime_failure = Some(failure),
         }
     }
-    if progress.runtime_failure.is_some() { return Err(retain(progress)); }
+    if progress.runtime_failure.is_some() {
+        return Err(retain(progress, anyhow::anyhow!("failed Store Runtime close remains pending")));
+    }
     if let Some(failure) = progress.runtime_open_failure.take() {
         match failure.retry_close() {
             Ok(released) => progress.runtime_released = Some(released),
-            Err(failure) => { progress.runtime_open_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.runtime_open_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store Runtime acquisition release remains pending")));
+            }
         }
     }
     if progress.state.is_some() || progress.state_failure.is_some() {
@@ -3408,44 +3514,62 @@ fn advance_store_startup_close(progress: StoreStartupCloseProgress)
                 Ok(guard) => Ok(guard), Err(error) => Err(error),
             },
         };
-        let guard = match guard { Ok(guard) => guard, Err(_) => return Err(retain(progress)) };
+        let guard = match guard { Ok(guard) => guard, Err(error) => return Err(retain(progress, error)) };
         let closed = if let Some(state) = progress.state.take() { state.close_live(Arc::clone(&factory), &guard) }
             else { progress.state_failure.take().expect("actual State close failure").retry(&guard) };
         match closed { Ok(closed) => progress.state_closed = Some(closed),
-            Err(failure) => { progress.state_failure = Some(failure); return Err(retain(progress)); } }
+            Err(failure) => {
+                progress.state_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store State close remains pending")));
+            } }
     }
     if let Some(failure) = progress.state_open_failure.take() {
         match failure.close_retained() {
             Ok(released) => progress.state_released = Some(released),
-            Err(failure) => { progress.state_recovery_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.state_recovery_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store State opening release remains pending")));
+            }
         }
     } else if let Some(failure) = progress.state_recovery_failure.take() {
         match failure.retry() {
             Ok(released) => progress.state_released = Some(released),
-            Err(failure) => { progress.state_recovery_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.state_recovery_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store State opening release remains pending")));
+            }
         }
     }
     if let Some(failure) = progress.operational_open_failure.take() {
         match failure.close_retained() {
             Ok(released) => progress.operational_released = Some(released),
-            Err(failure) => { progress.operational_recovery_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.operational_recovery_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store Operational opening release remains pending")));
+            }
         }
     } else if let Some(failure) = progress.operational_recovery_failure.take() {
         match failure.retry() {
             Ok(released) => progress.operational_released = Some(released),
-            Err(failure) => { progress.operational_recovery_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.operational_recovery_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store Operational opening release remains pending")));
+            }
         }
     }
     if let Some(failure) = progress.schema_failure.take() {
         match failure.close_retained() {
             Ok(released) => progress.schema_released = Some(released),
-            Err(failure) => { progress.schema_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => {
+                progress.schema_failure = Some(failure);
+                return Err(retain(progress, anyhow::anyhow!("failed Store schema reference release remains pending")));
+            }
         }
     }
-    let released = ReleasedLiveStateStoreStartup { progress };
-    if released.native_terminals(&factory).is_err() {
-        let progress = std::mem::ManuallyDrop::new(released.into_progress());
-        return Err(retain(progress));
+    let released = ReleasedLiveStateStoreStartup { progress: std::mem::ManuallyDrop::new(progress.into_inner()) };
+    if let Err(error) = released.native_terminals(&factory) {
+        let progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, released.into_progress());
+        return Err(retain(progress, error));
     }
     Ok(released)
 }
@@ -3588,17 +3712,81 @@ mod custody_drop_tests {
     #[test]
     fn dropped_closing_recovery_failure_is_retained_whole() {
         let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_closing_recovery_failure_is_retained_whole");
+        // The retained frame keeps its factory alias, which only the process
+        // end releases, so the scenario runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "recovery +1; progress +0", "{outcome}");
+            return;
+        }
         let host = ryeos_state::test_support::shared_test_host();
-        let failure = LiveStateStoreStartupRecoveryFailure {
-            custody: StoreStartupRecoveryCustody::Closing {
-                factory: Arc::clone(host.factory()),
-                progress: std::mem::ManuallyDrop::new(Mutex::new(empty_startup_progress())),
-            },
-        };
+        let failure = LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
+            factory: Arc::clone(host.factory()),
+            progress: Mutex::new(empty_startup_progress()),
+            refusal: anyhow::anyhow!("test close refused"),
+        });
         let before = (abandoned(RECOVERY), abandoned(PROGRESS));
         drop(failure);
-        assert_eq!((abandoned(RECOVERY), abandoned(PROGRESS)), (before.0 + 1, before.1));
-        ryeos_state::test_support::release_shared_test_host(host);
+        let after = (abandoned(RECOVERY), abandoned(PROGRESS));
+        lillux_sqlite::test_host::end_isolated_process(host,
+            &format!("recovery +{}; progress +{}", after.0 - before.0, after.1 - before.1))
+    }
+
+    #[test]
+    fn retry_after_the_opening_owner_left_is_a_plain_refusal() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::retry_after_the_opening_owner_left_is_a_plain_refusal");
+        // The retained frame keeps its factory alias, which only the process
+        // end releases, so the scenario runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "refused twice; recovery +1", "{outcome}");
+            return;
+        }
+        let host = ryeos_state::test_support::shared_test_host();
+        let factory = Arc::clone(host.factory());
+        // The whole startup progress moves by value through the close; a
+        // debug build needs more than a test thread's default stack for it.
+        let retained = std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
+            // A progress whose opening owner was already handed outside: the
+            // retry refuses with its reason and keeps the progress, never
+            // panics.
+            let failure = LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
+                factory,
+                progress: Mutex::new(empty_startup_progress()),
+                refusal: anyhow::anyhow!("outside handoff began"),
+            });
+            let Err(failure) = failure.retry() else { panic!("no opening owner to close from") };
+            assert!(failure.refusal().to_string().contains("already transferred"), "{failure}");
+            let Err(failure) = failure.retry() else { panic!("still no opening owner") };
+            assert!(failure.to_string().contains("already transferred"), "{failure}");
+            let before = abandoned(RECOVERY);
+            drop(failure);
+            abandoned(RECOVERY) - before
+        }).unwrap().join().unwrap();
+        lillux_sqlite::test_host::end_isolated_process(host,
+            &format!("refused twice; recovery +{retained}"))
+    }
+
+    #[test]
+    fn retained_owner_is_kept_on_unwind_and_returned_when_taken() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        const KIND: &str = "ryeos-app::test-retained-until-taken";
+        // Taken back, the owner is returned whole and nothing is retained.
+        let before = abandoned(KIND);
+        let mut held = RetainedUntilTaken::new(KIND, vec![1u8]);
+        held.push(2);
+        assert_eq!(held.into_inner(), vec![1, 2]);
+        assert_eq!(abandoned(KIND), before);
+        // A panic unwinding the stretch retains the owner, counted.
+        let unwound = std::panic::catch_unwind(|| {
+            let held = RetainedUntilTaken::new(KIND, vec![3u8]);
+            assert!(held.is_empty(), "unwind while holding");
+            held.into_inner()
+        });
+        assert!(unwound.is_err());
+        assert_eq!(abandoned(KIND), before + 1);
     }
 
     #[test]

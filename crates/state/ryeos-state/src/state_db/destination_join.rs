@@ -144,25 +144,42 @@ impl JoinState {
             })
     }
 }
+impl JoinState {
+    /// Move every owned field out of this state, in declaration order,
+    /// leaving only emptied slots and plain copied facts. Nothing here
+    /// allocates, so a forked child may call this.
+    ///
+    /// # Safety
+    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
+    /// never be read again.
+    unsafe fn take_whole(&mut self) -> impl Send + 'static {
+        unsafe {(
+            ManuallyDrop::take(&mut self.parent),
+            ManuallyDrop::take(&mut self.leaves),
+            ManuallyDrop::take(&mut self.live_parent),
+            self.generated_root_registry.take(),
+        )}
+    }
+}
 impl Drop for JoinState {
     fn drop(&mut self) {
-        // Each field is taken exactly once, here; every consuming path leaves
-        // it None or empty first.
-        let parent = unsafe { ManuallyDrop::take(&mut self.parent) };
-        let leaves = unsafe { ManuallyDrop::take(&mut self.leaves) };
-        let live_parent = unsafe { ManuallyDrop::take(&mut self.live_parent) };
-        if Self::owns_nothing(&parent, &leaves, &live_parent) {
-            drop(parent);
-            drop(leaves);
-            drop(live_parent);
+        // Settled exactly when it owns nothing: every consuming path leaves
+        // each slot None or empty first, and the state then releases normally.
+        // A retained parent, source alias, generated root or registration ends
+        // only through the supervised outside receiver; dropped without it,
+        // the whole state stays held until the process exits.
+        if lillux::exec::in_forked_child() {
+            // A forked child's copy holds none of these owners; it gives them
+            // up before any lock or allocation.
+            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
+            return;
+        }
+        let settled = Self::owns_nothing(&self.parent, &self.leaves, &self.live_parent);
+        let whole = unsafe { self.take_whole() };
+        if settled {
+            drop(whole);
         } else {
-            // A retained parent, source alias, generated root or registration
-            // ends only through the supervised outside receiver. Dropped
-            // without it, the whole graph stays held until the process exits.
-            lillux::custody::abandon(
-                "ryeos-state::destination-join",
-                (parent, leaves, live_parent),
-            );
+            lillux::custody::abandon("ryeos-state::destination-join", whole);
         }
     }
 }
@@ -314,7 +331,7 @@ impl OriginalStateDestinationJoin {
         aggregate: &OriginalNativeTerminal,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original State join"
         );
         factory.require_original_process()?;
@@ -327,7 +344,7 @@ impl OriginalStateDestinationJoin {
     }
     pub(super) fn holders_retired(&self) -> anyhow::Result<bool> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original State join observation"
         );
         let state = self
@@ -608,7 +625,7 @@ impl OriginalStateDestinationJoin {
     }
     /// Cached completion of the live parent handoff; reads no factory.
     pub(crate) fn live_parent_completed(&self) -> anyhow::Result<bool> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign original State join observation");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign original State join observation");
         let state = self.state.try_lock()
             .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
         Ok(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
@@ -620,7 +637,7 @@ impl OriginalStateDestinationJoin {
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign State root registration"
         );
         let registry_identity = registry.identity()?;
@@ -667,7 +684,7 @@ impl OriginalStateDestinationJoin {
         if complete {
             let quote = quote_generated_root_registration_at(registry, count, 0)?;
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-            anyhow::ensure!(self.process == std::process::id(),
+            anyhow::ensure!(!crate::foreign_process(self.process),
                 "foreign State roots after completed-stage validation debit");
             return self.require_generated_roots_registered(registry);
         }
@@ -675,7 +692,7 @@ impl OriginalStateDestinationJoin {
         // Counted aliases and membership checks are funded before any
         // source checkout; the original callback runs outside State's gate.
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-        anyhow::ensure!(self.process == std::process::id(), "foreign State roots after original prepay");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State roots after original prepay");
         for index in 0..count {
             let source = {
                 let mut state = self
@@ -733,7 +750,7 @@ impl OriginalStateDestinationJoin {
         &self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign State generated registry census");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
         let registry_identity = registry.identity()?;
         let state = self.state.try_lock()
             .map_err(|_| anyhow::anyhow!("State generated registry census busy or poisoned"))?;
@@ -766,7 +783,7 @@ impl OriginalStateDestinationJoin {
         registry: &RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign retired State generated-root receipt frame");
         let (leaves, generated_roots, identity) = {
             let state = self.state.try_lock()
@@ -808,7 +825,7 @@ impl OriginalStateDestinationJoin {
         let quote = quote_retired_generated_root_receipts(leaves, generated_roots)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign State generated-root frame after retirement debit");
 
         let mut state = self.state.try_lock()
@@ -855,7 +872,7 @@ impl OriginalStateDestinationJoin {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign State generated registry census");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
         let queries = {
             let state = self.state.try_lock()
                 .map_err(|_| anyhow::anyhow!("original State generated membership census busy or poisoned"))?;
@@ -1029,7 +1046,7 @@ struct StateLeafContinuation {
 unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for StateLeafContinuation {
     fn require_original_process(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.join.process == std::process::id(),
+            !crate::foreign_process(self.join.process),
             "foreign original State leaf continuation"
         );
         Ok(())
