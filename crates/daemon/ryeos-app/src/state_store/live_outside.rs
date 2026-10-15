@@ -4,7 +4,6 @@
 use super::{ClosedLiveStateStore, ReleasedLiveStateStoreStartup};
 use anyhow::{Context, Result, ensure};
 use lillux::custody::Held;
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use lillux_sqlite::original_physical_custody::OutsideWork;
 
@@ -1032,7 +1031,7 @@ impl OriginalPacketPartsProgress {
 }
 
 pub(super) fn packet_source_parts_consumed(
-    packets: Option<&ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: Option<&Vec<OriginalPacketPartsProgress>>,
 ) -> bool {
     packets.is_none_or(|packets| packets.iter().all(OriginalPacketPartsProgress::source_parts_consumed))
 }
@@ -1336,7 +1335,7 @@ impl OriginalPacketPartsProgress {
 /// Every packet in the slot has consumed its source parts and holds no
 /// owner. Absence is accepted; it carries no owner.
 pub(super) fn require_original_packets_exhausted(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
 ) -> Result<()> {
     if let Some(packets) = packets {
         for packet in packets.iter() {
@@ -1356,7 +1355,7 @@ pub(super) fn exhaust_original_packets(packets: Option<Vec<OriginalPacketPartsPr
 
 /// A drained producer packet vector holds no owner.
 pub(super) fn require_sql_custody_exhausted(
-    packets: &Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
+    packets: &Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
 ) -> Result<()> {
     ensure!(packets.as_ref().is_none_or(|packets| packets.is_empty()),
         "Store retains an undrained native packet vector at exhaustion");
@@ -1389,7 +1388,7 @@ impl StoreExhausted {
 
 pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
     store: &'store Store,
-    packets: Option<&ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: Option<&Vec<OriginalPacketPartsProgress>>,
     unopened_database: Option<&UnopenedSchedulerDatabaseProgress>,
     unopened_schema: Option<&UnopenedNativeTransientProgress>,
     admission_sources: Option<&super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
@@ -1462,7 +1461,7 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
 }
 
 pub(super) fn advance_unopened_scheduler_transient(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
     destination: &mut Option<UnopenedNativeTransientProgress>,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -1475,7 +1474,7 @@ pub(super) fn advance_unopened_scheduler_transient(
 }
 
 pub(super) fn advance_unopened_native_transient(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
     destination: &mut Option<UnopenedNativeTransientProgress>,
     expected_domain: lillux_sqlite::OriginalNativeDomain,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
@@ -1493,12 +1492,11 @@ pub(super) fn advance_unopened_native_transient(
         aggregate.require_original(factory)?;
         // SAFETY: this exact mutable source slot is taken once and cleared
         // before conversion; a foreign-process refusal restores the same owner.
-        let raw = unsafe { ManuallyDrop::take(source.as_mut().expect("checked Scheduler transient input")) };
-        *source = None;
+        let raw = source.take().expect("checked Scheduler transient input");
         let (domain, authority) = match raw.into_original_parts() {
             Ok(parts) => parts,
             Err(raw) => {
-                *source = Some(ManuallyDrop::new(raw));
+                *source = Some(raw);
                 anyhow::bail!("unused native transient input belongs to another process");
             }
         };
@@ -1521,8 +1519,8 @@ pub(super) fn advance_unopened_native_transient(
 /// its retained parts. The bounded scheduler vector is allocated before the
 /// caller's owner moves, then every retry resumes the same packet progress.
 pub(super) fn prepare_scheduler_packet_parts(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1539,7 +1537,7 @@ pub(super) fn prepare_scheduler_packet_parts(
         aggregate.require_original(factory)?;
         let mut packets = Vec::new();
         packets.try_reserve_exact(MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES)?;
-        *destination = Some(ManuallyDrop::new(packets));
+        *destination = Some(packets);
     }
     if source.is_some() {
         let packets = destination.as_mut().context("scheduler packet progress absent after reservation")?;
@@ -1550,7 +1548,7 @@ pub(super) fn prepare_scheduler_packet_parts(
         require_auxiliary_packet_domains_within_bounds(
             packets.iter().map(|packet| packet.held.native_domain).chain(std::iter::once(incoming)))?;
         let source = source.take().expect("checked scheduler packet source");
-        let parts = ManuallyDrop::into_inner(source);
+        let parts = source;
         packets.push(OriginalPacketPartsProgress::from_parts(
             parts, handoff, OriginalPacketSourceKind::Scheduler));
     }
@@ -1563,7 +1561,7 @@ pub(super) fn prepare_scheduler_packet_parts(
 }
 
 pub(super) fn advance_unopened_scheduler_database(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
     destination: &mut Option<UnopenedSchedulerDatabaseProgress>,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -1576,7 +1574,7 @@ pub(super) fn advance_unopened_scheduler_database(
     aggregate.require_original(factory)?;
     if source.is_some() && destination.is_none() {
         let raw = source.as_ref().expect("checked unopened scheduler source");
-        (&**raw).require_scheduler_coordinate()?;
+        raw.require_scheduler_coordinate()?;
         let bytes = std::mem::size_of::<UnopenedSchedulerDatabaseProgress>()
             .checked_add(std::mem::size_of::<lillux_sqlite::OriginalNativeOutsideBoundCoordinate>())
             .context("unopened scheduler source transfer quote overflow")?;
@@ -1587,12 +1585,11 @@ pub(super) fn advance_unopened_scheduler_database(
         // SAFETY: this branch has exactly one mutable source slot. Take it
         // once and clear the slot before any fallible conversion; the exact
         // owner is restored below if process validation refuses the move.
-        let raw = unsafe { ManuallyDrop::take(source.as_mut().expect("checked source")) };
-        *source = None;
+        let raw = source.take().expect("checked source");
         let parts = match raw.into_original_parts() {
             Ok(parts) => parts,
             Err(raw) => {
-                *source = Some(ManuallyDrop::new(raw));
+                *source = Some(raw);
                 anyhow::bail!("unopened scheduler bound input belongs to another process");
             }
         };
@@ -1612,8 +1609,8 @@ pub(super) fn advance_unopened_scheduler_database(
 /// Mechanical packet normalization shared by normal and failed Store paths.
 /// It moves complete genuine components; it supplies no native/physical grant.
 pub(super) fn prepare_original_packet_parts(
-    source: &mut Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1638,7 +1635,7 @@ pub(super) fn prepare_original_packet_parts(
         aggregate.require_original(factory)?;
         let mut slots = Vec::new();
         slots.try_reserve_exact(count)?;
-        *destination = Some(ManuallyDrop::new(slots));
+        *destination = Some(slots);
         let slots = destination.as_mut().expect("cached original packet progress vector");
         // Capacity is reserved and the destination is retained before source
         // transfer. This loop invokes no host operation or external callback.
@@ -1660,9 +1657,9 @@ pub(super) fn prepare_original_packet_parts(
 /// been prepaid and reserved; after transfer every retry resumes the packet
 /// progress in the same Store frame.
 pub(super) fn prepare_original_packet_parts_from_owner(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    raw: &mut Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    raw: &mut Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     expected_domain: lillux_sqlite::OriginalNativeDomain,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
@@ -1676,7 +1673,6 @@ pub(super) fn prepare_original_packet_parts_from_owner(
             "retained original packet marker lost its matching source phase");
         return Ok(());
     };
-    let actual = &**actual;
     ensure!(actual.domain == Some(expected_domain),
         "retained original packet changed its fixed native purpose");
     ensure!(actual.leaf_evidence.domain()? == Some(expected_domain),
@@ -1702,15 +1698,14 @@ pub(super) fn prepare_original_packet_parts_from_owner(
     if destination.is_none() {
         let mut slots = Vec::new();
         slots.try_reserve_exact(1)?;
-        *destination = Some(ManuallyDrop::new(slots));
+        *destination = Some(slots);
     }
-    if raw.is_none() { *raw = Some(ManuallyDrop::new(Vec::new())); }
+    if raw.is_none() { *raw = Some(Vec::new()); }
     let slots = destination.as_mut().expect("reserved original packet progress");
     if slots.capacity() < 1 { slots.try_reserve_exact(1)?; }
     // SAFETY: the same original Store progress retains this exact parts owner;
     // destination capacity is reserved before its one-time extraction.
-    let actual = unsafe { ManuallyDrop::take(source.as_mut().expect("checked actual outside parts")) };
-    *source = None;
+    let actual = source.take().expect("checked actual outside parts");
     slots.push(OriginalPacketPartsProgress::from_parts(actual, None, source_kind));
     for packet in slots.iter_mut() { packet.advance_destination(factory, aggregate, prepay)?; }
     Ok(())
@@ -1719,7 +1714,7 @@ pub(super) fn prepare_original_packet_parts_from_owner(
 /// Join selected packet roots to the SAME open physical inventory. This
 /// transfers actual owners only; the complete inventory is not sealed here.
 pub(super) fn register_original_packet_bound_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1738,7 +1733,7 @@ pub(super) fn register_original_packet_bound_roots(
 }
 
 pub(super) fn register_original_packet_destination_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1754,7 +1749,7 @@ pub(super) fn register_original_packet_destination_roots(
 /// Check actual selected packet handoff phases. This observes retained
 /// components only and does not imply native-reference or physical retirement.
 pub(super) fn require_original_packet_root_handoffs(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1786,7 +1781,7 @@ pub(super) fn require_original_packet_root_handoffs(
 }
 
 pub(super) fn require_original_packet_sources_transferred(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1826,7 +1821,7 @@ pub(super) fn require_original_packet_sources_transferred(
 /// Pre-seal census of one retained packet vector. An absent vector was
 /// already qualified by the parent join that would have produced it.
 pub(super) fn require_original_packet_pre_seal_complete(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
 ) -> Result<()> {
     let Some(packets) = packets else { return Ok(()); };
@@ -1839,7 +1834,7 @@ pub(super) fn require_original_packet_pre_seal_complete(
 }
 
 pub(super) fn retire_original_packet_native_references(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1854,7 +1849,7 @@ pub(super) fn retire_original_packet_native_references(
 }
 
 pub(super) fn retire_original_packet_metadata_pins(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
     source_kind: OriginalPacketSourceKind,
@@ -1879,7 +1874,7 @@ pub(super) fn retire_original_packet_metadata_pins(
 }
 
 pub(super) fn prepare_original_packet_destination_retirements(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1895,7 +1890,7 @@ pub(super) fn prepare_original_packet_destination_retirements(
 }
 
 pub(super) fn consume_retired_original_packet_destinations(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     source_kind: OriginalPacketSourceKind,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1909,7 +1904,7 @@ pub(super) fn consume_retired_original_packet_destinations(
 }
 
 pub(super) fn consume_retired_original_packet_bound_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     source_kind: OriginalPacketSourceKind,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1930,7 +1925,7 @@ pub(super) fn consume_retired_original_packet_bound_roots(
 }
 
 pub(super) fn consume_retired_original_packet_metadata_pins(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2004,7 +1999,7 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
 }
 
 pub(super) fn consume_retired_original_packet_source_parts(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2250,7 +2245,7 @@ impl LiveStateStoreOutsideCustody {
             };
             match taken {
                 ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::Connection(parts) => {
-                    let mut source = Some(ManuallyDrop::new(parts));
+                    let mut source = Some(parts);
                     let result = self.advance_scheduler_packet_parts_with_handoff(
                         &mut source, factory, aggregate, prepay,
                         Some((handoff_id.clone(), ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Database)));
@@ -2259,14 +2254,14 @@ impl LiveStateStoreOutsideCustody {
                         // from this wrapper; the Store progress did not accept them.
                         unsafe { sources.restore_database(
                             ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_connection(
-                                ManuallyDrop::into_inner(parts))); }
+                                parts)); }
                         true
                     } else { false };
                     result?;
                     ensure!(!unaccepted, "Scheduler database packet was not accepted by Store progress");
                 }
                 ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) => {
-                    let mut source = Some(ManuallyDrop::new(inputs));
+                    let mut source = Some(inputs);
                     let result = self.advance_unopened_scheduler_database_with_handoff(
                         &mut source, factory, aggregate, prepay, Some(handoff_id.clone()));
                     let unaccepted = if let Some(inputs) = source.take() {
@@ -2274,7 +2269,7 @@ impl LiveStateStoreOutsideCustody {
                         // from this wrapper; Store progress did not accept them.
                         unsafe { sources.restore_database(
                             ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_never_opened(
-                                ManuallyDrop::into_inner(inputs))); }
+                                inputs)); }
                         true
                     } else { false };
                     result?;
@@ -2286,14 +2281,14 @@ impl LiveStateStoreOutsideCustody {
         // SAFETY: the schema value remains local until accepted by the tagged
         // Store packet progress or restored to this wrapper on refusal.
         if let Some(schema) = unsafe { sources.take_schema()? } {
-            let mut source = Some(ManuallyDrop::new(schema));
+            let mut source = Some(schema);
             let result = self.advance_scheduler_packet_parts_with_handoff(
                 &mut source, factory, aggregate, prepay,
                 Some((handoff_id, ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Schema)));
             let unaccepted = if let Some(schema) = source.take() {
                 // SAFETY: these are the exact schema parts just taken from
                 // this wrapper; Store progress did not accept them.
-                unsafe { sources.restore_schema(ManuallyDrop::into_inner(schema)); }
+                unsafe { sources.restore_schema(schema); }
                 true
             } else { false };
             result?;
@@ -2306,7 +2301,7 @@ impl LiveStateStoreOutsideCustody {
     /// graph. Source movement is cached before any fallible lower transition.
     pub fn advance_scheduler_packet_parts(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2316,7 +2311,7 @@ impl LiveStateStoreOutsideCustody {
 
     fn advance_scheduler_packet_parts_with_handoff(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2342,7 +2337,7 @@ impl LiveStateStoreOutsideCustody {
     /// inventory without manufacturing a native terminal receipt.
     pub fn advance_unopened_scheduler_database(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2353,7 +2348,7 @@ impl LiveStateStoreOutsideCustody {
 
     fn advance_unopened_scheduler_database_with_handoff(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2379,7 +2374,7 @@ impl LiveStateStoreOutsideCustody {
     /// movement is cached before any fallible lower transition.
     pub fn advance_accounting_packet_parts(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2398,7 +2393,7 @@ impl LiveStateStoreOutsideCustody {
     /// after the live Store opened, so a failed-startup Store has none.
     pub fn advance_unopened_accounting_transient(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2423,7 +2418,7 @@ impl LiveStateStoreOutsideCustody {
     /// authority has joined this Store source graph.
     pub fn advance_unopened_scheduler_transient(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,

@@ -126,7 +126,6 @@ model:
     Ok(())
 }
 
-
 fn build_ryeos_signed_auth_headers(
     sk: &SigningKey,
     method: &str,
@@ -256,7 +255,14 @@ async fn assert_pre_admission_rejection(resp: reqwest::Response, expected_messag
 /// Returns `(harness, user_sk, publisher_sk, node_fp)`. The provider is
 /// bundle-owned; a directive-running test plants only its routing overlay and
 /// directive into the project it passes as `project_path`.
-async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
+async fn boot_daemon() -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    SigningKey,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("from dispatch_launch".into()),
@@ -288,9 +294,8 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     .await
     .expect("start daemon with mock + execute-stream route");
 
-    std::mem::forget(mock);
     let node_fp = fixture.node_fp();
-    (h, fixture.user, fixture.publisher, node_fp)
+    (Box::new(mock), h, fixture.user, fixture.publisher, node_fp)
 }
 
 /// Plant the routing overlay and directive into a project root for the
@@ -312,7 +317,7 @@ fn plant_launch_project(project: &Path, publisher: &SigningKey) {
 /// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_e2e_round_trip() {
-    let (h, node_sk, publisher_sk, node_fp) = boot_daemon().await;
+    let (_keep, h, node_sk, publisher_sk, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_launch_project(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
@@ -455,7 +460,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_last_event_id() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -502,7 +507,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -529,7 +534,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -557,7 +562,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -606,10 +611,10 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
 /// is OsRng-backed and operationally collision-free.
 #[test]
 fn sse_dispatch_launch_collision() {
-    use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner};
     use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::write_barrier::WriteBarrier;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
@@ -623,8 +628,13 @@ fn sse_dispatch_launch_collision() {
         *identity.verifying_key(),
     );
     let write_barrier = WriteBarrier::new();
-    let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
-        .expect("open state store");
+    let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
+        signer,
+        write_barrier,
+        Arc::new(head_trust),
+    )
+    .expect("open state store");
 
     let id = new_thread_id();
 
@@ -722,7 +732,7 @@ fn new_thread_id_format_and_uniqueness() {
 ///
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
         .expect("initialize project root");
@@ -771,7 +781,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 /// validation happens before the SSE handshake completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_relative_project_path() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",

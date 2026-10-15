@@ -260,25 +260,32 @@ impl StoreAuxiliaryPhysicalSources {
     }
 }
 
+const STORE_CLOSE_PROGRESS_KIND: &str = "ryeos-app::store-close-progress";
+const CLOSED_STORE_KIND: &str = "ryeos-app::closed-store";
+const STORE_CLOSE_FAILURE_KIND: &str = "ryeos-app::store-close-failure";
+
+/// Every owner a live Store's close holds. It has no destructor of its own:
+/// it is always held in a `Held`, which drops it only when final exhaustion
+/// would accept it and otherwise retains every parent, packet, registry,
+/// Runtime and State owner, with the metadata's Store alias and authorities,
+/// together until the process exits. Constructible only in this module.
 struct StoreCloseProgress {
-    /// The process that built this progress; any other process holds a copy.
-    process: u32,
-    store_parent: std::mem::ManuallyDrop<Option<live_native::LiveStateOpen>>,
-    store_parent_parts: std::mem::ManuallyDrop<Option<live_native::LiveStorePhysicalParent>>,
+    store_parent: Option<live_native::LiveStateOpen>,
+    store_parent_parts: Option<live_native::LiveStorePhysicalParent>,
     store_parent_finalization: Option<live_native::LiveStoreParentFinalizationParts>,
     store_destination_join: std::sync::OnceLock<Arc<super::live_destination_join::LiveStoreDestinationJoin>>,
-    runtime_packet_parts: Option<std::mem::ManuallyDrop<Vec<super::live_outside::OriginalPacketPartsProgress>>>,
-    operational_packet_parts: Option<std::mem::ManuallyDrop<Vec<super::live_outside::OriginalPacketPartsProgress>>>,
-    scheduler_packet_parts: Option<std::mem::ManuallyDrop<Vec<super::live_outside::OriginalPacketPartsProgress>>>,
+    runtime_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    operational_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
+    scheduler_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
     scheduler_unopened_database: Option<super::live_outside::UnopenedSchedulerDatabaseProgress>,
     scheduler_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
     accounting_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
     scheduler_admission_sources: Option<super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
-    operational_sql_custody: Option<std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
-    runtime_sql_custody: Option<std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
+    operational_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    runtime_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
     physical_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
     auxiliary_physical_sources: Option<StoreAuxiliaryPhysicalSources>,
-    metadata: std::mem::ManuallyDrop<StoreCloseMetadata>,
+    metadata: StoreCloseMetadata,
     runtime: Option<runtime_db::RuntimeDb>,
     runtime_failure: Option<runtime_db::OriginalRuntimeCloseFailure>,
     runtime_closed: Option<runtime_db::OriginalRuntimeClosed>,
@@ -289,6 +296,11 @@ struct StoreCloseProgress {
     state_physical: Option<ryeos_state::state_db::ClosedLiveStatePhysicalCustody>,
 }
 impl StoreCloseProgress {
+    /// Hold this progress: settled exactly when final exhaustion would accept
+    /// it without a registry.
+    fn held(self) -> lillux::custody::Held<StoreCloseProgress> {
+        lillux::custody::Held::new(STORE_CLOSE_PROGRESS_KIND, self, store_close_progress_exhausted)
+    }
     /// The registry-free part of final exhaustion: every owner slot consumed,
     /// the destination receiver completed, and every packet, source and
     /// admission exhausted. A dropped progress settles on exactly these
@@ -329,197 +341,75 @@ impl StoreCloseProgress {
         Ok(())
     }
 }
-/// Every field of a StoreCloseProgress moved out of its owner, unwrapped.
-struct StoreCloseProgressParts {
-    process: u32,
-    store_parent: Option<live_native::LiveStateOpen>,
-    store_parent_parts: Option<live_native::LiveStorePhysicalParent>,
-    store_parent_finalization: Option<live_native::LiveStoreParentFinalizationParts>,
-    store_destination_join: std::sync::OnceLock<Arc<super::live_destination_join::LiveStoreDestinationJoin>>,
-    runtime_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
-    operational_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
-    scheduler_packet_parts: Option<Vec<super::live_outside::OriginalPacketPartsProgress>>,
-    scheduler_unopened_database: Option<super::live_outside::UnopenedSchedulerDatabaseProgress>,
-    scheduler_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
-    accounting_unopened_schema_reference: Option<super::live_outside::UnopenedNativeTransientProgress>,
-    scheduler_admission_sources: Option<super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
-    operational_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    runtime_sql_custody: Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    physical_registry: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry>,
-    auxiliary_physical_sources: Option<StoreAuxiliaryPhysicalSources>,
-    metadata: StoreCloseMetadata,
-    runtime: Option<runtime_db::RuntimeDb>,
-    runtime_failure: Option<runtime_db::OriginalRuntimeCloseFailure>,
-    runtime_closed: Option<runtime_db::OriginalRuntimeClosed>,
-    runtime_outside: Option<runtime_db::OriginalLiveRuntimeOutsideCustody>,
-    state: Option<StateDb>,
-    state_failure: Option<ryeos_state::state_db::LiveStateCloseFailure>,
-    state_closed: Option<ryeos_state::state_db::ClosedLiveState>,
-    state_physical: Option<ryeos_state::state_db::ClosedLiveStatePhysicalCustody>,
-}
-impl StoreCloseProgress {
-    /// Move every field out exactly once; the emptied shell is never dropped.
-    fn into_parts(self) -> StoreCloseProgressParts {
-        let mut progress = std::mem::ManuallyDrop::new(self);
-        unsafe {
-            StoreCloseProgressParts {
-                process: progress.process,
-                store_parent: std::mem::ManuallyDrop::take(&mut progress.store_parent),
-                store_parent_parts: std::mem::ManuallyDrop::take(&mut progress.store_parent_parts),
-                store_parent_finalization: std::ptr::read(&progress.store_parent_finalization),
-                store_destination_join: std::ptr::read(&progress.store_destination_join),
-                runtime_packet_parts: std::ptr::read(&progress.runtime_packet_parts).map(std::mem::ManuallyDrop::into_inner),
-                operational_packet_parts: std::ptr::read(&progress.operational_packet_parts).map(std::mem::ManuallyDrop::into_inner),
-                scheduler_packet_parts: std::ptr::read(&progress.scheduler_packet_parts).map(std::mem::ManuallyDrop::into_inner),
-                scheduler_unopened_database: std::ptr::read(&progress.scheduler_unopened_database),
-                scheduler_unopened_schema_reference: std::ptr::read(&progress.scheduler_unopened_schema_reference),
-                accounting_unopened_schema_reference: std::ptr::read(&progress.accounting_unopened_schema_reference),
-                scheduler_admission_sources: std::ptr::read(&progress.scheduler_admission_sources),
-                operational_sql_custody: std::ptr::read(&progress.operational_sql_custody).map(std::mem::ManuallyDrop::into_inner),
-                runtime_sql_custody: std::ptr::read(&progress.runtime_sql_custody).map(std::mem::ManuallyDrop::into_inner),
-                physical_registry: std::ptr::read(&progress.physical_registry),
-                auxiliary_physical_sources: std::ptr::read(&progress.auxiliary_physical_sources),
-                metadata: std::mem::ManuallyDrop::take(&mut progress.metadata),
-                runtime: std::ptr::read(&progress.runtime),
-                runtime_failure: std::ptr::read(&progress.runtime_failure),
-                runtime_closed: std::ptr::read(&progress.runtime_closed),
-                runtime_outside: std::ptr::read(&progress.runtime_outside),
-                state: std::ptr::read(&progress.state),
-                state_failure: std::ptr::read(&progress.state_failure),
-                state_closed: std::ptr::read(&progress.state_closed),
-                state_physical: std::ptr::read(&progress.state_physical),
-            }
-        }
-    }
-}
-impl Drop for StoreCloseProgress {
-    fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept this progress
-        // without a registry. Each retained slot is taken exactly once, here;
-        // otherwise every parent, packet, registry, Runtime and State owner,
-        // with the metadata's Store alias and authorities, stays retained
-        // together until the process exits. The rest of the metadata
-        // (projection health, barrier, bookkeeping, abort handles, handler
-        // controls, signer and launch owners) is process memory owning no
-        // descriptor, released normally in the original process. A forked
-        // copy releases nothing: it relinquishes every slot and the whole
-        // metadata. Settlement is evaluated only in the original process: the
-        // check may allocate its refusal.
-        let forked = foreign_process(self.process);
-        let settled = !forked && self.require_exhausted_holders().is_ok();
-        let mut metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.metadata) };
-        let taken = unsafe {(
-            std::mem::ManuallyDrop::take(&mut self.store_parent),
-            std::mem::ManuallyDrop::take(&mut self.store_parent_parts),
-            self.runtime_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
-            self.operational_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
-            self.scheduler_packet_parts.take().map(std::mem::ManuallyDrop::into_inner),
-            self.operational_sql_custody.take().map(std::mem::ManuallyDrop::into_inner),
-            self.runtime_sql_custody.take().map(std::mem::ManuallyDrop::into_inner),
-        )};
-        if settled {
-            drop(taken);
-            drop(metadata);
-        } else if forked {
-            let rest = (
-                self.store_parent_finalization.take(),
-                std::mem::take(&mut self.store_destination_join),
-                self.scheduler_unopened_database.take(),
-                self.scheduler_unopened_schema_reference.take(),
-                self.accounting_unopened_schema_reference.take(),
-                self.scheduler_admission_sources.take(),
-                self.physical_registry.take(),
-                self.auxiliary_physical_sources.take(),
-                self.runtime.take(),
-                self.runtime_failure.take(),
-                self.runtime_closed.take(),
-                self.runtime_outside.take(),
-                self.state.take(),
-                self.state_failure.take(),
-                self.state_closed.take(),
-                self.state_physical.take(),
-            );
-            lillux::custody::relinquish_in_foreign_process((taken, metadata, rest));
-        } else {
-            let rest = (
-                self.store_parent_finalization.take(),
-                std::mem::take(&mut self.store_destination_join),
-                self.scheduler_unopened_database.take(),
-                self.scheduler_unopened_schema_reference.take(),
-                self.accounting_unopened_schema_reference.take(),
-                self.scheduler_admission_sources.take(),
-                self.physical_registry.take(),
-                self.auxiliary_physical_sources.take(),
-                (metadata.original.take(), metadata.authority.take(), metadata._thread_authority.take()),
-                self.runtime.take(),
-                self.runtime_failure.take(),
-                self.runtime_closed.take(),
-                self.runtime_outside.take(),
-                self.state.take(),
-                self.state_failure.take(),
-                self.state_closed.take(),
-                self.state_physical.take(),
-            );
-            lillux::custody::abandon("ryeos-app::store-close-progress", (taken, rest));
-            drop(metadata);
-        }
-    }
+/// Settled exactly when final exhaustion would accept the progress.
+fn store_close_progress_exhausted(progress: &StoreCloseProgress) -> bool {
+    progress.require_exhausted_holders().is_ok()
 }
 /// Actual State and Runtime terminal holders plus their original authority.
 /// This is neither aggregate native shutdown nor durable reservation settlement.
-pub struct ClosedLiveStateStore { progress: std::mem::ManuallyDrop<StoreCloseProgress>, prior_refusal: Option<anyhow::Error> }
-impl ClosedLiveStateStore {
-    /// Move the progress and the prior refusal out exactly once; the emptied
-    /// shell is never dropped.
-    fn into_parts(self) -> (StoreCloseProgress, Option<anyhow::Error>) {
-        let mut closed = std::mem::ManuallyDrop::new(self);
-        unsafe {
-            (std::mem::ManuallyDrop::take(&mut closed.progress), std::ptr::read(&closed.prior_refusal))
-        }
-    }
+pub struct ClosedLiveStateStore { inner: lillux::custody::Held<ClosedLiveStateStoreParts> }
 
+/// The close progress and the prior refusal. Constructible only in this
+/// module.
+struct ClosedLiveStateStoreParts {
+    progress: StoreCloseProgress,
+    prior_refusal: Option<anyhow::Error>,
+}
+impl ClosedLiveStateStoreParts {
     /// The registry-free part of final exhaustion: the progress holders and
-    /// a prior refusal that retains no owner. A dropped frame settles on
-    /// exactly these checks.
+    /// a prior refusal that retains no owner.
     fn require_exhausted_holders(&self) -> Result<()> {
         self.progress.require_exhausted_holders()?;
         ryeos_state::state_db::require_exhausted_refusals(self.prior_refusal.iter())
     }
 }
-impl Drop for ClosedLiveStateStore {
-    fn drop(&mut self) {
-        // Settled exactly when the progress inside would settle and the prior
-        // refusal retains nothing. The progress is taken exactly once, here;
-        // otherwise it stays retained whole, with the refusal, until the
-        // process exits. Settlement is evaluated only in the original
-        // process: the check may allocate its refusal.
-        let forked = foreign_process(self.progress.process);
-        let settled = !forked && self.require_exhausted_holders().is_ok();
-        let progress = unsafe { std::mem::ManuallyDrop::take(&mut self.progress) };
-        if settled {
-            drop(progress);
-            return;
+/// Settled exactly when the progress inside would settle and the prior
+/// refusal retains nothing; otherwise it stays retained whole, with the
+/// refusal, until the process exits.
+fn closed_store_exhausted(parts: &ClosedLiveStateStoreParts) -> bool {
+    parts.require_exhausted_holders().is_ok()
+}
+impl ClosedLiveStateStore {
+    fn new(progress: StoreCloseProgress, prior_refusal: Option<anyhow::Error>) -> Self {
+        Self {
+            inner: lillux::custody::Held::new(
+                CLOSED_STORE_KIND,
+                ClosedLiveStateStoreParts { progress, prior_refusal },
+                closed_store_exhausted,
+            ),
         }
-        let prior_refusal = self.prior_refusal.take();
-        if forked {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((progress, prior_refusal));
-        } else {
-            lillux::custody::abandon("ryeos-app::closed-store", (progress, prior_refusal));
-        }
+    }
+    fn progress_mut(&mut self) -> &mut StoreCloseProgress { &mut self.inner.get_mut().progress }
+
+    /// Move the progress and the prior refusal out; a copy in another process
+    /// is refused and comes back still held.
+    fn into_parts(self) -> std::result::Result<(StoreCloseProgress, Option<anyhow::Error>), Self> {
+        self.inner.take_whole()
+            .map(|parts| {
+                let ClosedLiveStateStoreParts { progress, prior_refusal } = parts;
+                (progress, prior_refusal)
+            })
+            .map_err(|inner| Self { inner })
+    }
+
+    /// The registry-free part of final exhaustion. A dropped frame settles on
+    /// exactly these checks.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign closed Store at exhaustion");
+        self.inner.require_exhausted_holders()
     }
 }
 impl ClosedLiveStateStore {
     pub(super) fn physical_registry_slot(&mut self)
         -> &mut Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
-        &mut self.progress.physical_registry
+        &mut self.progress_mut().physical_registry
     }
 
     pub(super) fn consume_retired_auxiliary_sources(
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        let progress = &mut *self.progress;
+        let progress = self.progress_mut();
         let sources = progress.auxiliary_physical_sources.as_ref()
             .context("actual Store auxiliary source frame absent after registry retirement")?;
         sources.require_retired(registry)?;
@@ -544,7 +434,7 @@ impl ClosedLiveStateStore {
             &[Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 2],
         ) -> Result<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>,
     ) -> Result<()> {
-        let StoreCloseProgress { state_physical, physical_registry, .. } = &mut *self.progress;
+        let StoreCloseProgress { state_physical, physical_registry, .. } = self.progress_mut();
         let registry = physical_registry.as_ref()
             .context("closed Store physical registry absent before State native-source retirement")?;
         state_physical.as_mut()
@@ -553,7 +443,7 @@ impl ClosedLiveStateStore {
     }
 
     pub(super) fn require_pre_seal_complete(&self) -> Result<()> {
-        let p = &*self.progress;
+        let p = &self.inner.progress;
         let registry = p.physical_registry.as_ref()
             .context("closed Store physical registry absent at pre-seal census")?;
         anyhow::ensure!(p.store_parent.is_none() && p.store_parent_parts.is_none()
@@ -589,7 +479,7 @@ impl ClosedLiveStateStore {
     }
 
     pub(super) fn require_state_native_sources_retired(&self) -> Result<()> {
-        let state = self.progress.state_physical.as_ref()
+        let state = self.inner.progress.state_physical.as_ref()
             .context("closed Store State physical frame absent before seal")?;
         anyhow::ensure!(state.native_sources_retired(),
             "closed Store seal precedes State native-source retirement");
@@ -603,7 +493,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let state = self.progress.state_physical.as_mut()
+        let state = self.progress_mut().state_physical.as_mut()
             .context("closed Store State physical frame absent after registry retirement")?;
         state.consume_retired_projection_sources(registry, prepay)
     }
@@ -613,7 +503,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let progress = &mut *self.progress;
+        let progress = self.progress_mut();
         anyhow::ensure!(progress.runtime_packet_parts.iter().all(|packets|
                 super::live_outside::packet_source_parts_consumed(Some(packets)))
             && progress.operational_packet_parts.iter().all(|packets|
@@ -631,7 +521,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        self.progress.runtime_outside.as_mut()
+        self.progress_mut().runtime_outside.as_mut()
             .context("closed Store Runtime outside frame absent after registry retirement")?
             .consume_retired_shared_roots(registry, prepay)
     }
@@ -640,7 +530,7 @@ impl ClosedLiveStateStore {
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        let progress = &mut *self.progress;
+        let progress = self.progress_mut();
         anyhow::ensure!(progress.store_parent.is_none()
             && progress.store_parent_parts.is_none()
             && progress.metadata.original.is_none()
@@ -669,7 +559,7 @@ impl ClosedLiveStateStore {
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        let progress = &mut *self.progress;
+        let progress = self.progress_mut();
         if let Some(database) = progress.scheduler_unopened_database.as_mut() {
             database.consume_retired(registry)?;
         }
@@ -686,7 +576,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let progress = &mut *self.progress;
+        let progress = self.progress_mut();
         if let Some(state) = progress.state_physical.take() {
             if let Err((state, error)) = state.into_exhausted(registry, prepay) {
                 progress.state_physical = Some(state);
@@ -707,7 +597,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         self.require_exhausted_holders()?;
-        self.progress.store_destination_join.get()
+        self.inner.progress.store_destination_join.get()
             .context("closed Store destination receiver absent at exhaustion")?
             .require_parent_completed_in_retired_registry(registry)
     }
@@ -724,14 +614,17 @@ impl ClosedLiveStateStore {
             Ok(exhausted) => exhausted,
             Err(error) => return Err((self, error)),
         };
-        let (progress, prior_refusal) = self.into_parts();
-        let StoreCloseProgressParts { process: _, store_parent, store_parent_parts, store_parent_finalization,
+        let (progress, prior_refusal) = match self.into_parts() {
+            Ok(parts) => parts,
+            Err(this) => return Err((this, anyhow!("closed Store belongs to another process"))),
+        };
+        let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
             physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
             runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
-            = progress.into_parts();
+            = progress;
         drop(store_parent);
         drop(store_parent_parts);
         drop(store_parent_finalization);
@@ -791,7 +684,7 @@ impl ClosedLiveStateStore {
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
     ) -> Result<ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt<'store>> {
-        let p = &*self.progress;
+        let p = &self.inner.progress;
         super::live_outside::issue_scheduler_store_handoff_receipt(
             self,
             p.scheduler_packet_parts.as_ref(),
@@ -809,16 +702,16 @@ impl ClosedLiveStateStore {
     ) -> Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if self.progress.store_parent.is_some() || self.progress.store_parent_parts.is_some() {
-            anyhow::ensure!(self.progress.metadata.original.is_none(),
+        if self.inner.progress.store_parent.is_some() || self.inner.progress.store_parent_parts.is_some() {
+            anyhow::ensure!(self.inner.progress.metadata.original.is_none(),
                 "Store retains transferred body and duplicate facade");
-            let p = &mut *self.progress;
+            let p = self.progress_mut();
             live_native::register_store_parent_roots(&mut p.store_parent, &mut p.store_parent_parts,
                 p.physical_registry.as_mut().context("actual Store physical registry absent")?,
                 factory, aggregate, prepay)?;
             return Ok(());
         }
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         anyhow::ensure!(p.runtime.is_none() && p.runtime_failure.is_none()
             && p.runtime_closed.is_none() && p.runtime_outside.is_some()
             && p.state.is_none() && p.state_failure.is_none() && p.state_closed.is_none()
@@ -877,14 +770,14 @@ impl ClosedLiveStateStore {
 
     pub(super) fn advance_scheduler_packet_parts(
         &mut self,
-        source: &mut Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         handoff: Option<(ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
             ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
     ) -> Result<()> {
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         super::live_outside::prepare_scheduler_packet_parts(source, &mut p.scheduler_packet_parts,
             factory, aggregate, prepay, handoff)?;
         let registry = p.physical_registry.as_mut()
@@ -896,13 +789,13 @@ impl ClosedLiveStateStore {
 
     pub(super) fn advance_unopened_scheduler_database(
         &mut self,
-        source: &mut Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
     ) -> Result<()> {
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         let expected = p.metadata.original.as_ref();
         let registry = p.physical_registry.as_mut()
             .context("actual Store physical registry absent for unopened Scheduler source")?;
@@ -913,12 +806,12 @@ impl ClosedLiveStateStore {
 
     pub(super) fn advance_unopened_scheduler_transient(
         &mut self,
-        source: &mut Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         let expected = p.metadata.original.as_ref();
         super::live_outside::advance_unopened_scheduler_transient(source,
             &mut p.scheduler_unopened_schema_reference, expected, factory, aggregate, prepay)
@@ -926,12 +819,12 @@ impl ClosedLiveStateStore {
 
     pub(super) fn advance_unopened_accounting_transient(
         &mut self,
-        source: &mut Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         let expected = p.metadata.original.as_ref();
         super::live_outside::advance_unopened_native_transient(source,
             &mut p.accounting_unopened_schema_reference,
@@ -946,7 +839,7 @@ impl ClosedLiveStateStore {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         if source.is_some() && p.scheduler_admission_sources.is_none() {
             let bytes = std::mem::size_of::<super::live_native::LiveSchedulerNativeAdmissionOutsideSources>();
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -971,7 +864,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = &mut *self.progress;
+        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = self.progress_mut();
         super::live_outside::consume_retired_original_packet_destinations(runtime_packet_parts,
             registry, super::live_outside::OriginalPacketSourceKind::Runtime, prepay)?;
         super::live_outside::consume_retired_original_packet_destinations(operational_packet_parts,
@@ -985,7 +878,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = &mut *self.progress;
+        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = self.progress_mut();
         super::live_outside::consume_retired_original_packet_bound_roots(runtime_packet_parts,
             registry, super::live_outside::OriginalPacketSourceKind::Runtime, prepay)?;
         super::live_outside::consume_retired_original_packet_bound_roots(operational_packet_parts,
@@ -999,7 +892,7 @@ impl ClosedLiveStateStore {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = &mut *self.progress;
+        let StoreCloseProgress { runtime_packet_parts, operational_packet_parts, scheduler_packet_parts, .. } = self.progress_mut();
         super::live_outside::consume_retired_original_packet_metadata_pins(runtime_packet_parts,
             super::live_outside::OriginalPacketSourceKind::Runtime, registry, prepay)?;
         super::live_outside::consume_retired_original_packet_metadata_pins(operational_packet_parts,
@@ -1014,7 +907,7 @@ impl ClosedLiveStateStore {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<u8> {
         let StoreCloseProgress { runtime_packet_parts, operational_packet_parts,
-            scheduler_packet_parts, .. } = &mut *self.progress;
+            scheduler_packet_parts, .. } = self.progress_mut();
         let mut failures = 0u8;
         for (packets, source_kind) in [
             (runtime_packet_parts, super::live_outside::OriginalPacketSourceKind::Runtime),
@@ -1041,7 +934,7 @@ impl ClosedLiveStateStore {
     ) -> Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         if p.store_parent_finalization.is_none() {
             anyhow::ensure!(p.store_parent.is_none(),
                 "actual Store parent body remains outside its physical frame");
@@ -1050,7 +943,7 @@ impl ClosedLiveStateStore {
             match parent.into_finalization_parts(factory, aggregate, prepay) {
                 Ok(parts) => p.store_parent_finalization = Some(parts),
                 Err((parent, error)) => {
-                    *p.store_parent_parts = Some(parent);
+                    p.store_parent_parts = Some(parent);
                     return Err(error);
                 }
             }
@@ -1131,7 +1024,7 @@ impl ClosedLiveStateStore {
         admission_alias: Option<&Arc<ryeos_node_runtime::state_lock::StateLockLease>>,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        let StoreCloseProgress { physical_registry, store_parent_finalization, .. } = &mut *self.progress;
+        let StoreCloseProgress { physical_registry, store_parent_finalization, .. } = self.progress_mut();
         let registry = physical_registry.as_ref()
             .context("actual Store physical registry absent before exclusion-alias retirement")?;
         let parts = store_parent_finalization.as_mut()
@@ -1147,13 +1040,13 @@ impl ClosedLiveStateStore {
     ) -> Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if self.progress.auxiliary_physical_sources.is_none() {
-            let sources = StoreAuxiliaryPhysicalSources::capture(&mut self.progress.metadata)?;
-            self.progress.auxiliary_physical_sources = Some(sources);
+        if self.inner.progress.auxiliary_physical_sources.is_none() {
+            let sources = StoreAuxiliaryPhysicalSources::capture(&mut self.progress_mut().metadata)?;
+            self.progress_mut().auxiliary_physical_sources = Some(sources);
         }
         let StoreCloseProgress {
             auxiliary_physical_sources, physical_registry, state_physical, ..
-        } = &mut *self.progress;
+        } = self.progress_mut();
         let registry = physical_registry.as_mut().context("actual Store physical registry absent")?;
         let sources = auxiliary_physical_sources.as_mut()
             .context("actual Store auxiliary source frame absent")?;
@@ -1170,17 +1063,17 @@ impl ClosedLiveStateStore {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         owner.require_original_process()?;
-        if let Some(original) = self.progress.metadata.original.as_ref() {
+        if let Some(original) = self.inner.progress.metadata.original.as_ref() {
             anyhow::ensure!(original.factory.same_original(factory),
                 "actual Store operator lock handoff changed factory");
         } else {
-            self.progress.store_destination_join.get()
+            self.inner.progress.store_destination_join.get()
                 .context("actual transferred Store receiver absent")?
                 .require_original_origin(factory, aggregate)?;
         }
-        super::live_outside::require_physical_registry(&self.progress.physical_registry,
+        super::live_outside::require_physical_registry(&self.inner.progress.physical_registry,
             factory, aggregate)?;
-        let p = &mut *self.progress;
+        let p = self.progress_mut();
         let registry = p.physical_registry.as_mut().context("actual Store physical registry absent")?;
         p.store_parent_parts.as_mut().context("actual Store physical parent parts absent")?
             .register_exclusion(owner, factory, aggregate, registry, prepay)?;
@@ -1197,7 +1090,7 @@ impl ClosedLiveStateStore {
         prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if self.progress.metadata.original.is_none() {
+        if self.inner.progress.metadata.original.is_none() {
             self.advance_store_parent(factory, aggregate, prepay)?;
             // Parent transfer may have succeeded before an auxiliary
             // descriptor or RecoveryStore-alias handoff refused. Resume that
@@ -1205,11 +1098,11 @@ impl ClosedLiveStateStore {
             // completion as completion of the whole Store census.
             return self.advance_auxiliary_physical_sources(factory, aggregate, prepay);
         }
-        anyhow::ensure!(self.progress.metadata.original()?.factory.same_original(factory),
+        anyhow::ensure!(self.inner.progress.metadata.original()?.factory.same_original(factory),
             "live Runtime physical handoff changed actual Store factory");
-        super::live_outside::require_physical_registry(&self.progress.physical_registry,
+        super::live_outside::require_physical_registry(&self.inner.progress.physical_registry,
             factory, aggregate)?;
-        let StoreCloseProgress { metadata, state_closed, state_physical, runtime_outside, runtime_sql_custody, operational_sql_custody, runtime_packet_parts, operational_packet_parts, physical_registry, .. } = &mut *self.progress;
+        let StoreCloseProgress { metadata, state_closed, state_physical, runtime_outside, runtime_sql_custody, operational_sql_custody, runtime_packet_parts, operational_packet_parts, physical_registry, .. } = self.progress_mut();
         let registry = physical_registry.as_mut().context("actual Store physical registry absent")?;
         let outside = runtime_outside.as_mut().context("actual Runtime outside source absent")?;
         if runtime_sql_custody.is_none() {
@@ -1218,7 +1111,7 @@ impl ClosedLiveStateStore {
             // Retain the whole original vector in an inline slot before any
             // subsequent root effect. No packet or native affinity is discarded.
             let packets = unsafe { outside.take_original_sql_custody() }?;
-            *runtime_sql_custody = Some(std::mem::ManuallyDrop::new(packets));
+            *runtime_sql_custody = Some(packets);
         }
         super::live_outside::prepare_original_packet_parts(runtime_sql_custody,
             runtime_packet_parts, factory, aggregate,
@@ -1235,7 +1128,7 @@ impl ClosedLiveStateStore {
                 registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
                 let packets = unsafe { state.take_operational_sql_custody(factory, aggregate) }?;
                 // Cache the entire vector before root registration can refuse.
-                *operational_sql_custody = Some(std::mem::ManuallyDrop::new(packets));
+                *operational_sql_custody = Some(packets);
             }
             super::live_outside::prepare_original_packet_parts(operational_sql_custody,
                 operational_packet_parts, factory, aggregate,
@@ -1281,9 +1174,9 @@ impl ClosedLiveStateStore {
         prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        anyhow::ensure!(self.progress.metadata.original()?.factory.same_original(factory),
+        anyhow::ensure!(self.inner.progress.metadata.original()?.factory.same_original(factory),
             "live Runtime source handoff changed actual Store factory");
-        let StoreCloseProgress { runtime_closed, runtime_outside, .. } = &mut *self.progress;
+        let StoreCloseProgress { runtime_closed, runtime_outside, .. } = self.progress_mut();
         if let Some(outside) = runtime_outside {
             return outside.advance_native_sources(factory, aggregate, prepay);
         }
@@ -1301,16 +1194,16 @@ impl ClosedLiveStateStore {
     pub(super) fn advance_state_projection_sources(&mut self,
         factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
-        if self.progress.metadata.original.is_none() {
-            return self.progress.store_destination_join.get()
+        if self.inner.progress.metadata.original.is_none() {
+            return self.inner.progress.store_destination_join.get()
                 .context("actual transferred Store receiver absent")?
                 .require_original_origin(factory, terminal);
         }
-        if let Some(state) = self.progress.state_physical.as_ref() {
+        if let Some(state) = self.inner.progress.state_physical.as_ref() {
             state.require_original(factory, terminal)?;
             return self.advance_runtime_sources(factory, terminal, prepay);
         }
-        let state = self.progress.state_closed.as_mut().context("actual closed State absent")?;
+        let state = self.progress_mut().state_closed.as_mut().context("actual closed State absent")?;
         state.advance_projection_sources(factory, terminal, prepay)?;
         state.advance_schema_sources(factory, terminal, prepay)?;
         state.advance_destination_input_sources(factory, terminal, prepay)?;
@@ -1321,19 +1214,19 @@ impl ClosedLiveStateStore {
         factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>) -> Result<()> {
         terminal.require_original(factory)?;
-        if self.progress.metadata.original.is_none() {
-            return self.progress.store_destination_join.get()
+        if self.inner.progress.metadata.original.is_none() {
+            return self.inner.progress.store_destination_join.get()
                 .context("actual transferred Store receiver absent")?
                 .require_original_origin(factory, terminal);
         }
-        anyhow::ensure!(self.progress.metadata.original()?.factory.same_original(factory), "closed Store selected foreign factory");
-        super::live_destination_join::prepare_store_destination_join(&self.progress.store_destination_join,
-            self.progress.metadata.original()?, factory, terminal, prepay)?;
-        if let Some(state) = self.progress.state_physical.as_ref() {
+        anyhow::ensure!(self.inner.progress.metadata.original()?.factory.same_original(factory), "closed Store selected foreign factory");
+        super::live_destination_join::prepare_store_destination_join(&self.inner.progress.store_destination_join,
+            self.inner.progress.metadata.original()?, factory, terminal, prepay)?;
+        if let Some(state) = self.inner.progress.state_physical.as_ref() {
             return state.require_original(factory, terminal);
         }
-        let state = self.progress.state_closed.as_ref().context("actual closed State absent")?;
-        let parent: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = self.progress.metadata.original()?.clone();
+        let state = self.inner.progress.state_closed.as_ref().context("actual closed State absent")?;
+        let parent: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = self.inner.progress.metadata.original()?.clone();
         state.require_original_store_parent(&parent, factory)?;
         state.prepare_destination_join(factory, terminal, prepay)
     }
@@ -1342,7 +1235,7 @@ impl ClosedLiveStateStore {
     /// holders remain owned; this is not descriptor retirement or settlement.
     pub fn into_outside_custody(self, terminal: &lillux_sqlite::OriginalNativeTerminal)
         -> std::result::Result<super::LiveStateStoreOutsideCustody, Self> {
-        let Some(original) = self.progress.metadata.original.as_ref() else { return Err(self); };
+        let Some(original) = self.inner.progress.metadata.original.as_ref() else { return Err(self); };
         if terminal.require_original(&original.factory).is_err() { return Err(self); }
         Ok(super::live_outside::LiveStateStoreOutsideCustody::closed(self))
     }
@@ -1350,16 +1243,16 @@ impl ClosedLiveStateStore {
     pub fn generation_lease_terminals(&self, factory: &Arc<OriginalNativeFactory>)
         -> Result<Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>> {
         self.native_terminals(factory)?;
-        self.progress.state_closed.as_ref().context("actual closed State absent")?.generation_lease_terminals()
+        self.inner.progress.state_closed.as_ref().context("actual closed State absent")?.generation_lease_terminals()
     }
-    pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.prior_refusal.as_ref() }
+    pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.inner.prior_refusal.as_ref() }
     pub fn native_terminals(&self, factory: &Arc<OriginalNativeFactory>) -> Result<Vec<OriginalNativeConnectionTerminal>> {
         factory.require_original_process()?;
-        anyhow::ensure!(self.progress.runtime_outside.is_none(),
+        anyhow::ensure!(self.inner.progress.runtime_outside.is_none(),
             "Runtime source already transferred after aggregate acknowledgement");
-        self.progress.metadata.original()?.require_close_factory(factory)?;
-        let mut terminals = self.progress.runtime_closed.as_ref().context("live Runtime terminal absent")?.native_terminals()?;
-        terminals.extend(self.progress.state_closed.as_ref().context("live State terminal absent")?.native_terminals()?);
+        self.inner.progress.metadata.original()?.require_close_factory(factory)?;
+        let mut terminals = self.inner.progress.runtime_closed.as_ref().context("live Runtime terminal absent")?.native_terminals()?;
+        terminals.extend(self.inner.progress.state_closed.as_ref().context("live State terminal absent")?.native_terminals()?);
         for terminal in &terminals { terminal.require_original(factory)?; }
         Ok(terminals)
     }
@@ -1386,8 +1279,8 @@ impl ClosedLiveStateStore {
         -> std::result::Result<StateStoreCensus, LiveStateStoreCloseFailure> {
         let checked = (|| -> Result<Vec<OriginalNativeConnectionTerminal>> {
             factory.require_original_process()?;
-            self.progress.metadata.original()?.require_close_factory(&factory)?;
-            let p = &*self.progress;
+            self.inner.progress.metadata.original()?.require_close_factory(&factory)?;
+            let p = &self.inner.progress;
             anyhow::ensure!(p.store_parent.is_none() && p.store_parent_parts.is_none()
                 && p.store_parent_finalization.is_none() && p.store_destination_join.get().is_none()
                 && p.runtime_packet_parts.is_none() && p.operational_packet_parts.is_none()
@@ -1406,28 +1299,36 @@ impl ClosedLiveStateStore {
         })();
         let runtime_terminals = match checked {
             Ok(terminals) => terminals,
-            Err(error) => return Err(LiveStateStoreCloseFailure { error, factory,
-                custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Closed(self))) }),
+            Err(error) => return Err(LiveStateStoreCloseFailure::new(error, factory,
+                StoreCloseCustody::Closed(self))),
         };
-        let state_closed = self.progress.state_closed.take().expect("checked closed State present");
+        let state_closed = self.progress_mut().state_closed.take().expect("checked closed State present");
         let state_census = match state_closed.into_census(Arc::clone(&factory)) {
             Ok(census) => census,
             Err(failure) => {
                 let error = anyhow!("in-process State census refused: {failure}");
-                self.progress.state_failure = Some(failure);
-                let (progress, prior_refusal) = self.into_parts();
-                return Err(LiveStateStoreCloseFailure { error: prior_refusal.unwrap_or(error), factory,
-                    custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Progress(progress))) });
+                self.progress_mut().state_failure = Some(failure);
+                let (progress, prior_refusal) = match self.into_parts() {
+                    Ok(parts) => parts,
+                    Err(this) => return Err(LiveStateStoreCloseFailure::new(
+                        error, factory, StoreCloseCustody::Closed(this))),
+                };
+                return Err(LiveStateStoreCloseFailure::new(prior_refusal.unwrap_or(error), factory,
+                    StoreCloseCustody::Progress(progress.held())));
             }
         };
-        let (progress, prior_refusal) = self.into_parts();
-        let StoreCloseProgressParts { process: _, store_parent, store_parent_parts, store_parent_finalization,
+        let (progress, prior_refusal) = match self.into_parts() {
+            Ok(parts) => parts,
+            Err(this) => return Err(LiveStateStoreCloseFailure::new(
+                anyhow!("closed Store belongs to another process"), factory, StoreCloseCustody::Closed(this))),
+        };
+        let StoreCloseProgress { store_parent, store_parent_parts, store_parent_finalization,
             store_destination_join, runtime_packet_parts, operational_packet_parts,
             scheduler_packet_parts, scheduler_unopened_database, scheduler_unopened_schema_reference,
             accounting_unopened_schema_reference, scheduler_admission_sources, operational_sql_custody, runtime_sql_custody,
             physical_registry, auxiliary_physical_sources, metadata, runtime, runtime_failure,
             runtime_closed, runtime_outside, state, state_failure, state_closed, state_physical }
-            = progress.into_parts();
+            = progress;
         // Every outside slot was checked empty above; the census holds every
         // native owner, and the Runtime close context ends with its roots.
         drop(store_parent);
@@ -1454,41 +1355,45 @@ impl ClosedLiveStateStore {
     }
 }
 
-enum StoreCloseCustody { Shared(Arc<StateStore>), Store(StateStore), Progress(StoreCloseProgress), Closed(ClosedLiveStateStore) }
-pub struct LiveStateStoreCloseFailure { error: anyhow::Error, factory: Arc<OriginalNativeFactory>, custody: std::mem::ManuallyDrop<Mutex<StoreCloseCustody>> }
+enum StoreCloseCustody { Shared(Arc<StateStore>), Store(StateStore), Progress(lillux::custody::Held<StoreCloseProgress>), Closed(ClosedLiveStateStore) }
+
+/// No drop settles a refused close: the custody always holds the live Store,
+/// its close progress or its closed frame, each owning the namespace
+/// exclusion and native owners that only a retried close, the returned Store
+/// or a census may end. Constructible only in this module.
+struct LiveStateStoreCloseFailureParts {
+    error: anyhow::Error,
+    factory: Arc<OriginalNativeFactory>,
+    custody: Mutex<StoreCloseCustody>,
+}
+pub struct LiveStateStoreCloseFailure { inner: lillux::custody::Held<LiveStateStoreCloseFailureParts> }
 impl LiveStateStoreCloseFailure {
-    /// Move every field out exactly once; the emptied shell is never dropped.
-    fn into_parts(self) -> (anyhow::Error, Arc<OriginalNativeFactory>, Mutex<StoreCloseCustody>) {
-        let mut failure = std::mem::ManuallyDrop::new(self);
-        unsafe {
-            (std::ptr::read(&failure.error), std::ptr::read(&failure.factory),
-                std::mem::ManuallyDrop::take(&mut failure.custody))
+    fn new(error: anyhow::Error, factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody) -> Self {
+        Self {
+            inner: lillux::custody::Held::until_taken(
+                STORE_CLOSE_FAILURE_KIND,
+                LiveStateStoreCloseFailureParts { error, factory, custody: Mutex::new(custody) },
+            ),
         }
     }
-}
-impl Drop for LiveStateStoreCloseFailure {
-    fn drop(&mut self) {
-        // No drop settles a refused close: the custody always holds the live
-        // Store, its close progress or its closed frame, each owning the
-        // namespace exclusion and native owners that only a retried close,
-        // the returned Store or a census may end. The whole custody stays
-        // retained until the process exits.
-        let custody = unsafe { std::mem::ManuallyDrop::take(&mut self.custody) };
-        if lillux::exec::in_forked_child() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(custody);
-            return;
-        }
-        lillux::custody::abandon("ryeos-app::store-close-failure", custody);
+    /// Move every field out; a copy in another process is refused and comes
+    /// back still held.
+    fn into_parts(self) -> std::result::Result<(anyhow::Error, Arc<OriginalNativeFactory>, Mutex<StoreCloseCustody>), Self> {
+        self.inner.take_whole()
+            .map(|parts| {
+                let LiveStateStoreCloseFailureParts { error, factory, custody } = parts;
+                (error, factory, custody)
+            })
+            .map_err(|inner| Self { inner })
     }
 }
 impl std::fmt::Debug for LiveStateStoreCloseFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LiveStateStoreCloseFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("LiveStateStoreCloseFailure").field("error", &self.inner.error).finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for LiveStateStoreCloseFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "live Store close retained: {:#}", self.error) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "live Store close retained: {:#}", self.inner.error) }
 }
 impl std::error::Error for LiveStateStoreCloseFailure {}
 impl LiveStateStoreCloseFailure {
@@ -1496,28 +1401,31 @@ impl LiveStateStoreCloseFailure {
     /// existing execution/recovery obligations can finish. Once either native
     /// owner has transferred, only the retained close retry is permitted.
     pub fn into_unstarted(self) -> std::result::Result<Arc<StateStore>, Self> {
-        if self.factory.require_original_process().is_err() { return Err(self); }
-        let (error, factory, custody) = self.into_parts();
+        if self.inner.is_foreign() || self.inner.factory.require_original_process().is_err() { return Err(self); }
+        let (error, factory, custody) = match self.into_parts() {
+            Ok(parts) => parts,
+            Err(this) => return Err(this),
+        };
         let custody = custody.into_inner().unwrap_or_else(|p| p.into_inner());
         match custody {
             StoreCloseCustody::Shared(store) => Ok(store),
             StoreCloseCustody::Store(store) => Ok(Arc::new(store)),
-            custody => Err(Self { error, factory, custody: std::mem::ManuallyDrop::new(Mutex::new(custody)) }),
+            custody => Err(Self::new(error, factory, custody)),
         }
     }
 
     pub fn retry(self) -> std::result::Result<ClosedLiveStateStore, Self> {
-        if self.factory.require_original_process().is_err() { return Err(self); }
-        let (error, factory, custody) = self.into_parts();
+        if self.inner.is_foreign() || self.inner.factory.require_original_process().is_err() { return Err(self); }
+        let (error, factory, custody) = match self.into_parts() {
+            Ok(parts) => parts,
+            Err(this) => return Err(this),
+        };
         advance_close(factory, custody.into_inner().unwrap_or_else(|p| p.into_inner()), Some(error))
     }
 }
-/// Kind under which a close progress is retained when the close unwinds
-/// before handing it back.
-const STORE_CLOSE_UNWOUND_KIND: &str = "ryeos-app::store-close-unwound";
 fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody,
     prior: Option<anyhow::Error>) -> std::result::Result<ClosedLiveStateStore, LiveStateStoreCloseFailure> {
-    let retain = |error, custody| LiveStateStoreCloseFailure { error, factory: Arc::clone(&factory), custody: std::mem::ManuallyDrop::new(Mutex::new(custody)) };
+    let retain = |error, custody| LiveStateStoreCloseFailure::new(error, Arc::clone(&factory), custody);
     if let Err(error) = factory.require_original_process() { return Err(retain(error, custody)); }
     let custody = match custody {
         StoreCloseCustody::Shared(shared) => match Arc::try_unwrap(shared) {
@@ -1550,8 +1458,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
             // retention/SQL mutex is held through the consuming close below.
             let Inner { state_db, runtime_db, signer, active_launch_owners } = inner.into_inner().unwrap_or_else(|p| p.into_inner());
             StoreCloseProgress {
-                process: std::process::id(),
-                store_parent: std::mem::ManuallyDrop::new(None), store_parent_parts: std::mem::ManuallyDrop::new(None),
+                store_parent: None, store_parent_parts: None,
                 store_parent_finalization: None,
                 store_destination_join: std::sync::OnceLock::new(),
                 runtime_packet_parts: None, operational_packet_parts: None,
@@ -1563,16 +1470,16 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
                 runtime_sql_custody: None,
                 physical_registry: None,
                 auxiliary_physical_sources: None,
-                metadata: std::mem::ManuallyDrop::new(StoreCloseMetadata { original: Some(live_native_open.expect("validated actual live opening owner")),
+                metadata: StoreCloseMetadata { original: Some(live_native_open.expect("validated actual live opening owner")),
                     authority: Some(state_authority), _thread_authority: thread_runtime_authority,
                     _projection_health: projection_health, _mode: (read_only, allow_projection_rebuild),
                     _barrier: write_barrier, _attachment_gate: process_attachment_admission_open,
                     _attachment_closed: process_attachment_admission_closed, _attached: attached_processes, _live_workers: live_workers,
                     _selected: selected_invocations, _launches: launch_task_abort_handles,
-                    _handlers: active_in_process_handlers, _signer: signer, _active_launch_owners: active_launch_owners }),
+                    _handlers: active_in_process_handlers, _signer: signer, _active_launch_owners: active_launch_owners },
                 runtime: Some(runtime_db), runtime_failure: None, runtime_closed: None, runtime_outside: None,
                 state: Some(state_db), state_failure: None, state_closed: None, state_physical: None,
-            }
+            }.held()
         }
         StoreCloseCustody::Progress(progress) => progress,
         StoreCloseCustody::Closed(closed) => {
@@ -1582,9 +1489,9 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         StoreCloseCustody::Shared(_) => unreachable!("shared custody resolved before native close"),
     };
     // An unwind through the close retains the progress whole, counted.
-    let mut progress = lillux::custody::Held::until_taken(STORE_CLOSE_UNWOUND_KIND, progress);
+    let mut progress = progress;
     if let Err(error) = progress.metadata.original().and_then(|original| original.require_close_factory(&factory)) {
-        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(live_native::take_held(progress))));
+        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress)));
     }
     // Resolve the real CAS guard before taking either SQL owner, preserving
     // both unchanged if the exact existing anchor cannot be acquired.
@@ -1592,7 +1499,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         .context("actual Store pinned authority absent before close")
         .and_then(|authority| authority.acquire_exclusive_guard(false)) {
         Ok(guard) => guard,
-        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(live_native::take_held(progress)))),
+        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress))),
     };
     if let Some(runtime) = progress.get_mut().runtime.take() {
         match runtime.close_original_runtime(Arc::clone(&factory)) {
@@ -1606,7 +1513,7 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         }
     }
     if progress.runtime_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(live_native::take_held(progress))));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(progress)));
     }
     if let Some(state) = progress.get_mut().state.take() {
         match state.close_live(Arc::clone(&factory), &guard) {
@@ -1620,9 +1527,10 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         }
     }
     if progress.state_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(live_native::take_held(progress))));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(progress)));
     }
-    let closed = ClosedLiveStateStore { progress: std::mem::ManuallyDrop::new(live_native::take_held(progress)), prior_refusal: prior };
+    // The progress was held only after the original process was confirmed.
+    let closed = ClosedLiveStateStore::new(live_native::take_held(progress), prior);
     if let Err(error) = closed.native_terminals(&factory) { return Err(retain(error, StoreCloseCustody::Closed(closed))); }
     Ok(closed)
 }
@@ -1675,8 +1583,8 @@ impl StateStore {
 mod custody_drop_tests {
     use super::*;
 
-    const CLOSED: &str = "ryeos-app::closed-store";
-    const FAILURE: &str = "ryeos-app::store-close-failure";
+    const CLOSED: &str = CLOSED_STORE_KIND;
+    const FAILURE: &str = STORE_CLOSE_FAILURE_KIND;
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
@@ -1714,11 +1622,11 @@ mod custody_drop_tests {
         }
         let app_root = tempfile::tempdir().unwrap();
         let (closed, retained) = super::super::test_native::closed_store_for_test(app_root.path());
-        let failure = LiveStateStoreCloseFailure {
-            error: anyhow!("census refused"),
-            factory: Arc::clone(&retained.0),
-            custody: std::mem::ManuallyDrop::new(Mutex::new(StoreCloseCustody::Closed(closed))),
-        };
+        let failure = LiveStateStoreCloseFailure::new(
+            anyhow!("census refused"),
+            Arc::clone(&retained.0),
+            StoreCloseCustody::Closed(closed),
+        );
         let before = (abandoned(FAILURE), abandoned(CLOSED));
         drop(failure);
         let after = (abandoned(FAILURE), abandoned(CLOSED));

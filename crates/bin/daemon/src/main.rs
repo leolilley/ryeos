@@ -429,9 +429,9 @@ struct DaemonSelectedComposition {
     // attempt (successful or refused) until its acknowledged outside sources
     // are cached below; then the cached sources join the Store graph.
     accounting_native: Option<Arc<ryeos_app::accounting_db::AccountingNativeLedger>>,
-    accounting_native_connection_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    accounting_native_reference_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    accounting_native_unused_reference: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    accounting_native_connection_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    accounting_native_reference_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    accounting_native_unused_reference: Option<lillux_sqlite::OriginalNativeTransientInputs>,
     // The audit outbox publisher holds Store and ledger aliases. Its handle
     // is filled from inside the startup future and ended before native
     // shutdown, so the consuming Store close sees no service owner.
@@ -450,13 +450,13 @@ struct DaemonSelectedComposition {
     #[cfg(feature = "scheduling")]
     scheduler_admission_sources: Option<state_store::LiveSchedulerNativeAdmissionOutsideSources>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_connection_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    scheduler_native_connection_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_unopened_inputs: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+    scheduler_native_unopened_inputs: Option<lillux_sqlite::OriginalNativeBoundInputs>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_schema_parts: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+    scheduler_native_schema_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_schema_transient: Option<std::mem::ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    scheduler_native_schema_transient: Option<lillux_sqlite::OriginalNativeTransientInputs>,
     #[cfg(feature = "scheduling")]
     scheduler_participant_custody: Option<Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>>,
     // Retain actual receipts alongside their database until the full original
@@ -697,10 +697,10 @@ impl DaemonSelectedComposition {
             match released.into_outside_parts(factory, terminal) {
                 Ok((parts, transient, _prior_refusal)) => {
                     if let Some(parts) = parts {
-                        self.scheduler_native_schema_parts =
-                            Some(std::mem::ManuallyDrop::new(parts));
+                        self.scheduler_native_schema_parts = Some(parts);
                     }
-                    self.scheduler_native_schema_transient = transient;
+                    self.scheduler_native_schema_transient = transient
+                        .map(ryeos_state::sqlite_schema::UnusedSchemaTransientInputs::take_or_abort);
                     tracing::warn!(
                         "scheduler schema reference failed; retaining its original failure evidence during shutdown"
                     );
@@ -3855,8 +3855,7 @@ async fn run(
                     Ok(reference) => reference,
                     Err(failure) => {
                         composition.scheduler_schema_failure = Some(failure);
-                        composition.scheduler_native_unopened_inputs =
-                            Some(std::mem::ManuallyDrop::new(scheduler_inputs));
+                        composition.scheduler_native_unopened_inputs = Some(scheduler_inputs);
                         anyhow::bail!("scheduler schema reference refused; original custody retained");
                     }
                 };

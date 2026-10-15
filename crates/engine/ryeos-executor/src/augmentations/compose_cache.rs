@@ -465,7 +465,9 @@ mod tests {
 
     #[test]
     fn failed_fill_is_not_cached() {
-        let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+        static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+            std::sync::LazyLock::new(ComposeProjectionCache::default);
+        let cache = &*FRESH;
         let CacheLookup::Build(fill) = cache.begin("key") else {
             panic!("first lookup must build");
         };
@@ -481,7 +483,9 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+                static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+                    std::sync::LazyLock::new(ComposeProjectionCache::default);
+                let cache = &*FRESH;
                 let CacheLookup::Build(fill) = cache.begin("key") else {
                     panic!("first lookup must build");
                 };
@@ -503,7 +507,9 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+                static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+                    std::sync::LazyLock::new(ComposeProjectionCache::default);
+                let cache = &*FRESH;
                 let CacheLookup::Build(fill) = cache.begin("oversize-single-flight") else {
                     panic!("leader must build");
                 };
@@ -531,7 +537,9 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+                static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+                    std::sync::LazyLock::new(ComposeProjectionCache::default);
+                let cache = &*FRESH;
                 let CacheLookup::Build(fill) = cache.begin("failure") else {
                     panic!("first lookup must build");
                 };
@@ -549,7 +557,9 @@ mod tests {
 
     #[test]
     fn authority_revalidation_discards_only_the_observed_projection() {
-        let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+        static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+            std::sync::LazyLock::new(ComposeProjectionCache::default);
+        let cache = &*FRESH;
         let CacheLookup::Build(fill) = cache.begin("key") else {
             panic!("first lookup must build");
         };
@@ -560,7 +570,9 @@ mod tests {
 
     #[test]
     fn pending_keys_are_bounded() {
-        let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+        static FRESH: std::sync::LazyLock<ComposeProjectionCache> =
+            std::sync::LazyLock::new(ComposeProjectionCache::default);
+        let cache = &*FRESH;
         let mut fills = Vec::new();
         for index in 0..MAX_PENDING {
             let CacheLookup::Build(fill) = cache.begin(&format!("key-{index}")) else {

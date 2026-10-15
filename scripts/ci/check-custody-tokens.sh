@@ -26,25 +26,8 @@ EXCEPTION_FILE=crates/kernel/lillux-sqlite/src/binding.rs
 EXCEPTION_PATTERN='Box::into_raw[[:space:]]*\('
 
 LEGACY=(
-    crates/bin/daemon/src/main.rs:16
-    crates/bin/daemon/tests/cli_execute_stream_e2e.rs:2
-    crates/bin/daemon/tests/sse_chain_tail_e2e.rs:2
-    crates/bin/daemon/tests/sse_dispatch_launch_e2e.rs:1
-    crates/bin/daemon/tests/sse_live_streaming_e2e.rs:1
-    crates/bin/daemon/tests/sse_thread_events_e2e.rs:2
-    crates/bin/daemon/tests/thread_tail_descriptor_e2e.rs:2
-    crates/daemon/ryeos-app/src/accounting_db/native.rs:25
-    crates/daemon/ryeos-app/src/custody_drop_gate.rs:55
-    crates/daemon/ryeos-app/src/no_forget_gate.rs:77
-    crates/daemon/ryeos-app/src/runtime_db/original_close.rs:54
-    crates/daemon/ryeos-app/src/state_store/live_close.rs:64
-    crates/daemon/ryeos-app/src/state_store/live_destination_join.rs:6
-    crates/daemon/ryeos-app/src/state_store/live_native.rs:109
-    crates/daemon/ryeos-app/src/state_store/live_outside.rs:50
+    crates/bin/daemon/src/main.rs:7
     crates/daemon/ryeos-node/src/native_capacity/reservation.rs:6
-    crates/engine/ryeos-executor/src/augmentations/compose_cache.rs:6
-    crates/engine/ryeos-executor/src/custody_drop_gate.rs:18
-    crates/engine/ryeos-executor/src/execution/prepared_launch_cache.rs:11
     crates/kernel/lillux-sqlite/src/binding.rs:1
     crates/kernel/lillux-sqlite/src/custody_drop_gate.rs:18
     crates/kernel/lillux-sqlite/src/lib.rs:19
@@ -52,12 +35,6 @@ LEGACY=(
     crates/kernel/lillux-sqlite/src/original_host_owner.rs:13
     crates/kernel/lillux-sqlite/src/original_physical_custody.rs:9
     crates/state/ryeos-state/src/custody_drop_gate.rs:46
-    crates/state/ryeos-state/src/operational/live_native.rs:56
-    crates/state/ryeos-state/src/operational/original.rs:31
-    crates/state/ryeos-state/src/sqlite_schema.rs:32
-    crates/state/ryeos-state/src/state_db/destination_join.rs:16
-    crates/state/ryeos-state/src/state_db/live_close.rs:84
-    crates/state/ryeos-state/src/state_db/live_native.rs:88
 )
 
 banned='(^|[^A-Za-z0-9_])forget[[:space:]]*(\(|::<)|mem::forget|mem::\{[^}]*forget([^A-Za-z0-9_]|$)'

@@ -5632,29 +5632,29 @@ impl StateStore {
         let _ = runtime_db_path;
         // Establish the real outside checkout before schema/native Runtime
         // acquisition, so early failures reach the same startup recovery owner.
-        let mut custody = live_native::StateOpenCustody { original: Some(live), runtime: None, state: None };
-        let opened_runtime = custody.original.as_ref().expect("actual Store opening owner").open_runtime();
+        let mut custody = live_native::StateOpenCustody::new(live);
+        let opened_runtime = custody.original().expect("actual Store opening owner").open_runtime();
         let runtime_db = match opened_runtime {
             Ok(runtime) => runtime,
             Err(error) => return Err(custody.fail(error)),
         };
-        custody.runtime = Some(runtime_db);
+        custody.set_runtime(runtime_db);
         // Launch claims are durable owner evidence. They must survive process
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = custody.original.as_ref().expect("actual Store opening owner")
+        let state_db = custody.original().expect("actual Store opening owner")
             .open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
-                head_trust, recovery_observer, custody.runtime.as_ref().expect("acquired Runtime owner"))
+                head_trust, recovery_observer, custody.runtime().expect("acquired Runtime owner"))
             .map_err(with_execution_schema_cutover_hint);
         let state_db = match state_db {
             Ok(state_db) => state_db,
             Err(error) => return Err(custody.fail(error)),
         };
-        custody.state = Some(state_db);
+        custody.set_state(state_db);
         let completed = (|| -> Result<_> {
-            let state_db = custody.state.as_ref().expect("acquired State owner");
-            let runtime_db = custody.runtime.as_ref().expect("acquired Runtime owner");
+            let state_db = custody.state().expect("acquired State owner");
+            let runtime_db = custody.runtime().expect("acquired Runtime owner");
             reconcile_credential_profile_authority(state_db, runtime_db)
                 .context("reconcile stable credential-profile authority")?;
             ensure_current_external_content_bindings(state_db)?;
@@ -5668,11 +5668,11 @@ impl StateStore {
             Ok(completed) => completed,
             Err(error) => return Err(custody.fail(error)),
         };
-        let state_db = custody.state.take().expect("completed State owner");
-        let runtime_db = custody.runtime.take().expect("completed Runtime owner");
+        let state_db = custody.take_state().expect("completed State owner");
+        let runtime_db = custody.take_runtime().expect("completed Runtime owner");
         // Transfer the actual opening owner from the same successful checkout;
         // `live` already moved into custody before State/recovery effects.
-        let live_native_open = custody.original.take();
+        let live_native_open = custody.take_original();
         Ok(Self {
             live_native_open,
             state_authority,

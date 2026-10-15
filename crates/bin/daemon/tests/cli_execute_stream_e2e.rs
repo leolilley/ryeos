@@ -86,7 +86,8 @@ Say hello.
 
 /// Boot a daemon with the mock provider (given canned responses) + the project
 /// directive. Returns the harness and the project path to pass via `-p`.
-async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
+/// The mock and project come first so they outlive the harness's teardown.
+async fn boot(responses: Vec<MockResponse>) -> (Box<dyn std::any::Any>, DaemonHarness, String) {
     let mock = MockProvider::start(responses).await;
     let mock_url = mock.base_url.clone();
 
@@ -119,9 +120,7 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
     plant_directive(project.path(), &fixture.publisher).expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();
 
-    std::mem::forget(project);
-    std::mem::forget(mock);
-    (h, project_path)
+    (Box::new((project, mock)), h, project_path)
 }
 
 fn run_cli(h: &DaemonHarness, args: &[&str]) -> std::process::Output {
@@ -136,7 +135,7 @@ fn run_cli(h: &DaemonHarness, args: &[&str]) -> std::process::Output {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_stream_success_exits_zero_and_prints_result() {
-    let (h, project) = boot(vec![
+    let (_keep, h, project) = boot(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
     ])
@@ -177,7 +176,7 @@ async fn cli_execute_stream_success_exits_zero_and_prints_result() {
 async fn cli_execute_stream_failure_exits_nonzero() {
     // Empty mock queue → provider returns 500 on the first call → the run fails
     // → thread_failed → the CLI must exit non-zero.
-    let (h, project) = boot(vec![]).await;
+    let (_keep, h, project) = boot(vec![]).await;
 
     let out = run_cli(
         &h,
@@ -201,7 +200,7 @@ async fn cli_execute_stream_failure_exits_nonzero() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_json_flag_prints_buffered_json() {
-    let (h, project) = boot(vec![
+    let (_keep, h, project) = boot(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
     ])

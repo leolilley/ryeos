@@ -499,7 +499,11 @@ fn copy_core_to_temp_from_prepared() -> (TempDir, PathBuf) {
 pub fn require_compiled_composition(bundle_names: &[&str]) -> anyhow::Result<()> {
     let needs = [
         ("scheduling", "scheduling", cfg!(feature = "scheduling")),
-        ("standard", "model-provider-setup", cfg!(feature = "model-provider-setup")),
+        (
+            "standard",
+            "model-provider-setup",
+            cfg!(feature = "model-provider-setup"),
+        ),
     ];
     let missing = needs
         .iter()
@@ -1069,11 +1073,7 @@ impl DaemonHarness {
             fast_fixture::register_full_composition(&state_path, &fixture)?;
         }
         plant(&state_path, user_space.path(), &fixture)?;
-        fast_fixture::validate_profile_bundle_records(
-            &state_path,
-            &fixture,
-            selected_profile,
-        )?;
+        fast_fixture::validate_profile_bundle_records(&state_path, &fixture, selected_profile)?;
         fast_fixture::seal_initialized_state(&state_path)?;
 
         // Authorize the user key (wildcard scope) so `post_execute` can sign
@@ -1272,7 +1272,11 @@ impl DaemonHarness {
     /// listed.
     pub async fn list_threads(&self, limit: usize) -> anyhow::Result<Vec<ListedThread>> {
         let (status, body) = self
-            .post_execute("service:threads/list", ".", serde_json::json!({ "limit": limit }))
+            .post_execute(
+                "service:threads/list",
+                ".",
+                serde_json::json!({ "limit": limit }),
+            )
             .await?;
         anyhow::ensure!(status.is_success(), "threads/list failed: {status} {body}");
         let threads = body
@@ -1382,7 +1386,10 @@ impl DaemonHarness {
                         .map(str::to_owned)
                         .with_context(|| format!("replayed event has no {name}: {event}"))
                 };
-                let payload = event.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = event
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 events.push((field("thread_id")?, field("event_type")?, payload));
             }
             match body

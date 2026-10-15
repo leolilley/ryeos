@@ -7,6 +7,7 @@ use lillux_sqlite::{
     OriginalNativeOpenFailure,
 };
 use lillux_sqlite::original_physical_custody::{OriginalPhysicalRegistry, OutsideWork};
+use lillux::custody::Held;
 use std::sync::{Arc, Mutex};
 
 pub fn quote_operational_schema_sources(current: usize, incoming: usize) -> Result<OutsideWork> {
@@ -126,17 +127,6 @@ impl OperationalMarkerSource {
             registry_identity: None,
             state: OperationalMarkerState::Unobserved,
         }
-    }
-    /// Move this whole source out of its slot, leaving an unobserved source
-    /// with the same copied process. Allocation-free, so a forked child may
-    /// call it while giving up a copied frame.
-    pub(super) fn take(&mut self) -> Self {
-        let process = self.process;
-        std::mem::replace(self, Self {
-            process,
-            registry_identity: None,
-            state: OperationalMarkerState::Unobserved,
-        })
     }
     /// A source whose marker receipt is already consumed, for frames built
     /// directly in tests.
@@ -382,132 +372,82 @@ struct LiveOperationalSchemaSource {
     _definition: crate::sqlite_schema::SchemaSqlDefinition,
     terminal: Option<OriginalNativeConnectionTerminal>,
 }
-struct LiveClosedOperationalContext {
+const LIVE_CONTEXT_KIND: &str = "ryeos-state::operational-live-context";
+
+/// Every owned field of a live closed Operational context, in the order its
+/// release drops them. Constructible only in this module, so no caller can
+/// swap the whole out from under its custody.
+struct LiveClosedOperationalContextParts {
     schema_sources: Vec<LiveOperationalSchemaSource>,
     schema_native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
-    original: std::mem::ManuallyDrop<Arc<crate::state_db::live_native::LiveStateNativeOwner>>,
+    original: Arc<crate::state_db::live_native::LiveStateNativeOwner>,
     references: super::live_native::LiveOperationalSchemaReferences,
-    initialization_phase: super::live_native::LiveOperationalInitializationPhase,
     _initialization: Option<lillux_sqlite::DurableLiveOperationalInitialization>,
     initialization_retirement: Option<super::live_native::LiveOperationalInitializationRetirement>,
     _marker: Option<File>,
 }
-/// Every owned field of a live closed Operational context moved out of it.
-/// The initialization phase is a plain copied fact and stays behind.
-type LiveClosedOperationalContextParts = (
-    Vec<LiveOperationalSchemaSource>,
-    Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
-    Arc<crate::state_db::live_native::LiveStateNativeOwner>,
-    super::live_native::LiveOperationalSchemaReferences,
-    Option<lillux_sqlite::DurableLiveOperationalInitialization>,
-    Option<super::live_native::LiveOperationalInitializationRetirement>,
-    Option<File>,
-);
-impl LiveClosedOperationalContext {
-    /// Move every owned field out of this context, in declaration order,
-    /// leaving only emptied slots and the plain phase. Nothing here
-    /// allocates, so a forked child may call this.
-    ///
-    /// # Safety
-    /// Call at most once, from `Drop` or on a shell that is never dropped:
-    /// the taken `ManuallyDrop` slot must never be read again.
-    unsafe fn take_whole(&mut self) -> LiveClosedOperationalContextParts {
-        (
-            std::mem::take(&mut self.schema_sources),
-            self.schema_native_failure.take(),
-            unsafe { std::mem::ManuallyDrop::take(&mut self.original) },
-            self.references.take(),
-            self._initialization.take(),
-            self.initialization_retirement.take(),
-            self._marker.take(),
-        )
-    }
-    /// No schema source keeps its native receipt and no schema transfer
-    /// refusal holds one: only the outside native transfer may end either.
-    fn schema_sources_settled(&self) -> bool {
-        self.schema_native_failure.is_none()
-            && self.schema_sources.iter().all(|source| source.terminal.is_none())
-    }
+/// Settled when no schema source or schema transfer refusal still holds a
+/// native receipt; the context then releases normally, its parent alias,
+/// references, initialization and marker through their own drops. Otherwise
+/// the whole context stays retained until the process exits. No schema source
+/// keeps its native receipt and no schema transfer refusal holds one: only the
+/// outside native transfer may end either.
+fn live_context_schema_sources_settled(parts: &LiveClosedOperationalContextParts) -> bool {
+    parts.schema_native_failure.is_none()
+        && parts.schema_sources.iter().all(|source| source.terminal.is_none())
 }
-impl Drop for LiveClosedOperationalContext {
-    fn drop(&mut self) {
-        // Settled when no schema source or schema transfer refusal still
-        // holds a native receipt; the context then releases normally, its
-        // parent alias, references, initialization and marker through their
-        // own drops. Otherwise the whole context stays retained until the
-        // process exits.
-        if lillux::exec::in_forked_child() {
-            // A forked child's copy holds none of these owners; it gives them
-            // up before any lock or allocation.
-            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
-            return;
+struct LiveClosedOperationalContext {
+    inner: Held<LiveClosedOperationalContextParts>,
+    // A plain copied fact; it carries no custody.
+    initialization_phase: super::live_native::LiveOperationalInitializationPhase,
+}
+impl LiveClosedOperationalContext {
+    fn new(
+        parts: LiveClosedOperationalContextParts,
+        initialization_phase: super::live_native::LiveOperationalInitializationPhase,
+    ) -> Self {
+        Self {
+            inner: Held::new(LIVE_CONTEXT_KIND, parts, live_context_schema_sources_settled),
+            initialization_phase,
         }
-        let settled = self.schema_sources_settled();
-        let whole = unsafe { self.take_whole() };
-        if settled {
-            drop(whole);
-        } else {
-            lillux::custody::abandon("ryeos-state::operational-live-context", whole);
-        }
+    }
+    /// Move every owned field out. A copy in another process is refused and
+    /// comes back still held.
+    fn into_parts(self) -> std::result::Result<LiveClosedOperationalContextParts, Self> {
+        let Self { inner, initialization_phase } = self;
+        inner.take_whole().map_err(|inner| Self { inner, initialization_phase })
     }
 }
 // Full live semantic/descriptor custody after the duplicate State-parent
 // edge ends. None of these retained bodies is a disposal or settlement receipt.
-struct LiveOperationalMetadataCustody {
+const LIVE_METADATA_KIND: &str = "ryeos-state::operational-live-metadata";
+
+/// Everything the metadata custody owns, in the order its release drops it.
+/// Constructible only in this module.
+struct LiveOperationalMetadataParts {
     parent: std::sync::Weak<crate::state_db::live_native::LiveStateNativeOwner>,
     factory: std::sync::Weak<OriginalNativeFactory>,
     schema_sources: Vec<LiveOperationalSchemaSource>,
     schema_native_failure: Option<(usize, lillux_sqlite::OriginalNativeOutsideCustodyFailure)>,
-    references: std::mem::ManuallyDrop<super::live_native::LiveOperationalSchemaReferences>,
-    _initialization_retirement: std::mem::ManuallyDrop<Option<super::live_native::LiveOperationalInitializationRetirement>>,
-    _marker: std::mem::ManuallyDrop<Option<File>>,
+    references: super::live_native::LiveOperationalSchemaReferences,
+    _initialization_retirement: Option<super::live_native::LiveOperationalInitializationRetirement>,
+    _marker: Option<File>,
+}
+/// Settled exactly when live metadata retirement would accept it: no schema
+/// native failure, no schema receipt, no original schema reference and no
+/// marker descriptor remain.
+fn live_metadata_settled(parts: &LiveOperationalMetadataParts) -> bool {
+    parts.schema_native_failure.is_none()
+        && parts.schema_sources.iter().all(|source| source.terminal.is_none())
+        && parts.references.original_source_count() == 0
+        && parts._marker.is_none()
+}
+struct LiveOperationalMetadataCustody {
+    inner: Held<LiveOperationalMetadataParts>,
 }
 impl LiveOperationalMetadataCustody {
-    /// Move every owned field out of this custody, in declaration order,
-    /// leaving only emptied slots. Nothing here allocates, so a forked child
-    /// may call this.
-    ///
-    /// # Safety
-    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
-    /// never be read again.
-    unsafe fn take_whole(&mut self) -> impl Send + 'static {
-        unsafe {(
-            std::mem::replace(&mut self.parent, std::sync::Weak::new()),
-            std::mem::replace(&mut self.factory, std::sync::Weak::new()),
-            std::mem::take(&mut self.schema_sources),
-            self.schema_native_failure.take(),
-            std::mem::ManuallyDrop::take(&mut self.references),
-            std::mem::ManuallyDrop::take(&mut self._initialization_retirement),
-            std::mem::ManuallyDrop::take(&mut self._marker),
-        )}
-    }
-    /// Settled exactly when live metadata retirement would accept it: no
-    /// schema native failure, no schema receipt, no original schema reference
-    /// and no marker descriptor remain.
-    fn settled(&self) -> bool {
-        self.schema_native_failure.is_none()
-            && self.schema_sources.iter().all(|source| source.terminal.is_none())
-            && self.references.original_source_count() == 0
-            && self._marker.is_none()
-    }
-}
-impl Drop for LiveOperationalMetadataCustody {
-    fn drop(&mut self) {
-        // Settled custody releases normally; otherwise the whole custody stays
-        // retained until the process exits.
-        if lillux::exec::in_forked_child() {
-            // A forked child's copy holds none of these owners; it gives them
-            // up before any lock or allocation.
-            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
-            return;
-        }
-        let settled = self.settled();
-        let whole = unsafe { self.take_whole() };
-        if settled {
-            drop(whole);
-        } else {
-            lillux::custody::abandon("ryeos-state::operational-live-metadata", whole);
-        }
+    fn new(parts: LiveOperationalMetadataParts) -> Self {
+        Self { inner: Held::new(LIVE_METADATA_KIND, parts, live_metadata_settled) }
     }
 }
 impl ContextOwner {
@@ -526,7 +466,7 @@ impl ContextOwner {
         self.factory.require_original_process()?;
         if let Some(live) = &self.live {
             anyhow::ensure!(
-                Arc::ptr_eq(live.original.factory(), &self.factory),
+                Arc::ptr_eq(live.inner.original.factory(), &self.factory),
                 "live Operational close selects foreign factory"
             );
         }
@@ -576,26 +516,26 @@ impl ClosedOriginalOperational {
         anyhow::ensure!(self.context.factory.same_original(factory) && self.context.live_domain,
             "live Operational schema transfer selected foreign or offline context");
         let live = self.context.live.as_mut().context("actual live Operational context absent")?;
-        let count = live.references.original_source_count();
+        let count = live.inner.references.original_source_count();
         anyhow::ensure!(count <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
-            && live.schema_sources.len().checked_add(count).is_some_and(|total|
+            && live.inner.schema_sources.len().checked_add(count).is_some_and(|total|
                 total <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES),
             "Operational schema source collection exceeds its one fixed DDL owner");
         if count == 0 { return Ok(()); }
-        let quote = quote_operational_schema_sources(live.schema_sources.len(), count)?;
+        let quote = quote_operational_schema_sources(live.inner.schema_sources.len(), count)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
         anyhow::ensure!(count <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
-            && live.schema_sources.len().checked_add(count).is_some_and(|total|
+            && live.inner.schema_sources.len().checked_add(count).is_some_and(|total|
                 total <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES),
             "Operational schema source bound changed after funding");
-        live.schema_sources.try_reserve_exact(count)?;
-        live.references.require_original_sources(factory)?;
+        live.inner.get_mut().schema_sources.try_reserve_exact(count)?;
+        live.inner.references.require_original_sources(factory)?;
         // No fallible/native work follows checkout of these actual entries.
         // Existing DDL, definitions and receipts move without recreating source.
-        for (ddl, reference) in live.references.take_original_sources() {
+        for (ddl, reference) in live.inner.get_mut().references.take_original_sources() {
             let (definition, proof) = reference.into_original_parts();
-            live.schema_sources.push(LiveOperationalSchemaSource { _ddl: ddl, _definition: definition, terminal: Some(proof) });
+            live.inner.get_mut().schema_sources.push(LiveOperationalSchemaSource { _ddl: ddl, _definition: definition, terminal: Some(proof) });
         }
         Ok(())
     }
@@ -606,10 +546,10 @@ impl ClosedOriginalOperational {
         self.require_original(&self.context.factory)?;
         let mut terminals = vec![self.terminal()];
         if let Some(live) = &self.context.live {
-            terminals.extend(live.references.native_terminals(&self.context.factory)?);
-            anyhow::ensure!(live.schema_native_failure.is_none(),
+            terminals.extend(live.inner.references.native_terminals(&self.context.factory)?);
+            anyhow::ensure!(live.inner.schema_native_failure.is_none(),
                 "Operational schema source already entered native outside handoff");
-            for source in live.schema_sources.iter() {
+            for source in live.inner.schema_sources.iter() {
                 let proof = source.terminal.as_ref().context("Operational schema receipt already moved outside")?;
                 proof.require_original(&self.context.factory)?;
                 terminals.push(proof.clone());
@@ -655,26 +595,73 @@ impl ClosedOriginalOperational {
 /// Original offline Operational continuation. No terminal transfer or Drop
 /// proves physical disposal; the actual outside controller retains this owner.
 pub struct OutsideOriginalOperationalCustody {
-    process: u32,
+    inner: Held<OutsideOperationalParts>,
+}
+const OUTSIDE_OPERATIONAL_KIND: &str = "ryeos-state::outside-operational-custody";
+
+/// Everything the outside frame owns, in the order its release drops it,
+/// followed by plain copied facts. Constructible only in this module, so no
+/// caller can swap the whole out from under its custody.
+struct OutsideOperationalParts {
     // The actual live parent, initialization proof, marker and schema bodies
     // remain accessible until their typed retirement. No offline shortcut.
-    live: std::mem::ManuallyDrop<Option<LiveClosedOperationalContext>>,
-    live_metadata: std::mem::ManuallyDrop<Option<LiveOperationalMetadataCustody>>,
-    live_domain: bool,
+    live: Option<LiveClosedOperationalContext>,
+    live_metadata: Option<LiveOperationalMetadataCustody>,
     root: Option<Arc<lillux::PinnedDirectory>>,
     namespace: Option<lillux::PinnedDirectoryLock>,
-    terminal: std::mem::ManuallyDrop<Option<OriginalNativeConnectionTerminal>>,
+    terminal: Option<OriginalNativeConnectionTerminal>,
     native_failure: Option<lillux_sqlite::OriginalNativeOutsideCustodyFailure>,
     sql_custody: Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
     // Fixed actual root and namespace roles; absence never means registered.
     shared_registrations:
         [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 2],
     shared_registry_identity: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
-    retired_shared_roots_consumed: bool,
     marker_source: OperationalMarkerSource,
     descriptor_owners: Vec<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>>,
     descriptor_receipts: Vec<Option<Arc<lillux_sqlite::RetiredOriginalFinalizerFile>>>,
     prior_refusal: Option<anyhow::Error>,
+    live_domain: bool,
+    retired_shared_roots_consumed: bool,
+}
+impl OutsideOperationalParts {
+    /// Only actual descriptor obligations, not durable/account settlement.
+    fn descriptors_retired(&self) -> bool {
+        self.live.is_none()
+            && self.live_metadata.is_none()
+            && self.root.is_none()
+            && self.namespace.is_none()
+            && self.terminal.is_none()
+            && self.native_failure.is_none()
+            && self.sql_custody.is_empty()
+            && (if self.retired_shared_roots_consumed {
+                self.shared_registrations.iter().all(Option::is_none)
+            } else {
+                self.shared_registrations
+                    .iter()
+                    .all(|binding| binding.as_ref().is_some_and(|binding| binding.retired()))
+            })
+            && self.descriptor_receipts.iter().all(Option::is_some)
+            && self.marker_source.retired_or_absent(!self.live_domain)
+    }
+    /// The registry-free part of final exhaustion.
+    fn require_exhausted_holders(&self) -> Result<()> {
+        anyhow::ensure!(self.retired_shared_roots_consumed && self.descriptors_retired(),
+            "Operational frame retains a physical or native owner at final exhaustion");
+        anyhow::ensure!(self.descriptor_owners.len() == self.descriptor_receipts.len(),
+            "Operational descriptor receipt census changed");
+        for (owner, receipt) in self.descriptor_owners.iter().zip(self.descriptor_receipts.iter()) {
+            receipt.as_ref().context("Operational descriptor receipt absent")?
+                .require_original(owner)?;
+        }
+        crate::state_db::live_native::require_exhausted_refusals(self.prior_refusal.iter())
+    }
+}
+/// Settled exactly when final exhaustion would accept the frame: shared roots
+/// consumed, every descriptor, root, marker, terminal, packet and live body
+/// retired and no owner-bearing refusal left. The frame then releases
+/// normally; otherwise the whole graph stays retained until the process exits.
+fn outside_operational_exhausted(parts: &OutsideOperationalParts) -> bool {
+    parts.require_exhausted_holders().is_ok()
 }
 impl ClosedOriginalOperational {
     /// Move the actual live context after genuine aggregate acknowledgement.
@@ -696,9 +683,9 @@ impl ClosedOriginalOperational {
             anyhow::ensure!(self.context.factory.same_original(factory) && self.context.live_domain,
                 "live Operational handoff selected foreign or offline source");
             let live = self.context.live.as_ref().context("actual live Operational State context absent")?;
-            anyhow::ensure!(Arc::ptr_eq(&live.original, parent),
+            anyhow::ensure!(Arc::ptr_eq(&live.inner.original, parent),
                 "live Operational handoff changed actual State parent");
-            anyhow::ensure!(live.references.original_source_count() == 0,
+            anyhow::ensure!(live.inner.references.original_source_count() == 0,
                 "live Operational schema sources must transfer before context handoff");
             let quote = quote_operational_live_context()?;
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -708,20 +695,21 @@ impl ClosedOriginalOperational {
         });
         if let Err(error) = checked { return Err((self, error)); }
         let Self { context, terminal, prior_refusal } = self;
-        let ContextOwner { factory: source_factory, root, namespace, live, .. } = context;
-        let outside = OutsideOriginalOperationalCustody {
-            process: std::process::id(),
-            live: std::mem::ManuallyDrop::new(live),
-            live_metadata: std::mem::ManuallyDrop::new(None),
-            live_domain: true,
+        let ContextOwner { factory: source_factory, root, namespace, read_only: _, live,
+            live_domain: _ } = context;
+        let outside = OutsideOriginalOperationalCustody::from_parts(OutsideOperationalParts {
+            live,
+            live_metadata: None,
             root: Some(root), namespace: Some(namespace),
-            terminal: std::mem::ManuallyDrop::new(Some(terminal)),
+            terminal: Some(terminal),
             native_failure: None, sql_custody: Vec::new(),
             shared_registrations: std::array::from_fn(|_| None), shared_registry_identity: None,
-            retired_shared_roots_consumed: false, marker_source: OperationalMarkerSource::new(),
+            marker_source: OperationalMarkerSource::new(),
             descriptor_owners: Vec::new(),
             descriptor_receipts: Vec::new(), prior_refusal,
-        };
+            live_domain: true,
+            retired_shared_roots_consumed: false,
+        });
         // The supplied original factory and actual State parent remain owned
         // by the outside supervisor. Every resource-bearing field is cached.
         drop(source_factory);
@@ -729,6 +717,9 @@ impl ClosedOriginalOperational {
     }
 }
 impl OutsideOriginalOperationalCustody {
+    fn from_parts(parts: OutsideOperationalParts) -> Self {
+        Self { inner: Held::new(OUTSIDE_OPERATIONAL_KIND, parts, outside_operational_exhausted) }
+    }
     /// Preserve the complete live context before ending only its duplicate
     /// parent Arc. The supplied canonical State parent survives this call.
     /// No marker is closed and no initialization/schema evidence is discarded.
@@ -742,28 +733,28 @@ impl OutsideOriginalOperationalCustody {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         lillux_sqlite::OriginalNativeDestinationAuthority::require_original(parent.as_ref(), factory)?;
-        anyhow::ensure!(self.live_domain && Arc::ptr_eq(parent.factory(), factory),
+        anyhow::ensure!(self.inner.live_domain && Arc::ptr_eq(parent.factory(), factory),
             "live Operational context normalization changed domain or factory");
-        anyhow::ensure!(self.terminal.is_none() && self.native_failure.is_none()
-            && self.sql_custody.is_empty(),
+        anyhow::ensure!(self.inner.terminal.is_none() && self.inner.native_failure.is_none()
+            && self.inner.sql_custody.is_empty(),
             "live Operational native packets must transfer before context normalization");
-        if let Some(metadata) = self.live_metadata.as_ref() {
-            anyhow::ensure!(self.live.is_none()
-                && std::sync::Weak::ptr_eq(&metadata.parent, &Arc::downgrade(parent))
-                && std::sync::Weak::ptr_eq(&metadata.factory, &Arc::downgrade(factory))
-                && metadata.schema_native_failure.is_none()
-                && metadata.schema_sources.iter().all(|source| source.terminal.is_none())
-                && metadata.references.original_source_count() == 0,
+        if let Some(metadata) = self.inner.live_metadata.as_ref() {
+            anyhow::ensure!(self.inner.live.is_none()
+                && std::sync::Weak::ptr_eq(&metadata.inner.parent, &Arc::downgrade(parent))
+                && std::sync::Weak::ptr_eq(&metadata.inner.factory, &Arc::downgrade(factory))
+                && metadata.inner.schema_native_failure.is_none()
+                && metadata.inner.schema_sources.iter().all(|source| source.terminal.is_none())
+                && metadata.inner.references.original_source_count() == 0,
                 "retained live Operational metadata changed original custody");
             return Ok(());
         }
-        let live = self.live.as_ref().context("actual live Operational context absent")?;
-        anyhow::ensure!(Arc::ptr_eq(&live.original, parent)
-            && live.schema_native_failure.is_none()
-            && live.schema_sources.iter().all(|source| source.terminal.is_none())
-            && live.references.original_source_count() == 0
-            && live._initialization.is_none()
-            && live.initialization_retirement.is_some(),
+        let live = self.inner.live.as_ref().context("actual live Operational context absent")?;
+        anyhow::ensure!(Arc::ptr_eq(&live.inner.original, parent)
+            && live.inner.schema_native_failure.is_none()
+            && live.inner.schema_sources.iter().all(|source| source.terminal.is_none())
+            && live.inner.references.original_source_count() == 0
+            && live.inner._initialization.is_none()
+            && live.inner.initialization_retirement.is_some(),
             "live Operational context still retains native/schema sources or a foreign parent");
         let quote = quote_operational_metadata()?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -774,19 +765,25 @@ impl OutsideOriginalOperationalCustody {
         lillux_sqlite::OriginalNativeDestinationAuthority::require_original(parent.as_ref(), factory)?;
         let parent_identity = Arc::downgrade(parent);
         let factory_identity = Arc::downgrade(factory);
-        let mut live = std::mem::ManuallyDrop::new(
-            self.live.take().expect("validated retained live Operational context"));
-        // Every owned field is read out exactly once; the emptied shell is
-        // never dropped. The initialization phase is a plain copied fact.
-        let (schema_sources, schema_native_failure, original, references,
-            _initialization, initialization_retirement, _marker) = unsafe { live.take_whole() };
+        let live = self.inner.get_mut().live.take().expect("validated retained live Operational context");
+        // Every owned field is read out exactly once. The initialization
+        // phase is a plain copied fact. A copy in another process is put back
+        // and refused.
+        let LiveClosedOperationalContextParts { schema_sources, schema_native_failure, original,
+            references, _initialization, initialization_retirement, _marker } = match live.into_parts() {
+            Ok(parts) => parts,
+            Err(live) => {
+                self.inner.get_mut().live = Some(live);
+                anyhow::bail!("foreign Operational live context");
+            }
+        };
         drop(_initialization);
-        *self.live_metadata = Some(LiveOperationalMetadataCustody {
-            parent: parent_identity, factory: factory_identity, schema_sources,
-            schema_native_failure, references: std::mem::ManuallyDrop::new(references),
-            _initialization_retirement: std::mem::ManuallyDrop::new(initialization_retirement),
-            _marker: std::mem::ManuallyDrop::new(_marker),
-        });
+        self.inner.get_mut().live_metadata = Some(LiveOperationalMetadataCustody::new(
+            LiveOperationalMetadataParts {
+                parent: parent_identity, factory: factory_identity, schema_sources,
+                schema_native_failure, references, _initialization_retirement: initialization_retirement,
+                _marker,
+            }));
         // All non-parent fields are cached first. The caller's same actual
         // parent, not a reconstructed authority, retains the canonical body.
         drop(original);
@@ -804,24 +801,24 @@ impl OutsideOriginalOperationalCustody {
         self.require_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if let Some(metadata) = self.live_metadata.as_ref() {
-            anyhow::ensure!(self.live.is_none() && self.live_domain
-                && std::sync::Weak::ptr_eq(&metadata.factory, &Arc::downgrade(factory))
-                && self.terminal.is_none() && self.native_failure.is_none()
-                && self.sql_custody.is_empty() && metadata.schema_native_failure.is_none()
-                && metadata.schema_sources.iter().all(|source| source.terminal.is_none())
-                && metadata.references.original_source_count() == 0
-                && (&*metadata._initialization_retirement).is_some(),
+        if let Some(metadata) = self.inner.live_metadata.as_ref() {
+            anyhow::ensure!(self.inner.live.is_none() && self.inner.live_domain
+                && std::sync::Weak::ptr_eq(&metadata.inner.factory, &Arc::downgrade(factory))
+                && self.inner.terminal.is_none() && self.inner.native_failure.is_none()
+                && self.inner.sql_custody.is_empty() && metadata.inner.schema_native_failure.is_none()
+                && metadata.inner.schema_sources.iter().all(|source| source.terminal.is_none())
+                && metadata.inner.references.original_source_count() == 0
+                && (&metadata.inner._initialization_retirement).is_some(),
                 "normalized Operational context retains native sources or changed factory");
-            (&*metadata._initialization_retirement).as_ref()
+            (&metadata.inner._initialization_retirement).as_ref()
                 .expect("checked Operational retirement receipt")
                 .require_factory_witness(&Arc::downgrade(factory))?;
             return Ok(());
         }
-        let live = self.live.as_ref().context("actual live Operational native context absent")?;
-        anyhow::ensure!(Arc::ptr_eq(live.original.factory(), factory),
+        let live = self.inner.live.as_ref().context("actual live Operational native context absent")?;
+        anyhow::ensure!(Arc::ptr_eq(live.inner.original.factory(), factory),
             "live Operational native handoff changed original factory");
-        if live.initialization_retirement.is_none() {
+        if live.inner.initialization_retirement.is_none() {
             anyhow::ensure!(matches!(live.initialization_phase,
                 super::live_native::LiveOperationalInitializationPhase::Durable
                     | super::live_native::LiveOperationalInitializationPhase::NotEntered {
@@ -834,33 +831,33 @@ impl OutsideOriginalOperationalCustody {
             self.require_process()?;
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
-            let live = self.live.as_mut()
+            let live = self.inner.get_mut().live.as_mut()
                 .context("actual live Operational context disappeared after funding")?;
-            anyhow::ensure!(Arc::ptr_eq(live.original.factory(), factory)
-                && live.initialization_retirement.is_none(),
+            anyhow::ensure!(Arc::ptr_eq(live.inner.original.factory(), factory)
+                && live.inner.initialization_retirement.is_none(),
                 "live Operational initialization source changed after funding");
             let retirement = super::live_native::capture_initialization_retirement(
                 live.initialization_phase,
-                live._initialization.as_ref(),
+                live.inner._initialization.as_ref(),
                 None,
                 None,
                 factory,
             )?;
-            live.initialization_retirement = Some(retirement);
+            live.inner.get_mut().initialization_retirement = Some(retirement);
             // The fixed weak receipt now carries the startup-only fact. Drop
             // the strong factory-owning durability proof before any seal.
-            drop(live._initialization.take());
-        } else if let Some(live) = self.live.as_ref() {
-            anyhow::ensure!(live._initialization.is_none(),
+            drop(live.inner.get_mut()._initialization.take());
+        } else if let Some(live) = self.inner.live.as_ref() {
+            anyhow::ensure!(live.inner._initialization.is_none(),
                 "live Operational initialization owner remains beside its receipt");
-            live.initialization_retirement.as_ref()
+            live.inner.initialization_retirement.as_ref()
                 .expect("checked initialization retirement receipt")
                 .require_factory_witness(&Arc::downgrade(factory))?;
         }
-        if self.terminal.is_none() && self.native_failure.is_none() {
+        if self.inner.terminal.is_none() && self.inner.native_failure.is_none() {
             return self.advance_live_schema_receipts(factory, aggregate, prepay);
         }
-        let quote = quote_operational_main_packet(self.sql_custody.len())?;
+        let quote = quote_operational_main_packet(self.inner.sql_custody.len())?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
         // Revalidate after the external funding callback and before touching
@@ -868,9 +865,9 @@ impl OutsideOriginalOperationalCustody {
         self.require_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        anyhow::ensure!(self.sql_custody.len() < super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
+        anyhow::ensure!(self.inner.sql_custody.len() < super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
             "Operational main packet bound changed after funding");
-        self.sql_custody.try_reserve_exact(1)?;
+        self.inner.get_mut().sql_custody.try_reserve_exact(1)?;
         // No synthetic alias census: the native consuming handoff retains the
         // original refusal if any other actual receipt owner still exists.
         self.retire_native_references(factory, aggregate, &|_| Ok(()))?;
@@ -884,57 +881,59 @@ impl OutsideOriginalOperationalCustody {
         self.require_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let live = self.live.as_mut().context("actual live Operational schema context absent")?;
-        anyhow::ensure!(Arc::ptr_eq(live.original.factory(), factory),
+        let issuer = self.inner.issuer();
+        let parts = self.inner.get_mut();
+        let live = parts.live.as_mut().context("actual live Operational schema context absent")?;
+        anyhow::ensure!(Arc::ptr_eq(live.inner.original.factory(), factory),
             "live Operational schema handoff changed original factory");
-        let count = live.schema_sources.iter().filter(|source| source.terminal.is_some()).count()
-            .checked_add(usize::from(live.schema_native_failure.is_some()))
+        let count = live.inner.schema_sources.iter().filter(|source| source.terminal.is_some()).count()
+            .checked_add(usize::from(live.inner.schema_native_failure.is_some()))
             .context("live Operational schema receipt count overflow")?;
-        anyhow::ensure!(live.schema_sources.len() <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
+        anyhow::ensure!(live.inner.schema_sources.len() <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
             && count <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES,
             "Operational schema packet sources exceed their one fixed DDL owner");
-        anyhow::ensure!(self.sql_custody.len().checked_add(count).is_some_and(|total|
+        anyhow::ensure!(parts.sql_custody.len().checked_add(count).is_some_and(|total|
             total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES),
             "Operational packet collection exceeds one schema source plus one main source");
         if count == 0 { return Ok(()); }
-        let quote = quote_operational_packet_sources(self.sql_custody.len(), count)?;
+        let quote = quote_operational_packet_sources(parts.sql_custody.len(), count)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
         // The live context was borrowed in the original process. Do not read
         // or mutate it after a funding callback unless that process still owns
         // the entire retained graph.
-        anyhow::ensure!(!crate::foreign_process(self.process),
+        anyhow::ensure!(!lillux::custody::foreign_process(issuer),
             "foreign Operational schema custody after funding callback");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        anyhow::ensure!(self.sql_custody.len().checked_add(count).is_some_and(|total|
+        anyhow::ensure!(parts.sql_custody.len().checked_add(count).is_some_and(|total|
             total <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES),
             "Operational schema packet bound changed after funding");
-        self.sql_custody.try_reserve_exact(count)?;
-        if let Some((index, _)) = &live.schema_native_failure {
-            anyhow::ensure!(live.schema_sources.get(*index).is_some_and(|source| source.terminal.is_none()),
+        parts.sql_custody.try_reserve_exact(count)?;
+        if let Some((index, _)) = &live.inner.schema_native_failure {
+            anyhow::ensure!(live.inner.schema_sources.get(*index).is_some_and(|source| source.terminal.is_none()),
                 "retained Operational schema failure lost its original source slot");
         }
-        if let Some((index, failure)) = live.schema_native_failure.take() {
+        if let Some((index, failure)) = live.inner.get_mut().schema_native_failure.take() {
             match failure.into_original() {
-                Ok(original) => live.schema_sources[index].terminal = Some(original),
+                Ok(original) => live.inner.get_mut().schema_sources[index].terminal = Some(original),
                 Err(failure) => {
-                    live.schema_native_failure = Some((index, failure));
+                    live.inner.get_mut().schema_native_failure = Some((index, failure));
                     anyhow::bail!("Operational schema native failure retains its original receipt");
                 }
             }
         }
         // Validate the complete remaining finite source list before consuming
         // any receipt. Actual source bodies/DDL stay cached in their same slots.
-        for source in live.schema_sources.iter() {
+        for source in live.inner.schema_sources.iter() {
             if let Some(proof) = &source.terminal { proof.require_original(factory)?; }
         }
-        for (index, source) in live.schema_sources.iter_mut().enumerate() {
+        for (index, source) in live.inner.get_mut().schema_sources.iter_mut().enumerate() {
             let Some(proof) = source.terminal.take() else { continue; };
             match proof.into_outside_custody(aggregate) {
-                Ok(packet) => self.sql_custody.push(packet),
+                Ok(packet) => parts.sql_custody.push(packet),
                 Err(failure) => {
-                    live.schema_native_failure = Some((index, failure));
+                    live.inner.get_mut().schema_native_failure = Some((index, failure));
                     anyhow::bail!("Operational schema native handoff retains original custody");
                 }
             }
@@ -942,14 +941,11 @@ impl OutsideOriginalOperationalCustody {
         Ok(())
     }
     fn require_process(&self) -> Result<()> {
-        anyhow::ensure!(
-            !crate::foreign_process(self.process),
-            "foreign Operational outside custody"
-        );
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign Operational outside custody");
         Ok(())
     }
     pub fn prior_refusal(&self) -> Option<&anyhow::Error> {
-        self.prior_refusal.as_ref()
+        self.inner.prior_refusal.as_ref()
     }
     pub fn retire_native_references(
         &mut self,
@@ -959,16 +955,16 @@ impl OutsideOriginalOperationalCustody {
     ) -> Result<()> {
         self.require_process()?;
         terminal.require_original(factory)?;
-        if let Some(failure) = self.native_failure.take() {
+        if let Some(failure) = self.inner.get_mut().native_failure.take() {
             match failure.into_original() {
-                Ok(original) => *self.terminal = Some(original),
+                Ok(original) => self.inner.get_mut().terminal = Some(original),
                 Err(failure) => {
-                    self.native_failure = Some(failure);
+                    self.inner.get_mut().native_failure = Some(failure);
                     anyhow::bail!("Operational native refusal retains original terminal");
                 }
             }
         }
-        if let Some(original) = self.terminal.as_ref() {
+        if let Some(original) = self.inner.terminal.as_ref() {
             original.require_original(factory)?;
             // Preserve the genuine canonical receipt through ordinary refusal
             // and unwind; the callback may remove only matching census aliases.
@@ -982,12 +978,12 @@ impl OutsideOriginalOperationalCustody {
         self.require_process()?;
         factory.require_original_process()?;
         terminal.require_original(factory)?;
-        if let Some(original) = self.terminal.take() {
+        if let Some(original) = self.inner.get_mut().terminal.take() {
             match original.into_outside_custody(terminal) {
-                Ok(custody) => self.sql_custody.push(custody),
+                Ok(custody) => self.inner.get_mut().sql_custody.push(custody),
                 Err(failure) => {
                     let message = format!("Operational native transfer retains original terminal: {failure:#}");
-                    self.native_failure = Some(failure);
+                    self.inner.get_mut().native_failure = Some(failure);
                     anyhow::bail!(message);
                 }
             }
@@ -1003,17 +999,17 @@ impl OutsideOriginalOperationalCustody {
     ) -> Result<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>> {
         self.require_process()?;
         anyhow::ensure!(
-            self.terminal.is_none() && self.native_failure.is_none(),
+            self.inner.terminal.is_none() && self.inner.native_failure.is_none(),
             "Operational native handoff incomplete"
         );
-        if let Some(live) = &*self.live {
-            anyhow::ensure!(live.schema_native_failure.is_none()
-                && live.schema_sources.iter().all(|source| source.terminal.is_none()),
+        if let Some(live) = &self.inner.live {
+            anyhow::ensure!(live.inner.schema_native_failure.is_none()
+                && live.inner.schema_sources.iter().all(|source| source.terminal.is_none()),
                 "Operational live schema native handoff incomplete");
         }
-        anyhow::ensure!(self.sql_custody.len() <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
+        anyhow::ensure!(self.inner.sql_custody.len() <= super::MAX_LIVE_OPERATIONAL_PACKET_SOURCES,
             "Operational packet vector exceeds one schema source plus one main source");
-        Ok(std::mem::take(&mut self.sql_custody))
+        Ok(std::mem::take(&mut self.inner.get_mut().sql_custody))
     }
     /// # Safety
     /// Join the actual SAME original physical inventory as every other closed
@@ -1024,45 +1020,47 @@ impl OutsideOriginalOperationalCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        anyhow::ensure!(!self.retired_shared_roots_consumed,
+        anyhow::ensure!(!self.inner.retired_shared_roots_consumed,
             "retired Operational roots cannot be registered again");
         let actual_registry = registry.identity()?;
-        if let Some(expected) = self.shared_registry_identity.as_ref() {
+        if let Some(expected) = self.inner.shared_registry_identity.as_ref() {
             expected.require_same_registry(&actual_registry)?;
         } else {
-            self.shared_registry_identity = Some(actual_registry);
+            self.inner.get_mut().shared_registry_identity = Some(actual_registry);
         }
         anyhow::ensure!(
-            self.terminal.is_none() && self.native_failure.is_none() && self.sql_custody.is_empty()
-                && self.live.is_none(),
+            self.inner.terminal.is_none() && self.inner.native_failure.is_none() && self.inner.sql_custody.is_empty()
+                && self.inner.live.is_none(),
             "Operational native payload or live context handoff incomplete"
         );
-        anyhow::ensure!(!self.live_domain || self.live_metadata.is_some(),
+        anyhow::ensure!(!self.inner.live_domain || self.inner.live_metadata.is_some(),
             "live Operational metadata custody was not preserved");
-        let marker = self.live_metadata.as_mut().map(|metadata| &mut *metadata._marker);
-        self.marker_source.register(marker, registry, prepay, !self.live_domain)?;
-        if self.root.is_some() {
+        let live_domain = self.inner.live_domain;
+        let parts = self.inner.get_mut();
+        let marker = parts.live_metadata.as_mut().map(|metadata| &mut metadata.inner.get_mut()._marker);
+        parts.marker_source.register(marker, registry, prepay, !live_domain)?;
+        if self.inner.root.is_some() {
             let quote = quote_operational_root_transfer();
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
             self.require_process()?;
-            let actual = self.root.take().unwrap();
+            let actual = self.inner.get_mut().root.take().unwrap();
             match unsafe { registry.register_directory(actual, prepay) } {
-                Ok(binding) => self.shared_registrations[0] = Some(binding),
+                Ok(binding) => self.inner.get_mut().shared_registrations[0] = Some(binding),
                 Err((actual, error)) => {
-                    self.root = Some(actual);
+                    self.inner.get_mut().root = Some(actual);
                     return Err(error);
                 }
             }
         }
-        if self.namespace.is_some() {
+        if self.inner.namespace.is_some() {
             let quote = quote_operational_root_transfer();
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
             self.require_process()?;
-            let actual = self.namespace.take().unwrap();
+            let actual = self.inner.get_mut().namespace.take().unwrap();
             match unsafe { registry.register_namespace(actual, prepay) } {
-                Ok(binding) => self.shared_registrations[1] = Some(binding),
+                Ok(binding) => self.inner.get_mut().shared_registrations[1] = Some(binding),
                 Err((actual, error)) => {
-                    self.namespace = Some(actual);
+                    self.inner.get_mut().namespace = Some(actual);
                     return Err(error);
                 }
             }
@@ -1078,24 +1076,24 @@ impl OutsideOriginalOperationalCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        anyhow::ensure!(!self.retired_shared_roots_consumed,
+        anyhow::ensure!(!self.inner.retired_shared_roots_consumed,
             "retired Operational roots cannot reenter the live registry census");
         let actual_registry = registry.identity()?;
-        self.shared_registry_identity.as_ref()
+        self.inner.shared_registry_identity.as_ref()
             .context("Operational shared-root registry identity absent")?
             .require_same_registry(&actual_registry)?;
-        anyhow::ensure!(self.live.is_none() && self.terminal.is_none()
-            && self.native_failure.is_none() && self.sql_custody.is_empty()
-            && self.root.is_none() && self.namespace.is_none(),
+        anyhow::ensure!(self.inner.live.is_none() && self.inner.terminal.is_none()
+            && self.inner.native_failure.is_none() && self.inner.sql_custody.is_empty()
+            && self.inner.root.is_none() && self.inner.namespace.is_none(),
             "Operational original owners remain outside registration");
-        anyhow::ensure!(!self.live_domain || self.live_metadata.is_some(),
+        anyhow::ensure!(!self.inner.live_domain || self.inner.live_metadata.is_some(),
             "live Operational metadata custody was not preserved");
-        anyhow::ensure!(self.shared_registrations.iter().all(Option::is_some),
+        anyhow::ensure!(self.inner.shared_registrations.iter().all(Option::is_some),
             "actual Operational root or namespace registration missing");
-        let marker_queries = if self.live_domain { 1 } else { 0 };
+        let marker_queries = if self.inner.live_domain { 1 } else { 0 };
         let quote = quote_operational_membership(registry, 2 + marker_queries)?;
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-        for (index, slot) in self.shared_registrations.iter().enumerate() {
+        for (index, slot) in self.inner.shared_registrations.iter().enumerate() {
             let binding = slot.as_ref().context("actual Operational root or namespace registration missing")?;
             registry.require_membership(binding)?;
             let identity = binding.observed_source_identity()?;
@@ -1104,8 +1102,8 @@ impl OutsideOriginalOperationalCustody {
                 | (1, lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Namespace { .. })),
                 "Operational registered original role changed");
         }
-        let marker = self.live_metadata.as_ref().map(|metadata| &*metadata._marker);
-        self.marker_source.require_registered(marker, registry, !self.live_domain)?;
+        let marker = self.inner.live_metadata.as_ref().map(|metadata| &metadata.inner._marker);
+        self.inner.marker_source.require_registered(marker, registry, !self.inner.live_domain)?;
         Ok(())
     }
 
@@ -1117,29 +1115,31 @@ impl OutsideOriginalOperationalCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        let identity = self.shared_registry_identity.as_ref()
+        let identity = self.inner.shared_registry_identity.as_ref()
             .context("Operational shared-root registry identity absent before retirement")?;
         registry.require_same_registry(identity)?;
         let quote = quote_operational_retired_shared_roots()?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        registry.require_same_registry(self.shared_registry_identity.as_ref()
+        registry.require_same_registry(self.inner.shared_registry_identity.as_ref()
             .context("Operational shared-root registry identity disappeared after funding")?)?;
-        if self.retired_shared_roots_consumed {
-            anyhow::ensure!(self.shared_registrations.iter().all(Option::is_none)
-                && self.root.is_none() && self.namespace.is_none(),
+        if self.inner.retired_shared_roots_consumed {
+            anyhow::ensure!(self.inner.shared_registrations.iter().all(Option::is_none)
+                && self.inner.root.is_none() && self.inner.namespace.is_none(),
                 "consumed Operational root registrations reappeared");
-            self.marker_source.consume_retired(
-                self.live_metadata.as_mut().map(|metadata| &mut *metadata._marker),
+            let live_domain = self.inner.live_domain;
+            let parts = self.inner.get_mut();
+            parts.marker_source.consume_retired(
+                parts.live_metadata.as_mut().map(|metadata| &mut metadata.inner.get_mut()._marker),
                 registry,
                 prepay,
-                !self.live_domain,
+                !live_domain,
             )?;
             return Ok(());
         }
-        anyhow::ensure!(self.root.is_none() && self.namespace.is_none(),
+        anyhow::ensure!(self.inner.root.is_none() && self.inner.namespace.is_none(),
             "retired Operational frame retains a physical root alias");
-        for (index, binding) in self.shared_registrations.iter().enumerate() {
+        for (index, binding) in self.inner.shared_registrations.iter().enumerate() {
             let binding = binding.as_ref()
                 .context("retired Operational root or namespace registration absent")?;
             let source = binding.observed_source_identity()?;
@@ -1148,17 +1148,19 @@ impl OutsideOriginalOperationalCustody {
                 | (1, lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Namespace { .. })),
                 "retired Operational root registration changed role");
         }
-        for binding in self.shared_registrations.iter().flatten() {
+        for binding in self.inner.shared_registrations.iter().flatten() {
             drop(binding.receipt_in(registry)?);
         }
-        self.marker_source.consume_retired(
-            self.live_metadata.as_mut().map(|metadata| &mut *metadata._marker),
+        let live_domain = self.inner.live_domain;
+        let parts = self.inner.get_mut();
+        parts.marker_source.consume_retired(
+            parts.live_metadata.as_mut().map(|metadata| &mut metadata.inner.get_mut()._marker),
             registry,
             prepay,
-            !self.live_domain,
+            !live_domain,
         )?;
-        self.shared_registrations = std::array::from_fn(|_| None);
-        self.retired_shared_roots_consumed = true;
+        self.inner.get_mut().shared_registrations = std::array::from_fn(|_| None);
+        self.inner.get_mut().retired_shared_roots_consumed = true;
         Ok(())
     }
 
@@ -1167,32 +1169,32 @@ impl OutsideOriginalOperationalCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<OutsideWork> {
         self.require_process()?;
-        anyhow::ensure!(self.live_domain && self.live.is_none()
-            && self.live_metadata.is_some(),
+        anyhow::ensure!(self.inner.live_domain && self.inner.live.is_none()
+            && self.inner.live_metadata.is_some(),
             "live Operational metadata retirement lacks its normalized source");
-        anyhow::ensure!(self.retired_shared_roots_consumed
-            && self.shared_registrations.iter().all(Option::is_none)
-            && self.root.is_none() && self.namespace.is_none()
-            && self.terminal.is_none() && self.native_failure.is_none()
-            && self.sql_custody.is_empty()
-            && self.descriptor_receipts.iter().all(Option::is_some)
-            && self.marker_source.retired_or_absent(false),
+        anyhow::ensure!(self.inner.retired_shared_roots_consumed
+            && self.inner.shared_registrations.iter().all(Option::is_none)
+            && self.inner.root.is_none() && self.inner.namespace.is_none()
+            && self.inner.terminal.is_none() && self.inner.native_failure.is_none()
+            && self.inner.sql_custody.is_empty()
+            && self.inner.descriptor_receipts.iter().all(Option::is_some)
+            && self.inner.marker_source.retired_or_absent(false),
             "Operational physical sources remain before live metadata retirement");
         require_retired_operational_metadata_registry(
-            self.shared_registry_identity.as_ref(), registry,
+            self.inner.shared_registry_identity.as_ref(), registry,
         )?;
-        let metadata = self.live_metadata.as_ref().expect("checked live metadata source");
-        anyhow::ensure!(metadata.schema_native_failure.is_none()
-            && metadata.schema_sources.len() <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
-            && metadata.schema_sources.iter().all(|source| source.terminal.is_none())
-            && metadata.references.original_source_count() == 0
-            && metadata._marker.is_none(),
+        let metadata = self.inner.live_metadata.as_ref().expect("checked live metadata source");
+        anyhow::ensure!(metadata.inner.schema_native_failure.is_none()
+            && metadata.inner.schema_sources.len() <= super::MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES
+            && metadata.inner.schema_sources.iter().all(|source| source.terminal.is_none())
+            && metadata.inner.references.original_source_count() == 0
+            && metadata.inner._marker.is_none(),
             "live Operational metadata retains an unconsumed native or marker source");
-        (&*metadata._initialization_retirement).as_ref()
+        (&metadata.inner._initialization_retirement).as_ref()
             .context("live Operational initialization disposition absent")?
-            .require_factory_witness(&metadata.factory)?;
+            .require_factory_witness(&metadata.inner.factory)?;
         let quote = quote_operational_live_metadata_retirement(
-            metadata.schema_sources.capacity(), metadata.references.retirement_capacity(),
+            metadata.inner.schema_sources.capacity(), metadata.inner.references.retirement_capacity(),
             true,
         )?;
         Ok(quote)
@@ -1208,12 +1210,12 @@ impl OutsideOriginalOperationalCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        if self.live_metadata.is_none() {
-            anyhow::ensure!(!self.live_domain || self.retired_shared_roots_consumed,
+        if self.inner.live_metadata.is_none() {
+            anyhow::ensure!(!self.inner.live_domain || self.inner.retired_shared_roots_consumed,
                 "live Operational metadata disappeared before its root receipts");
-            if self.live_domain {
+            if self.inner.live_domain {
                 require_retired_operational_metadata_registry(
-                    self.shared_registry_identity.as_ref(), registry,
+                    self.inner.shared_registry_identity.as_ref(), registry,
                 )?;
             }
             return Ok(());
@@ -1227,9 +1229,8 @@ impl OutsideOriginalOperationalCustody {
 
         // All fallible identity, receipt, and funding checks are complete.
         // The exact owner is consumed once; the empty replacement keeps this
-        // ManuallyDrop field valid for idempotent later observations.
-        let metadata = unsafe { std::mem::ManuallyDrop::take(&mut self.live_metadata) };
-        self.live_metadata = std::mem::ManuallyDrop::new(None);
+        // slot empty for idempotent later observations.
+        let metadata = self.inner.get_mut().live_metadata.take();
         let metadata = metadata.expect("validated live Operational metadata");
         // The checks above include its settled predicate, so its Drop
         // releases every field normally.
@@ -1238,27 +1239,11 @@ impl OutsideOriginalOperationalCustody {
     }
 
     pub fn descriptor_owners(&self) -> &[Arc<lillux_sqlite::RetainedOriginalFinalizerFile>] {
-        &self.descriptor_owners
+        &self.inner.descriptor_owners
     }
     /// Only actual descriptor obligations, not durable/account settlement.
     pub fn descriptors_retired(&self) -> bool {
-        !crate::foreign_process(self.process)
-            && self.live.is_none()
-            && self.live_metadata.is_none()
-            && self.root.is_none()
-            && self.namespace.is_none()
-            && self.terminal.is_none()
-            && self.native_failure.is_none()
-            && self.sql_custody.is_empty()
-            && (if self.retired_shared_roots_consumed {
-                self.shared_registrations.iter().all(Option::is_none)
-            } else {
-                self.shared_registrations
-                    .iter()
-                    .all(|binding| binding.as_ref().is_some_and(|binding| binding.retired()))
-            })
-            && self.descriptor_receipts.iter().all(Option::is_some)
-            && self.marker_source.retired_or_absent(!self.live_domain)
+        !self.inner.is_foreign() && self.inner.descriptors_retired()
     }
 }
 impl OriginalOperationalFailure {
@@ -1380,16 +1365,18 @@ fn advance_close(
             let owner = match db.conn {
                 OperationalConnection::Original { owner, factory: _, reference: _ } => owner,
                 OperationalConnection::Live(live) => {
-                    context.live = Some(LiveClosedOperationalContext {
-                        schema_sources: Vec::new(),
-                        schema_native_failure: None,
-                        original: std::mem::ManuallyDrop::new(live.original),
-                        references: live.references,
-                        initialization_phase: live.initialization_phase,
-                        _initialization: live.initialization,
-                        initialization_retirement: None,
-                        _marker: db._initialization_marker,
-                    });
+                    context.live = Some(LiveClosedOperationalContext::new(
+                        LiveClosedOperationalContextParts {
+                            schema_sources: Vec::new(),
+                            schema_native_failure: None,
+                            original: live.original,
+                            references: live.references,
+                            _initialization: live.initialization,
+                            initialization_retirement: None,
+                            _marker: db._initialization_marker,
+                        },
+                        live.initialization_phase,
+                    ));
                     live.owner
                 }
             };
@@ -1625,16 +1612,15 @@ mod abandoned_schema_source_tests {
     const METADATA: &str = "ryeos-state::operational-live-metadata";
 
     fn metadata(marker: Option<std::fs::File>) -> LiveOperationalMetadataCustody {
-        LiveOperationalMetadataCustody {
+        LiveOperationalMetadataCustody::new(super::LiveOperationalMetadataParts {
             parent: std::sync::Weak::new(),
             factory: std::sync::Weak::new(),
             schema_sources: Vec::new(),
             schema_native_failure: None,
-            references: std::mem::ManuallyDrop::new(
-                super::super::live_native::LiveOperationalSchemaReferences::empty_for_test()),
-            _initialization_retirement: std::mem::ManuallyDrop::new(None),
-            _marker: std::mem::ManuallyDrop::new(marker),
-        }
+            references: super::super::live_native::LiveOperationalSchemaReferences::empty_for_test(),
+            _initialization_retirement: None,
+            _marker: marker,
+        })
     }
 
     #[test]
@@ -1661,16 +1647,18 @@ mod abandoned_schema_source_tests {
         let original = state.live_native_owner_for_test();
         let aliases = Arc::strong_count(&original);
         let before = lillux::custody::abandoned_custody().count(CONTEXT);
-        drop(LiveClosedOperationalContext {
-            schema_sources: Vec::new(),
-            schema_native_failure: None,
-            original: std::mem::ManuallyDrop::new(Arc::clone(&original)),
-            references: super::super::live_native::LiveOperationalSchemaReferences::empty_for_test(),
-            initialization_phase: super::super::live_native::LiveOperationalInitializationPhase::Failed,
-            _initialization: None,
-            initialization_retirement: None,
-            _marker: None,
-        });
+        drop(LiveClosedOperationalContext::new(
+            super::LiveClosedOperationalContextParts {
+                schema_sources: Vec::new(),
+                schema_native_failure: None,
+                original: Arc::clone(&original),
+                references: super::super::live_native::LiveOperationalSchemaReferences::empty_for_test(),
+                _initialization: None,
+                initialization_retirement: None,
+                _marker: None,
+            },
+            super::super::live_native::LiveOperationalInitializationPhase::Failed,
+        ));
         assert_eq!(lillux::custody::abandoned_custody().count(CONTEXT), before);
         assert_eq!(Arc::strong_count(&original), aliases, "the parent alias was released");
         drop(original);
@@ -1866,22 +1854,14 @@ impl OutsideOriginalOperationalCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         self.require_exhausted_holders()?;
-        registry.require_same_registry(self.shared_registry_identity.as_ref()
+        registry.require_same_registry(self.inner.shared_registry_identity.as_ref()
             .context("Operational registry identity absent at final exhaustion")?)
     }
     /// The registry-free part of final exhaustion. A dropped frame settles on
     /// exactly these checks.
     pub(crate) fn require_exhausted_holders(&self) -> Result<()> {
         self.require_process()?;
-        anyhow::ensure!(self.retired_shared_roots_consumed && self.descriptors_retired(),
-            "Operational frame retains a physical or native owner at final exhaustion");
-        anyhow::ensure!(self.descriptor_owners.len() == self.descriptor_receipts.len(),
-            "Operational descriptor receipt census changed");
-        for (owner, receipt) in self.descriptor_owners.iter().zip(self.descriptor_receipts.iter()) {
-            receipt.as_ref().context("Operational descriptor receipt absent")?
-                .require_original(owner)?;
-        }
-        crate::state_db::live_native::require_exhausted_refusals(self.prior_refusal.iter())
+        self.inner.require_exhausted_holders()
     }
 
     /// Consumption after `require_exhausted`: the exhausted frame's own Drop
@@ -1890,80 +1870,30 @@ impl OutsideOriginalOperationalCustody {
         drop(self);
     }
 }
-impl Drop for OutsideOriginalOperationalCustody {
-    fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept the frame: shared
-        // roots consumed, every descriptor, root, marker, terminal, packet and
-        // live body retired and no owner-bearing refusal left. The settled
-        // fact is read while every slot is still in place; the frame then
-        // releases normally. Otherwise the whole graph stays retained until
-        // the process exits.
-        if crate::foreign_process(self.process) {
-            // A copy in another process, forked or not, holds none of these
-            // owners; it gives them up before the settled check, which may allocate.
-            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
-            return;
-        }
-        let settled = self.require_exhausted_holders().is_ok();
-        let whole = unsafe { self.take_whole() };
-        if settled {
-            drop(whole);
-        } else {
-            lillux::custody::abandon("ryeos-state::outside-operational-custody", whole);
-        }
-    }
-}
-impl OutsideOriginalOperationalCustody {
-    /// Move every owned field out of the frame, in declaration order, leaving
-    /// only emptied slots and plain copied facts. The replacements allocate
-    /// nothing, so a forked child may call this.
-    ///
-    /// # Safety
-    /// Call at most once, from `Drop`: the taken `ManuallyDrop` slots must
-    /// never be read again.
-    unsafe fn take_whole(&mut self) -> impl Send + 'static {
-        unsafe {(
-            std::mem::ManuallyDrop::take(&mut self.live),
-            std::mem::ManuallyDrop::take(&mut self.live_metadata),
-            self.root.take(),
-            self.namespace.take(),
-            std::mem::ManuallyDrop::take(&mut self.terminal),
-            self.native_failure.take(),
-            std::mem::take(&mut self.sql_custody),
-            std::mem::replace(&mut self.shared_registrations, std::array::from_fn(|_| None)),
-            self.shared_registry_identity.take(),
-            self.marker_source.take(),
-            std::mem::take(&mut self.descriptor_owners),
-            (std::mem::take(&mut self.descriptor_receipts), self.prior_refusal.take()),
-        )}
-    }
-}
-
 #[cfg(test)]
 mod outside_custody_drop_tests {
-    use super::{OperationalMarkerSource, OutsideOriginalOperationalCustody};
+    use super::{OperationalMarkerSource, OutsideOperationalParts, OutsideOriginalOperationalCustody};
 
     const KIND: &str = "ryeos-state::outside-operational-custody";
 
     fn frame(shared_roots_consumed: bool) -> OutsideOriginalOperationalCustody {
-        OutsideOriginalOperationalCustody {
-            process: std::process::id(),
-            live: std::mem::ManuallyDrop::new(None),
-            live_metadata: std::mem::ManuallyDrop::new(None),
-            live_domain: true,
+        OutsideOriginalOperationalCustody::from_parts(OutsideOperationalParts {
+            live: None,
+            live_metadata: None,
             root: None,
             namespace: None,
-            terminal: std::mem::ManuallyDrop::new(None),
+            terminal: None,
             native_failure: None,
             sql_custody: Vec::new(),
             shared_registrations: std::array::from_fn(|_| None),
             shared_registry_identity: None,
-            retired_shared_roots_consumed: shared_roots_consumed,
             marker_source: OperationalMarkerSource::consumed_for_test(true),
             descriptor_owners: Vec::new(),
             descriptor_receipts: Vec::new(),
             prior_refusal: None,
-        }
+            live_domain: true,
+            retired_shared_roots_consumed: shared_roots_consumed,
+        })
     }
 
     #[test]

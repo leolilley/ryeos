@@ -2,15 +2,13 @@
 pub(crate) const EXECUTOR_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("executor");
 
 pub mod augmentations;
-#[cfg(test)]
-mod custody_drop_gate;
 pub mod dispatch;
 pub mod dispatch_error;
 pub mod dispatch_role;
 pub mod execution;
 pub use execution::{
-    SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, SelectedDedicatedInvocationLoan,
+    SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
     abandoned_selected_compositions,
 };
 /// Immutable daemon publication. Attachment presence never admits a worker.

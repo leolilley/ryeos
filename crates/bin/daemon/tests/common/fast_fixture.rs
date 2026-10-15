@@ -945,10 +945,14 @@ fn materialize_seed_node_policy_generation(
     let raw = fs::read_to_string(&source)
         .with_context(|| format!("read node init profile {}", source.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile = serde_yaml::from_str(&body)
-        .with_context(|| format!("parse node init profile {}", source.display()))?;
+    let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
+        serde_yaml::from_str(&body)
+            .with_context(|| format!("parse node init profile {}", source.display()))?;
     profile
-        .validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
+        .validate(
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+            &source,
+        )
         .with_context(|| format!("validate selected node init profile {}", source.display()))?;
     if let Some(expected) = selected_profile.exact_bundles() {
         anyhow::ensure!(
@@ -964,7 +968,12 @@ fn materialize_seed_node_policy_generation(
     // Every fast-fixture node runs under its profile's local class.
     let mut profile = profile
         .for_host_class(FAST_FIXTURE_HOST_CLASS)
-        .with_context(|| format!("select the local class of profile {}", selected_profile.name()))?;
+        .with_context(|| {
+            format!(
+                "select the local class of profile {}",
+                selected_profile.name()
+            )
+        })?;
     let isolation = profile
         .policies
         .get_mut("isolation")
@@ -976,7 +985,10 @@ fn materialize_seed_node_policy_generation(
         )
     })?;
     profile
-        .validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
+        .validate(
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+            &source,
+        )
         .with_context(|| {
             format!(
                 "validate direct-host fixture policy generation for profile {}",
@@ -1015,7 +1027,9 @@ pub fn node_isolation_mode(state_path: &Path) -> Result<String> {
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))
             .with_context(|| format!("parse node isolation policy {}", path.display()))?;
     document
-        .pointer(&format!("/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}/mode"))
+        .pointer(&format!(
+            "/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}/mode"
+        ))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .with_context(|| {
@@ -1112,7 +1126,9 @@ fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
         }
     }
     *floor = retained;
-    if policy.get("proc_filesystem").and_then(serde_json::Value::as_str)
+    if policy
+        .get("proc_filesystem")
+        .and_then(serde_json::Value::as_str)
         == Some("pid_namespace_nested")
     {
         policy.insert(

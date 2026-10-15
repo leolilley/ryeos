@@ -4,7 +4,6 @@ use super::live_native::{LiveStateOpen, LiveStoreParentFinalizationParts};
 use anyhow::{Context, Result, ensure};
 use lillux_sqlite::{OriginalNativeDestinationAuthority, OriginalNativeFactory, OriginalNativeTerminal};
 use lillux_sqlite::original_physical_custody::OutsideWork;
-use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 pub fn quote_store_parent_transfer() -> Result<OutsideWork> {
@@ -27,10 +26,14 @@ pub fn quote_store_leaf_transfers(leaves: usize) -> Result<OutsideWork> {
         .checked_mul(u64::try_from(leaves)?)
 }
 
-pub(super) struct LiveStoreDestinationJoin {
-    process: u32,
+const STORE_DESTINATION_JOIN_KIND: &str = "ryeos-app::store-destination-join";
+
+/// Everything the Store receiver holds, in the order its release drops it.
+/// Constructible only in this module, so no caller can swap the whole out
+/// from under its custody.
+pub(super) struct StoreDestinationJoinParts {
+    original: Mutex<Option<Arc<LiveStateOpen>>>,
     factory: Weak<OriginalNativeFactory>,
-    original: Mutex<ManuallyDrop<Option<Arc<LiveStateOpen>>>>,
     // Native ACK does not retire this real Store body. A consuming outside
     // finalization frame must retain the body authorities and verify the
     // canonical physical registrations before clearing this obligation.
@@ -40,12 +43,34 @@ pub(super) struct LiveStoreDestinationJoin {
     // the disposed native region.
     parent_registry_identity: OnceLock<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
 }
+
+impl StoreDestinationJoinParts {
+    /// Settled exactly when parent completion would accept this receiver
+    /// without a registry: no outside completion pending and no parent body
+    /// retained. Allocation-free; a busy or poisoned slot is unsettled.
+    fn parent_completed(&self) -> bool {
+        !self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire)
+            && self.original.try_lock().is_ok_and(|original| original.is_none())
+    }
+}
+
+pub(super) struct LiveStoreDestinationJoin {
+    inner: lillux::custody::Held<StoreDestinationJoinParts>,
+}
+
+impl std::ops::Deref for LiveStoreDestinationJoin {
+    type Target = StoreDestinationJoinParts;
+    fn deref(&self) -> &StoreDestinationJoinParts {
+        &self.inner
+    }
+}
+
 impl LiveStoreDestinationJoin {
     /// The registry-free part of parent completion: this process, the
     /// outside completion no longer pending and no parent body retained. A
     /// dropped receiver settles on exactly these checks.
     pub(super) fn require_parent_completed_holders(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store receiver");
+        ensure!(!self.inner.is_foreign(), "foreign original Store receiver");
         ensure!(!self.parent_outside_pending.load(std::sync::atomic::Ordering::Acquire),
             "Store parent outside completion remains pending");
         let original = self.original.try_lock()
@@ -57,7 +82,7 @@ impl LiveStoreDestinationJoin {
     pub(super) fn require_original_origin(&self,
         factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store receiver");
+        ensure!(!self.inner.is_foreign(), "foreign original Store receiver");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         ensure!(Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
@@ -98,7 +123,7 @@ impl LiveStoreDestinationJoin {
         original: &Arc<LiveStateOpen>, factory: &Arc<OriginalNativeFactory>,
         aggregate: &OriginalNativeTerminal,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store destination receiver");
+        ensure!(!self.inner.is_foreign(), "foreign original Store destination receiver");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         ensure!(Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
@@ -122,7 +147,7 @@ impl LiveStoreDestinationJoin {
         aggregate: &OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id() && parts.process == std::process::id(),
+        ensure!(!self.inner.is_foreign() && parts.process == std::process::id(),
             "foreign Store parent completion");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
@@ -220,7 +245,7 @@ impl LiveStoreDestinationJoin {
         factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
         destination: &mut Option<LiveStateOpen>, prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign Store parent transfer");
+        ensure!(!self.inner.is_foreign(), "foreign Store parent transfer");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         ensure!(Weak::ptr_eq(&self.factory, &Arc::downgrade(factory)),
@@ -229,7 +254,7 @@ impl LiveStoreDestinationJoin {
         let quote = quote_store_parent_transfer()?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        ensure!(self.process == std::process::id(), "foreign Store parent after funding");
+        ensure!(!self.inner.is_foreign(), "foreign Store parent after funding");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         let original = {
@@ -242,7 +267,7 @@ impl LiveStoreDestinationJoin {
             Ok(original) => { *destination = Some(original); Ok(()) }
             Err(original) => {
                 let mut slot = self.original.lock().unwrap_or_else(|p| p.into_inner());
-                **slot = Some(original);
+                *slot = Some(original);
                 anyhow::bail!("actual Store parent retains external aliases");
             }
         }
@@ -287,10 +312,16 @@ impl LiveStoreDestinationJoin {
         aggregate.require_original(factory)?;
         original.require_original(factory)?;
         let candidate = Arc::new(Self {
-            process: std::process::id(), factory: Arc::downgrade(factory),
-            original: Mutex::new(ManuallyDrop::new(Some(Arc::clone(original)))),
-            parent_outside_pending: std::sync::atomic::AtomicBool::new(true),
-            parent_registry_identity: OnceLock::new(),
+            inner: lillux::custody::Held::new(
+                STORE_DESTINATION_JOIN_KIND,
+                StoreDestinationJoinParts {
+                    original: Mutex::new(Some(Arc::clone(original))),
+                    factory: Arc::downgrade(factory),
+                    parent_outside_pending: std::sync::atomic::AtomicBool::new(true),
+                    parent_registry_identity: OnceLock::new(),
+                },
+                StoreDestinationJoinParts::parent_completed,
+            ),
         });
         // No native/account callback runs under this publication gate.
         let mut link = match original.destination_join_link().try_lock() {
@@ -308,37 +339,6 @@ impl LiveStoreDestinationJoin {
         }
         *link = Arc::downgrade(&candidate);
         Ok(candidate)
-    }
-}
-
-impl Drop for LiveStoreDestinationJoin {
-    fn drop(&mut self) {
-        // Settled exactly when parent completion would accept this receiver
-        // without a registry: no outside completion pending and no parent
-        // body retained. The slot is taken exactly once, here; otherwise the
-        // parent body stays retained until the process exits. Exclusive
-        // access reaches the slot without entering its mutex.
-        if lillux::exec::in_forked_child() || self.process != std::process::id() {
-            // A copy in another process holds none of these owners: the parent body, the
-            // factory edge and the captured registry identity are
-            // relinquished whole.
-            let original = unsafe { std::mem::ManuallyDrop::take(self.original.get_mut()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)) };
-            let factory = std::mem::replace(&mut self.factory, Weak::new());
-            let identity = std::mem::take(&mut self.parent_registry_identity);
-            lillux::custody::relinquish_in_foreign_process((original, factory, identity));
-            return;
-        }
-        // Settlement is evaluated only in the original process: the check
-        // may allocate its refusal.
-        let settled = self.require_parent_completed_holders().is_ok();
-        let original = unsafe { std::mem::ManuallyDrop::take(self.original.get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)) };
-        if settled {
-            drop(original);
-        } else {
-            lillux::custody::abandon("ryeos-app::store-destination-join", original);
-        }
     }
 }
 
@@ -372,7 +372,7 @@ struct StoreLeafContinuation {
 // Candidate source: cumulative independent lifecycle review is still required.
 unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for StoreLeafContinuation {
     fn require_original_process(&self) -> Result<()> {
-        ensure!(self.join.process == std::process::id(), "foreign Store leaf continuation");
+        ensure!(!self.join.inner.is_foreign(), "foreign Store leaf continuation");
         Ok(())
     }
     fn retire_native_references(&mut self, factory: &Arc<OriginalNativeFactory>,
@@ -462,15 +462,20 @@ pub(super) fn transfer_store_leaf(
 mod custody_drop_tests {
     use super::*;
 
-    const KIND: &str = "ryeos-app::store-destination-join";
+    const KIND: &str = STORE_DESTINATION_JOIN_KIND;
 
     fn join(parent_outside_pending: bool) -> LiveStoreDestinationJoin {
         LiveStoreDestinationJoin {
-            process: std::process::id(),
-            factory: Weak::new(),
-            original: Mutex::new(ManuallyDrop::new(None)),
-            parent_outside_pending: std::sync::atomic::AtomicBool::new(parent_outside_pending),
-            parent_registry_identity: OnceLock::new(),
+            inner: lillux::custody::Held::new(
+                KIND,
+                StoreDestinationJoinParts {
+                    original: Mutex::new(None),
+                    factory: Weak::new(),
+                    parent_outside_pending: std::sync::atomic::AtomicBool::new(parent_outside_pending),
+                    parent_registry_identity: OnceLock::new(),
+                },
+                StoreDestinationJoinParts::parent_completed,
+            ),
         }
     }
 

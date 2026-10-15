@@ -2680,7 +2680,6 @@ dependencies = [
  "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
- "regex",
  "reqwest",
  "rusqlite",
  "rustls",
