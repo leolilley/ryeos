@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T01:24:34Z:e23aa5545bc52f187ebd1df1f67592780f2b7d0420f9be7b35e36dfd4eae8f9d:zVPMTrhc2yskWNOO1+HcU2gGLVPkUqBDarW9XaysrpWgdb/lJdHj7GVrA0rKObBEkLf1bT/jSPL8Sqyrv3e4Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T23:05:10Z:487171060b93902a2d0d72376e0c7f3e751db7aac8b4bb59fd966a95a5441afb:KCH7uLct2aAG0dl5zuoC3FiOruUYHSt+4Cq/UIdDBWkdFfNbUwKDGqyQdimkE9ISmy+x0PN/Xbyzj5abv/8sDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -148,14 +148,21 @@ for the full matrix.
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
 
+## Core Thread Read Services
+
+The core bundle ships `threads/list` and `threads/get`, so every node that serves the core `/threads` routes can answer them without the standard bundle.
+
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `threads/list` | `threads.list` | none |
+| `threads/get` | `threads.get` | none |
+
 ## Standard Thread/Event/Scheduler Services
 
 These are contributed by the standard bundle.
 
 | Service | Endpoint | Caps Required |
 |---|---|---|
-| `threads/list` | `threads.list` | none |
-| `threads/get` | `threads.get` | none |
 | `threads/children` | `threads.children` | none |
 | `threads/chain` | `threads.chain` | none |
 | `threads/cancel` | `threads.cancel` | route-backed control surface |

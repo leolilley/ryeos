@@ -734,11 +734,9 @@ async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    // A Core+Scheduling node serves no surface that returns a scheduled
-    // thread's result payload: the fire record keeps only status, outcome
-    // class, thread id and admitted capsule hash, and the thread read
-    // service lives outside this composition. The doctor's findings are
-    // therefore not observable here; the terminal fire record is.
+    // The fire record keeps only status, outcome class, thread id and the
+    // admitted capsule hash; the doctor's findings are read back through the
+    // Core `threads/get` service once the thread is terminal.
     loop {
         let (status, body) = exec(
             &h,
@@ -756,6 +754,23 @@ async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
             assert_eq!(fire["admitted_capsule_hash"], admitted_capsule_hash);
             // The tool completing is a lifecycle verdict; the doctor's own
             // project verdict is a separate authority carried in its result.
+            let (status, body) =
+                exec(&h, "service:threads/get", json!({"thread_id": thread_id})).await;
+            let retained = unwrap_result(status, &body, "read retained doctor thread");
+            assert_eq!(retained["thread"]["status"], "completed", "{retained}");
+            let doctor_result = &retained["result"]["result"];
+            assert_eq!(doctor_result["ok"], false, "{retained}");
+            let manifest_finding = doctor_result["checks"]
+                .as_array()
+                .and_then(|checks| checks.iter().find(|check| check["name"] == "manifest"))
+                .expect("doctor report must retain the manifest finding");
+            assert_eq!(manifest_finding["status"], "fail");
+            assert!(
+                manifest_finding["detail"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("bogus_field")),
+                "malformed manifest finding must name the fixed unknown field: {manifest_finding}"
+            );
             h.kill_daemon()
                 .await
                 .expect("stop daemon before restoring temporary cleanup");
