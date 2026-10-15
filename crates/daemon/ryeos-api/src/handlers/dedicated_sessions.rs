@@ -8215,8 +8215,17 @@ fn verify_candidate_evaluation_testimony(
         .get_thread(qualification_root_id)
         .map_err(internal)?
         .ok_or_else(|| internal("candidate qualification root disappeared"))?;
+    let qualification_placement = state
+        .state_store
+        .recorded_thread_placement(qualification_root_id)
+        .map_err(internal)?;
     if qualification.thread_id != qualification_root_id
-        || qualification.chain_root_id != qualification_root_id
+        || !qualification_placement_admitted(
+            qualification_root_id,
+            &qualification.chain_root_id,
+            &session.chain_root_id,
+            &qualification_placement,
+        )
         || qualification.item_ref != "service:worker-executions/qualify-candidate"
         || qualification.requested_by.as_deref() != Some(session.owner_principal.as_str())
         || qualification.current_site_id != source.current_site_id
@@ -9946,9 +9955,17 @@ fn expected_candidate_discard_fact(
         )
         .map_err(internal)?
         .ok_or_else(|| internal("candidate source root disappeared"))?;
+    let disposition_placement = state
+        .state_store
+        .recorded_thread_placement(disposition_root_id)
+        .map_err(internal)?;
     if disposition.thread_id != disposition_root_id
-        || disposition.chain_root_id != disposition_root_id
-        || disposition_root_id == session.chain_root_id
+        || !discard_placement_admitted(
+            disposition_root_id,
+            &disposition.chain_root_id,
+            &session.chain_root_id,
+            &disposition_placement,
+        )
         || disposition.item_ref != "service:worker-executions/discard"
         || disposition.requested_by.as_deref() != Some(session.owner_principal.as_str())
         || disposition.current_site_id != source.current_site_id
@@ -10494,6 +10511,52 @@ async fn publish(
     }))
 }
 
+/// A candidate qualification is a direct invocation (its own chain root) or
+/// an inline callback child, with proven in-process lineage, of a thread in
+/// the session's own chain. A member of any other chain, or a member without
+/// that lineage, is refused.
+fn qualification_placement_admitted(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+    placement: &ryeos_app::state_store::RecordedThreadPlacement,
+) -> bool {
+    use ryeos_app::state_store::RecordedThreadPlacement;
+    match placement {
+        RecordedThreadPlacement::Root => chain_root_id == thread_id,
+        RecordedThreadPlacement::InProcessMember {
+            chain_root_id: born_in,
+            upstream_thread_id: _,
+        } => born_in == chain_root_id && chain_root_id == session_chain_root_id,
+        RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
+    }
+}
+
+/// A candidate discard is a direct invocation (its own chain root, never the
+/// session itself) or an inline callback child, with proven in-process
+/// lineage, of a thread outside the session's chain. Work inside the session
+/// cannot discard its own session, and a member without in-process lineage
+/// is refused.
+fn discard_placement_admitted(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+    placement: &ryeos_app::state_store::RecordedThreadPlacement,
+) -> bool {
+    use ryeos_app::state_store::RecordedThreadPlacement;
+    if chain_root_id == session_chain_root_id || thread_id == session_chain_root_id {
+        return false;
+    }
+    match placement {
+        RecordedThreadPlacement::Root => chain_root_id == thread_id,
+        RecordedThreadPlacement::InProcessMember {
+            chain_root_id: born_in,
+            upstream_thread_id: _,
+        } => born_in == chain_root_id,
+        RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
+    }
+}
+
 fn internal(error: impl std::fmt::Display) -> HandlerError {
     HandlerError::Internal(error.to_string())
 }
@@ -10738,6 +10801,55 @@ mod evaluator_contract_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::{discard_placement_admitted, qualification_placement_admitted};
+
+    #[test]
+    fn qualification_admits_roots_and_inline_children_of_the_session_chain() {
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
+            chain_root_id: chain.to_owned(),
+            upstream_thread_id: "T-placement".to_owned(),
+        };
+        let check = |chain: &str, placement: &RecordedThreadPlacement| {
+            qualification_placement_admitted("T-qualify", chain, "T-session", placement)
+        };
+        assert!(check("T-qualify", &RecordedThreadPlacement::Root));
+        assert!(check("T-session", &member("T-session")));
+        assert!(!check("T-unrelated", &member("T-unrelated")));
+        assert!(!check("T-session", &member("T-unrelated")));
+        assert!(!check(
+            "T-session",
+            &RecordedThreadPlacement::OtherMember {
+                chain_root_id: "T-session".to_owned()
+            }
+        ));
+    }
+
+    #[test]
+    fn discard_admits_roots_and_inline_children_outside_the_session_chain() {
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
+            chain_root_id: chain.to_owned(),
+            upstream_thread_id: "T-operator-graph".to_owned(),
+        };
+        let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
+            discard_placement_admitted(thread, chain, "T-session", placement)
+        };
+        assert!(check("T-discard", "T-discard", &RecordedThreadPlacement::Root));
+        assert!(check("T-discard", "T-operator", &member("T-operator")));
+        // The session itself and work inside the session's chain.
+        assert!(!check("T-session", "T-session", &RecordedThreadPlacement::Root));
+        assert!(!check("T-discard", "T-session", &member("T-session")));
+        // A chain other than the one its lineage proves.
+        assert!(!check("T-discard", "T-unrelated", &member("T-operator")));
+        assert!(!check(
+            "T-discard",
+            "T-operator",
+            &RecordedThreadPlacement::OtherMember {
+                chain_root_id: "T-operator".to_owned()
+            }
+        ));
+    }
     use serde_json::{Value, json};
 
     use super::{
