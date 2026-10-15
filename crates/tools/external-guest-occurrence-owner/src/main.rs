@@ -151,14 +151,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     ));
     let source = lillux::sandbox::enter_linux_private_source_filesystem(limits)
         .map_err(anyhow::Error::msg)?;
-    // The three inputs this owner verified, in the order the controller
-    // expects a leased guest's Ready to name them. The package payload digest
-    // is the ticket's: staging refuses an upload that differs from it.
-    let ready_boot_inputs = vec![
-        admitted.authorization().activation_request_digest.clone(),
-        lillux::sha256_hex(&import_bytes),
-        admitted.authorization().ticket.payload_sha256.clone(),
-    ];
+    let ready_boot_inputs = admitted.ready_boot_inputs(&import_bytes);
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
         &upload,

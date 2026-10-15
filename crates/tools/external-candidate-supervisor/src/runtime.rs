@@ -1359,6 +1359,19 @@ fn lease_handshake<T: ExternalExecutionChannelTransport>(
     Ok(())
 }
 
+/// The leased guest handshake exactly as the supervisor runs it, for tests
+/// that drive it over a real transport against a real controller route.
+#[cfg(feature = "test-support")]
+pub fn lease_handshake_for_test<T: ExternalExecutionChannelTransport>(
+    transport: &mut T,
+    binding: &ExecutionChannelBinding,
+    ready: &[u8],
+    report: &[u8],
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    lease_handshake(transport, binding, ready, report, deadline)
+}
+
 /// One exchange of exactly `wire`, retried unchanged while the outcome is
 /// ambiguous and `deadline` has not elapsed.
 fn exchange_exact<T: ExternalExecutionChannelTransport>(

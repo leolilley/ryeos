@@ -518,11 +518,11 @@ impl LeaseReadyExpectation {
     /// The activation inputs the guest must report verified, in delivery
     /// order.
     fn verified_inputs(&self) -> [&str; 3] {
-        [
-            self.activation_request_digest.as_str(),
-            self.signed_import_sha256.as_str(),
-            self.guest_package_sha256.as_str(),
-        ]
+        ryeos_external_execution_contract::lease_ready_inputs::ordered_lease_ready_inputs(
+            &self.activation_request_digest,
+            &self.signed_import_sha256,
+            &self.guest_package_sha256,
+        )
     }
 }
 
@@ -1539,6 +1539,26 @@ mod tests {
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains("different activation inputs"));
+
+        // The same three digests in another order are not the delivered inputs.
+        for (left, right) in [(0, 1), (1, 2), (0, 2)] {
+            let mut reordered = ready_boot(&lease);
+            reordered.verified_input_digests.swap(left, right);
+            let reordered = signed_ready(&lease, reordered);
+            let error = verify_ready(&lease.expectation, &reordered, 1_500, SKEW)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("different activation inputs"));
+        }
+        // Dropping or appending an input is refused as well.
+        let mut short = ready_boot(&lease);
+        short.verified_input_digests.pop();
+        let short = signed_ready(&lease, short);
+        assert!(verify_ready(&lease.expectation, &short, 1_500, SKEW).is_err());
+        let mut long = ready_boot(&lease);
+        long.verified_input_digests.push("6".repeat(64));
+        let long = signed_ready(&lease, long);
+        assert!(verify_ready(&lease.expectation, &long, 1_500, SKEW).is_err());
 
         let no_boot = signed_frame(
             &lease,

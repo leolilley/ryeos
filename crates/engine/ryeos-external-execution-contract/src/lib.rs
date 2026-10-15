@@ -8,6 +8,7 @@
 
 pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
+pub mod lease_ready_inputs;
 pub mod length_prefixed;
 pub mod provider_configuration;
 pub use provider_configuration::{

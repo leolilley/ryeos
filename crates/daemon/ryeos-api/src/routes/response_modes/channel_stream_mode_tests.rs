@@ -144,6 +144,9 @@ struct FixtureOwner {
     refuse_in_exchange: std::sync::atomic::AtomicBool,
     /// Set to answer every frame as a held one: not new, nothing outbound.
     held: std::sync::atomic::AtomicBool,
+    /// Set to hold only the first frame of the channel, as the controller
+    /// holds a leased guest's Ready until it has admitted the guest.
+    hold_first_frame: std::sync::atomic::AtomicBool,
     /// The number of coming exchanges that reach no verdict, as an adapter
     /// timeout does; each fails with the unavailable context.
     unavailable_exchanges: std::sync::atomic::AtomicUsize,
@@ -167,6 +170,7 @@ impl FixtureOwner {
             refused: std::sync::atomic::AtomicBool::new(false),
             refuse_in_exchange: std::sync::atomic::AtomicBool::new(false),
             held: std::sync::atomic::AtomicBool::new(false),
+            hold_first_frame: std::sync::atomic::AtomicBool::new(false),
             unavailable_exchanges: std::sync::atomic::AtomicUsize::new(0),
             exchange_delay,
         })
@@ -253,7 +257,12 @@ impl ChannelStreamOwner for FixtureOwner {
             return Err(anyhow::anyhow!("the lifecycle adapter timed out")
                 .context(ryeos_app::external_placement::ExternalChannelExchangeUnavailable));
         }
-        if self.held.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.held.load(std::sync::atomic::Ordering::SeqCst)
+            || (verified.frame().sequence == 1
+                && self
+                    .hold_first_frame
+                    .load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Ok(ExternalChannelExchangeResponse {
                 schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
                 incoming_new: false,
@@ -1156,4 +1165,173 @@ async fn the_guest_retries_a_frame_whose_exchange_reached_no_verdict() {
     })
     .await;
     assert_eq!(owner.exchanges(), 1);
+}
+
+/// A leased guest's Ready naming its boot and the capability report that
+/// follows it, signed by the supervisor key of `fixture`.
+fn lease_handshake_frames(fixture: &Fixture) -> (Vec<u8>, Vec<u8>) {
+    let boot_id = "01234567-89ab-cdef-0123-456789abcdef".to_owned();
+    let author = |sequence: u64, previous: Option<String>, payload: ExecutionChannelPayload| {
+        let signed = SignedExecutionFrame::sign(
+            ExecutionFrame {
+                schema: 1,
+                binding_digest: fixture.binding.digest().unwrap(),
+                direction: ChannelDirection::SupervisorToOwner,
+                sequence,
+                previous_frame_digest: previous,
+                acknowledged_peer_sequence: 0,
+                payload,
+            },
+            &fixture.binding,
+            &fixture.supervisor_key,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(&signed).unwrap())
+            .unwrap()
+            .into_bytes();
+        let digest = SignedExecutionFrame::decode_and_verify(
+            &wire,
+            &fixture.binding,
+            lillux::time::timestamp_millis(),
+        )
+        .unwrap()
+        .digest()
+        .to_owned();
+        (wire, digest)
+    };
+    let (ready, ready_digest) = author(
+        1,
+        None,
+        ExecutionChannelPayload::Ready {
+            supervisor_runtime_hash: fixture.binding.supervisor_runtime_hash.clone(),
+            base_snapshot_hash: fixture.binding.base_snapshot_hash.clone(),
+            boot: Some(ryeos_state::external_execution::SupervisorReadyBoot {
+                boot_id: boot_id.clone(),
+                verified_input_digests: vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)],
+                ready_at_ms: lillux::time::timestamp_millis(),
+            }),
+        },
+    );
+    let (report, _) = author(
+        2,
+        Some(ready_digest),
+        ExecutionChannelPayload::CapabilityReport {
+            boot_id,
+            provided: std::collections::BTreeMap::new(),
+            missing: std::collections::BTreeMap::new(),
+        },
+    );
+    (ready, report)
+}
+
+/// The guest's own `lease_handshake` over the guest's TLS WebSocket transport
+/// against the real stream route. The controller holds the Ready, answers the
+/// report once it has admitted the guest, and a transient no-verdict closes
+/// 1011 and is retried while a durably refused occurrence closes 1008 and is
+/// fatal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_guests_lease_handshake_runs_against_the_real_stream_route() {
+    // Held Ready, then Admitted: the handshake proceeds.
+    let owner = FixtureOwner::new(Fixture::new(), 1024 * 1024);
+    owner
+        .hold_first_frame
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let slots = ChannelStreamSlots::new(test_policy());
+    let controller = serve(Arc::clone(&owner), Arc::clone(&slots)).await;
+    let edge = tls_edge(controller).await;
+    let (ready, report) = lease_handshake_frames(&owner.fixture);
+    let binding = owner.fixture.binding.clone();
+    on_guest_thread(move || {
+        let mut stream = guest_stream(edge, OCCURRENCE);
+        ryeos_external_candidate_supervisor::runtime::lease_handshake_for_test(
+            &mut stream,
+            &binding,
+            &ready,
+            &report,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10)),
+        )
+        .unwrap();
+    })
+    .await;
+    // Only the report reached a verdict; the held Ready is not counted.
+    assert_eq!(owner.exchanges(), 1);
+
+    // A transient no-verdict closes 1011 and the guest retries the same
+    // frame. The 1011 close itself is checked on a raw socket below.
+    let owner = FixtureOwner::new(Fixture::new(), 1024 * 1024);
+    owner
+        .hold_first_frame
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    owner
+        .unavailable_exchanges
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let slots = ChannelStreamSlots::new(test_policy());
+    let controller = serve(Arc::clone(&owner), Arc::clone(&slots)).await;
+    let edge = tls_edge(controller).await;
+    let (ready, report) = lease_handshake_frames(&owner.fixture);
+    let binding = owner.fixture.binding.clone();
+    on_guest_thread(move || {
+        let mut stream = guest_stream(edge, OCCURRENCE);
+        ryeos_external_candidate_supervisor::runtime::lease_handshake_for_test(
+            &mut stream,
+            &binding,
+            &ready,
+            &report,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(20)),
+        )
+        .unwrap();
+    })
+    .await;
+    assert_eq!(owner.exchanges(), 1);
+    assert_eq!(
+        owner
+            .unavailable_exchanges
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "both no-verdict exchanges were consumed and retried"
+    );
+    let probe = FixtureOwner::new(Fixture::new(), 1024 * 1024);
+    probe
+        .unavailable_exchanges
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let address = serve(Arc::clone(&probe), ChannelStreamSlots::new(test_policy())).await;
+    let mut socket = dial(address, OCCURRENCE, true).await.unwrap();
+    socket
+        .send(tungstenite::Message::Binary(
+            lease_handshake_frames(&probe.fixture).0,
+        ))
+        .await
+        .unwrap();
+    let (code, reason) = closed_with(&mut socket).await;
+    assert_eq!(code, close_code::ERROR);
+    assert_eq!(reason, "external_channel_stream_exchange_unavailable");
+
+    // A durably refused occurrence closes 1008 and the handshake is fatal.
+    let owner = FixtureOwner::new(Fixture::new(), 1024 * 1024);
+    owner
+        .refuse_in_exchange
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let slots = ChannelStreamSlots::new(test_policy());
+    let controller = serve(Arc::clone(&owner), Arc::clone(&slots)).await;
+    let edge = tls_edge(controller).await;
+    let (ready, report) = lease_handshake_frames(&owner.fixture);
+    let binding = owner.fixture.binding.clone();
+    let refusal = on_guest_thread(move || {
+        let mut stream = guest_stream(edge, OCCURRENCE);
+        ryeos_external_candidate_supervisor::runtime::lease_handshake_for_test(
+            &mut stream,
+            &binding,
+            &ready,
+            &report,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10)),
+        )
+        .unwrap_err()
+    })
+    .await;
+    assert!(format!("{refusal:#}").contains(OCCURRENCE_REFUSED), "{refusal:#}");
+    // The refusal is verdict-final: the occurrence no longer upgrades.
+    assert_eq!(
+        refused_status(dial(controller, OCCURRENCE, true).await.err().unwrap()),
+        410
+    );
 }

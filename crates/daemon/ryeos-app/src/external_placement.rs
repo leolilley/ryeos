@@ -8083,19 +8083,34 @@ fn begin_external_lease_supervisor_activation(
     if reservation.admitted_adapter_request_base64.is_none() {
         return Ok(());
     }
-    let signed_import = lillux::canonical_json(&serde_json::to_value(
-        activation.signed_import_authorization()?,
-    )?)?;
     state_store.activate_external_lease_record(
         &reservation.placement_thread_id,
-        &crate::runtime_db::external_execution::ExternalLeaseActivation {
-            lease_id: occurrence.occurrence_id.clone(),
-            activation_request_digest: intent.activation_request_digest.clone(),
-            signed_import_sha256: lillux::sha256_hex(signed_import.as_bytes()),
-            guest_package_sha256: intent.delivery.payload_sha256.clone(),
-            ready_deadline_ms: reservation.startup_deadline_ms,
-        },
+        &external_lease_activation(reservation, occurrence, intent, activation)?,
     )
+}
+
+/// The digests and deadline the lease record binds at activation. The signed
+/// import digest covers the exact canonical bytes delivered to the guest,
+/// which the guest accepts only in the contract's canonical encoding (struct
+/// field order), not the key-sorted encoding used for content addressing.
+fn external_lease_activation(
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    intent: &ExternalSupervisorActivationIntent,
+    activation: &ExternalSupervisorActivation,
+) -> Result<crate::runtime_db::external_execution::ExternalLeaseActivation> {
+    let signed_import = ryeos_external_execution_contract::canonical_json(
+        activation.signed_import_authorization()?,
+    )?;
+    Ok(crate::runtime_db::external_execution::ExternalLeaseActivation {
+        lease_id: occurrence.occurrence_id.clone(),
+        activation_request_digest: intent.activation_request_digest.clone(),
+        signed_import_sha256: ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
+            &signed_import,
+        ),
+        guest_package_sha256: intent.delivery.payload_sha256.clone(),
+        ready_deadline_ms: reservation.startup_deadline_ms,
+    })
 }
 
 fn supervisor_activation(
@@ -12206,7 +12221,7 @@ mod tests {
             &reservation.base_snapshot_hash,
         );
         let package_parent = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
-        let (intent, activation) = supervisor_activation(
+        let (intent, mut activation) = supervisor_activation(
             &contract,
             &reservation,
             &occurrence,
@@ -12292,6 +12307,48 @@ mod tests {
             &assignment_bytes,
         )
         .unwrap();
+        // The same activation's lease record and the guest's verification of
+        // the delivered import name the same three inputs in the same order.
+        activation.import_authorization = Some(signed.clone());
+        let delivered = ryeos_external_execution_contract::canonical_json(
+            activation.signed_import_authorization().unwrap(),
+        )
+        .unwrap();
+        let verified_delivery =
+            ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
+                &delivered,
+                &root.verifying_key(),
+                assignment.guest_runtime_manifest_hash,
+                &assignment_bytes,
+            )
+            .unwrap();
+        let record =
+            external_lease_activation(&reservation, &occurrence, &intent, &activation).unwrap();
+        let controller_inputs =
+            ryeos_external_execution_contract::lease_ready_inputs::ordered_lease_ready_inputs(
+                &record.activation_request_digest,
+                &record.signed_import_sha256,
+                &record.guest_package_sha256,
+            );
+        let guest_inputs = verified_delivery.ready_boot_inputs(&delivered);
+        assert_eq!(
+            guest_inputs.iter().map(String::as_str).collect::<Vec<_>>(),
+            controller_inputs
+        );
+        assert_eq!(guest_inputs[0], intent.activation_request_digest);
+        assert_eq!(guest_inputs[2], intent.delivery.payload_sha256);
+        assert_eq!(
+            guest_inputs[1],
+            lillux::sha256_hex(&delivered),
+            "the controller digests the very bytes the guest receives"
+        );
+        let mut reordered = guest_inputs.clone();
+        reordered.swap(0, 1);
+        assert_ne!(reordered, guest_inputs);
+        assert_ne!(
+            guest_inputs.iter().map(String::as_str).collect::<Vec<_>>(),
+            [controller_inputs[1], controller_inputs[0], controller_inputs[2]]
+        );
         assert_ne!(
             signed.authorization.guest_runtime_manifest_hash,
             signed.authorization.supervisor_runtime_hash
