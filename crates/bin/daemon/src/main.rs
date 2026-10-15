@@ -28,6 +28,7 @@ use ryeosd::scheduler;
 use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{bootstrap, reconcile, uds};
 
+mod composition_native;
 #[cfg(feature = "scheduling")]
 mod maintenance_schedule;
 #[cfg(feature = "scheduling")]
@@ -429,9 +430,9 @@ struct DaemonSelectedComposition {
     // attempt (successful or refused) until its acknowledged outside sources
     // are cached below; then the cached sources join the Store graph.
     accounting_native: Option<Arc<ryeos_app::accounting_db::AccountingNativeLedger>>,
-    accounting_native_connection_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
-    accounting_native_reference_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
-    accounting_native_unused_reference: Option<lillux_sqlite::OriginalNativeTransientInputs>,
+    // Native SQLite source slots of the accounting and scheduler owners, under
+    // type-level custody: occupied slots are retained, never dropped.
+    native_sources: composition_native::CompositionNativeSources,
     // The audit outbox publisher holds Store and ledger aliases. Its handle
     // is filled from inside the startup future and ended before native
     // shutdown, so the consuming Store close sees no service owner.
@@ -442,27 +443,13 @@ struct DaemonSelectedComposition {
     #[cfg(feature = "scheduling")]
     scheduler_db_custody: Option<Arc<scheduler::db::SchedulerDb>>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_finalization_owner: Option<scheduler::db::SchedulerNativeFinalizationOwner>,
-    #[cfg(feature = "scheduling")]
-    scheduler_native_outside_sources: Option<scheduler::db::SchedulerNativeOutsideSources>,
-    #[cfg(feature = "scheduling")]
     scheduler_admission_failure: Option<state_store::LiveSchedulerNativeAdmissionFailure>,
     #[cfg(feature = "scheduling")]
     scheduler_admission_sources: Option<state_store::LiveSchedulerNativeAdmissionOutsideSources>,
     #[cfg(feature = "scheduling")]
-    scheduler_native_connection_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
-    #[cfg(feature = "scheduling")]
-    scheduler_native_unopened_inputs: Option<lillux_sqlite::OriginalNativeBoundInputs>,
-    #[cfg(feature = "scheduling")]
-    scheduler_native_schema_parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
-    #[cfg(feature = "scheduling")]
-    scheduler_native_schema_transient: Option<lillux_sqlite::OriginalNativeTransientInputs>,
-    #[cfg(feature = "scheduling")]
     scheduler_participant_custody: Option<Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>>,
     // Retain actual receipts alongside their database until the full original
     // factory census settles. Service close alone cannot release this owner.
-    #[cfg(feature = "scheduling")]
-    scheduler_native_terminals: Option<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>>,
     #[cfg(feature = "scheduling")]
     scheduler_open_failure: Option<scheduler::db::SchedulerDbOpenFailure>,
     #[cfg(feature = "scheduling")]
@@ -511,33 +498,17 @@ impl DaemonSelectedComposition {
             native_admission_fence: Arc::default(),
             native_control_observation: std::sync::Mutex::new(None),
             accounting_native: None,
-            accounting_native_connection_parts: None,
-            accounting_native_reference_parts: None,
-            accounting_native_unused_reference: None,
+            native_sources: composition_native::CompositionNativeSources::new(),
             accounting_publisher: Arc::default(),
             service_stop: ServiceStopState::default(),
             #[cfg(feature = "scheduling")]
             scheduler_db_custody: None,
             #[cfg(feature = "scheduling")]
-            scheduler_native_finalization_owner: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_outside_sources: None,
-            #[cfg(feature = "scheduling")]
             scheduler_admission_failure: None,
             #[cfg(feature = "scheduling")]
             scheduler_admission_sources: None,
             #[cfg(feature = "scheduling")]
-            scheduler_native_connection_parts: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_unopened_inputs: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_schema_parts: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_schema_transient: None,
-            #[cfg(feature = "scheduling")]
             scheduler_participant_custody: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_terminals: None,
             #[cfg(feature = "scheduling")]
             scheduler_open_failure: None,
                 #[cfg(feature = "scheduling")]
@@ -575,17 +546,17 @@ impl DaemonSelectedComposition {
 
     #[cfg(feature = "scheduling")]
     fn retain_scheduler_terminals_after_close(&mut self) -> Result<()> {
-        if self.scheduler_native_terminals.is_some() {
+        if self.native_sources.scheduler_native_terminals().is_some() {
             return Ok(());
         }
-        if let Some(owner) = &self.scheduler_native_finalization_owner {
+        if let Some(owner) = &self.native_sources.scheduler_native_finalization_owner() {
             let terminals = owner.retained_native_terminals()?;
-            self.scheduler_native_terminals = Some(terminals);
+            *self.native_sources.scheduler_native_terminals_mut() = Some(terminals);
         } else if let Some(db) = &self.scheduler_db_custody {
             // This method validates the original factory and actual terminal
             // state. Any failure leaves the database under composition custody.
             let terminals = db.retained_native_terminals()?;
-            self.scheduler_native_terminals = Some(terminals);
+            *self.native_sources.scheduler_native_terminals_mut() = Some(terminals);
         }
         Ok(())
     }
@@ -594,7 +565,7 @@ impl DaemonSelectedComposition {
     /// owner transfer. Each step is idempotent once it has completed.
     #[cfg(feature = "scheduling")]
     fn retry_scheduler_close_and_transfer(&mut self) -> Result<()> {
-        if self.scheduler_native_finalization_owner.is_none() {
+        if self.native_sources.scheduler_native_finalization_owner().is_none() {
             let service = self.app_state_custody.as_ref()
                 .and_then(|app| app.extensions.get::<ryeos_scheduler_service::SchedulerService>());
             if let Some(service) = service {
@@ -614,7 +585,7 @@ impl DaemonSelectedComposition {
 
     #[cfg(feature = "scheduling")]
     fn transfer_scheduler_native_finalization_owner(&mut self) -> Result<()> {
-        if self.scheduler_native_finalization_owner.is_some() {
+        if self.native_sources.scheduler_native_finalization_owner().is_some() {
             return Ok(());
         }
         let Some(expected_db) = self.scheduler_db_custody.as_ref() else {
@@ -651,7 +622,7 @@ impl DaemonSelectedComposition {
         self.scheduler_db_custody.take();
         match service.into_native_finalization_owner() {
             Ok(owner) => {
-                self.scheduler_native_finalization_owner = Some(owner);
+                *self.native_sources.scheduler_native_finalization_owner_mut() = Some(owner);
                 Ok(())
             }
             Err((service, error)) => {
@@ -667,12 +638,12 @@ impl DaemonSelectedComposition {
 
     #[cfg(feature = "scheduling")]
     fn prepare_scheduler_outside_source_fields(&mut self) -> Result<()> {
-        if let Some(sources) = self.scheduler_native_outside_sources.as_ref() {
+        if let Some(sources) = self.native_sources.scheduler_native_outside_sources().as_ref() {
             sources.handoff_id()?;
-            anyhow::ensure!(self.scheduler_native_connection_parts.is_none()
-                && self.scheduler_native_unopened_inputs.is_none()
-                && self.scheduler_native_schema_parts.is_none()
-                && self.scheduler_native_schema_transient.is_none(),
+            anyhow::ensure!(self.native_sources.scheduler_native_connection_parts().is_none()
+                && self.native_sources.scheduler_native_unopened_inputs().is_none()
+                && self.native_sources.scheduler_native_schema_parts().is_none()
+                && self.native_sources.scheduler_native_schema_transient().is_none(),
                 "Scheduler outside packet competes with an already retained source field");
         }
         Ok(())
@@ -687,9 +658,9 @@ impl DaemonSelectedComposition {
     ) -> Result<()> {
         self.prepare_scheduler_outside_source_fields()?;
         if self.scheduler_recovered_schema.is_some() {
-            anyhow::ensure!(self.scheduler_native_schema_parts.is_none()
-                && self.scheduler_native_schema_transient.is_none()
-                && self.scheduler_native_outside_sources.as_ref()
+            anyhow::ensure!(self.native_sources.scheduler_native_schema_parts().is_none()
+                && self.native_sources.scheduler_native_schema_transient().is_none()
+                && self.native_sources.scheduler_native_outside_sources().as_ref()
                     .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
                 "failed schema reference competes with a normal Scheduler source packet");
             let released = self.scheduler_recovered_schema.take()
@@ -697,9 +668,9 @@ impl DaemonSelectedComposition {
             match released.into_outside_parts(factory, terminal) {
                 Ok((parts, transient, _prior_refusal)) => {
                     if let Some(parts) = parts {
-                        self.scheduler_native_schema_parts = Some(parts);
+                        *self.native_sources.scheduler_native_schema_parts_mut() = Some(parts);
                     }
-                    self.scheduler_native_schema_transient = transient
+                    *self.native_sources.scheduler_native_schema_transient_mut() = transient
                         .map(ryeos_state::sqlite_schema::UnusedSchemaTransientInputs::take_or_abort);
                     tracing::warn!(
                         "scheduler schema reference failed; retaining its original failure evidence during shutdown"
@@ -716,23 +687,23 @@ impl DaemonSelectedComposition {
         outside.advance_scheduler_admission_sources(&mut self.scheduler_admission_sources,
             factory, terminal, &|bytes, steps|
                 producer.prepay_outside_control(terminal, bytes, steps))?;
-        outside.advance_scheduler_native_handoff(&mut self.scheduler_native_outside_sources,
+        outside.advance_scheduler_native_handoff(self.native_sources.scheduler_native_outside_sources_mut(),
             factory, terminal, &|bytes, steps|
                 producer.prepay_outside_control(terminal, bytes, steps))?;
-        if self.scheduler_native_connection_parts.is_some() {
-            outside.advance_scheduler_packet_parts(&mut self.scheduler_native_connection_parts, factory, terminal,
+        if self.native_sources.scheduler_native_connection_parts().is_some() {
+            outside.advance_scheduler_packet_parts(self.native_sources.scheduler_native_connection_parts_mut(), factory, terminal,
                 &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
         }
-        if self.scheduler_native_unopened_inputs.is_some() {
-            outside.advance_unopened_scheduler_database(&mut self.scheduler_native_unopened_inputs, factory, terminal,
+        if self.native_sources.scheduler_native_unopened_inputs().is_some() {
+            outside.advance_unopened_scheduler_database(self.native_sources.scheduler_native_unopened_inputs_mut(), factory, terminal,
                 &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
         }
-        if self.scheduler_native_schema_parts.is_some() {
-            outside.advance_scheduler_packet_parts(&mut self.scheduler_native_schema_parts, factory, terminal,
+        if self.native_sources.scheduler_native_schema_parts().is_some() {
+            outside.advance_scheduler_packet_parts(self.native_sources.scheduler_native_schema_parts_mut(), factory, terminal,
                 &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
         }
-        if self.scheduler_native_schema_transient.is_some() {
-            outside.advance_unopened_scheduler_transient(&mut self.scheduler_native_schema_transient,
+        if self.native_sources.scheduler_native_schema_transient().is_some() {
+            outside.advance_unopened_scheduler_transient(self.native_sources.scheduler_native_schema_transient_mut(),
                 factory, terminal, &|bytes, steps|
                     producer.prepay_outside_control(terminal, bytes, steps))?;
         }
@@ -747,29 +718,29 @@ impl DaemonSelectedComposition {
         let mut no_transient_source = None;
         outside.advance_unopened_scheduler_transient(&mut no_transient_source, factory, terminal,
             &|bytes, steps| producer.prepay_outside_control(terminal, bytes, steps))?;
-        anyhow::ensure!(self.scheduler_native_connection_parts.is_none()
-            && self.scheduler_native_unopened_inputs.is_none()
-            && self.scheduler_native_schema_parts.is_none()
-            && self.scheduler_native_schema_transient.is_none()
+        anyhow::ensure!(self.native_sources.scheduler_native_connection_parts().is_none()
+            && self.native_sources.scheduler_native_unopened_inputs().is_none()
+            && self.native_sources.scheduler_native_schema_parts().is_none()
+            && self.native_sources.scheduler_native_schema_transient().is_none()
             && self.scheduler_admission_sources.is_none(),
             "selected Scheduler sources remain outside the Store inventory");
-        if self.scheduler_native_finalization_owner.is_some() {
-            let sources = self.scheduler_native_outside_sources.as_ref()
+        if self.native_sources.scheduler_native_finalization_owner().is_some() {
+            let sources = self.native_sources.scheduler_native_outside_sources().as_ref()
                 .context("selected Scheduler source owner absent before completion")?;
             anyhow::ensure!(sources.is_empty(),
                 "selected Scheduler inputs remain outside Store custody");
             let handoff_id = sources.handoff_id()?;
             let receipt = outside.scheduler_native_store_handoff_receipt(handoff_id,
                 factory, terminal)?;
-            let owner = self.scheduler_native_finalization_owner.take()
+            let owner = self.native_sources.scheduler_native_finalization_owner_mut().take()
                 .expect("checked Scheduler finalization owner");
             if let Err((owner, error)) = owner.finish_outside_handoff(receipt) {
-                self.scheduler_native_finalization_owner = Some(owner);
+                *self.native_sources.scheduler_native_finalization_owner_mut() = Some(owner);
                 return Err(error);
             }
-            self.scheduler_native_outside_sources = None;
+            *self.native_sources.scheduler_native_outside_sources_mut() = None;
         } else {
-            anyhow::ensure!(self.scheduler_native_outside_sources.as_ref()
+            anyhow::ensure!(self.native_sources.scheduler_native_outside_sources().as_ref()
                 .is_none_or(scheduler::db::SchedulerNativeOutsideSources::is_empty),
                 "Scheduler Store source inputs outlived their finalization owner");
         }
@@ -778,15 +749,15 @@ impl DaemonSelectedComposition {
 
     #[cfg(feature = "scheduling")]
     fn has_scheduler_custody(&self) -> bool {
-        self.scheduler_db_custody.is_some() || self.scheduler_native_terminals.is_some()
-            || self.scheduler_native_finalization_owner.is_some()
-            || self.scheduler_native_outside_sources.is_some()
+        self.scheduler_db_custody.is_some() || self.native_sources.scheduler_native_terminals().is_some()
+            || self.native_sources.scheduler_native_finalization_owner().is_some()
+            || self.native_sources.scheduler_native_outside_sources().is_some()
             || self.scheduler_admission_failure.is_some()
             || self.scheduler_admission_sources.is_some()
-            || self.scheduler_native_connection_parts.is_some()
-            || self.scheduler_native_unopened_inputs.is_some()
-            || self.scheduler_native_schema_parts.is_some()
-            || self.scheduler_native_schema_transient.is_some()
+            || self.native_sources.scheduler_native_connection_parts().is_some()
+            || self.native_sources.scheduler_native_unopened_inputs().is_some()
+            || self.native_sources.scheduler_native_schema_parts().is_some()
+            || self.native_sources.scheduler_native_schema_transient().is_some()
             || self.scheduler_participant_custody.is_some()
             || self.scheduler_open_failure.is_some()
             || self.scheduler_schema_failure.is_some()
@@ -827,9 +798,9 @@ impl DaemonSelectedComposition {
     }
 
     fn has_accounting_custody(&self) -> bool {
-        self.accounting_native.is_some() || self.accounting_native_connection_parts.is_some()
-            || self.accounting_native_reference_parts.is_some()
-            || self.accounting_native_unused_reference.is_some()
+        self.accounting_native.is_some() || self.native_sources.accounting_native_connection_parts().is_some()
+            || self.native_sources.accounting_native_reference_parts().is_some()
+            || self.native_sources.accounting_native_unused_reference().is_some()
     }
 
     /// After the aggregate ACK, move the ledger's acknowledged terminals into
@@ -839,16 +810,16 @@ impl DaemonSelectedComposition {
         terminal: &lillux_sqlite::OriginalNativeTerminal,
     ) -> Result<()> {
         let Some(ledger) = self.accounting_native.as_ref() else { return Ok(()) };
-        anyhow::ensure!(self.accounting_native_connection_parts.is_none()
-            && self.accounting_native_reference_parts.is_none()
-            && self.accounting_native_unused_reference.is_none(),
+        anyhow::ensure!(self.native_sources.accounting_native_connection_parts().is_none()
+            && self.native_sources.accounting_native_reference_parts().is_none()
+            && self.native_sources.accounting_native_unused_reference().is_none(),
             "accounting outside sources compete with already cached sources");
         let sources = ledger.take_outside_sources(terminal)
             .context("take accounting ledger outside sources")?;
         let (connection, reference, unused_reference) = sources.into_parts();
-        self.accounting_native_connection_parts = connection;
-        self.accounting_native_reference_parts = reference;
-        self.accounting_native_unused_reference = unused_reference;
+        *self.native_sources.accounting_native_connection_parts_mut() = connection;
+        *self.native_sources.accounting_native_reference_parts_mut() = reference;
+        *self.native_sources.accounting_native_unused_reference_mut() = unused_reference;
         // The emptied owner holds no native object; remaining AccountingDb
         // aliases already refuse SQL.
         self.accounting_native = None;
@@ -869,11 +840,11 @@ impl DaemonSelectedComposition {
         let outside = self.native_outside_store.as_mut()
             .context("accounting ledger sources lack the retained Store graph")?;
         let prepay = |bytes, steps| producer.prepay_outside_control(terminal, bytes, steps);
-        outside.advance_accounting_packet_parts(&mut self.accounting_native_connection_parts,
+        outside.advance_accounting_packet_parts(self.native_sources.accounting_native_connection_parts_mut(),
             factory, terminal, &prepay).context("Store pre-seal accounting ledger packet")?;
-        outside.advance_accounting_packet_parts(&mut self.accounting_native_reference_parts,
+        outside.advance_accounting_packet_parts(self.native_sources.accounting_native_reference_parts_mut(),
             factory, terminal, &prepay).context("Store pre-seal accounting reference packet")?;
-        outside.advance_unopened_accounting_transient(&mut self.accounting_native_unused_reference,
+        outside.advance_unopened_accounting_transient(self.native_sources.accounting_native_unused_reference_mut(),
             factory, terminal, &prepay).context("Store pre-seal unused accounting reference")?;
         anyhow::ensure!(!self.has_accounting_custody(),
             "accounting ledger sources remain outside the Store inventory");
@@ -891,7 +862,7 @@ impl DaemonSelectedComposition {
     /// move it to finalization custody; any refusal keeps the same Arc.
     #[cfg(feature = "scheduling")]
     fn retire_unadopted_scheduler_db(&mut self) -> Result<()> {
-        if self.app_state_custody.is_some() || self.scheduler_native_finalization_owner.is_some() {
+        if self.app_state_custody.is_some() || self.native_sources.scheduler_native_finalization_owner().is_some() {
             return Ok(());
         }
         let Some(db) = self.scheduler_db_custody.as_ref() else {
@@ -914,7 +885,7 @@ impl DaemonSelectedComposition {
         };
         match db.into_native_finalization() {
             Ok(owner) => {
-                self.scheduler_native_finalization_owner = Some(owner);
+                *self.native_sources.scheduler_native_finalization_owner_mut() = Some(owner);
                 Ok(())
             }
             Err((db, error)) => {
@@ -1812,11 +1783,11 @@ impl DaemonSelectedComposition {
         }
         #[cfg(feature = "scheduling")]
         if let Some(failure) = self.scheduler_open_failure.take() {
-            anyhow::ensure!(self.scheduler_native_finalization_owner.is_none(),
+            anyhow::ensure!(self.native_sources.scheduler_native_finalization_owner().is_none(),
                 "failed Scheduler open competes with a finalization owner");
             match failure.retry_close() {
                 Ok(failure) => match failure.into_native_finalization_owner() {
-                    Ok(owner) => self.scheduler_native_finalization_owner = Some(owner),
+                    Ok(owner) => *self.native_sources.scheduler_native_finalization_owner_mut() = Some(owner),
                     Err((failure, error)) => {
                         self.scheduler_open_failure = Some(failure);
                         return Err(error);
@@ -1874,7 +1845,7 @@ impl DaemonSelectedComposition {
             let mut terminals = self.native_closed_store.as_ref().context("actual live Store terminal owner absent")?
                 .native_terminals(&native)?;
             #[cfg(feature = "scheduling")]
-            if let Some(scheduler) = &self.scheduler_native_terminals { terminals.extend(scheduler.iter().cloned()); }
+            if let Some(scheduler) = &self.native_sources.scheduler_native_terminals() { terminals.extend(scheduler.iter().cloned()); }
             #[cfg(feature = "scheduling")]
             if let Some(released) = &self.scheduler_recovered_schema {
                 if let Some(terminal) = released.terminal(&native)? { terminals.push(terminal.clone()); }
@@ -1900,7 +1871,7 @@ impl DaemonSelectedComposition {
             drop(leases);
             drop(terminals);
             #[cfg(feature = "scheduling")]
-            self.scheduler_native_terminals.take();
+            self.native_sources.scheduler_native_terminals_mut().take();
         }
         // Every native terminal is already acknowledged by the real backend.
         // Retire their Rust handles before the zero-loan resident seal.
@@ -1911,13 +1882,13 @@ impl DaemonSelectedComposition {
         }
         let terminal = self.native_terminal.as_ref().context("actual native terminal absent for Store retirement")?;
         #[cfg(feature = "scheduling")]
-        if self.scheduler_native_outside_sources.is_none()
-            && let Some(owner) = &mut self.scheduler_native_finalization_owner
+        if self.native_sources.scheduler_native_outside_sources().is_none()
+            && let Some(owner) = self.native_sources.scheduler_native_finalization_owner_mut()
         {
             owner.prepare_outside_sources(terminal)?;
             // SAFETY: the exact wrapper is retained in this composition and
             // passed to the Store's typed handoff path before owner completion.
-            self.scheduler_native_outside_sources = Some(unsafe { owner.take_outside_sources()? });
+            *self.native_sources.scheduler_native_outside_sources_mut() = Some(unsafe { owner.take_outside_sources()? });
         }
         if let Some(closed) = self.native_closed_store.take() {
             match closed.into_outside_custody(terminal) {
@@ -3873,7 +3844,7 @@ async fn run(
                 composition.scheduler_admission_custody = Some(admission);
                 composition.scheduler_admission_custody.as_ref().expect("retained scheduler admission")
                     .require_factory(&original_factory)?;
-                anyhow::ensure!(composition.scheduler_native_unopened_inputs.is_none()
+                anyhow::ensure!(composition.native_sources.scheduler_native_unopened_inputs().is_none()
                     && composition.scheduler_schema_failure.is_none(),
                     "scheduler admission competes with retained unopened/schema-failure custody");
                 // Consume only after every fallible handoff check; mismatch
@@ -3886,7 +3857,7 @@ async fn run(
                     Ok(reference) => reference,
                     Err(failure) => {
                         composition.scheduler_schema_failure = Some(failure);
-                        composition.scheduler_native_unopened_inputs = Some(scheduler_inputs);
+                        *composition.native_sources.scheduler_native_unopened_inputs_mut() = Some(scheduler_inputs);
                         anyhow::bail!("scheduler schema reference refused; original custody retained");
                     }
                 };
@@ -7941,33 +7912,17 @@ mod selected_composition_tests {
                 native_admission_fence: Arc::default(),
                 native_control_observation: std::sync::Mutex::new(None),
                 accounting_native: None,
-                accounting_native_connection_parts: None,
-                accounting_native_reference_parts: None,
-                accounting_native_unused_reference: None,
+                native_sources: composition_native::CompositionNativeSources::new(),
                 accounting_publisher: Arc::default(),
                 service_stop: ServiceStopState::default(),
                 #[cfg(feature = "scheduling")]
                 scheduler_db_custody: None,
                 #[cfg(feature = "scheduling")]
-                scheduler_native_finalization_owner: None,
-                #[cfg(feature = "scheduling")]
-                scheduler_native_outside_sources: None,
-                #[cfg(feature = "scheduling")]
                 scheduler_admission_failure: None,
                 #[cfg(feature = "scheduling")]
                 scheduler_admission_sources: None,
                 #[cfg(feature = "scheduling")]
-                scheduler_native_connection_parts: None,
-                #[cfg(feature = "scheduling")]
-                scheduler_native_unopened_inputs: None,
-                #[cfg(feature = "scheduling")]
-                scheduler_native_schema_parts: None,
-                #[cfg(feature = "scheduling")]
-                scheduler_native_schema_transient: None,
-                #[cfg(feature = "scheduling")]
                 scheduler_participant_custody: None,
-            #[cfg(feature = "scheduling")]
-            scheduler_native_terminals: None,
                 #[cfg(feature = "scheduling")]
                 scheduler_open_failure: None,
                 #[cfg(feature = "scheduling")]
