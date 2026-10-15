@@ -20,11 +20,14 @@ use ryeos_external_execution::launcher_protocol::{
     LiveInheritedExternalCandidateSupervisor, launch_prepared_external_candidate_supervisor,
 };
 use ryeos_external_execution::transport::{
-    ExternalCandidateTransportDriver, ExternalTransportProgress, ExternalTransportStepFailure,
+    ExternalCandidateTransportDriver, ExternalExecutionChannelTransport, ExternalTransportExchange,
+    ExternalTransportProgress, ExternalTransportStepFailure,
 };
 use ryeos_external_execution_contract::guest_supervisor_descriptors::rebind_fixed_guest_descriptors;
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
-use ryeos_state::external_execution::ExecutionChannelBinding;
+use ryeos_state::external_execution::{
+    ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
+};
 use ryeos_state::external_execution::guest_journal::{
     GuestJournalStoreIdentity, LiveGuestJournal, PreparedGuestJournal, ReservedGuestJournal,
 };
@@ -46,7 +49,7 @@ use crate::native_host::{SupervisorJournalEnvelope, SupervisorNativeHost};
 use crate::relay_transport::OriginalRelayMailbox;
 use crate::{
     AttachedExternalExecutionTransport, attach_external_execution_channel_exact,
-    reconnect_external_execution_channel,
+    select_exchange_transport,
 };
 
 const OUTER_DIRECTORY: &str = "outer";
@@ -73,6 +76,9 @@ pub struct ExternalCandidateSupervisorInputs {
     pub workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
     pub runtime_mounts: Vec<lillux::InheritedDescriptorAuthority>,
     pub content_records: Vec<lillux::InheritedDescriptorAuthority>,
+    /// Verified activation inputs a leased guest's Ready names, in order.
+    /// Present exactly when the bootstrap asks for a capability report.
+    pub ready_boot_inputs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,6 +280,7 @@ pub fn run_external_candidate_supervisor(
         workspace_outputs,
         runtime_mounts,
         content_records: _,
+        ready_boot_inputs,
     } = inputs;
     let root = LockedSupervisorRoot::lock(state_root, &bootstrap, relay_mailbox.is_some())?;
     // Issued once, before any journal opens, under the state root's exclusive
@@ -317,6 +324,7 @@ pub fn run_external_candidate_supervisor(
                         launcher,
                         workspace_outputs,
                         runtime_mounts,
+                        ready_boot_inputs,
                     )?);
                     started.run()
                 })();
@@ -399,6 +407,14 @@ fn validate_authorities(inputs: &ExternalCandidateSupervisorInputs) -> Result<()
     ensure!(
         inputs.relay_mailbox.is_some() == inputs.bootstrap.controller.relay().is_ok(),
         "relay mailbox presence differs from sealed transport selection"
+    );
+    ensure!(
+        inputs.ready_boot_inputs.is_some() == inputs.bootstrap.report_capabilities,
+        "leased guest ready inputs differ from the bootstrap's capability-report selection"
+    );
+    ensure!(
+        !(inputs.bootstrap.report_capabilities && inputs.bootstrap.controller.relay().is_ok()),
+        "a leased guest reports capabilities only over the HTTP or stream carrier"
     );
     if let Some(mailbox) = inputs.relay_mailbox.as_ref() {
         let staged = inputs
@@ -1035,12 +1051,13 @@ impl LiveExternalCandidateSupervisor {
         launcher: lillux::InheritedDescriptorAuthority,
         workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
         runtime_mounts: Vec<lillux::InheritedDescriptorAuthority>,
+        ready_boot_inputs: Option<Vec<String>>,
     ) -> Result<Self> {
         ensure!(
             state.guest_directory.entry_names()?.is_empty(),
             "pre-launch recovery found an abandoned guest reservation"
         );
-        let transport = match state
+        let mut transport = match state
             .journal
             .as_ref()
             .context("external supervisor state lost its retained journal")?
@@ -1053,8 +1070,21 @@ impl LiveExternalCandidateSupervisor {
                         prepared.attachment_request(),
                         prepared.captured_network_inputs()?,
                     )?;
+                    // Selecting the carrier contacts nothing. Its outcome is
+                    // held until the attached binding is durable, so a failed
+                    // selection still recovers from the attached stage and
+                    // never by attaching again.
+                    let selected = prepared.captured_network_inputs().and_then(|inputs| {
+                        select_exchange_transport(
+                            prepared.bootstrap(),
+                            prepared.supervisor_signing_key(),
+                            &binding,
+                            inputs,
+                            Some(transport),
+                        )
+                    });
                     state.record_binding(binding, None, native)?;
-                    AttachedExternalExecutionTransport::from(transport)
+                    selected?
                 }
                 ExternalSupervisorTransportCapture::Relay(capture) => {
                     let mut mailbox = adopt_relay_mailbox(
@@ -1082,14 +1112,13 @@ impl LiveExternalCandidateSupervisor {
                 }
             },
             RetainedSupervisorJournal::Attached(attached) => match attached.transport_capture() {
-                ExternalSupervisorTransportCapture::Http(_) => {
-                    AttachedExternalExecutionTransport::from(reconnect_external_execution_channel(
-                        attached.bootstrap(),
-                        attached.supervisor_signing_key(),
-                        attached.binding(),
-                        attached.captured_network_inputs()?,
-                    )?)
-                }
+                ExternalSupervisorTransportCapture::Http(_) => select_exchange_transport(
+                    attached.bootstrap(),
+                    attached.supervisor_signing_key(),
+                    attached.binding(),
+                    attached.captured_network_inputs()?,
+                    None,
+                )?,
                 ExternalSupervisorTransportCapture::Relay(capture) => {
                     let mailbox = adopt_relay_mailbox(
                         attached.bootstrap(),
@@ -1161,6 +1190,9 @@ impl LiveExternalCandidateSupervisor {
         );
         let spec_digest = spec.digest()?;
         let signing_key = attached.supervisor_signing_key().clone();
+        let lease_ready = ready_boot_inputs
+            .map(ryeos_external_execution::supervisor::LeaseReadyPlan::observe)
+            .transpose()?;
         let reserved = PreparedGuestJournal::reserve(
             state.guest_directory.try_clone()?,
             &prepared.authority,
@@ -1189,9 +1221,30 @@ impl LiveExternalCandidateSupervisor {
             guest_journal,
             prepared,
             signing_key,
+            lease_ready,
             expiry_deadline,
             native.retain,
         )?;
+        // A leased guest's Ready and capability report reach the controller
+        // before anything else happens. Its candidate is launched only by the
+        // owner's Release, which the controller sends after admitting the
+        // report; this handshake dispatches no owner frame.
+        if let Some(report) = runtime.capability_report_frame() {
+            if let Err(error) = lease_handshake(
+                &mut transport,
+                runtime.binding(),
+                runtime.ready_frame().as_bytes(),
+                report.as_bytes(),
+                expiry_deadline,
+            ) {
+                let (journal, cleanup) = runtime.abort_and_reap();
+                drop(transport);
+                let error = error.context(format!(
+                    "leased guest Ready and capability report; launcher cleanup={cleanup:?}"
+                ));
+                return Err(native.refuse("live guest journal", error, journal.close()));
+            }
+        }
         let driver = match ExternalCandidateTransportDriver::try_new(runtime, transport) {
             Ok(driver) => driver,
             Err((runtime, transport, error)) => {
@@ -1249,6 +1302,89 @@ impl LiveExternalCandidateSupervisor {
             }
         }
         failures
+    }
+}
+
+/// Present a leased guest's signed Ready and then its capability report, each
+/// retried byte for byte after transport ambiguity. The controller holds its
+/// answer to Ready, which is idle rather than an error, and answers the report
+/// only once it has admitted the guest; a refusal arrives as a failure.
+fn lease_handshake<T: ExternalExecutionChannelTransport>(
+    transport: &mut T,
+    binding: &ExecutionChannelBinding,
+    ready: &[u8],
+    report: &[u8],
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    let ready_frame = SignedExecutionFrame::decode_and_verify(
+        ready,
+        binding,
+        lillux::time::timestamp_millis(),
+    )?;
+    ensure!(
+        ready_frame.frame().sequence == 1
+            && matches!(
+                ready_frame.frame().payload,
+                ExecutionChannelPayload::Ready { boot: Some(_), .. }
+            ),
+        "a leased guest starts from a Ready that names its boot"
+    );
+    let report_frame = SignedExecutionFrame::decode_and_verify(
+        report,
+        binding,
+        lillux::time::timestamp_millis(),
+    )?;
+    ensure!(
+        report_frame.frame().sequence == 2
+            && matches!(
+                report_frame.frame().payload,
+                ExecutionChannelPayload::CapabilityReport { .. }
+            ),
+        "a leased guest's second frame is its capability report"
+    );
+    let held = exchange_exact(transport, ready, deadline)?;
+    ensure!(
+        held.incoming_sequence == 1
+            && held.incoming_frame_digest == ready_frame.digest()
+            && !held.incoming_new
+            && held.outbound_frames.is_empty()
+            && held.urgent_revocation_frame.is_none(),
+        "the controller answered a leased guest's Ready with more than a hold"
+    );
+    let admitted = exchange_exact(transport, report, deadline)?;
+    ensure!(
+        admitted.incoming_sequence == 2 && admitted.incoming_frame_digest == report_frame.digest(),
+        "the controller answered a different frame than the capability report"
+    );
+    Ok(())
+}
+
+/// One exchange of exactly `wire`, retried unchanged while the outcome is
+/// ambiguous and `deadline` has not elapsed.
+fn exchange_exact<T: ExternalExecutionChannelTransport>(
+    transport: &mut T,
+    wire: &[u8],
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<ExternalTransportExchange> {
+    loop {
+        match transport.exchange_until(wire, deadline) {
+            Ok(exchange) => {
+                ensure!(
+                    exchange.schema == 1,
+                    "unsupported external exchange response schema"
+                );
+                return Ok(exchange);
+            }
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
+                if !deadline.has_elapsed() =>
+            {
+                lillux::time::sleep(IDLE_POLL.min(deadline.remaining()));
+            }
+            Err(ExternalTransportStepFailure::AmbiguousTransport(error)) => {
+                return Err(error.context("leased guest handshake outlived its channel"));
+            }
+            Err(ExternalTransportStepFailure::Fatal(error)) => return Err(error),
+        }
     }
 }
 
@@ -1601,6 +1737,7 @@ mod tests {
                 cleanup_millis: 120_000,
                 cleanup_steps: 3_000_000,
             },
+            report_capabilities: false,
         }
     }
 
@@ -2035,6 +2172,7 @@ mod tests {
             workspace_outputs: None,
             runtime_mounts: vec![runtime],
             content_records: vec![manifest],
+            ready_boot_inputs: None,
         };
         validate_authorities(&valid_inputs).unwrap();
         let (source_projection, source_mount, source_binding, source_manifest) =
@@ -2119,6 +2257,7 @@ mod tests {
             workspace_outputs: None,
             runtime_mounts: vec![exposed_ancestor],
             content_records: vec![manifest],
+            ready_boot_inputs: None,
         })
         .unwrap_err();
         assert!(format!("{error:#}").contains("overlap by ancestry"));
@@ -2172,6 +2311,7 @@ mod tests {
                     workspace_outputs: None,
                     runtime_mounts: vec![runtime],
                     content_records: vec![manifest],
+                    ready_boot_inputs: None,
                 },
             )
         };
@@ -2790,5 +2930,202 @@ mod tests {
             assert!(lillux::valid_hash(&launch_intent_digest));
             recovered.close_journals(native).unwrap();
         });
+    }
+    enum HandshakeReply {
+        Answer(ExternalTransportExchange),
+        Ambiguous,
+        Fatal,
+    }
+
+    struct ScriptedTransport {
+        sent: Vec<Vec<u8>>,
+        replies: VecDeque<HandshakeReply>,
+    }
+
+    impl ExternalExecutionChannelTransport for ScriptedTransport {
+        fn exchange(&mut self, _frame: &[u8]) -> Result<ExternalTransportExchange> {
+            bail!("the scripted transport answers only until a deadline")
+        }
+
+        fn exchange_until(
+            &mut self,
+            frame: &[u8],
+            _deadline: lillux::time::MonotonicDeadline,
+        ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
+            self.sent.push(frame.to_vec());
+            match self
+                .replies
+                .pop_front()
+                .expect("the handshake sent a frame the script did not expect")
+            {
+                HandshakeReply::Answer(exchange) => Ok(exchange),
+                HandshakeReply::Ambiguous => Err(ExternalTransportStepFailure::AmbiguousTransport(
+                    anyhow::anyhow!("scripted transport loss"),
+                )),
+                HandshakeReply::Fatal => Err(ExternalTransportStepFailure::Fatal(
+                    anyhow::anyhow!("scripted controller refusal"),
+                )),
+            }
+        }
+    }
+
+    struct HandshakeFrames {
+        binding: ExecutionChannelBinding,
+        ready: Vec<u8>,
+        ready_digest: String,
+        report: Vec<u8>,
+        report_digest: String,
+    }
+
+    fn handshake_frames() -> HandshakeFrames {
+        use ryeos_state::external_execution::{ChannelDirection, ExecutionFrame};
+
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[61; 32]);
+        let bootstrap = bootstrap("lease-handshake", lillux::time::timestamp_millis() + 60_000);
+        let binding = binding(&bootstrap, &supervisor);
+        let boot_id = "01234567-89ab-cdef-0123-456789abcdef".to_owned();
+        let author = |sequence: u64, previous: Option<String>, payload: ExecutionChannelPayload| {
+            let signed = SignedExecutionFrame::sign(
+                ExecutionFrame {
+                    schema: 1,
+                    binding_digest: binding.digest().unwrap(),
+                    direction: ChannelDirection::SupervisorToOwner,
+                    sequence,
+                    previous_frame_digest: previous,
+                    acknowledged_peer_sequence: 0,
+                    payload,
+                },
+                &binding,
+                &supervisor,
+            )
+            .unwrap();
+            let wire = lillux::canonical_json(&serde_json::to_value(signed).unwrap())
+                .unwrap()
+                .into_bytes();
+            let digest = SignedExecutionFrame::decode_and_verify(
+                &wire,
+                &binding,
+                lillux::time::timestamp_millis(),
+            )
+            .unwrap()
+            .digest()
+            .to_owned();
+            (wire, digest)
+        };
+        let (ready, ready_digest) = author(
+            1,
+            None,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: Some(ryeos_state::external_execution::SupervisorReadyBoot {
+                    boot_id: boot_id.clone(),
+                    verified_input_digests: vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)],
+                    ready_at_ms: lillux::time::timestamp_millis(),
+                }),
+            },
+        );
+        let (report, report_digest) = author(
+            2,
+            Some(ready_digest.clone()),
+            ExecutionChannelPayload::CapabilityReport {
+                boot_id,
+                provided: BTreeMap::new(),
+                missing: BTreeMap::new(),
+            },
+        );
+        HandshakeFrames {
+            binding,
+            ready,
+            ready_digest,
+            report,
+            report_digest,
+        }
+    }
+
+    fn handshake_answer(
+        sequence: u64,
+        digest: &str,
+        incoming_new: bool,
+    ) -> HandshakeReply {
+        HandshakeReply::Answer(ExternalTransportExchange {
+            schema: 1,
+            incoming_new,
+            incoming_sequence: sequence,
+            incoming_frame_digest: digest.to_owned(),
+            acknowledgement_frame_digest: None,
+            outbound_frames: Vec::new(),
+            urgent_revocation_frame: None,
+        })
+    }
+
+    fn handshake_deadline() -> lillux::time::MonotonicDeadline {
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30))
+    }
+
+    #[test]
+    fn lease_handshake_sends_ready_then_the_report_and_retries_exact_bytes() {
+        let frames = handshake_frames();
+        let mut transport = ScriptedTransport {
+            sent: Vec::new(),
+            replies: VecDeque::from([
+                HandshakeReply::Ambiguous,
+                handshake_answer(1, &frames.ready_digest, false),
+                handshake_answer(2, &frames.report_digest, true),
+            ]),
+        };
+        lease_handshake(
+            &mut transport,
+            &frames.binding,
+            &frames.ready,
+            &frames.report,
+            handshake_deadline(),
+        )
+        .unwrap();
+        assert_eq!(
+            transport.sent,
+            vec![frames.ready.clone(), frames.ready.clone(), frames.report.clone()]
+        );
+    }
+
+    #[test]
+    fn lease_handshake_refuses_a_ready_answer_that_is_not_a_hold_and_sends_no_report() {
+        let frames = handshake_frames();
+        let mut transport = ScriptedTransport {
+            sent: Vec::new(),
+            replies: VecDeque::from([handshake_answer(1, &frames.ready_digest, true)]),
+        };
+        let error = lease_handshake(
+            &mut transport,
+            &frames.binding,
+            &frames.ready,
+            &frames.report,
+            handshake_deadline(),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("more than a hold"));
+        assert_eq!(transport.sent, vec![frames.ready.clone()]);
+    }
+
+    #[test]
+    fn lease_handshake_surfaces_a_controller_refusal_of_the_report() {
+        let frames = handshake_frames();
+        let mut transport = ScriptedTransport {
+            sent: Vec::new(),
+            replies: VecDeque::from([
+                handshake_answer(1, &frames.ready_digest, false),
+                HandshakeReply::Fatal,
+            ]),
+        };
+        let error = lease_handshake(
+            &mut transport,
+            &frames.binding,
+            &frames.ready,
+            &frames.report,
+            handshake_deadline(),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("scripted controller refusal"));
+        assert_eq!(transport.sent.len(), 2);
     }
 }

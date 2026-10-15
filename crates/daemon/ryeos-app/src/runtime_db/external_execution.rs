@@ -12,6 +12,13 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 mod lease_budget;
+mod lease_gate;
+mod lease_record;
+pub(crate) use lease_record::{
+    ExternalLeaseActivation, ExternalLeaseAdmission, ExternalLeaseRecord,
+    ExternalLeaseRecordState, MAX_HELD_LEASE_FRAME_BYTES,
+};
+pub(super) use lease_record::JOURNAL_SQL as LEASE_RECORD_SQL;
 pub(crate) use lease_budget::{ExternalLeaseCharge, HeldExternalLease, UnweightedLeaseCharge};
 pub(super) use lease_budget::JOURNAL_SQL as LEASE_BUDGET_SQL;
 pub(crate) mod connector;
@@ -2396,6 +2403,7 @@ impl RuntimeDb {
             )?;
             if let Some(lease) = lease {
                 lease_budget::reserve(&tx, &reservation.placement_thread_id, now, lease)?;
+                lease_record::reserve(&tx, reservation, now)?;
             }
             let record =
                 read(&tx, &reservation.placement_thread_id)?.context("reserved allocation missing")?;

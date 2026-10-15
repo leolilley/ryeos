@@ -16434,6 +16434,121 @@ impl StateStore {
             .predecessor_external_lease_placements(current_generation)
     }
 
+    /// The lease record of a placed session's remote lease, if it has one.
+    pub(crate) fn external_lease_record(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?.runtime_db.external_lease_record(placement)
+    }
+
+    /// Reserved to activated: bind the lease's identity and ready deadline.
+    pub(crate) fn activate_external_lease_record(
+        &self,
+        placement: &str,
+        activation: &runtime_db::external_execution::ExternalLeaseActivation,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.activate_external_lease_record(
+            placement,
+            activation,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Hold the guest's first frame, un-journalled, on an activated record.
+    pub(crate) fn hold_external_lease_ready_frame(
+        &self,
+        placement: &str,
+        frame: &[u8],
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.hold_external_lease_ready_frame(
+            placement,
+            frame,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Hold the guest's second frame, un-journalled, on an activated record.
+    pub(crate) fn hold_external_lease_report_frame(
+        &self,
+        placement: &str,
+        frame: &[u8],
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.hold_external_lease_report_frame(
+            placement,
+            frame,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Journal the held Ready and admit the lease, in one transaction.
+    pub(crate) fn admit_external_lease_with_ready(
+        &self,
+        placement: &str,
+        admission: &runtime_db::external_execution::ExternalLeaseAdmission,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.admit_external_lease_with_ready(
+            placement,
+            admission,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Refuse the lease, terminally, and cancel its allocation, in one
+    /// transaction.
+    pub(crate) fn refuse_external_lease_and_cancel(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.refuse_external_lease_and_cancel(
+            placement,
+            reason,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Refuse the lease and cancel its allocation, in one transaction, only if
+    /// it is still activated; returns whether it was refused.
+    pub(crate) fn refuse_activated_external_lease_and_cancel(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .refuse_activated_external_lease_and_cancel(
+                placement,
+                reason,
+                i64::try_from(lillux::time::timestamp_millis())?,
+            )
+    }
+
+    /// Activated lease records whose ready deadline is at or before `now_ms`.
+    pub(crate) fn overdue_external_lease_records(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?.runtime_db.overdue_external_lease_records(now_ms)
+    }
+
+    /// Unrefused lease records of leases held for a worker of another daemon
+    /// incarnation than `current_generation`.
+    pub(crate) fn predecessor_external_lease_records(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?
+            .runtime_db
+            .predecessor_external_lease_records(current_generation)
+    }
+
     /// First direct reservation consumes evidence from the sole full-capsule
     /// compiler. Retained JSON alone cannot produce this non-serializable token.
     pub(crate) fn reserve_external_direct_allocation(

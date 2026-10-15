@@ -123,6 +123,7 @@ pub fn adopt_mounted_supervisor_inputs(
     )?;
     let (execution_guest_inputs, workspace_outputs, runtime_mounts, content_records) =
         content.into_parts();
+    let ready_boot_inputs = handoff.ready_boot_inputs().map(<[String]>::to_vec);
     Ok(ExternalCandidateSupervisorInputs {
         bootstrap,
         execution_guest_inputs,
@@ -135,6 +136,7 @@ pub fn adopt_mounted_supervisor_inputs(
         workspace_outputs,
         runtime_mounts,
         content_records,
+        ready_boot_inputs,
     })
 }
 
@@ -292,6 +294,7 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
         workspace_outputs,
         runtime_mounts,
         content_records,
+        ready_boot_inputs: None,
     })
 }
 

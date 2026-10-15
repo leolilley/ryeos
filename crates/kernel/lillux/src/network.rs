@@ -184,6 +184,7 @@ impl NetworkContext {
             setup_deadline: Some(deadline),
             idle_timeout,
             cancellation,
+            operation: None,
         })
     }
 }
@@ -223,6 +224,7 @@ pub struct NetworkStream {
     setup_deadline: Option<MonotonicDeadline>,
     idle_timeout: crate::time::Duration,
     cancellation: NetworkCancellation,
+    operation: Option<MonotonicDeadline>,
 }
 
 impl NetworkStream {
@@ -246,12 +248,25 @@ impl NetworkStream {
     }
 
     fn io_deadline(&self) -> MonotonicDeadline {
-        self.effective_deadline()
-            .min(MonotonicDeadline::after(self.idle_timeout))
+        let bounded = self
+            .effective_deadline()
+            .min(MonotonicDeadline::after(self.idle_timeout));
+        match self.operation {
+            Some(operation) => bounded.min(operation),
+            None => bounded,
+        }
     }
 
     pub fn narrow_deadline(&mut self, deadline: MonotonicDeadline) {
         self.deadline = self.deadline.min(deadline);
+    }
+
+    /// Bound every following I/O by `operation` as well, until it is replaced
+    /// or cleared. This is for one exchange on a long-lived stream: it never
+    /// extends the stream's own deadline, which still ends every I/O, and
+    /// clearing it restores exactly the stream's own bounds.
+    pub fn bound_operation(&mut self, operation: Option<MonotonicDeadline>) {
+        self.operation = operation;
     }
 }
 
@@ -700,6 +715,68 @@ mod tests {
         );
         settled.send(()).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn an_operation_bound_ends_one_read_early_and_clearing_it_restores_the_stream_bounds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            // Silent until the client gives up and releases its socket.
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        });
+        let deadline = MonotonicDeadline::after(Duration::from_secs(30));
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(30),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.bound_operation(Some(MonotonicDeadline::after(Duration::from_millis(100))));
+        let start = Instant::now();
+        assert_eq!(
+            stream.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the operation bound did not end the read before the idle bound"
+        );
+
+        // A fresh stream with the bound cleared reads under its own bounds.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let second = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            peer.write_all(b"y").unwrap();
+            let _ = peer.read(&mut [0; 1]);
+        });
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(30),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.bound_operation(Some(MonotonicDeadline::after(Duration::from_millis(50))));
+        stream.bound_operation(None);
+        let mut byte = [0; 1];
+        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+        assert_eq!(&byte, b"y");
+        drop(stream);
+        server.join().unwrap();
+        second.join().unwrap();
     }
 
     #[test]

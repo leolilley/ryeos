@@ -252,8 +252,9 @@ pub enum ExecutionChannelPayload {
     /// there. Workload: a disposable remote guest whose owner admits it only
     /// if this report covers the workload's guest requirements. Each entry
     /// is evidence the owner grades with its own requirement data; a missing
-    /// name carries the supervisor's plain reason. Channel lifecycle
-    /// journals do not accept it; the owner that asked consumes it directly.
+    /// name carries the supervisor's plain reason. The owner that asked
+    /// consumes it directly; a channel journal retains it, linked after Ready
+    /// so the next frame chains to it, but never applies it.
     CapabilityReport {
         boot_id: String,
         provided: BTreeMap<String, CapabilityEvidence>,

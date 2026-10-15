@@ -1,6 +1,7 @@
 //! Closed executable runner for signed external occurrence lifecycle adapters.
 
 pub(crate) mod lease_admission;
+pub(crate) mod lease_ready;
 
 use std::collections::BTreeMap;
 
@@ -38,7 +39,8 @@ use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
+    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
+    LIFECYCLE_HOSTS_FD_ENV,
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
@@ -47,7 +49,8 @@ use ryeos_external_execution_contract::{
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
     LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
-    LifecycleRuntimeProbeSource, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    LifecycleRuntimeProbeSource, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
     SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 use ryeos_state::objects::RetainedLifecycleExecutableRole;
@@ -1089,6 +1092,16 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<lease_admission::AdmittedLease> {
         self.invoke_admit_lease(inputs, deadline)
+    }
+
+    fn await_lease_ready(
+        &self,
+        request: &[u8],
+        ready_frame: &[u8],
+        report_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        self.invoke_await_lease_ready(request, ready_frame, report_frame, deadline)
     }
 
     fn artifact_hash(&self) -> &str {
@@ -2184,6 +2197,96 @@ impl ExecutableExternalPlacementBackend {
             request,
             budget_weight,
         })
+    }
+
+    /// Lease readiness judgement. The adapter receives the sealed readiness
+    /// request, the captured signed provider spec and one inherited duplex
+    /// descriptor carrying exactly the guest's Ready and capability report,
+    /// each length-prefixed, then end of input. It holds no credential,
+    /// settings or activation material and the enclosure denies it process
+    /// creation. Returns the adapter's raw verdict bytes for the caller to
+    /// read against the lease record; a failure to obtain any verdict is an
+    /// error, never a verdict.
+    fn invoke_await_lease_ready(
+        &self,
+        request: &[u8],
+        ready_frame: &[u8],
+        report_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        let ready = ryeos_external_execution_contract::length_prefixed::encode(
+            ready_frame,
+            MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+        )?;
+        let report = ryeos_external_execution_contract::length_prefixed::encode(
+            report_frame,
+            MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+        )?;
+        let request_handle = lillux::sealed_memfd(c"ryeos-lease-ready-request", request)
+            .map_err(anyhow::Error::msg)?;
+        let (mut frames, child) =
+            lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+        let mut inherited = vec![self.provider_spec.authority.clone()];
+        child.retain_for_child(&mut inherited);
+        let envs = vec![
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                self.provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
+            ),
+            (
+                LIFECYCLE_REMAINING_TIMEOUT_MS_ENV.into(),
+                u64::try_from(deadline.remaining().as_millis())?.to_string(),
+            ),
+            (
+                LIFECYCLE_GUEST_FRAMES_FD_ENV.into(),
+                child.inherited_descriptor().map_err(anyhow::Error::msg)?.to_string(),
+            ),
+        ];
+        // The child's copy travels in `inherited`; dropping the parent's copy
+        // leaves the adapter the only reader of its end.
+        drop(child);
+        let result = std::thread::scope(|scope| {
+            // The writer runs beside the adapter so neither waits on the
+            // other: it writes both frames, then closes its direction so the
+            // adapter sees end of input. A write error after the adapter has
+            // answered and gone is not a failure; only the verdict counts.
+            scope.spawn(move || {
+                use std::io::Write as _;
+                let mut stream = frames.with_deadline(deadline);
+                if stream.write_all(&ready).is_ok() && stream.write_all(&report).is_ok() {
+                    let _ = stream.flush();
+                }
+                let _ = frames.shutdown_write();
+            });
+            run_lifecycle_adapter(
+                &self.adapter,
+                LifecycleAdapterInvocation::AwaitLeaseReady,
+                &request_handle,
+                inherited,
+                envs,
+                deadline,
+            )
+        });
+        let response = result.with_context(|| {
+            format!(
+                "lease readiness refused: lifecycle adapter `{}` gave no verdict",
+                self.declaration.id
+            )
+        })?;
+        ensure!(
+            !response.deadline_exceeded,
+            "lease readiness refused: lifecycle adapter `{}` answered after its deadline",
+            self.declaration.id
+        );
+        Ok(response.bytes)
     }
 
     fn common(

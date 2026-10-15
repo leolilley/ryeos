@@ -31,6 +31,11 @@ use crate::lease::{
 };
 
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
+/// Bound on one lease Ready request. The request embeds the whole stage-one
+/// admission request, which alone may reach the admission bound, beside the
+/// retained expectation (channel binding included) and any resume state, so
+/// it needs headroom above the admission bound.
+pub(crate) const MAX_LEASE_READY_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_OPERATION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 /// Every credential, network, settings, activation, relay, lease-admission
@@ -165,9 +170,9 @@ pub fn await_lease_ready<F: LeaseProviderFacts>(
     refuse_lease_contact_authority(LeaseOperation::Ready)?;
     let guest_frames = take_guest_frames_channel()?;
     let deadline = operation_deadline()?;
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LEASE_REQUEST_BYTES)?;
+    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LEASE_READY_REQUEST_BYTES)?;
     let request: LeaseReadyRequest =
-        from_json_slice_strict(&request_bytes, MAX_LEASE_REQUEST_BYTES)?;
+        from_json_slice_strict(&request_bytes, MAX_LEASE_READY_REQUEST_BYTES)?;
     ensure!(
         canonical_json(&request)? == request_bytes,
         "lease Ready request is noncanonical"
@@ -288,6 +293,15 @@ pub fn write_response_bounded<T: Serialize>(response: &T, maximum_bytes: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_request_bound_holds_a_maximal_admission_with_headroom() {
+        // Only the Ready request embeds another request; admission keeps its
+        // own bound.
+        assert_eq!(MAX_LEASE_REQUEST_BYTES, 64 * 1024);
+        assert_eq!(MAX_LEASE_READY_REQUEST_BYTES, 128 * 1024);
+        assert!(MAX_LEASE_READY_REQUEST_BYTES >= 2 * MAX_LEASE_REQUEST_BYTES);
+    }
 
     #[test]
     fn lease_operations_refuse_every_activation_descriptor_by_name() {

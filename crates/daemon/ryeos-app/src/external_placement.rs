@@ -101,6 +101,25 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
             self.backend_id()
         )
     }
+    /// Lease readiness judgement: the backend's lifecycle adapter judges the
+    /// guest's first two frames, held un-journalled by the controller,
+    /// against the lease's retained expectation. `request` is the canonical
+    /// readiness request; the adapter receives it with the captured signed
+    /// provider spec and the two frames, holding no credential or activation
+    /// authority. Returns the adapter's raw verdict bytes; a failure to obtain
+    /// one is an error, never a verdict.
+    fn await_lease_ready(
+        &self,
+        _request: &[u8],
+        _ready_frame: &[u8],
+        _report_frame: &[u8],
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        bail!(
+            "lease readiness refused: external placement backend `{}` judges no lease readiness",
+            self.backend_id()
+        )
+    }
     /// Transport only. The private claimed contact follows a durable journal
     /// transition and the original sealed bootstrap is joined again below.
     fn relay_file_contact(
@@ -2460,6 +2479,218 @@ pub fn authenticate_external_channel_frame(
     })
 }
 
+/// What a channel stream may carry for one occurrence, settled before the
+/// stream is opened. This authenticates nothing: the stream's first message
+/// must still be a supervisor frame that verifies against the binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalChannelStreamAdmission {
+    maximum_response_bytes: u64,
+}
+
+impl ExternalChannelStreamAdmission {
+    /// The negotiated per-response bound the request/response route applies;
+    /// a stream applies the same bound to each outbound message.
+    pub fn maximum_response_bytes(&self) -> u64 {
+        self.maximum_response_bytes
+    }
+}
+
+/// Why a channel stream was refused before it carried anything. The two
+/// are told apart because a guest that dialed the wrong carrier has a
+/// configuration fault, while a channel that is not live has simply ended.
+#[derive(Debug)]
+pub enum ExternalChannelStreamRefusal {
+    /// No live attached binding for this occurrence.
+    NoLiveChannel(anyhow::Error),
+    /// The signed binding carries its exchange on the request/response route.
+    NotSelected,
+    /// The occurrence's lease was durably refused. The stream does not
+    /// reopen for it, whatever else a restart or a retry would find.
+    OccurrenceRefused(String),
+}
+
+/// Whether the lease record of an occurrence leaves its channel stream
+/// admissible, settled before the allocation's phase is consulted: a
+/// durable refusal outlives the allocation that carried it and stays
+/// refused. A placement with no lease record has no lease to refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalChannelStreamStanding {
+    Live,
+    Refused(String),
+}
+
+impl ExternalChannelStreamStanding {
+    pub(crate) fn of(record: Option<&crate::runtime_db::external_execution::ExternalLeaseRecord>) -> Self {
+        match record {
+            Some(record)
+                if record.state
+                    == crate::runtime_db::external_execution::ExternalLeaseRecordState::Refused =>
+            {
+                Self::Refused(
+                    record
+                        .refusal_reason
+                        .clone()
+                        .unwrap_or_else(|| "the lease was refused".to_owned()),
+                )
+            }
+            _ => Self::Live,
+        }
+    }
+}
+
+impl std::fmt::Display for ExternalChannelStreamRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoLiveChannel(error) => {
+                write!(
+                    formatter,
+                    "external channel stream has no live channel: {error:#}"
+                )
+            }
+            Self::NotSelected => formatter.write_str(
+                "external channel stream refused: the signed binding selects the \
+                 request/response route",
+            ),
+            Self::OccurrenceRefused(reason) => write!(
+                formatter,
+                "external channel stream refused: the occurrence's lease was refused: {reason}"
+            ),
+        }
+    }
+}
+
+/// Whether a signed controller contract carries the exchange on the channel
+/// stream. Both carriers ask this one question: the stream admits only a
+/// binding that selects it, and the request/response exchange refuses one.
+pub fn controller_exchanges_on_stream(
+    controller: &ryeos_state::external_execution::transport::ExternalControllerTransportSelection,
+) -> bool {
+    controller
+        .http()
+        .is_ok_and(|http| http.exchanges_on_stream())
+}
+
+/// Whether the placement's retained signed binding selects the channel
+/// stream for its exchange.
+pub fn external_channel_exchanges_on_stream(state: &AppState, placement: &str) -> Result<bool> {
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("external channel has no retained allocation")?;
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("external channel lost its retained signed binding")?;
+    Ok(controller_exchanges_on_stream(
+        &retained.backend_contract().controller_transport,
+    ))
+}
+
+/// The retained facts a stream admission decides on.
+pub(crate) struct ChannelStreamFacts<'a> {
+    pub(crate) phase: ExternalAllocationPhase,
+    pub(crate) bound_occurrence_id: Option<&'a str>,
+    pub(crate) binding: Option<&'a ryeos_state::external_execution::ExecutionChannelBinding>,
+    pub(crate) controller:
+        &'a ryeos_state::external_execution::transport::ExternalControllerTransportSelection,
+}
+
+/// Admit a channel stream for `occurrence_id` from retained facts at `now_ms`:
+/// an allocation that is not terminated, bound to the same occurrence, an
+/// attached channel for it, a time inside the binding's admitted lifetime,
+/// and a signed contract that selects the stream.
+pub(crate) fn check_channel_stream(
+    facts: ChannelStreamFacts<'_>,
+    occurrence_id: &str,
+    now_ms: i64,
+) -> std::result::Result<ExternalChannelStreamAdmission, ExternalChannelStreamRefusal> {
+    let live = || -> Result<()> {
+        ensure!(
+            facts.phase != ExternalAllocationPhase::Terminated,
+            "the allocation is terminated"
+        );
+        ensure!(
+            facts
+                .bound_occurrence_id
+                .context("the allocation has no bound occurrence")?
+                == occurrence_id,
+            "the allocation is bound to a different occurrence"
+        );
+        let binding = facts
+            .binding
+            .context("the occurrence has no attached channel")?;
+        ensure!(
+            binding.occurrence_id == occurrence_id,
+            "the attached channel names a different occurrence"
+        );
+        ensure!(
+            now_ms >= binding.issued_at_ms && now_ms < binding.expires_at_ms,
+            "the time is outside the binding's admitted lifetime"
+        );
+        Ok(())
+    };
+    live().map_err(ExternalChannelStreamRefusal::NoLiveChannel)?;
+    if !controller_exchanges_on_stream(facts.controller) {
+        return Err(ExternalChannelStreamRefusal::NotSelected);
+    }
+    let http = facts
+        .controller
+        .http()
+        .map_err(ExternalChannelStreamRefusal::NoLiveChannel)?;
+    Ok(ExternalChannelStreamAdmission {
+        maximum_response_bytes: http.maximum_response_bytes,
+    })
+}
+
+/// Refuse a channel stream unless the occurrence has a live attached binding
+/// whose signed route contract selects the stream. See `check_channel_stream`.
+pub fn external_channel_stream_admission(
+    state: &AppState,
+    placement: &str,
+    occurrence_id: &str,
+) -> std::result::Result<ExternalChannelStreamAdmission, ExternalChannelStreamRefusal> {
+    let standing = state
+        .state_store
+        .external_lease_record(placement)
+        .map(|record| ExternalChannelStreamStanding::of(record.as_ref()))
+        .map_err(ExternalChannelStreamRefusal::NoLiveChannel)?;
+    if let ExternalChannelStreamStanding::Refused(reason) = standing {
+        return Err(ExternalChannelStreamRefusal::OccurrenceRefused(reason));
+    }
+    let load = || -> Result<_> {
+        let controller_lifetime = Arc::clone(&state.controller_lifetime);
+        controller_lifetime
+            .ensure_protects_app_root(&state.config.app_root)
+            .context("external channel controller lease has the wrong app root")?;
+        let allocation = state
+            .state_store
+            .external_allocation(placement)?
+            .context("external channel stream has no retained allocation")?;
+        let binding = state
+            .state_store
+            .optional_external_execution_channel(placement)?;
+        let retained = state
+            .state_store
+            .retained_external_binding(&allocation.reservation.binding_hash)?
+            .context("external channel stream lost its retained signed binding")?;
+        Ok((allocation, binding, retained.backend_contract()))
+    };
+    let (allocation, binding, contract) =
+        load().map_err(ExternalChannelStreamRefusal::NoLiveChannel)?;
+    check_channel_stream(
+        ChannelStreamFacts {
+            phase: allocation.phase,
+            bound_occurrence_id: allocation
+                .occurrence
+                .as_ref()
+                .map(|occurrence| occurrence.occurrence_id.as_str()),
+            binding: binding.as_ref(),
+            controller: &contract.controller_transport,
+        },
+        occurrence_id,
+        lillux::time::timestamp_millis(),
+    )
+}
 /// Retain one authenticated supervisor frame and return only exact signed
 /// owner frames from the durable backlog. HTTP completion is not application
 /// evidence; the supervisor must send a later signed acknowledgement.
@@ -2505,6 +2736,16 @@ pub fn exchange_external_channel_frame(
             && verified.digest() == authenticated.frame_digest,
         "external channel frame changed after authentication"
     );
+    if let lease_ready_gate::LeaseReadyGate::Held =
+        lease_ready_gate::admit_frame(state, &allocation, &binding, verified.frame(), wire)?
+    {
+        return Ok(ExternalChannelExchangeResult {
+            incoming_new: false,
+            acknowledgement_digest: None,
+            outbound: Vec::new(),
+            urgent_revocation: None,
+        });
+    }
     let exchanged = exchange_external_supervisor_frame_and_wake_imports(
         &state.state_store,
         &state.external_candidate_imports,
@@ -6372,11 +6613,15 @@ pub fn fence_external_candidates_after_controller_restart(state: &AppState) -> R
 pub fn recover_external_candidate_cleanups(
     state: &AppState,
 ) -> Result<ExternalCandidateCleanupRecovery> {
+    // A lease whose guest never reported ready is refused first, so the
+    // cleanup below finds it quarantined and terminates it in this same pass.
+    let overdue_failures = lease_lifecycle::refuse_overdue_external_leases(state)?;
     let placements = state
         .state_store
         .recoverable_external_cleanup_placements()?;
     let mut report = ExternalCandidateCleanupRecovery {
         discovered: placements.len(),
+        failures: overdue_failures,
         ..Default::default()
     };
     for placement in placements {
@@ -7333,6 +7578,20 @@ impl ExternalPlacementReconciliation {
                     "fresh external activation lost its unique contact claim"
                 );
             }
+            if let Err(error) = begin_external_lease_supervisor_activation(
+                &self.state_store,
+                &current.reservation,
+                occurrence,
+                &intent,
+                &activation,
+            ) {
+                return Err(match activation.discard_guest_package() {
+                    Ok(()) => error,
+                    Err(cleanup) => error.context(format!(
+                        "lease activation refusal also failed guest package cleanup: {cleanup:#}"
+                    )),
+                });
+            }
             (intent, Some(activation), true, deadline)
         };
         if deadline.has_elapsed() {
@@ -7604,6 +7863,9 @@ fn admit_session_lease(
             contract.contact_timeout_seconds,
         ))),
     )?;
+    let charge = charge
+        .weighted_by(admitted.budget_weight)
+        .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
     Ok(Some((
         ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
         charge,
@@ -7712,7 +7974,15 @@ fn require_guest_package_artifact_floor_bytes(
 #[cfg(test)]
 mod session_lease_tests;
 
+#[cfg(test)]
+mod channel_stream_admission_tests;
+
+#[cfg(test)]
+mod lease_ready_loopback_tests;
+
 mod lease_lifecycle;
+mod lease_ready_gate;
+pub use lease_ready_gate::ExternalChannelExchangeUnavailable;
 pub use lease_lifecycle::{
     terminate_predecessor_external_leases, PredecessorLeaseTermination, PREDECESSOR_LEASE_INTERRUPTION,
 };
@@ -7728,6 +7998,38 @@ mod guest_package_artifact_floor_tests {
         assert!(require_guest_package_artifact_floor_bytes(8, 4, 5).is_err());
         assert!(require_guest_package_artifact_floor_bytes(u64::MAX, u64::MAX, 1).is_err());
     }
+}
+
+/// Mark the lease record of a placement that holds an admitted lease request
+/// activated, binding the lease's identity and the activation's digests. The
+/// lease is the bound occurrence; the guest package digest is the payload
+/// the supervisor's activation delivers, and the signed import digest is the
+/// canonical digest of the import authorization the guest verifies. The ready
+/// deadline is the session's startup deadline. A placement without an
+/// admitted lease request has no lease record and nothing to mark.
+fn begin_external_lease_supervisor_activation(
+    state_store: &Arc<crate::state_store::StateStore>,
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    intent: &ExternalSupervisorActivationIntent,
+    activation: &ExternalSupervisorActivation,
+) -> Result<()> {
+    if reservation.admitted_adapter_request_base64.is_none() {
+        return Ok(());
+    }
+    let signed_import = lillux::canonical_json(&serde_json::to_value(
+        activation.signed_import_authorization()?,
+    )?)?;
+    state_store.activate_external_lease_record(
+        &reservation.placement_thread_id,
+        &crate::runtime_db::external_execution::ExternalLeaseActivation {
+            lease_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            signed_import_sha256: lillux::sha256_hex(signed_import.as_bytes()),
+            guest_package_sha256: intent.delivery.payload_sha256.clone(),
+            ready_deadline_ms: reservation.startup_deadline_ms,
+        },
+    )
 }
 
 fn supervisor_activation(
@@ -7801,6 +8103,10 @@ fn supervisor_activation(
         candidate_export_max_bytes: contract.max_export_bytes.min(channel_max_bytes),
         channel_max_bytes,
         native_journal,
+        // A guest on a remote lease sends a capability report the lease's
+        // lifecycle adapter judges, so exactly a reservation that holds an
+        // admitted lease request asks for one.
+        report_capabilities: reservation.admitted_adapter_request_base64.is_some(),
     };
     bootstrap.validate()?;
     let activation_request_digest =
@@ -7864,9 +8170,6 @@ fn supervisor_activation(
                     if let Err(cleanup) = guest_package.discard() {
                         return Err(error.context(format!(
                             "guest import refusal also failed package cleanup: {cleanup:#}"
-    let charge = charge
-        .weighted_by(admitted.budget_weight)
-        .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
                         )));
                     }
                     return Err(error);
@@ -9002,6 +9305,7 @@ pub mod test_support {
                 cleanup_millis: 120_000,
                 cleanup_steps: 3_000_000,
             },
+            report_capabilities: false,
         };
         bootstrap.validate()?;
         Ok(bootstrap)

@@ -68,6 +68,27 @@ struct GuestSupervisorLaunchIntent {
     launch_timeout_bits: u64,
     stage_mount_destination: String,
     control_descriptors: Vec<u32>,
+    /// The activation inputs the outer owner verified before launch, in
+    /// delivery order: activation request digest, signed import digest, guest
+    /// package payload digest. Present only for a leased guest, whose Ready
+    /// must name exactly these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ready_boot_inputs: Option<Vec<String>>,
+}
+
+/// Number of verified activation inputs a leased guest's Ready names.
+const READY_BOOT_INPUT_COUNT: usize = 3;
+
+fn validate_ready_boot_inputs(inputs: &[String]) -> Result<()> {
+    ensure!(
+        inputs.len() == READY_BOOT_INPUT_COUNT
+            && inputs.iter().all(|digest| digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "leased guest ready inputs must be {READY_BOOT_INPUT_COUNT} canonical SHA-256 digests"
+    );
+    Ok(())
 }
 
 /// Supervisor-side interpretation of the sealed post-import record. This is
@@ -79,6 +100,7 @@ pub struct MountedGuestSupervisorHandoff {
     record_sha256: String,
     relay_mailbox: Option<lillux::PinnedDirectoryIdentity>,
     relay_mailbox_path: Option<String>,
+    ready_boot_inputs: Option<Vec<String>>,
 }
 
 impl MountedGuestSupervisorHandoff {
@@ -100,6 +122,12 @@ impl MountedGuestSupervisorHandoff {
 
     pub fn relay_mailbox_path(&self) -> Option<&str> {
         self.relay_mailbox_path.as_deref()
+    }
+
+    /// The verified activation inputs a leased guest's Ready must name, in
+    /// order; `None` for an ordinary guest.
+    pub fn ready_boot_inputs(&self) -> Option<&[String]> {
+        self.ready_boot_inputs.as_deref()
     }
 }
 
@@ -158,6 +186,7 @@ pub fn decode_mounted_supervisor_handoff_with_mailbox(
             && record.bootstrap_sha256 == lillux::sha256_hex(&bootstrap.canonical_bytes()?)
             && record.launcher_sha256 == bootstrap.launcher_artifact_hash
             && record.guest_input_identity == bootstrap.guest_input_identity
+            && record.ready_boot_inputs.is_some() == bootstrap.report_capabilities
             && record.supervisor_state_root == state_root.identity()?
             && record.candidate_runtime == candidate_runtime.identity()?
             && record.private_parent == private_parent.identity()?
@@ -165,6 +194,9 @@ pub fn decode_mounted_supervisor_handoff_with_mailbox(
             && f64::from_bits(record.launch_timeout_bits) > 0.0,
         "sealed guest supervisor launch record differs from bootstrap or private handles"
     );
+    if let Some(inputs) = record.ready_boot_inputs.as_deref() {
+        validate_ready_boot_inputs(inputs)?;
+    }
     record.stage.validate()?;
     recheck_scratch_bindings(private_parent, &record.scratch, &bootstrap.guest_inputs)?;
     Ok(MountedGuestSupervisorHandoff {
@@ -173,6 +205,7 @@ pub fn decode_mounted_supervisor_handoff_with_mailbox(
         record_sha256: lillux::sha256_hex(sealed_record),
         relay_mailbox: record.relay_mailbox,
         relay_mailbox_path: record.relay_mailbox_path,
+        ready_boot_inputs: record.ready_boot_inputs,
     })
 }
 
@@ -324,6 +357,7 @@ pub struct PreparedGuestSupervisorRequest {
     request: lillux::SubprocessRequest,
     plan: GuestSupervisorDescriptorPlan,
     bootstrap_sha256: String,
+    ready_boot_inputs: Option<Vec<String>>,
 }
 
 /// One exact staged generation selected from the still-owned sealed source.
@@ -386,6 +420,9 @@ pub struct HeldGuestMountedSandbox {
 /// here does not establish either fact. Failure after the owner record is
 /// created never grants a replacement import or launch.
 ///
+/// `ready_boot_inputs` is present only for a leased guest: the verified
+/// activation inputs its Ready must name, in order.
+///
 /// The result is held, not running or Ready. Its caller must inspect Lillux's
 /// mount receipt, release exactly once, join the authenticated supervisor
 /// channel, and retain the owner through scope and writer settlement.
@@ -397,6 +434,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     signed_assignment_bytes: &[u8],
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
+    ready_boot_inputs: Option<Vec<String>>,
 ) -> Result<HeldGuestMountedSandbox> {
     ensure!(
         source.limits() == installed_runtime.profile().private_source_limits(),
@@ -432,6 +470,7 @@ pub fn prepare_authorized_held_guest_supervisor_once(
             inputs,
             installed_runtime.profile().owner_timeout_seconds(),
         )?;
+    let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
     let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
     committed
         .prepare_mounted_sandbox_request(&context, inputs)?
@@ -774,6 +813,7 @@ impl CommittedGuestSupervisorLaunchIntent {
                             .to_str()
                             .context("relay mailbox path is not UTF-8"))
                         .transpose()?
+                && parsed.ready_boot_inputs == self._prepared.ready_boot_inputs
                 && parsed.stage == *self._source_mount.stage()
                 && parsed.install_record_file
                     == self
@@ -1020,6 +1060,26 @@ impl PreparedGuestSupervisorRequest {
         })
     }
 
+    /// Seal the verified activation inputs a leased guest's Ready must name
+    /// into the outer launch intent. Only a bootstrap that asks the supervisor
+    /// to report capabilities is a leased guest: for one, the inputs are
+    /// required; for any other, they are not part of the intent.
+    pub fn with_ready_boot_inputs(
+        mut self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        supplied: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let (_, bootstrap) = self._artifacts.read_imported_bootstrap(context, inputs)?;
+        if bootstrap.report_capabilities {
+            let supplied = supplied
+                .context("a leased guest bootstrap needs the verified activation inputs")?;
+            validate_ready_boot_inputs(&supplied)?;
+            self.ready_boot_inputs = Some(supplied);
+        }
+        Ok(self)
+    }
+
     fn exact_request_timeout_bits(&self) -> Result<u64> {
         let request = &self.request;
         ensure!(
@@ -1109,6 +1169,7 @@ impl PreparedGuestSupervisorRequest {
             } else {
                 SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.to_vec()
             },
+            ready_boot_inputs: self.ready_boot_inputs.clone(),
         })
     }
 
@@ -1301,6 +1362,7 @@ impl PreparedGuestLaunchArtifacts {
             request,
             plan,
             bootstrap_sha256,
+            ready_boot_inputs: None,
         })
     }
 
@@ -1313,6 +1375,21 @@ impl PreparedGuestLaunchArtifacts {
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
     ) -> Result<lillux::InheritedDescriptorAuthority> {
+        let (bytes, _) = self.read_imported_bootstrap(context, inputs)?;
+        lillux::sealed_memfd(c"ryeos-external-supervisor-bootstrap", &bytes)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Re-read the opened package bootstrap and join it to the retained
+    /// occurrence. Returns its exact canonical bytes with the decoded value.
+    fn read_imported_bootstrap(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<(
+        Vec<u8>,
+        ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    )> {
         let source = &self.bootstrap_source;
         let ticket = self.private.content._installed.imported.ticket();
         ticket.validate_for_context(context)?;
@@ -1343,8 +1420,7 @@ impl PreparedGuestLaunchArtifacts {
                 && bootstrap.launcher_artifact_hash == ticket.launcher_sha256,
             "imported supervisor bootstrap differs from retained occurrence authority"
         );
-        lillux::sealed_memfd(c"ryeos-external-supervisor-bootstrap", &bytes)
-            .map_err(anyhow::Error::msg)
+        Ok((bytes, bootstrap))
     }
 }
 

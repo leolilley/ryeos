@@ -39,6 +39,34 @@ pub struct PredecessorLeaseTermination {
 pub const PREDECESSOR_LEASE_INTERRUPTION: &str = "session interrupted: the controller restarted, and the remote lease its worker was bound \
      to is terminated, never reattached; nothing from the interrupted turn was imported";
 
+/// The reason a lease of an earlier daemon incarnation is refused with.
+const PREDECESSOR_LEASE_REFUSAL: &str = "controller restarted";
+
+/// The reason a lease whose guest never reported ready in time is refused
+/// with.
+const OVERDUE_LEASE_REFUSAL: &str =
+    "the guest did not report ready before the lease's ready deadline";
+
+/// Refuse every activated lease whose ready deadline has passed, durably, and
+/// start the cleanup that terminates it. The guest's frames alone cannot do
+/// this: a guest that never speaks sends nothing to judge. Returns the
+/// placements that could not be refused, with the reason; the periodic pass
+/// that calls this tries them again.
+pub(super) fn refuse_overdue_external_leases(state: &AppState) -> Result<Vec<(String, String)>> {
+    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let mut failures = Vec::new();
+    for record in state.state_store.overdue_external_lease_records(now_ms)? {
+        if let Err(error) = super::lease_ready_gate::refuse_activated_lease(
+            state,
+            &record.placement_thread_id,
+            OVERDUE_LEASE_REFUSAL,
+        ) {
+            failures.push((record.placement_thread_id, format!("{error:#}")));
+        }
+    }
+    Ok(failures)
+}
+
 /// Drive every lease held for a worker of another daemon incarnation to
 /// termination by its occurrence id. Call before the node is ready, when no
 /// worker of this incarnation can yet hold a lease. One provider operation is
@@ -47,13 +75,30 @@ pub const PREDECESSOR_LEASE_INTERRUPTION: &str = "session interrupted: the contr
 pub fn terminate_predecessor_external_leases(
     state: &AppState,
 ) -> Result<PredecessorLeaseTermination> {
+    let generation = crate::runtime_db::daemon_generation_id();
     let placements = state
         .state_store
-        .predecessor_external_lease_placements(crate::runtime_db::daemon_generation_id())?;
+        .predecessor_external_lease_placements(generation)?;
+    let records = state
+        .state_store
+        .predecessor_external_lease_records(generation)?;
     let mut report = PredecessorLeaseTermination {
         discovered: placements.len(),
         ..PredecessorLeaseTermination::default()
     };
+    // The guest of an earlier incarnation dialed a controller that is gone.
+    // Its lease is condemned before termination begins, so its stream and any
+    // retry of its frames are refused for good whatever termination finds.
+    for record in records {
+        if let Err(error) = state.state_store.refuse_external_lease_and_cancel(
+            &record.placement_thread_id,
+            PREDECESSOR_LEASE_REFUSAL,
+        ) {
+            report
+                .failures
+                .push((record.placement_thread_id, format!("{error:#}")));
+        }
+    }
     for placement in placements {
         match advance_external_candidate_cleanup(state, &placement) {
             Ok(ExternalCandidateCleanupProgress::Proved) => report.terminated.push(placement),

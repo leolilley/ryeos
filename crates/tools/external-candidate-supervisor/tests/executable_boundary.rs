@@ -197,6 +197,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
             cleanup_millis: 120_000,
             cleanup_steps: 3_000_000,
         },
+        report_capabilities: false,
     }
 }
 

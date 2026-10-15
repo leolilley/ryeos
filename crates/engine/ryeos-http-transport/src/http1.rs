@@ -260,7 +260,8 @@ struct StreamingBody {
     failed: bool,
 }
 
-type TlsStream = rustls::StreamOwned<ClientConnection, NetworkStream>;
+/// A TLS-authenticated byte stream to one explicitly authorized HTTPS origin.
+pub type TlsStream = rustls::StreamOwned<ClientConnection, NetworkStream>;
 
 impl ResponseBody {
     fn empty() -> Self {
@@ -413,56 +414,19 @@ pub(crate) fn execute(
     request: HttpRequest,
 ) -> Result<HttpResponse, HttpError> {
     validate(&request)?;
-    let host = request
-        .url
-        .host_str()
-        .ok_or_else(|| HttpError::before(io::ErrorKind::InvalidInput, "HTTPS host is absent"))?;
-    let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
-    let server_name = if let Ok(address) = host_without_brackets.parse::<IpAddr>() {
-        ServerName::IpAddress(address.into())
-    } else {
-        ServerName::try_from(host_without_brackets.to_owned()).map_err(|_| {
-            HttpError::before(io::ErrorKind::InvalidInput, "invalid HTTPS server name")
-        })?
-    };
-    let tls_config = build_tls_config(&request.tls_roots_der)?;
-    let tls_session = ClientConnection::new(tls_config, server_name)
-        .map_err(|_| HttpError::before(io::ErrorKind::InvalidData, "TLS session setup failed"))?;
     let (request_head, send_request) = encode_request_head(
         build_http_call(&request)?,
         request.limits.request_header_bytes,
     )?;
     // Establish the exact inode and length before any request bytes can leave.
     let mut body_reader = request.body.open_reader()?;
-
-    let setup_deadline = MonotonicDeadline::after(request.deadlines.setup_timeout);
-    let socket = network
-        .connect(
-            host_without_brackets,
-            request.url.port_or_known_default().unwrap_or(443),
-            setup_deadline,
-            request.deadlines.absolute,
-            request.deadlines.idle_timeout,
-            request.cancellation.clone(),
-        )
-        .map_err(|error| HttpError::before(error.kind(), "HTTPS connection setup failed"))?;
-    if request.deadlines.absolute.has_elapsed() {
-        return Err(HttpError::before(
-            io::ErrorKind::TimedOut,
-            "HTTP operation deadline elapsed before request transmission",
-        ));
-    }
-    let mut stream = rustls::StreamOwned::new(tls_session, socket);
-    while stream.conn.is_handshaking() {
-        stream
-            .conn
-            .complete_io(&mut stream.sock)
-            .map_err(|error| HttpError::before(error.kind(), "TLS setup failed"))?;
-    }
-    stream
-        .sock
-        .complete_setup()
-        .map_err(|error| HttpError::before(error.kind(), "TLS setup deadline elapsed"))?;
+    let mut stream = open_tls_stream(
+        network,
+        &request.url,
+        &request.tls_roots_der,
+        request.deadlines,
+        request.cancellation.clone(),
+    )?;
 
     // Past this point every error is conservatively remote-contact ambiguous.
     if request.cancellation.is_cancelled() || request.deadlines.absolute.has_elapsed() {
@@ -589,6 +553,82 @@ pub(crate) fn execute(
         request.cancellation,
         request.deadlines.absolute,
     )
+}
+
+/// Open one TLS-authenticated stream to an uncredentialed HTTPS URL's origin
+/// under the explicit roots, with TLS negotiated and the setup window closed.
+/// No request bytes have been written when this returns, so every failure is
+/// before contact. The caller owns everything sent afterwards, including a
+/// protocol that starts as HTTP/1.1 and upgrades.
+pub fn open_tls_stream(
+    network: &NetworkContext,
+    url: &url::Url,
+    tls_roots_der: &[Vec<u8>],
+    deadlines: Deadlines,
+    cancellation: NetworkCancellation,
+) -> Result<TlsStream, HttpError> {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(HttpError::before(
+            io::ErrorKind::InvalidInput,
+            "request requires an uncredentialed HTTPS URL",
+        ));
+    }
+    if deadlines.setup_timeout.is_zero()
+        || deadlines.idle_timeout.is_zero()
+        || deadlines.absolute.has_elapsed()
+    {
+        return Err(HttpError::before(
+            io::ErrorKind::TimedOut,
+            "HTTP operation has an expired or zero deadline",
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpError::before(io::ErrorKind::InvalidInput, "HTTPS host is absent"))?;
+    let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
+    let server_name = if let Ok(address) = host_without_brackets.parse::<IpAddr>() {
+        ServerName::IpAddress(address.into())
+    } else {
+        ServerName::try_from(host_without_brackets.to_owned()).map_err(|_| {
+            HttpError::before(io::ErrorKind::InvalidInput, "invalid HTTPS server name")
+        })?
+    };
+    let tls_config = build_tls_config(tls_roots_der)?;
+    let tls_session = ClientConnection::new(tls_config, server_name)
+        .map_err(|_| HttpError::before(io::ErrorKind::InvalidData, "TLS session setup failed"))?;
+    let setup_deadline = MonotonicDeadline::after(deadlines.setup_timeout);
+    let socket = network
+        .connect(
+            host_without_brackets,
+            url.port_or_known_default().unwrap_or(443),
+            setup_deadline,
+            deadlines.absolute,
+            deadlines.idle_timeout,
+            cancellation,
+        )
+        .map_err(|error| HttpError::before(error.kind(), "HTTPS connection setup failed"))?;
+    if deadlines.absolute.has_elapsed() {
+        return Err(HttpError::before(
+            io::ErrorKind::TimedOut,
+            "HTTP operation deadline elapsed before request transmission",
+        ));
+    }
+    let mut stream = rustls::StreamOwned::new(tls_session, socket);
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|error| HttpError::before(error.kind(), "TLS setup failed"))?;
+    }
+    stream
+        .sock
+        .complete_setup()
+        .map_err(|error| HttpError::before(error.kind(), "TLS setup deadline elapsed"))?;
+    Ok(stream)
 }
 
 fn validate(request: &HttpRequest) -> Result<(), HttpError> {

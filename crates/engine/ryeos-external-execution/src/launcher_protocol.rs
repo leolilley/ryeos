@@ -24,7 +24,7 @@ use crate::backends::linux::NativeExternalCandidate;
 use crate::backends::linux::{CapturedQualificationFixture, NativeQualificationCompletion};
 use crate::launcher::{LAUNCHER_CONTROL_FD, PreparedExternalCandidateLauncherRequest};
 use crate::supervisor::{
-    CandidateExecutionOutput, ExternalCandidateLauncherClient,
+    CandidateExecutionOutput, ExternalCandidateLauncherClient, LeaseReadyPlan,
     SerializedExternalCandidateSupervisor, SupervisorApplicationOutcome,
 };
 
@@ -195,6 +195,9 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     bootstrap_digest: String,
     candidate_program: ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram,
     ready_frame: String,
+    /// The capability report authored right after Ready; present only on a
+    /// leased guest.
+    capability_report_frame: Option<String>,
     applied_runtime_recorded: bool,
     runtime_applied_frame_authored: bool,
     qualification_settled: bool,
@@ -301,6 +304,13 @@ impl LiveInheritedExternalCandidateSupervisor {
 
     pub fn ready_frame(&self) -> &str {
         &self.ready_frame
+    }
+
+    /// The signed capability report that follows Ready as the second
+    /// supervisor frame, or `None` when this supervisor is not on a leased
+    /// guest.
+    pub fn capability_report_frame(&self) -> Option<&str> {
+        self.capability_report_frame.as_deref()
     }
 
     pub fn has_durable_capture(&self) -> Result<bool> {
@@ -528,6 +538,7 @@ impl LiveInheritedExternalCandidateSupervisor {
             bootstrap_digest,
             candidate_program,
             ready_frame,
+            capability_report_frame,
             applied_runtime_recorded: _,
             runtime_applied_frame_authored: _,
             qualification_settled: _,
@@ -546,6 +557,7 @@ impl LiveInheritedExternalCandidateSupervisor {
             bootstrap_digest,
             candidate_program,
             ready_frame,
+            capability_report_frame,
         ));
         (journal, cleanup)
     }
@@ -610,6 +622,7 @@ pub fn launch_external_candidate_supervisor(
     launcher_artifact_digest: &str,
     channel_env_name: &str,
     channel_target_fd: u32,
+    lease_ready: Option<LeaseReadyPlan>,
     deadline: lillux::time::MonotonicDeadline,
     retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
@@ -752,12 +765,29 @@ pub fn launch_external_candidate_supervisor(
         }
     };
     let supervisor = SerializedExternalCandidateSupervisor::new(live_journal, client);
+    let supervisor = match lease_ready {
+        Some(plan) => supervisor.with_lease_ready(plan),
+        None => supervisor,
+    };
     let ready_frame = match supervisor.publish_ready(&supervisor_signing_key) {
         Ok(ready) => ready.canonical().to_owned(),
         Err(error) => {
             let cleanup = running.abort_and_reap_checked();
             let error = error.context(format!(
                 "publish dedicated launcher readiness; cleanup={cleanup:?}"
+            ));
+            let (live_journal, client) = supervisor.into_parts();
+            drop(client);
+            return Err(refuse_with_journal(error, live_journal.close(), retain));
+        }
+    };
+    let capability_report_frame = match supervisor.author_capability_report(&supervisor_signing_key)
+    {
+        Ok(report) => report.map(|report| report.canonical().to_owned()),
+        Err(error) => {
+            let cleanup = running.abort_and_reap_checked();
+            let error = error.context(format!(
+                "author leased guest capability report; cleanup={cleanup:?}"
             ));
             let (live_journal, client) = supervisor.into_parts();
             drop(client);
@@ -775,6 +805,7 @@ pub fn launch_external_candidate_supervisor(
         bootstrap_digest,
         candidate_program,
         ready_frame,
+        capability_report_frame,
         applied_runtime_recorded: false,
         runtime_applied_frame_authored: false,
         qualification_settled: false,
@@ -798,6 +829,7 @@ pub fn launch_prepared_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     prepared: PreparedExternalCandidateLauncherRequest,
     supervisor_signing_key: lillux::crypto::SigningKey,
+    lease_ready: Option<LeaseReadyPlan>,
     deadline: lillux::time::MonotonicDeadline,
     retain: RetainTerminal<'_>,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
@@ -818,6 +850,7 @@ pub fn launch_prepared_external_candidate_supervisor(
         measured_launcher.digest(),
         "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
         LAUNCHER_CONTROL_FD,
+        lease_ready,
         deadline,
         retain,
     )?;
