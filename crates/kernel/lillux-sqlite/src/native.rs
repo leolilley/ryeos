@@ -1708,6 +1708,72 @@ impl OriginalNativeCleanupScope<'_> {
         self.inputs.require_original(self.factory)
     }
 }
+/// Fixed cleanup steps the native layout adds to every cleanup quote, beyond
+/// its per-block, per-ticket and per-map terms.
+pub const NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS: u64 = 64;
+/// Headroom the layout's fixed margin sets aside for one stopped intake's
+/// cleanup steps. It is a sizing figure, not a runtime counter: the stopped
+/// intake runs in a cleanup allocator scope, so its allocations are charged to
+/// the cleanup reserve, only its stopped create allocates, and retries of the
+/// held owner charge nothing more. No cleanup quote adds this charge: it rides
+/// the layout's fixed margin, so it must stay within that margin (checked at
+/// compile time) and a measured intake must stay within it (checked by a test).
+/// The runtime refusal is the cleanup reserve itself, which an intake cannot
+/// exceed.
+pub const STOPPED_INTAKE_CLEANUP_STEPS: u64 = 32;
+const _: () = assert!(STOPPED_INTAKE_CLEANUP_STEPS <= NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS);
+/// Borrow present only inside one lexical stopped-intake scope of an
+/// original factory: a cleanup allocator scope with no open ticket, entered
+/// while the service window is open. It cannot be constructed outside this
+/// module, sent to another thread, or retained past its callback.
+pub struct OriginalNativeStoppedIntakeScope<'a> {
+    _factory: &'a OriginalNativeFactory,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+/// Borrow present only inside one lexical service allocator scope of an
+/// original factory, entered while the service window is open. It cannot be
+/// constructed outside this module, sent to another thread, or retained past
+/// its callback.
+pub struct OriginalNativeServiceScope<'a> {
+    _factory: &'a OriginalNativeFactory,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+/// Refusal of a stopped-intake or service scope. A refusal after the
+/// callback ran carries the callback's value, so an owner it produced or
+/// handed back stays with the caller; a refusal before it ran carries none.
+pub struct OriginalNativeScopeFailure<T> {
+    error: anyhow::Error,
+    completed: Option<T>,
+}
+impl<T> OriginalNativeScopeFailure<T> {
+    pub fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
+    pub fn completed_owner(&mut self) -> Option<T> {
+        self.completed.take()
+    }
+    pub fn into_parts(self) -> (anyhow::Error, Option<T>) {
+        (self.error, self.completed)
+    }
+}
+impl<T> std::fmt::Debug for OriginalNativeScopeFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OriginalNativeScopeFailure")
+            .field("error", &self.error)
+            .field("completed", &self.completed.is_some())
+            .finish()
+    }
+}
+impl<T> std::fmt::Display for OriginalNativeScopeFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl<T> std::error::Error for OriginalNativeScopeFailure<T> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
 /// Callback success may precede a late refusal. Preserve its genuine owner
 /// outside any bookkeeping lock, alongside the same factory/terminal/seal.
 pub struct OriginalNativeCleanupFailure<T> {
@@ -2998,6 +3064,77 @@ impl OriginalNativeFactory {
                 factory: self.clone(),
                 inputs: inputs.clone(),
             }),
+        }
+    }
+    /// Stopped (no-SQL) intake inside a cleanup allocator scope with no open
+    /// ticket, the only scope the native stopped-intake entry admits. It is
+    /// admitted while the service window is open, holds this factory's effect
+    /// gate so no open, finish or other effect runs beside it, and refuses
+    /// once the backend has shut down or recorded its terminal. Nothing in
+    /// `operation` may enter a service scope of this arena (that nested entry
+    /// refuses BUSY), so permit and journal reads run outside it. Owners the
+    /// callback consumes should be borrowed, not moved in: a refusal before
+    /// the callback runs drops the callback. A refusal after it ran carries
+    /// its value in the failure.
+    pub fn with_original_stopped_intake<T>(
+        &self,
+        operation: impl for<'s> FnOnce(&'s OriginalNativeStoppedIntakeScope<'s>) -> T,
+    ) -> std::result::Result<T, OriginalNativeScopeFailure<T>> {
+        let mut completed = None;
+        let entered = (|| -> Result<()> {
+            self.require_original(false)?;
+            let _effect = self.enter_effect()?;
+            self.require_original(false)?;
+            ensure!(
+                !self.storage()?.shutdown_completed.load(Ordering::Acquire)
+                    && self.storage()?.terminal_body.get().is_none(),
+                "original backend shutdown; stopped intake refused"
+            );
+            let _scope = self.arena()?.scope(true, 0)?;
+            let context = OriginalNativeStoppedIntakeScope {
+                _factory: self,
+                _not_send: std::marker::PhantomData,
+            };
+            completed = Some(operation(&context));
+            Ok(())
+        })();
+        Self::scope_outcome(entered.and_then(|()| self.require_original(false)), completed)
+    }
+    /// Native work that holds no ticket of its own, such as a stopped
+    /// owner's observations, role mutations, release and drop, inside a
+    /// service allocator scope admitted while the service window is open.
+    /// Guarded reads made through this factory nest inside it. Owners the
+    /// callback consumes should be borrowed, not moved in: a refusal before
+    /// the callback runs drops the callback. A refusal after it ran carries
+    /// its value in the failure.
+    pub fn with_original_service_scope<T>(
+        &self,
+        operation: impl for<'s> FnOnce(&'s OriginalNativeServiceScope<'s>) -> T,
+    ) -> std::result::Result<T, OriginalNativeScopeFailure<T>> {
+        let mut completed = None;
+        let entered = (|| -> Result<()> {
+            self.require_original(false)?;
+            let _scope = self.arena()?.scope(false, 0)?;
+            let context = OriginalNativeServiceScope {
+                _factory: self,
+                _not_send: std::marker::PhantomData,
+            };
+            completed = Some(operation(&context));
+            Ok(())
+        })();
+        Self::scope_outcome(entered.and_then(|()| self.require_original(false)), completed)
+    }
+    fn scope_outcome<T>(
+        checked: Result<()>,
+        completed: Option<T>,
+    ) -> std::result::Result<T, OriginalNativeScopeFailure<T>> {
+        match (checked, completed) {
+            (Ok(()), Some(value)) => Ok(value),
+            (Ok(()), None) => Err(OriginalNativeScopeFailure {
+                error: anyhow!("original native scope admitted without running its callback"),
+                completed: None,
+            }),
+            (Err(error), completed) => Err(OriginalNativeScopeFailure { error, completed }),
         }
     }
     /// Call after the lexical cleanup callback returns. Genuine sealed intake
@@ -6693,6 +6830,17 @@ impl OriginalNativeFactory {
     pub(crate) fn raw_cleanup_scope_for_test<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
         let _scope = self.arena()?.scope(true, 0)?;
         Ok(work())
+    }
+}
+#[cfg(test)]
+impl OriginalNativeFactory {
+    /// Present one backend lifecycle stage (finishing, shut down) to an
+    /// admission check without running the stages around it. A test sets
+    /// both back to false before the host finishes its own backend.
+    pub(crate) fn mark_lifecycle_for_test(&self, finishing: bool, shutdown: bool) -> Result<()> {
+        self.storage()?.finishing.store(finishing, Ordering::Release);
+        self.storage()?.shutdown_completed.store(shutdown, Ordering::Release);
+        Ok(())
     }
 }
 #[cfg(test)]

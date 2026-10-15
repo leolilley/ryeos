@@ -11,6 +11,9 @@ default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service"]
 model-provider-setup = ["dep:ryeos-directive-definition"]
 handoff-test-support = ["ryeos-app/test-support"]
+# Exact process-kill qualification for project apply-snapshot durable
+# boundaries. The cut selector does not exist in production builds.
+crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
 
 [dependencies]
 ryeos-node-runtime = { workspace = true }

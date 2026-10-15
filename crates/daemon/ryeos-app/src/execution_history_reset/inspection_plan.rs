@@ -22,6 +22,12 @@ pub(super) struct InspectionSourcePlan {
     pub(super) directory_identity: String,
     pub(super) database_name: String,
     pub(super) roles: [Option<SourceFact>; 4],
+    /// Set only when this plan is captured for the resumption of an operation
+    /// whose signed record shows the main was present when it began. A main
+    /// that is now absent with its sidecars left behind is then the earlier
+    /// run's own interrupted retirement, which the participant's journals
+    /// settle; without it that shape is unknown state and is refused.
+    pub(super) orphan_sidecars_recoverable: bool,
 }
 
 pub(super) fn role_names(database_name: &str) -> Result<[OsString; 4]> {
@@ -48,6 +54,7 @@ impl InspectionSourcePlan {
         source: &lillux::PinnedDirectory,
         name: &OsStr,
         purpose: &str,
+        orphan_sidecars_recoverable: bool,
     ) -> Result<(Self, Vec<File>)> {
         source.ensure_path_binding()?;
         let database_name = name
@@ -81,6 +88,7 @@ impl InspectionSourcePlan {
             directory_identity: serde_json::to_string(&source.identity()?)?,
             database_name,
             roles,
+            orphan_sidecars_recoverable,
         };
         plan.validate()?;
         source.ensure_path_binding()?;
@@ -99,7 +107,7 @@ impl InspectionSourcePlan {
         );
         if self.roles[0].is_none() {
             ensure!(
-                self.roles.iter().all(Option::is_none),
+                self.orphan_sidecars_recoverable || self.roles.iter().all(Option::is_none),
                 "absent inspection main has retained sidecars requiring recovery"
             );
         }
@@ -364,6 +372,7 @@ impl OperationalSourcePlan {
 pub(super) fn capture_sources(
     runtime: &lillux::PinnedDirectory,
     db_target: &Path,
+    scheduler_main_was_retired_by_prior: bool,
 ) -> Result<(
     [InspectionSourcePlan; 2],
     [lillux::PinnedDirectory; 2],
@@ -377,9 +386,14 @@ pub(super) fn capture_sources(
     let name = db_target
         .file_name()
         .context("runtime inspection target has no basename")?;
-    let (runtime_plan, mut pins) = InspectionSourcePlan::capture(&runtime_source, name, "runtime")?;
+    let (runtime_plan, mut pins) = InspectionSourcePlan::capture(&runtime_source, name, "runtime", false)?;
     let (scheduler_plan, scheduler_pins) =
-        InspectionSourcePlan::capture(runtime, OsStr::new("scheduler.sqlite3"), "scheduler")?;
+        InspectionSourcePlan::capture(
+            runtime,
+            OsStr::new("scheduler.sqlite3"),
+            "scheduler",
+            scheduler_main_was_retired_by_prior,
+        )?;
     pins.extend(scheduler_pins);
     let plans = [runtime_plan, scheduler_plan];
     validate_sources(&plans)?;
@@ -427,7 +441,7 @@ mod controls {
             ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT).unwrap();
         let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (copies, _, _) = capture_sources(&directory, &temp.path().join("runtime.sqlite3")).unwrap();
+        let (copies, _, _) = capture_sources(&directory, &temp.path().join("runtime.sqlite3"), false).unwrap();
         (temp, directory, namespace, copies)
     }
 
@@ -481,7 +495,7 @@ mod controls {
         std::fs::write(&path, b"original").unwrap();
         let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let (plan, pins) =
-            InspectionSourcePlan::capture(&root, OsStr::new("runtime.sqlite3"), "runtime").unwrap();
+            InspectionSourcePlan::capture(&root, OsStr::new("runtime.sqlite3"), "runtime", false).unwrap();
         plan.require_current(&root).unwrap();
         std::fs::write(&path, b"changed extent").unwrap();
         assert!(plan.require_current(&root).is_err());
@@ -503,12 +517,12 @@ mod controls {
         std::fs::write(&path, b"original").unwrap();
         std::fs::hard_link(&path, tmp.path().join("scheduler.sqlite3")).unwrap();
         let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        assert!(capture_sources(&root, &path).is_err());
+        assert!(capture_sources(&root, &path, false).is_err());
         std::fs::remove_file(tmp.path().join("scheduler.sqlite3")).unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3-wal"), b"orphan").unwrap();
-        assert!(capture_sources(&root, &path).is_err());
+        assert!(capture_sources(&root, &path, false).is_err());
         std::fs::remove_file(tmp.path().join("scheduler.sqlite3-wal")).unwrap();
-        let (plans, roots, pins) = capture_sources(&root, &path).unwrap();
+        let (plans, roots, pins) = capture_sources(&root, &path, false).unwrap();
         assert_eq!(plans[0].total_bytes().unwrap(), 8);
         assert_eq!(plans[1].total_bytes().unwrap(), 0);
         plans[0].require_current(&roots[0]).unwrap();
@@ -516,5 +530,17 @@ mod controls {
         assert_eq!(pins.len(), 1);
         assert!(role_names("../foreign").is_err());
         assert!(role_names(&"a".repeat(248)).is_err());
+    }
+
+    #[test]
+    fn prior_retirement_alone_admits_absent_scheduler_main_with_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("runtime.sqlite3");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::write(tmp.path().join("scheduler.sqlite3-wal"), b"retired").unwrap();
+        let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        assert!(capture_sources(&root, &path, false).is_err());
+        let (plans, roots, _pins) = capture_sources(&root, &path, true).unwrap();
+        plans[1].require_current(&roots[1]).unwrap();
     }
 }

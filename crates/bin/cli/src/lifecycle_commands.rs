@@ -1003,6 +1003,27 @@ impl ExecutionHistoryResetArgs {
     }
 }
 
+/// Whether the stopped node's installed, trusted composition selects the
+/// scheduler. The engine is built from the node's verified bundle
+/// registrations; an installed scheduler service that does not resolve or is
+/// not trusted refuses the reset.
+fn scheduler_selected_by_installed_composition(app_root: Option<PathBuf>) -> Result<bool> {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root,
+        ..Default::default()
+    })
+    .context("load local node location for scheduler selection")?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot(&config.app_root)
+        .context("load verified node composition for scheduler selection")?;
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(&snapshot);
+    let engine =
+        crate::effective_metadata::build_effective_item_engine(&config.app_root, None, &bundle_roots)
+            .context("build installed-composition engine for scheduler selection")?;
+    // A build that cannot run a selected scheduler refuses.
+    ryeos_api::scheduler_selection::resolve_scheduler_selection(&engine, cfg!(feature = "scheduling"))
+        .context("derive scheduler selection from the installed composition")
+}
+
 fn run_execution_history_reset_command(
     argv: &[String],
     console: &crate::tty::Console,
@@ -1029,19 +1050,27 @@ fn run_execution_history_reset_command(
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
+    // The stopped node's installed, trusted composition decides whether the
+    // scheduler participant takes part, exactly as daemon startup decides it.
+    // An unselected scheduler is never opened or created; the reset then
+    // proves the runtime holds no scheduler namespace instead.
+    let scheduler_selected = scheduler_selected_by_installed_composition(options.app_root.clone())?;
     #[cfg(feature = "scheduling")]
     let scheduler_reset = ryeos_scheduler_service::SchedulerHistoryReset::new();
     #[cfg(feature = "scheduling")]
     let scheduler_participant: Option<
         &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = Some(
+    > = scheduler_selected.then_some(
         &scheduler_reset
             as &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
     );
     #[cfg(not(feature = "scheduling"))]
     let scheduler_participant: Option<
         &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = None;
+    > = {
+        let _ = scheduler_selected;
+        None
+    };
     let report = match progress.as_mut() {
         Some(progress) => {
             let mut observer =

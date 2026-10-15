@@ -514,6 +514,7 @@ async fn scheduler_at_schedule_fires() {
     let fire = poll_for_fires(&h, "at-fire-test", 1, Duration::from_secs(10))
         .await
         .expect("expected at least 1 fire within 10s");
+    let fire = await_dispatch_handoff(&h, "at-fire-test", fire).await;
 
     // Fire record exists — proves the timer dispatched
     assert_eq!(fire["schedule_id"], "at-fire-test");
@@ -607,7 +608,7 @@ async fn scheduler_interval_schedule_fires() {
         panic!("expected at least 1 fire within 8s");
     }
 
-    let fire = fire.unwrap();
+    let fire = await_dispatch_handoff(&h, "interval-fire-test", fire.unwrap()).await;
     assert_eq!(fire["schedule_id"], "interval-fire-test");
     let status_str = fire["status"].as_str().unwrap_or("");
     assert!(
@@ -1299,6 +1300,25 @@ async fn scheduler_registered_at_preserved_on_update() {
 
 /// Poll `show_fires` until at least `min_count` fire records appear.
 /// Returns the first fire record.
+/// A fire record is first written as `reserved` and becomes `dispatched` (or
+/// `failed`) when the launch handoff persists, so the first sighting of the
+/// record is not yet the dispatch outcome. Follow that fire, by identity
+/// since later fires may exist, until it leaves `reserved`; a fire that stays
+/// reserved past the deadline is returned as is and fails the caller's check.
+async fn await_dispatch_handoff(h: &DaemonHarness, schedule_id: &str, mut fire: Value) -> Value {
+    let first_fire_id = fire["fire_id"].clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while fire["status"] == "reserved" && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Some(fires) = poll_for_fires_count(h, schedule_id, 1, Duration::from_secs(1)).await
+            && let Some(latest) = fires.into_iter().find(|f| f["fire_id"] == first_fire_id)
+        {
+            fire = latest;
+        }
+    }
+    fire
+}
+
 async fn poll_for_fires(
     h: &DaemonHarness,
     schedule_id: &str,

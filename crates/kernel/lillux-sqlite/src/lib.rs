@@ -5458,7 +5458,7 @@ mod tests {
         });
     }
     #[cfg(target_os = "linux")]
-    fn stopped_plan_fixture(
+    pub(super) fn stopped_plan_fixture(
         runtime: &PinnedDirectory,
         root: &std::path::Path,
         sources: [StoppedSqliteRoleSource; 3],
@@ -6079,7 +6079,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     const STOCK_ALIAS_REFUSAL: rusqlite::ErrorCode = rusqlite::ErrorCode::CannotOpen;
     #[cfg(target_os = "linux")]
-    fn seed_wal_on(host: &crate::test_host::TestNativeHost, root: &std::path::Path) {
+    pub(super) fn seed_wal_on(host: &crate::test_host::TestNativeHost, root: &std::path::Path) {
         let (connection, ticket) = host.armed(|| Connection::open(root.join("scheduler.sqlite3")).unwrap());
         host.scope(|| {
             connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
@@ -8419,5 +8419,328 @@ mod inspection_sql_controls {
             assert!(install_inspection_sql_work(&conn, &root, work).is_err());
         });
         close_memory(&host, conn, ticket);
+    }
+}
+
+/// The original factory's stopped-intake and service scopes: the stopped
+/// SQLite intake runs only in the first, every refusal leaves the caller's
+/// owners with the caller, and the cleanup reserve still settles the arena
+/// after a held intake is retried to its bound.
+#[cfg(all(test, target_os = "linux"))]
+mod stopped_intake_scope_controls {
+    use super::*;
+    use super::tests::{armed_stock, close_armed, seed_wal_on, stopped_plan_fixture};
+    use crate::offline_host::{OfflineNativeAuthority, OfflineNativeHost};
+    use crate::test_host::{TestNativeEnvelope, TestNativeHost, issue_offline_host};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// SQLite's BUSY code, as a refused nested scope entry reports it.
+    const NESTED_SCOPE_BUSY: &str = "sqlite code 5";
+
+    /// An operation window the test can close; the cleanup window stays open
+    /// so the host can always finish.
+    struct OperationWindow {
+        open: AtomicBool,
+    }
+    impl OperationWindow {
+        fn open() -> Arc<Self> {
+            Arc::new(Self { open: AtomicBool::new(true) })
+        }
+    }
+    impl OfflineNativeAuthority for OperationWindow {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            ensure!(cleanup || self.open.load(Ordering::Acquire), "test operation window closed");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn absent_plan(runtime: &PinnedDirectory, root: &std::path::Path) -> StoppedSqliteProjectionPlan {
+        stopped_plan_fixture(runtime, root, [StoppedSqliteRoleSource::Absent; 3])
+    }
+
+    /// Mutate and release an all-absent stopped owner, the way the scheduler
+    /// retires one. The caller runs this inside an allocator scope.
+    fn retire_absent(mut owner: DrainedSqliteProjection) {
+        for role in SqliteRole::all() {
+            owner.quarantine_role(role).unwrap();
+            owner.purge_role(role).unwrap();
+        }
+        owner.release().unwrap();
+    }
+
+    fn transient(host: &OfflineNativeHost) -> OriginalNativeConnection {
+        // SAFETY: test-only issuance under this host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination().unwrap())
+        }
+        .unwrap();
+        match host.factory().unwrap().open_transient(inputs) {
+            Ok(connection) => connection,
+            Err(failure) => panic!("test transient open refused: {failure}"),
+        }
+    }
+
+    fn finish(host: OfflineNativeHost) {
+        if let Err(retained) = host.finish() {
+            panic!("offline test host finish retained: {:#}", retained.error);
+        }
+    }
+
+    #[test]
+    fn stopped_intake_scope_admits_the_stopped_create_an_unscoped_intake_refuses() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let plan = absent_plan(&runtime, tmp.path());
+        // Outside every native scope the stopped create refuses MISUSE
+        // before it allocates or claims anything.
+        let refused = DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            .err()
+            .expect("stopped intake outside every native scope refuses");
+        assert!(refused.to_string().contains("refused (21)"), "{refused}");
+        assert!(matches!(refused.owner(), SqliteProjectionRetirementOwner::UnacquiredStopped { .. }));
+        refused.abort().unwrap();
+
+        let before = factory.budget_snapshot().unwrap().cleanup_steps;
+        let owner = factory
+            .with_original_stopped_intake(|_| {
+                DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            factory.budget_snapshot().unwrap().cleanup_steps > before,
+            "the stopped intake allocates inside the cleanup scope"
+        );
+        let observed = factory
+            .with_original_service_scope(|_| owner.observe_stopped_projection())
+            .unwrap()
+            .unwrap();
+        assert!(observed.ready);
+        assert_eq!(observed.plan, plan);
+        factory.with_original_service_scope(|_| retire_absent(owner)).unwrap();
+        assert!(!tmp.path().join("scheduler.sqlite3").exists());
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_inside_an_open_ticket_and_refuses_a_nested_scope() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        // A thread inside a ticketed open scope cannot open the cleanup scope.
+        let mut inside_ticket = None;
+        let (connection, ticket) = host.armed(|| {
+            inside_ticket = Some(factory.with_original_stopped_intake(|_| ()).map_err(|failure| failure.to_string()));
+            rusqlite::Connection::open_in_memory().unwrap()
+        });
+        close_armed(&host, connection, ticket);
+        let error = inside_ticket.expect("intake attempted").expect_err("intake inside an open ticket refuses");
+        assert!(error.contains(NESTED_SCOPE_BUSY), "{error}");
+
+        // A service scope nested in the intake scope does not match it.
+        let nested = factory
+            .with_original_stopped_intake(|_| factory.with_original_service_scope(|_| ()).map_err(|failure| failure.to_string()))
+            .unwrap();
+        let error = nested.expect_err("service scope nested in the intake scope refuses");
+        assert!(error.contains(NESTED_SCOPE_BUSY), "{error}");
+        // The held effect gate refuses a second intake nested in the first.
+        let again = factory
+            .with_original_stopped_intake(|_| factory.with_original_stopped_intake(|_| ()).map_err(|failure| failure.to_string()))
+            .unwrap();
+        let error = again.expect_err("intake nested in an intake refuses");
+        assert!(error.contains("effect in progress"), "{error}");
+        // Both scopes left: each opens again on this thread.
+        factory.with_original_service_scope(|_| ()).unwrap();
+        factory.with_original_stopped_intake(|_| ()).unwrap();
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_a_finishing_or_shut_down_backend() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        factory.mark_lifecycle_for_test(true, false).unwrap();
+        let error = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("draining"), "{error}");
+        let error = factory.with_original_service_scope(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("draining"), "{error}");
+        factory.mark_lifecycle_for_test(false, true).unwrap();
+        let error = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("shutdown"), "{error}");
+        factory.mark_lifecycle_for_test(false, false).unwrap();
+        factory.with_original_stopped_intake(|_| ()).unwrap();
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_a_closed_window_and_closed_admission() {
+        {
+            let authority = OperationWindow::open();
+            let (host, serial) = issue_offline_host(TestNativeEnvelope::default(), authority.clone());
+            let factory = host.factory().unwrap().clone();
+            factory.with_original_stopped_intake(|_| ()).unwrap();
+            authority.open.store(false, Ordering::Release);
+            let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+            assert!(format!("{:#}", refused.error()).contains("test operation window closed"), "{refused}");
+            // The closed window latched service refusal: reopening it does
+            // not readmit the intake or a service scope.
+            authority.open.store(true, Ordering::Release);
+            let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+            assert!(refused.to_string().contains("service refused"), "{refused}");
+            let refused = factory.with_original_service_scope(|_| ()).unwrap_err();
+            assert!(refused.to_string().contains("service refused"), "{refused}");
+            drop(factory);
+            finish(host);
+            drop(serial);
+        }
+        let (mut host, serial) = issue_offline_host(TestNativeEnvelope::default(), OperationWindow::open());
+        let factory = host.factory().unwrap().clone();
+        // A connection the census has not recorded holds the finish after it
+        // closed admission and marked the factory finishing.
+        let connection = transient(&host);
+        assert!(host.finish_backend().is_err(), "an unrecorded ticket holds the finish");
+        let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(refused.to_string().contains("admission closed"), "{refused}");
+        let closed = connection.close().unwrap_or_else(|failure| panic!("close in cleanup window refused: {failure}"));
+        if let Err((_terminal, error)) = host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed)) {
+            panic!("terminal refused: {error:#}");
+        }
+        drop(host.finish_backend().unwrap());
+        // The backend terminal exists and SQLite has shut down.
+        let post = host.post_backend_factory().unwrap().clone();
+        assert!(post.with_original_stopped_intake(|_| ()).is_err());
+        assert!(post.with_original_service_scope(|_| ()).is_err());
+        drop((post, factory));
+        if let Err(retained) = host.release() {
+            panic!("offline test host release retained: {:#}", retained.error);
+        }
+        drop(serial);
+    }
+
+    #[test]
+    fn stopped_intake_late_refusal_hands_the_owner_back() {
+        let authority = OperationWindow::open();
+        let (host, serial) = issue_offline_host(TestNativeEnvelope::default(), authority.clone());
+        let factory = host.factory().unwrap().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let plan = absent_plan(&runtime, tmp.path());
+        let mut refused = factory
+            .with_original_stopped_intake(|_| {
+                let captured = DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone());
+                authority.open.store(false, Ordering::Release);
+                captured
+            })
+            .err()
+            .expect("the window closed during the intake refuses after it");
+        assert!(format!("{:#}", refused.error()).contains("test operation window closed"), "{refused}");
+        let owner = refused
+            .completed_owner()
+            .expect("the late refusal carries the callback's owner")
+            .unwrap();
+        assert!(refused.completed_owner().is_none(), "the owner is handed back once");
+        // Service refusal is latched; the owner still settles through this
+        // arena's own allocator scope.
+        factory.raw_scope_for_test(|| retire_absent(owner)).unwrap();
+        drop(factory);
+        finish(host);
+        drop(serial);
+    }
+
+    /// The stopped intake allocates inside the cleanup scope, so it spends
+    /// part of the cleanup reserve. Only its stopped create allocates:
+    /// retries of the held owner, here to the scheduler reset's bound of 240
+    /// after the first attempt, charge the reserve nothing more. The whole
+    /// intake stays within its named bound, which rides the layout quote's
+    /// fixed margin; what remains settles the stopped owner and finishes and
+    /// releases the arena.
+    #[test]
+    fn cleanup_reserve_settles_and_finishes_after_maximal_stopped_intake_retries() {
+        const RETRIES: usize = 240;
+        let envelope = TestNativeEnvelope::default();
+        let host = TestNativeHost::acquire_with(envelope);
+        let factory = host.factory().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        seed_wal_on(&host, tmp.path());
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let source = StoppedSqliteRoleSource::Quarantine { generation: [1; 16] };
+        let mut skeleton = stopped_plan_fixture(
+            &runtime,
+            tmp.path(),
+            [StoppedSqliteRoleSource::Canonical, StoppedSqliteRoleSource::Absent, StoppedSqliteRoleSource::Absent],
+        );
+        skeleton.roles[0].source = source;
+        let selected = skeleton.source_name(SqliteRole::Main).unwrap();
+        std::fs::rename(tmp.path().join("scheduler.sqlite3"), tmp.path().join(&selected)).unwrap();
+        let plan = stopped_plan_fixture(
+            &runtime,
+            tmp.path(),
+            [source, StoppedSqliteRoleSource::Absent, StoppedSqliteRoleSource::Absent],
+        );
+        // A peer holding the selected inode keeps every intake attempt held.
+        let peer_path = tmp.path().join("peer.sqlite3");
+        std::fs::hard_link(tmp.path().join(&selected), &peer_path).unwrap();
+        let (peer, peer_ticket) = armed_stock(&host, &peer_path);
+        host.scope(|| peer.execute_batch("BEGIN; SELECT * FROM custody;").unwrap());
+
+        let reserved = factory.budget_snapshot().unwrap().cleanup_reserved;
+        let before = factory.budget_snapshot().unwrap().cleanup_steps;
+        let mut failure = factory
+            .with_original_stopped_intake(|_| {
+                DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            })
+            .unwrap()
+            .err()
+            .expect("the held peer refuses the intake");
+        let after_first = factory.budget_snapshot().unwrap().cleanup_steps;
+        for _ in 0..RETRIES {
+            failure = factory
+                .with_original_stopped_intake(|_| failure.retry_stopped_projection(&plan))
+                .unwrap()
+                .err()
+                .expect("the held peer refuses each retry");
+        }
+        let after_retries = factory.budget_snapshot().unwrap().cleanup_steps;
+        let intake = after_retries - before;
+        let first = after_first - before;
+
+        host.scope(|| peer.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, peer, peer_ticket);
+        let owner = factory
+            .with_original_stopped_intake(|_| failure.retry_stopped_projection(&plan))
+            .unwrap()
+            .unwrap();
+        factory.with_original_service_scope(|_| owner.abort()).unwrap().unwrap();
+        assert!(tmp.path().join(&selected).exists());
+        drop(factory);
+
+        let required = crate::offline_host::offline_native_required_cleanup_steps(envelope.storage_bytes, envelope.tickets)
+            .unwrap();
+        let released = host.release();
+        let facts = released.facts.expect("finished backend facts");
+        let settled = facts.budget.cleanup_steps;
+        let teardown = settled - after_retries;
+        eprintln!(
+            "cleanup reserve {reserved}, required quote {required}, first intake {first}, intake with {RETRIES} retries {intake}, \
+             settlement and finish {teardown}, total {settled}"
+        );
+        assert_eq!(facts.arena, crate::OriginalNativeArenaDisposition::Released);
+        assert!(first > 0, "the stopped create allocates inside the cleanup scope");
+        assert_eq!(intake, first, "retries of the held owner charge the cleanup reserve nothing");
+        assert!(
+            intake <= crate::STOPPED_INTAKE_CLEANUP_STEPS,
+            "intake charged {intake} cleanup steps, beyond its bound {}",
+            crate::STOPPED_INTAKE_CLEANUP_STEPS
+        );
+        assert!(crate::STOPPED_INTAKE_CLEANUP_STEPS <= crate::NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS);
+        assert_eq!(required, reserved, "the host reserves exactly the layout quote");
     }
 }

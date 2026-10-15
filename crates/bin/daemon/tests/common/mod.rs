@@ -435,11 +435,18 @@ pub fn selected_projection_path(app_root: &Path) -> anyhow::Result<PathBuf> {
 /// The validation queue builds this artifact with its declared source, lock,
 /// target and feature selection before allocating the integration test. A test
 /// must not start another Cargo process or infer freshness from file presence.
+///
+/// `RYEOS_TEST_CLI_BINARY` names a differently featured CLI built into its own
+/// target directory, so a qualification build never replaces the CLI beside
+/// the daemon.
 pub fn ryeos_binary() -> PathBuf {
-    let candidate = ryeosd_binary()
-        .parent()
-        .expect("ryeosd binary has parent dir")
-        .join("ryeos");
+    let candidate = match std::env::var_os("RYEOS_TEST_CLI_BINARY").filter(|v| !v.is_empty()) {
+        Some(explicit) => PathBuf::from(explicit),
+        None => ryeosd_binary()
+            .parent()
+            .expect("ryeosd binary has parent dir")
+            .join("ryeos"),
+    };
 
     assert!(
         candidate.is_file(),

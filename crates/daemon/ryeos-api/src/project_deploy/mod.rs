@@ -101,13 +101,15 @@ pub(crate) fn authenticated_schedule_authority_for_site(
         "schedule registration requires stable authorized-key grant-generation evidence",
     )?;
     let origin_site_id = ctx.execution_origin(site_id);
-    Ok(ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
-        principal_id: ctx.fingerprint.clone(),
-        principal_class,
-        effective_origin_site_id: origin_site_id,
-        grant_authority,
-        registration_request_hash,
-    })
+    Ok(
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
+            principal_id: ctx.fingerprint.clone(),
+            principal_class,
+            effective_origin_site_id: origin_site_id,
+            grant_authority,
+            registration_request_hash,
+        },
+    )
 }
 
 fn require_scope(caller: &HandlerContext, capability: &str) -> Result<()> {

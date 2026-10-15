@@ -78,6 +78,25 @@ const PROXY_AND_CA_NAMES: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
+/// Test-only crash-cut selector for the daemon's project apply-snapshot
+/// handler. Read in-process by the daemon itself; never forwarded into any
+/// spawned child environment and absent from production builds.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const PROJECT_APPLY_TEST_CUT_ENV: &str = "RYEOS_PROJECT_APPLY_TEST_CUT";
+
+/// Test-only crash-cut selector for the scheduler execution-history reset
+/// participant, as `<boundary>:<role>`. Read in-process by the offline reset
+/// command; never forwarded into any spawned child environment and absent
+/// from production builds.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const SCHEDULER_RESET_TEST_CUT_ENV: &str = "RYEOS_SCHEDULER_RESET_TEST_CUT";
+
+/// Line prefix a process writes to stderr when it parks at a selected
+/// test-only crash cut, followed by `<site>:<boundary>`. The qualification
+/// harness waits for this line and then SIGKILLs the parked process.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const TEST_CRASH_CUT_REACHED_PREFIX: &str = "ryeos-test-crash-cut-reached ";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvSourceKind {
     BaseAllowlist,
@@ -609,6 +628,21 @@ mod tests {
             map.get("RYEOS_DIRECTIVE_TEST_BLOCK_AT").map(String::as_str),
             Some("effect_committed")
         );
+    }
+
+    #[cfg(feature = "crash-qualification-test-support")]
+    #[test]
+    fn in_process_crash_cut_selectors_are_never_forwarded() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[
+                (PROJECT_APPLY_TEST_CUT_ENV, "ref_published"),
+                (SCHEDULER_RESET_TEST_CUT_ENV, "purge_armed:main"),
+            ]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key(PROJECT_APPLY_TEST_CUT_ENV));
+        assert!(!map.contains_key(SCHEDULER_RESET_TEST_CUT_ENV));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:298fb185991417cf82a18b57389a4785c01e465e76adc54d2f24de50ec8e26ad:mLv8FRulB+l1ABlz0VQCbSsPj0282SAtih2khdfSpS/dAAFEU3+e/0KpccabYLTlGwuYEvNUvO9NOssXT79XAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T23:30:58Z:b4e8e292be6743851eca77b0bda6e034dbef3b61cc46f9cfc4425b942b3e78c3:F7pGLDj00GBEO4xgv6kmevc3/Tga/XOeLfw6Q0/wuY7B7fLy3Z+3N4KoNe3cBpW+a8KPC8WAQdKKG05Y1YaaAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -208,30 +208,8 @@ policies:
       max_cleanup_millis: 60000
       max_cleanup_steps: 1024
       max_recovery_record_bytes: 2097152
-    schedules:
-      - schedule_id: maintenance-gc
-        item_ref: service:maintenance/gc
-        ref_bindings: {}
-        schedule_type: cron
-        expression: "0 0 4 * * *"
-        timezone: UTC
-        misfire_policy: skip
-        overlap_policy: skip
-        lateness_grace_secs: 60
-        initial_enabled: true
-        params:
-          compact: true
-          policy:
-            manual_pushes: 10
-            auto_snapshots: 30
-          deep: true
-          schedule_fire_max_age_days: 30
-          schedule_fire_max_count: 500
-          sync_job_retention_days: 14
-          seat_lease_grace_seconds: 600
-          durable_cas_upload_max_age_seconds: 21600
-        capabilities:
-          - ryeos.execute.service.maintenance/gc
+    # Without the scheduling bundle, maintenance is explicitly invoked, not scheduled.
+    schedules: []
   hosted:
     schema: 1
     admission_enabled: false
@@ -240,22 +218,31 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, storage:durable_root, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        mode: unconfigured
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -329,7 +316,7 @@ policies:
     enabled: false
     limits: null
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

@@ -1010,6 +1010,98 @@ fn materialize_seed_node_policy_generation(
 /// Host class every fast-fixture node is initialized under.
 const FAST_FIXTURE_HOST_CLASS: &str = "local";
 
+/// Author a profile source root for switching a fast-fixture node to
+/// `profile` through the real `ryeos node reset policy-generation`.
+///
+/// The authored profile keeps a per-scope floor that a directly spawned
+/// daemon cannot prove, so the root holds the profile narrowed exactly as
+/// the fixture narrows its initial generation and signed by the fixture
+/// publisher, whose key the node already trusts. The CLI then installs a
+/// complete, consistently sealed generation. Every bundle the profile names
+/// is copied from `authored_source`, along with its publisher trust document.
+pub fn author_direct_host_profile_source(
+    authored_source: &Path,
+    profile: &str,
+    destination: &Path,
+) -> Result<()> {
+    let profile_dir = destination.join(AI_DIR).join("node").join("init").join("profiles");
+    fs::create_dir_all(&profile_dir)
+        .with_context(|| format!("create {}", profile_dir.display()))?;
+    let authored = authored_source
+        .join(AI_DIR)
+        .join("node")
+        .join("init")
+        .join("profiles")
+        .join(format!("{profile}.yaml"));
+    let raw = fs::read_to_string(&authored)
+        .with_context(|| format!("read node init profile {}", authored.display()))?;
+    let mut document: serde_json::Value =
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))
+            .with_context(|| format!("parse node init profile {}", authored.display()))?;
+    let isolation = document
+        .pointer_mut("/policies/isolation")
+        .context("node init profile has no isolation policy")?;
+    direct_host_isolation(isolation)
+        .with_context(|| format!("derive direct-host isolation for profile {profile}"))?;
+    let bundles: Vec<String> = document
+        .get("exact_bundles")
+        .and_then(serde_json::Value::as_array)
+        .context("node init profile has no exact_bundles list")?
+        .iter()
+        .map(|name| {
+            name.as_str()
+                .map(str::to_owned)
+                .context("exact_bundles entry is not a name")
+        })
+        .collect::<Result<_>>()?;
+    let body = serde_yaml::to_string(&document).context("serialize narrowed node init profile")?;
+    let signed = lillux::signature::sign_content_at(
+        &body,
+        &publisher_signing_key(),
+        "#",
+        None,
+        FAST_FIXTURE_TIME,
+    );
+    fs::write(profile_dir.join(format!("{profile}.yaml")), signed)
+        .with_context(|| format!("write narrowed node init profile {profile}"))?;
+    fs::copy(
+        authored_source.join(AI_DIR).join("PUBLISHER_TRUST.toml"),
+        destination.join(AI_DIR).join("PUBLISHER_TRUST.toml"),
+    )
+    .context("copy publisher trust document")?;
+    for bundle in bundles {
+        copy_tree_preserving_mtimes(&authored_source.join(&bundle), &destination.join(&bundle))
+            .with_context(|| format!("copy bundle {bundle} into the profile source"))?;
+    }
+    Ok(())
+}
+
+/// Copy a directory tree keeping every file's modification time. Bundle
+/// preflight refuses a manifest older than its source, so a copy that
+/// restamped files in arbitrary order would change what the bundle proves.
+fn copy_tree_preserving_mtimes(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree_preserving_mtimes(&from, &to)?;
+            continue;
+        }
+        fs::copy(&from, &to).with_context(|| format!("copy {}", from.display()))?;
+        let modified = fs::metadata(&from)?.modified()?;
+        fs::File::options()
+            .write(true)
+            .open(&to)
+            .with_context(|| format!("open {}", to.display()))?
+            .set_modified(modified)
+            .with_context(|| format!("restore modification time of {}", to.display()))?;
+    }
+    Ok(())
+}
+
 /// The isolation mode (`enforce` or `disabled`) of the host class a
 /// fast-fixture node at `state_path` runs under, read from its signed node
 /// policy. Under `enforce` a launched tool runs in the sandbox; under

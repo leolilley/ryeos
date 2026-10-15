@@ -391,6 +391,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 },
             )?;
             journal_prepared = true;
+            #[cfg(feature = "crash-qualification-test-support")]
+            reach_apply_crash_cut(ApplyCrashCut::JournalPublished);
             let mut surface_swap = match replace_managed_surfaces(
                 &project_directory,
                 &staging,
@@ -427,6 +429,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                     return Err(err);
                 }
             };
+            #[cfg(feature = "crash-qualification-test-support")]
+            reach_apply_crash_cut(ApplyCrashCut::SchedulesPrepared);
 
             let commit_surface_validation = (|| -> Result<()> {
                 project_directory.ensure_path_binding()?;
@@ -539,6 +543,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             ));
         }
 
+        #[cfg(feature = "crash-qualification-test-support")]
+        reach_apply_crash_cut(ApplyCrashCut::RefPublished);
         let deploy_report = deploy_tx.report.clone();
         deploy_tx.finalize().context("finalize project schedule session")?;
         surface_swap.finalize();
@@ -662,6 +668,54 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             "deleted": report.deploy.schedules.deleted,
         },
     }))
+}
+
+/// Test-only durable boundaries between apply-journal publication and
+/// schedule-session finalization. Each names the last durable effect that has
+/// happened when the process stops there.
+#[cfg(feature = "crash-qualification-test-support")]
+#[derive(Clone, Copy)]
+enum ApplyCrashCut {
+    /// The authenticated apply journal is durable; no live surface or
+    /// schedule has changed.
+    JournalPublished,
+    /// Live surfaces are swapped and the schedule transaction is prepared;
+    /// the deployed ref still names the previous snapshot.
+    SchedulesPrepared,
+    /// The deployed ref names the target snapshot and the live surfaces are
+    /// verified; the schedule session is not yet finalized.
+    RefPublished,
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+impl ApplyCrashCut {
+    fn name(self) -> &'static str {
+        match self {
+            Self::JournalPublished => "journal_published",
+            Self::SchedulesPrepared => "schedules_prepared",
+            Self::RefPublished => "ref_published",
+        }
+    }
+}
+
+/// Park the applying thread forever at the boundary selected by the
+/// qualification environment, after announcing it on stderr. The harness
+/// SIGKILLs the process there, so no unwinding, rollback or settlement can
+/// run after the boundary's durable effects.
+#[cfg(feature = "crash-qualification-test-support")]
+fn reach_apply_crash_cut(cut: ApplyCrashCut) {
+    let selected = std::env::var_os(ryeos_app::env_contract::PROJECT_APPLY_TEST_CUT_ENV);
+    if selected.as_deref() != Some(OsStr::new(cut.name())) {
+        return;
+    }
+    eprintln!(
+        "{}project_apply:{}",
+        ryeos_app::env_contract::TEST_CRASH_CUT_REACHED_PREFIX,
+        cut.name()
+    );
+    loop {
+        std::thread::park();
+    }
 }
 
 /// Per-project logical-ref serialization. This remains separate from the
@@ -1168,7 +1222,12 @@ fn write_apply_journal(
     }
     if workspace
         .transaction
-        .atomic_create_regular(OsStr::new("journal.json"), &bytes, 0o600, crate::API_TEMP_PURPOSE)?
+        .atomic_create_regular(
+            OsStr::new("journal.json"),
+            &bytes,
+            0o600,
+            crate::API_TEMP_PURPOSE,
+        )?
         .is_none()
     {
         anyhow::bail!("project apply journal already exists");

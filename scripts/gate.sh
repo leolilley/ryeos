@@ -175,6 +175,12 @@ test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
 if [[ "$crash_qualification_only" != "1" ]]; then
+    # The Core reporter revisions are stdlib-only Python with their own
+    # unit tests; no cargo target runs them.
+    if [[ "$skip_tests" != "1" ]]; then
+        gate_info "running Core reporter unit tests"
+        python3 -I -B "$ROOT/bundles/core/tests/reporter/test_reporter.py"
+    fi
     workspace_args=()
     if [[ ${#selected_packages[@]} -eq 0 && "$explicit_workspace" == 0 ]]; then
         workspace_args=(--workspace)
@@ -245,4 +251,28 @@ if [[ "$refresh_bundles" == "1" \
     mv -- "$handoff_report_candidate" "$handoff_report"
     trap - EXIT
     gate_info "retained explicit handoff qualification report: $handoff_report"
+
+    gate_info "qualifying project schedule deploy crash cuts"
+    "$CARGO" nextest run -p ryeosd \
+        --features "$crash_qualification_features" \
+        --test project_schedule_deploy_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1
+
+    # The offline reset runs in the CLI process, so the CLI beside ryeosd must
+    # carry the selected scheduler participant and its reset crash cuts. It is
+    # built into its own target directory so the normal CLI beside ryeosd is
+    # not replaced, and the test is pointed at it explicitly.
+    gate_info "building the crash-qualification ryeos CLI for scheduler reset cuts"
+    cli_jobs_args=()
+    [[ "$build_jobs" != "0" ]] && cli_jobs_args=(-j "$build_jobs")
+    crash_cli_target="$ROOT/target/crash-qualification"
+    "$CARGO" build -p ryeos-cli \
+        --target-dir "$crash_cli_target" \
+        --features scheduling,model-provider-setup,ryeos-scheduler-service/crash-qualification-test-support \
+        "${cli_jobs_args[@]}"
+    gate_info "qualifying scheduler execution-history reset crash cuts"
+    RYEOS_TEST_CLI_BINARY="$crash_cli_target/debug/ryeos" "$CARGO" nextest run -p ryeosd \
+        --features "$crash_qualification_features" \
+        --test execution_history_reset_scheduler_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1
 fi

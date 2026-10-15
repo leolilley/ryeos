@@ -3691,6 +3691,31 @@ async fn run(
                 },
             )?;
 
+            // The installed composition, not the build, decides whether this
+            // node runs the scheduler. Without it no scheduler state is opened
+            // or created and every consumer observes an absent scheduler.
+            // A build that cannot run a selected scheduler refuses.
+            let scheduler_selected = ryeos_api::scheduler_selection::resolve_scheduler_selection(
+                &engine,
+                cfg!(feature = "scheduling"),
+            )
+            .context("derive scheduler selection from the installed composition")?;
+            startup.select_scheduler(scheduler_selected)?;
+            tracing::info!(scheduler_selected, "scheduler selection from installed composition");
+            // Enabled maintenance schedules need the scheduler. Refuse such a
+            // node here, before startup recovery mutates any state.
+            if !scheduler_selected
+                && node_policy_snapshot
+                    .require::<ryeos_scheduler_contract::NodeMaintenancePolicy>()?
+                    .schedules
+                    .iter()
+                    .any(|schedule| schedule.initial_enabled)
+            {
+                anyhow::bail!(
+                    "this node policy requires scheduled maintenance, but the selected daemon composition has no scheduler service"
+                );
+            }
+
             // Build UI state (browser sessions + session bus).
             let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
             let ui_state_for_hints = ui_state.clone();
@@ -3811,7 +3836,7 @@ async fn run(
             // removal consults scheduler pins and before active-thread recovery
             // can observe scheduler rows.
             #[cfg(feature = "scheduling")]
-            let (scheduler_db, scheduler_runtime_gate, scheduler_service) = {
+            let scheduler_runtime = if scheduler_selected {
                 startup.phase(
                     ryeos_node::StartupPhase::RecoveringSchedulerProjection,
                     "recovering scheduler fire projection",
@@ -3898,7 +3923,9 @@ async fn run(
                 }
                 drop(scheduler_startup_guard);
                 tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
-                (scheduler_db, scheduler_runtime_gate, scheduler_service)
+                Some((scheduler_db, scheduler_runtime_gate, scheduler_service))
+            } else {
+                None
             };
 
             let events = Arc::new(EventStoreService::new(state_store.clone()));
@@ -4076,7 +4103,9 @@ async fn run(
                 extensions: {
                     let mut ext = ryeos_app::extension_state::ExtensionState::new();
                     #[cfg(feature = "scheduling")]
-                    ext.insert(scheduler_service.clone());
+                    if let Some((_, _, scheduler_service)) = &scheduler_runtime {
+                        ext.insert(scheduler_service.clone());
+                    }
                     ext.insert(Arc::new(
                         ryeos_api::project_deploy::ProjectScheduleRecoveryOwners::default(),
                     ));
@@ -4170,8 +4199,10 @@ async fn run(
                 qualification_workspace_custody: Arc::new(Default::default()),
             };
             #[cfg(feature = "scheduling")]
-            app_state.install_scheduler_participant(scheduler_service.clone()
-                as Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>)?;
+            if let Some((_, _, scheduler_service)) = &scheduler_runtime {
+                app_state.install_scheduler_participant(scheduler_service.clone()
+                    as Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>)?;
+            }
             // Move the completed AppState under outer custody before the
             // fallible generation arm and recovery sequence. This preserves
             // the exact pool allocation installed above.
@@ -4252,20 +4283,32 @@ async fn run(
                 ryeos_node::StartupPhase::ReplayingHeadChanges,
                 "finishing interrupted terminal-history removals",
             )?;
-            #[cfg(not(feature = "scheduling"))]
-            let scheduler_absence = require_absent_scheduler_history(&config.app_root)?;
+            // A composition without the scheduler may clean terminal history
+            // only while its namespaces keep proving no scheduler history.
+            let scheduler_absence = if scheduler_selected {
+                None
+            } else {
+                Some(require_absent_scheduler_history(&config.app_root)?)
+            };
             #[cfg(feature = "scheduling")]
-            let _startup_retention_guard = scheduler_runtime_gate.clone().write_owned().await;
+            let _startup_retention_guard = match &scheduler_runtime {
+                Some((_, scheduler_runtime_gate, _)) => {
+                    Some(scheduler_runtime_gate.clone().write_owned().await)
+                }
+                None => None,
+            };
             let cleanup_store = app_state.state_store.clone();
             #[cfg(feature = "scheduling")]
-            let cleanup_scheduler = scheduler_db.clone();
+            let cleanup_scheduler = scheduler_runtime
+                .as_ref()
+                .map(|(scheduler_db, _, _)| scheduler_db.clone());
             let recovered_removals = tokio::task::spawn_blocking(move || {
                 let recovered = cleanup_store.recover_pending_terminal_chain_removals(
                     &lillux::time::iso8601_now(),
                     false,
                     |thread_ids| {
                         #[cfg(feature = "scheduling")]
-                        {
+                        if let Some(cleanup_scheduler) = &cleanup_scheduler {
                             let mut pins = 0_u64;
                             for thread_id in thread_ids {
                                 if cleanup_scheduler.find_fire_by_thread(thread_id)?.is_some() {
@@ -4274,18 +4317,19 @@ async fn run(
                                     })?;
                                 }
                             }
-                            Ok(pins)
+                            return Ok(pins);
                         }
-                        #[cfg(not(feature = "scheduling"))]
-                        {
-                            let _ = thread_ids;
-                            scheduler_absence.verify_absent()?;
-                            Ok(0)
-                        }
+                        let _ = thread_ids;
+                        scheduler_absence
+                            .as_ref()
+                            .context("scheduler-free cleanup lost its absence proof")?
+                            .verify_absent()?;
+                        Ok(0)
                     },
                 )?;
-                #[cfg(not(feature = "scheduling"))]
-                scheduler_absence.verify_absent()?;
+                if let Some(scheduler_absence) = &scheduler_absence {
+                    scheduler_absence.verify_absent()?;
+                }
                 Ok::<_, anyhow::Error>(recovered)
             })
             .await
@@ -4407,11 +4451,14 @@ async fn run(
             // Scheduler reload channel — must be created BEFORE the router is built
             // so that HTTP handler clones of AppState carry the sender.
             #[cfg(feature = "scheduling")]
-            let scheduler_reload_rx = {
-                let (scheduler_reload_tx, scheduler_reload_rx) =
-                    tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
-                scheduler_service.install_reload_sender(scheduler_reload_tx)?;
-                scheduler_reload_rx
+            let scheduler_reload_rx = match &scheduler_runtime {
+                Some((_, _, scheduler_service)) => {
+                    let (scheduler_reload_tx, scheduler_reload_rx) =
+                        tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+                    scheduler_service.install_reload_sender(scheduler_reload_tx)?;
+                    Some(scheduler_reload_rx)
+                }
+                None => None,
             };
 
             // Auth is per-route via the dispatcher's auth_invoker chain.
@@ -4438,7 +4485,9 @@ async fn run(
             // application publication and recovery enqueue. Timer/recovery tasks may be
             // spawned below, but cannot claim a fire until Ready releases this guard.
             #[cfg(feature = "scheduling")]
-            let (scheduler_ctx, scheduler_reconcile_guard, scheduler_intents) = {
+            let scheduler_reconciled = if let Some((_, scheduler_runtime_gate, scheduler_service)) =
+                &scheduler_runtime
+            {
                 startup.phase(
                     ryeos_node::StartupPhase::ReconcilingScheduler,
                     "reconciling scheduler state",
@@ -4455,20 +4504,15 @@ async fn run(
                     tracing::info!("startup shutdown requested after scheduler reconciliation");
                     return Ok(());
                 }
-                (scheduler_ctx, scheduler_reconcile_guard, scheduler_intents)
+                Some((scheduler_ctx, scheduler_reconcile_guard, scheduler_intents))
+            } else {
+                None
             };
-            #[cfg(not(feature = "scheduling"))]
-            if app_state
-                .node_policy
-                .require::<ryeos_scheduler_contract::NodeMaintenancePolicy>()?
-                .schedules
-                .iter()
-                .any(|schedule| schedule.initial_enabled)
-            {
-                anyhow::bail!(
-                    "this node policy requires scheduled maintenance, but the selected daemon composition has no scheduler service"
-                );
-            }
+            #[cfg(feature = "scheduling")]
+            let (scheduler_ctx, scheduler_reconcile_guard, scheduler_intents) = match scheduler_reconciled {
+                Some((ctx, guard, intents)) => (Some(ctx), Some(guard), intents),
+                None => (None, None, Vec::new()),
+            };
 
             // Publish callback-capable application state while external admission is
             // still closed. UDS runtime callbacks from recovered work can now succeed;
@@ -4552,10 +4596,15 @@ async fn run(
             #[cfg(feature = "scheduling")]
             for intent in scheduler_intents {
                 let fire_id = intent.fire_id.clone();
+                let (Some(scheduler_ctx), Some(scheduler_reconcile_guard)) =
+                    (&scheduler_ctx, &scheduler_reconcile_guard)
+                else {
+                    anyhow::bail!("scheduler recovery fire {fire_id} has no selected scheduler");
+                };
                 let outcome = scheduler::timer::dispatch_recovery_fire_under_startup_guard(
                     scheduler_ctx.clone(),
                     intent,
-                    &scheduler_reconcile_guard,
+                    scheduler_reconcile_guard,
                 )
                 .await
                 .with_context(|| format!("durably enqueue recovered scheduler fire {fire_id}"))?;
@@ -4604,15 +4653,21 @@ async fn run(
             // The ordinary timer does not exist until Ready is published, so
             // no timer fire can race the final internal-gate release boundary.
             #[cfg(feature = "scheduling")]
-            let scheduler_task = Some(tokio::spawn(scheduler::timer::run(
-                scheduler_ctx,
-                scheduler_reload_rx,
-                shutdown_signal(),
-            )));
+            let scheduler_task = match (scheduler_ctx, scheduler_reload_rx) {
+                (Some(scheduler_ctx), Some(scheduler_reload_rx)) => {
+                    let task = tokio::spawn(scheduler::timer::run(
+                        scheduler_ctx,
+                        scheduler_reload_rx,
+                        shutdown_signal(),
+                    ));
+                    tracing::info!("scheduler: timer loop started after readiness publication");
+                    Some(task)
+                }
+                (None, None) => None,
+                _ => anyhow::bail!("scheduler context and reload channel disagree on selection"),
+            };
             #[cfg(not(feature = "scheduling"))]
             let scheduler_task = None;
-            #[cfg(feature = "scheduling")]
-            tracing::info!("scheduler: timer loop started after readiness publication");
 
             let result = supervise_background_tasks(
                 app_state.clone(),
@@ -5882,18 +5937,16 @@ async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) 
     }
 }
 
-/// A scheduler-free daemon may perform terminal-history cleanup only while the
-/// pinned runtime and node namespaces continue to prove no scheduler DB, fire
-/// history, or signed schedule source exists. The process StateLock is also
-/// retained across startup recovery.
-#[cfg(not(feature = "scheduling"))]
+/// A daemon whose composition does not select the scheduler may perform
+/// terminal-history cleanup only while the pinned runtime and node namespaces
+/// continue to prove no scheduler DB, fire history, or signed schedule source
+/// exists. The process StateLock is also retained across startup recovery.
 struct SchedulerFreeStartupAbsence {
     runtime: lillux::PinnedDirectory,
     node: Option<lillux::PinnedDirectory>,
     node_path: std::path::PathBuf,
 }
 
-#[cfg(not(feature = "scheduling"))]
 fn require_absent_scheduler_history(
     app_root: &std::path::Path,
 ) -> Result<SchedulerFreeStartupAbsence> {
@@ -5911,7 +5964,6 @@ fn require_absent_scheduler_history(
     Ok(guard)
 }
 
-#[cfg(not(feature = "scheduling"))]
 impl SchedulerFreeStartupAbsence {
     fn verify_absent(&self) -> Result<()> {
         self.runtime.ensure_path_binding()?;
@@ -5922,20 +5974,15 @@ impl SchedulerFreeStartupAbsence {
                 );
             };
             if name.starts_with("scheduler") || name == "schedules" {
-                anyhow::bail!("scheduler history requires the selected scheduler composition");
+                anyhow::bail!(
+                    "scheduler history requires the selected scheduler composition; {}",
+                    ryeos_app::execution_history_reset::SCHEDULER_STATE_REMEDY
+                );
             }
         }
         if let Some(node) = self.node.as_ref() {
             node.ensure_path_binding()?;
-            if node
-                .entry_names()?
-                .iter()
-                .any(|name| name == std::ffi::OsStr::new("schedules"))
-            {
-                anyhow::bail!(
-                    "signed scheduler sources require the selected scheduler composition"
-                );
-            }
+            ryeos_app::execution_history_reset::require_no_signed_schedule_sources(node)?;
         } else if lillux::PinnedDirectory::open(&self.node_path)?.is_some() {
             anyhow::bail!("node configuration appeared during scheduler-free startup");
         }
@@ -5943,7 +5990,7 @@ impl SchedulerFreeStartupAbsence {
     }
 }
 
-#[cfg(all(test, not(feature = "scheduling")))]
+#[cfg(test)]
 mod scheduler_free_startup_tests {
     use super::*;
 
@@ -5956,7 +6003,7 @@ mod scheduler_free_startup_tests {
     }
 
     #[test]
-    fn scheduler_free_startup_accepts_only_empty_scheduler_namespaces() {
+    fn scheduler_free_startup_accepts_only_scheduler_free_namespaces() {
         let root = tempfile::tempdir().unwrap();
         let (runtime, node) = make_state_dirs(root.path());
         let guard = require_absent_scheduler_history(root.path()).unwrap();
@@ -5966,8 +6013,18 @@ mod scheduler_free_startup_tests {
         assert!(guard.verify_absent().is_err());
         std::fs::remove_file(runtime.join("scheduler.sqlite3")).unwrap();
 
+        // An empty schedules directory carries no schedule source.
         std::fs::create_dir(node.join("schedules")).unwrap();
-        assert!(guard.verify_absent().is_err());
+        guard.verify_absent().unwrap();
+
+        let source = node.join("schedules").join("maintenance-gc.yaml");
+        std::fs::write(&source, b"signed schedule").unwrap();
+        let refusal = guard.verify_absent().unwrap_err().to_string();
+        assert!(
+            refusal.contains(ryeos_app::execution_history_reset::SCHEDULER_STATE_REMEDY),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"signed schedule");
     }
 
     #[test]
@@ -7354,6 +7411,16 @@ async fn run_service_standalone(
     let standalone_state_access = ryeos_app::service_registry::extract_standalone_state_access(
         &service_verified.resolved.metadata.extra,
     )?;
+    // The installed composition decides whether this stopped node has a
+    // scheduler store to consult; a node without it never opens or creates one.
+    // A build that cannot run a selected scheduler refuses.
+    let standalone_scheduler_selected = ryeos_api::scheduler_selection::resolve_scheduler_selection(
+        &engine,
+        cfg!(feature = "scheduling"),
+    )
+    .context("derive scheduler selection from the installed composition")?;
+    #[cfg(not(feature = "scheduling"))]
+    let _ = standalone_scheduler_selected;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
@@ -7635,13 +7702,17 @@ async fn run_service_standalone(
         qualification_workspace_custody: Arc::new(Default::default()),
     };
     // A projection rebuild recovers pending terminal-chain removals against
-    // scheduler fire pins. The stopped node has no scheduler service, so the
-    // rebuild opens the scheduler store on the same host as its Store and
-    // installs that owner as the lifecycle's scheduler participant; it is
-    // settled into the host's census after the service, before the Store.
+    // scheduler fire pins. The stopped node has no scheduler service, so when
+    // its composition selects the scheduler the rebuild opens the scheduler
+    // store on the same host as its Store and installs that owner as the
+    // lifecycle's scheduler participant; it is settled into the host's census
+    // after the service, before the Store. A composition without the
+    // scheduler installs no participant.
     #[cfg(feature = "scheduling")]
     let standalone_scheduler = match standalone_state_access {
-        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+            if standalone_scheduler_selected =>
+        {
             let host = standalone_native.as_ref().context("standalone native host absent")?;
             let (runtime, _namespace) = standalone_namespace
                 .as_ref()
@@ -7682,7 +7753,8 @@ async fn run_service_standalone(
             }
             Some(scheduler)
         }
-        ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting
+        ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild
+        | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting
         | ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
     };
 

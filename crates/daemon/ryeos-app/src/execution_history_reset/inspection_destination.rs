@@ -63,12 +63,17 @@ impl OriginalInspectionPlan {
             self == &Self::original(self.mode, self.scheduler_selected, prior, sources),
             "inspection accounting plan differs from original mode/selection/ancestor"
         );
-        if !self.scheduler_selected
-            || matches!(self.accounting[1], InspectionAccountingRequirement::Absent)
-        {
+        let scheduler_sources_absent = sources[1].roles.iter().all(Option::is_none);
+        if !self.scheduler_selected {
             ensure!(
-                sources[1].roles.iter().all(Option::is_none),
-                "unselected/absent scheduler retains original source roles"
+                scheduler_sources_absent,
+                "unselected scheduler retains original source roles; scheduler history requires its selected reset participant; {}",
+                super::SCHEDULER_STATE_REMEDY
+            );
+        } else if matches!(self.accounting[1], InspectionAccountingRequirement::Absent) {
+            ensure!(
+                scheduler_sources_absent,
+                "absent scheduler retains original source roles"
             );
         }
         Ok(())
@@ -122,6 +127,7 @@ mod controls {
             }
             .into(),
             roles: std::array::from_fn(|_| None),
+            orphan_sidecars_recoverable: false,
         });
         let plans = destination_plans(&operation);
         validate_destinations(&plans, &operation, &sources).unwrap();

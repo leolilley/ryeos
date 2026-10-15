@@ -5,6 +5,12 @@ edition = "2024"
 description = "Selected scheduler service ownership and App lifecycle adapters"
 license.workspace = true
 
+[features]
+default = []
+# Exact process-kill qualification for scheduler execution-history reset
+# stage transitions. The cut selector does not exist in production builds.
+crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
+
 [dependencies]
 ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
