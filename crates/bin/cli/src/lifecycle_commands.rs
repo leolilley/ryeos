@@ -2322,6 +2322,7 @@ fn inspect_capability_report(
                 "daemon_digest": signed.report.daemon_digest,
                 "exposure": signed.report.exposure,
                 "app_root_storage": app_root_storage_json(&signed.report),
+                "credential_home": signed.report.credential_home,
                 "floor": signed.report.floor,
                 "provided": signed.report.provided,
                 "missing": signed.report.missing,
@@ -2394,6 +2395,22 @@ fn app_root_storage_line(report: &ryeos_node::capability_report::NodeCapabilityR
     }
 }
 
+/// One line for a named report entry: the grade, provider and basis that
+/// prove it, or the reason nothing does.
+fn decision_line(
+    report: &ryeos_node::capability_report::NodeCapabilityReport,
+    name: &str,
+) -> (String, crate::tty::Tone) {
+    match (report.provided.get(name), report.missing.get(name)) {
+        (Some(evidence), _) => (
+            format!("{name} ({} by {}): {}", evidence.source.as_str(), evidence.provider, evidence.basis),
+            crate::tty::Tone::Secondary,
+        ),
+        (None, Some(reason)) => (format!("{name} missing: {reason}"), crate::tty::Tone::Warning),
+        (None, None) => (format!("{name} not decided"), crate::tty::Tone::Warning),
+    }
+}
+
 fn lillux_resident_quote() -> Option<u64> {
     ryeos_node::capability_report::resident_region_bytes().ok()
 }
@@ -2431,6 +2448,13 @@ fn capability_section(
     section.rows.push(crate::tty::Row::key_value("daemon binary", &report.daemon_digest));
     let (storage, storage_tone) = app_root_storage_line(report);
     section.rows.push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    for (key, name) in [
+        ("durable state", lillux::process_control::PERSISTENCE_DURABLE_STATE),
+        ("credential home", ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME),
+    ] {
+        let (text, tone) = decision_line(report, name);
+        section.rows.push(crate::tty::Row::key_value(key, &text).with_tone(tone));
+    }
     let exposure = &report.exposure;
     section.rows.push(crate::tty::Row::key_value(
         "listeners",
@@ -3150,6 +3174,10 @@ mod tests {
             STORAGE_DURABLE_ROOT.to_owned(),
             "the app root /data/app is on overlay (the container's writable layer)".to_owned(),
         );
+        missing.insert(
+            lillux::process_control::PERSISTENCE_DURABLE_STATE.to_owned(),
+            "no persistent disk; 24 h hard lifetime (fixture)".to_owned(),
+        );
         let report = NodeCapabilityReport {
             schema: ryeos_node::capability_report::CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: "fixture".to_owned(),
@@ -3191,9 +3219,15 @@ mod tests {
             signature: String::new(),
         };
         let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "host class"), "hosted");
         assert_eq!(row(&section, "compiled features"), "model-provider-setup, scheduling");
         assert_eq!(row(&section, "daemon binary"), "sha256:abc");
         assert!(row(&section, "app root storage").starts_with("not durable: the app root /data/app is on overlay"));
+        assert_eq!(
+            row(&section, "durable state"),
+            "persistence:durable_state missing: no persistent disk; 24 h hard lifetime (fixture)"
+        );
+        assert_eq!(row(&section, "credential home"), "credential:private_home not decided");
         assert_eq!(row(&section, "listeners"), "[::]:8080");
         assert_eq!(row(&section, "ingress"), "unattested: no provider attests what fronts this listener");
         let json = app_root_storage_json(&report);

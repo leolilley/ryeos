@@ -33,12 +33,15 @@ mod scope;
 pub(crate) use scope::SelectedScopePreparation;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
-    CgroupLimit, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities, HostFacts,
-    ISOLATION_NAMESPACES, MemlockFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
+    CgroupLimit, DirectoryStepFacts, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities, HostFacts,
+    HostLifetimeBound, ISOLATION_NAMESPACES, MAX_CAPABILITY_ENTRIES, MAX_CAPABILITY_NAME_BYTES,
+    MAX_CAPABILITY_TEXT_BYTES, MemlockFacts, PERSISTENCE_DURABLE_STATE, PrivateDirectoryFacts,
+    ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
     RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED,
     RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts,
     STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, SCOPE_LIMITS,
-    admit_enclosure_inits, current_host_generation, decide_durable_root, floor_entry_refusal,
+    admit_enclosure_inits, current_host_generation, decide_durable_root, decide_durable_state,
+    decide_private_directory, floor_entry_refusal,
     is_scope_capability, is_weaker_grade, met_by_strongest, satisfies,
 };
 pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
