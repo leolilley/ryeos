@@ -497,6 +497,18 @@ pub struct ComposeReport {
 /// Compose, sign with the node identity, verify the exact bytes the loader
 /// will read, and publish atomically.
 pub fn compose_external_execution_binding(request: ComposeRequest<'_>) -> Result<ComposeReport> {
+    compose_with_resolver(request, resolve_installed_artifacts)
+}
+
+/// The composition itself, parameterised on how the installed artifacts are
+/// resolved so a test can supply registries without a bundle on disk. The
+/// resolver runs at the same point of the sequence as the bundle read.
+pub(crate) fn compose_with_resolver(
+    request: ComposeRequest<'_>,
+    resolve: impl FnOnce(
+        &Path,
+    ) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts>,
+) -> Result<ComposeReport> {
     request.state_lock.ensure_protects_app_root(request.app_root)?;
     validate_binding_id(&request.id)?;
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(
@@ -515,7 +527,7 @@ pub fn compose_external_execution_binding(request: ComposeRequest<'_>) -> Result
                 .context("invalid runtime qualification")
         })
         .transpose()?;
-    let resolved = resolve_installed_artifacts(request.app_root)?;
+    let resolved = resolve(request.app_root)?;
     let artifacts = bundle_artifact_facts(
         &resolved,
         &request.program.requirement.provider_declaration_id,
@@ -943,7 +955,10 @@ const KEY_A_BODY: &str = concat!(
             runtime_qualification: None,
             limits: ComposeLimits::default(),
         }));
-        assert!(!format!("{error:#}").is_empty());
+        assert!(
+            format!("{error:#}").contains("load installed bundle registrations"),
+            "{error:#}"
+        );
         assert!(!root.path().join(".ai/node/external_execution/operator.yaml").exists());
     }
 
@@ -1076,5 +1091,289 @@ const KEY_A_BODY: &str = concat!(
         assert_eq!(limits.max_active, 3);
         assert_eq!(limits.timeout_seconds, ComposeLimits::default().timeout_seconds);
         assert!(serde_json::from_value::<ComposeLimits>(serde_json::json!({"max_actve": 3})).is_err());
+    }
+
+    use crate::external_placement::compose_test_support as installed;
+
+    const PROVIDER_ID: &str = "codex-hosted";
+    const BINDING_ID: &str = "operator";
+    const SETTINGS_SCHEMA: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    /// A stopped node with an identity, a vault key pair, the state lock and
+    /// real connector and configuration-adapter executables.
+    struct StoppedNode {
+        root: tempfile::TempDir,
+        lock: ryeos_node_runtime::state_lock::StateLock,
+        connector: PathBuf,
+        adapter: PathBuf,
+    }
+
+    fn stopped_node() -> StoppedNode {
+        let root = tempfile::tempdir().unwrap();
+        let _identity = identity_in(root.path());
+        let key = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(
+            &ryeos_vault::paths::default_vault_secret_key_path(root.path()),
+            &key,
+        )
+        .unwrap();
+        lillux::vault::write_public_key(
+            &ryeos_vault::paths::default_vault_public_key_path(root.path()),
+            &key.public_key(),
+        )
+        .unwrap();
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
+        )
+        .unwrap();
+        let connector = root.path().join("connector");
+        installed::write_executable(&connector, b"connector executable bytes");
+        let adapter = root.path().join("configuration-adapter");
+        installed::write_executable(&adapter, b"configuration adapter executable bytes");
+        StoppedNode { root, lock, connector, adapter }
+    }
+
+    fn provider_declaration(id: &str) -> ryeos_external_execution_contract::ExternalProviderDeclaration {
+        ryeos_external_execution_contract::ExternalProviderDeclaration {
+            id: id.to_owned(),
+            protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
+            connector: "provider-connector".to_owned(),
+            connector_process_group:
+                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+            configuration_adapter: "provider-configuration".to_owned(),
+            configuration_destination: "environments.toml".to_owned(),
+            qualification_request_binding_protocol: None,
+        }
+    }
+
+    fn lifecycle(artifact: &str) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
+        installed::CoordinateOnlyBackend::new(
+            RENDER_BACKEND_ID,
+            artifact,
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+        )
+    }
+
+    /// Registries holding `provider` over the node's executables, and the
+    /// given lifecycle generations.
+    fn installed_artifacts(
+        node: &StoppedNode,
+        provider: Option<&str>,
+        backends: Vec<std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend>>,
+    ) -> crate::external_artifacts::ResolvedExternalExecutionArtifacts {
+        let mut provider_connector_hashes = std::collections::BTreeMap::new();
+        let mut configurations = Vec::new();
+        if let Some(provider) = provider {
+            let (connector_hash, _) = installed::connector_coordinate(&node.connector);
+            provider_connector_hashes.insert(provider.to_owned(), connector_hash);
+            configurations.push(
+                installed::provider_configuration(provider_declaration(provider), &node.adapter)
+                    .unwrap(),
+            );
+        }
+        crate::external_artifacts::ResolvedExternalExecutionArtifacts {
+            provider_connector_hashes,
+            connectors: installed::connector_registry(
+                provider.map(|_| node.connector.clone()),
+            )
+            .unwrap(),
+            provider_configurations:
+                crate::external_placement::ExternalProviderConfigurationRegistry::from_artifacts(
+                    configurations,
+                )
+                .unwrap(),
+            placement_backends:
+                crate::external_placement::ExternalPlacementBackendRegistry::from_backends(backends)
+                    .unwrap(),
+        }
+    }
+
+    fn compose_request<'a>(node: &'a StoppedNode, backend: &str) -> ComposeRequest<'a> {
+        ComposeRequest {
+            app_root: node.root.path(),
+            state_lock: &node.lock,
+            id: BINDING_ID.into(),
+            backend: backend.into(),
+            program: program(),
+            transport: https(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            settings: serde_json::json!({}),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            limits: ComposeLimits::default(),
+        }
+    }
+
+    fn binding_path(node: &StoppedNode) -> PathBuf {
+        node.root.path().join(".ai/node/external_execution/operator.yaml")
+    }
+
+    #[test]
+    fn composed_binding_takes_its_artifact_facts_from_the_installed_registries() {
+        let node = stopped_node();
+        let resolved = installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+
+        assert_eq!(report.id, BINDING_ID);
+        assert_eq!(report.backend, RENDER_BACKEND_ID);
+        assert_eq!(report.path, binding_path(&node));
+        let published = lillux::secure_fs::open_pinned_regular_file_no_follow(&report.path).unwrap();
+        assert_eq!(published.observation().unwrap().permission_mode().unwrap(), 0o600);
+
+        // The published bytes load back through the loader's own admission
+        // under the node identity.
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        loaded.retained_generation().unwrap();
+        assert_eq!(loaded.digest, report.binding_digest);
+        assert_eq!(loaded.capacity_owner, report.capacity_owner);
+        assert_eq!(loaded.document.credential_generation, report.credential_generation);
+        assert_eq!(loaded.document.settings_digest, report.settings_digest);
+
+        let document = &loaded.document;
+        assert_eq!(document.settings_schema_digest, SETTINGS_SCHEMA);
+        assert_eq!(document.backend_artifact_hash, "d".repeat(64));
+        assert_eq!(document.backend_artifact_bytes, 4096);
+        assert_eq!(document.supervisor_artifact_hash, "1".repeat(64));
+        assert_eq!(document.supervisor_artifact_bytes, 8192);
+        assert_eq!(document.launcher_artifact_hash, "e".repeat(64));
+        assert_eq!(document.launcher_artifact_bytes, 12288);
+        let (connector_hash, connector_bytes) = installed::connector_coordinate(&node.connector);
+        let (adapter_hash, adapter_bytes) = installed::provider_configuration_coordinate(&node.adapter);
+        let session = document.workload.structured_session().unwrap();
+        assert_eq!(session.connector_artifact_hash, connector_hash);
+        assert_eq!(session.connector_artifact_bytes, connector_bytes);
+        assert_eq!(session.configuration_adapter_artifact_hash, adapter_hash);
+        assert_eq!(session.configuration_adapter_artifact_bytes, adapter_bytes);
+    }
+
+    #[test]
+    fn composing_for_an_uninstalled_provider_publishes_nothing() {
+        let node = stopped_node();
+        let resolved = installed_artifacts(&node, Some("another-provider"), vec![lifecycle(&"d".repeat(64))]);
+        let error = refusal(compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}").contains("external provider declaration is not installed"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn composing_for_an_uninstalled_backend_publishes_nothing() {
+        let node = stopped_node();
+        let resolved = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
+        let error = refusal(compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}")
+                .contains("external lifecycle backend `render-sandbox-early-access` is not installed"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn artifact_lookups_refuse_the_absent_and_ambiguous_cases() {
+        let node = stopped_node();
+        let facts_error = |resolved: &crate::external_artifacts::ResolvedExternalExecutionArtifacts| {
+            format!("{:#}", refusal(bundle_artifact_facts(resolved, PROVIDER_ID, RENDER_BACKEND_ID)))
+        };
+
+        // Two installed generations under one backend id are ambiguous.
+        let two_generations = installed_artifacts(
+            &node,
+            Some(PROVIDER_ID),
+            vec![lifecycle(&"d".repeat(64)), lifecycle(&"a".repeat(64))],
+        );
+        assert!(
+            facts_error(&two_generations)
+                .contains("has more than one installed generation"),
+            "ambiguous lifecycle generation"
+        );
+
+        // A provider with no installed adapter, or with no connector
+        // declared for it, or whose connector is not installed.
+        let mut resolved = installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        resolved.provider_connector_hashes.clear();
+        assert!(
+            facts_error(&resolved).contains("names no installed connector"),
+            "provider without a declared connector"
+        );
+        resolved
+            .provider_connector_hashes
+            .insert(PROVIDER_ID.to_owned(), "9".repeat(64));
+        assert!(
+            facts_error(&resolved).contains("installed external candidate connector is absent"),
+            "connector absent"
+        );
+        let no_provider = installed_artifacts(&node, None, vec![lifecycle(&"d".repeat(64))]);
+        assert!(
+            facts_error(&no_provider).contains("external provider declaration is not installed"),
+            "provider absent"
+        );
+        let no_backend = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
+        assert!(
+            facts_error(&no_backend).contains("is not installed"),
+            "backend absent"
+        );
+    }
+
+    #[test]
+    fn duplicate_provider_and_connector_identities_cannot_be_installed() {
+        // The registries refuse a duplicate at construction, so the
+        // ambiguous provider and connector lookups are unreachable from any
+        // installed set; this pins the refusals that guarantee it.
+        let node = stopped_node();
+        let twin = node.root.path().join("connector-twin");
+        installed::write_executable(&twin, b"connector executable bytes");
+        let error = installed::connector_registry([node.connector.clone(), twin]).unwrap_err();
+        assert!(error.to_string().contains("is duplicated"), "{error:#}");
+
+        let duplicate = crate::external_placement::ExternalProviderConfigurationRegistry::from_artifacts(vec![
+            installed::provider_configuration(provider_declaration(PROVIDER_ID), &node.adapter).unwrap(),
+            installed::provider_configuration(provider_declaration(PROVIDER_ID), &node.adapter).unwrap(),
+        ])
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("is duplicated"), "{duplicate:#}");
+    }
+
+    #[test]
+    fn a_composed_binding_provisions_a_credential_the_vault_returns() {
+        use crate::vault::{NodeVault as _, SealedEnvelopeVault};
+
+        let node = stopped_node();
+        let resolved = installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(compose_request(&node, "render"), |_| Ok(resolved)).unwrap();
+
+        let provisioned = super::super::provision::provision_installed_placement_credential(
+            node.root.path(),
+            BINDING_ID,
+            &zeroize::Zeroizing::new("provider-secret".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(provisioned.outcome, super::super::provision::ProvisionOutcome::Inserted);
+        assert_eq!(provisioned.owner, report.capacity_owner);
+        assert_eq!(provisioned.generation, report.credential_generation);
+        assert_eq!(provisioned.backend, report.backend);
+        assert_eq!(provisioned.account, report.account);
+
+        let access = crate::vault::placement::PlacementCredentialAccess::new(
+            &report.capacity_owner,
+            &report.credential_generation,
+            &report.backend,
+            &report.account,
+        )
+        .unwrap();
+        let vault = SealedEnvelopeVault::load(node.root.path()).unwrap();
+        let decoded = access.decode(vault.placement_credential(&access).unwrap()).unwrap();
+        assert_eq!(decoded.secret(), "provider-secret");
     }
 }

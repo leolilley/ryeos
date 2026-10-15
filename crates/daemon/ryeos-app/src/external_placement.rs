@@ -8038,6 +8038,9 @@ fn require_guest_package_artifact_floor_bytes(
 mod session_lease_tests;
 
 #[cfg(test)]
+pub(crate) mod compose_test_support;
+
+#[cfg(test)]
 mod channel_stream_admission_tests;
 
 #[cfg(test)]
