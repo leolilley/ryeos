@@ -132,6 +132,16 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
             graph = load_yaml(GRAPHS / f"{name}.yaml")
             self.assertIn(capability, graph["requires"]["capabilities"]["declared"], name)
 
+    def test_candidate_authority_classes_are_policy_data(self):
+        policy = load_yaml(ASSET / "config/bundle-release/candidate-authority.yaml")
+        classes = policy["candidate_authority"]["classes"]
+        self.assertTrue({"dev", "official"} <= set(classes))
+        self.assertEqual(classes["official"]["signers"], [])
+        kind = load_yaml(ASSET / "node/engine/kinds/release_candidate/release_candidate.kind-schema.yaml")
+        self.assertEqual(kind["location"]["directory"], "release-candidates")
+        manifest = load_yaml(ASSET / "manifest.yaml")
+        self.assertIn("release_candidate", manifest["provides_kinds"])
+
     def test_release_graphs_explicitly_hand_exact_selections_to_child_tools(self):
         expected = {
             "portable-build": ("portable-build", {"python"}),

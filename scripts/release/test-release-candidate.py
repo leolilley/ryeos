@@ -340,6 +340,75 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["authority"]["class"], "any-string-at-all")
 
+    def policy(self, official_signers=()):
+        body = (
+            "category: bundle-release\nversion: \"1.0.0\"\ndescription: test\n"
+            "candidate_authority:\n  schema: ryeos.release_candidate_authority.v1\n  classes:\n"
+            f"    dev:\n      signers: [\"{SIGNER_A}\"]\n"
+            f"    official:\n      signers: {json.dumps(list(official_signers))}\n"
+        )
+        return self.save(signed(body, SIGNER_B), "policy.yaml")
+
+    def verify(self, manifest_text, policy, signer=SIGNER_A):
+        manifest = self.save(signed(manifest_text, signer), "signed-manifest.yaml")
+        return self.run_tool(["verify", "--manifest", str(manifest),
+                              "--authority-policy", str(policy)])
+
+    def with_class(self, name, publisher):
+        args = self.build_args()
+        args[args.index("dev")] = name
+        args[args.index(PUBLISHER)] = publisher
+        result = self.run_tool(args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_signed_dev_manifest_verifies_against_policy_data(self):
+        result = self.verify(self.with_class("dev", SIGNER_A), self.policy())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["authority_class"], "dev")
+
+    def test_official_claim_signed_by_dev_key_is_refused(self):
+        result = self.verify(self.with_class("official", SIGNER_A), self.policy())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'official' may not be signed by", result.stderr)
+
+    def test_official_claim_accepted_only_when_policy_data_lists_the_signer(self):
+        result = self.verify(self.with_class("official", SIGNER_B),
+                             self.policy(official_signers=[SIGNER_B]), SIGNER_B)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unknown_class_and_foreign_publisher_are_refused(self):
+        result = self.verify(self.with_class("made-up", SIGNER_A), self.policy())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not defined", result.stderr)
+        result = self.verify(self.with_class("dev", PUBLISHER), self.policy())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("publisher fingerprint", result.stderr)
+
+    def test_unsigned_manifest_is_refused_by_verify(self):
+        manifest = self.save(self.with_class("dev", SIGNER_A), "unsigned.yaml")
+        result = self.run_tool(["verify", "--manifest", str(manifest),
+                                "--authority-policy", str(self.policy())])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsigned", result.stderr)
+
+    def test_signed_manifest_still_recomputes(self):
+        text = signed(self.build(), SIGNER_A)
+        code, report, _ = self.recompute(self.save(text, "item.yaml"))
+        self.assertEqual(code, 0)
+
+    def test_core_closure_is_computed_like_any_bundle(self):
+        core = self.tree / "core"
+        (core / ".ai").mkdir(parents=True)
+        (core / ".ai/manifest.yaml").write_text(signed("name: core\n"))
+        args = self.build_args()
+        args[args.index(BUNDLE)] = "core"
+        args = [a for a in args if a not in ("--interpreter", str(self.interp))]
+        result = self.run_tool(args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("substrate-owned", result.stderr)
+        self.assertIn("populated tree refused", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,15 +31,17 @@ def fail(message):
 
 
 def plan(repository_root, bundle, source_snapshot_hash, target, build_profile="release",
-         predecessor_generation_hash=None, ownership_config=None):
+         predecessor_generation_hash=None, ownership_config=None, allow_core=False):
     """Return the read-only input plan for one bundle generation.
 
     A caller that only needs payload ownership may pass no snapshot hash.
+    Core is refused for bundle-only publication unless the caller is
+    computing a closure over it (`allow_core`).
     """
     root = repository_root.resolve(strict=True)
     if not NAME.fullmatch(bundle):
         fail("bundle name is not canonical")
-    if bundle == "core":
+    if bundle == "core" and not allow_core:
         fail("core is substrate-owned and cannot use bundle-only publication")
     if source_snapshot_hash is not None and not HASH.fullmatch(source_snapshot_hash):
         fail("source snapshot hash must be a lowercase SHA-256 identity")

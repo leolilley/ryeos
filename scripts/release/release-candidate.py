@@ -21,9 +21,15 @@ The payload-ownership contract is read from the working tree at
 `--repository-root`, not from the source commit. `--source-commit` is
 recorded and compared but not verified against that tree.
 
-The manifest carries no signatures, timestamps or host paths. The authority
-class is plain data; whether a class is acceptable is decided elsewhere.
-The tool is read-only.
+The closure covers every bundle, Core included. The manifest is the body of a
+`release_candidate` signed item: `build` prints that body (one canonical-JSON
+line, which is also valid YAML) and the signer adds the envelope line. It
+carries no signatures, timestamps or host paths. The authority class is plain
+data; `verify` decides whether a signed manifest's class is acceptable from a
+trust/policy data file mapping each class to the signer fingerprints allowed
+to sign it, so no class name is known to this tool. `verify` checks the
+envelope claim, body hash and class/signer policy; the signature itself is
+checked by the ordinary signed-item path. The tool is read-only.
 """
 
 import argparse
@@ -39,6 +45,7 @@ sys.dont_write_bytecode = True
 
 CANDIDATE_SCHEMA = "ryeos.release_candidate.v1"
 REPORT_SCHEMA = "ryeos.release_closure_report.v1"
+AUTHORITY_SCHEMA = "ryeos.release_candidate_authority.v1"
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 ENVELOPE = re.compile(
@@ -125,7 +132,7 @@ def compute(repository_root, tree, bundle, triple, source_commit, interpreter,
     if not bundle_root.is_dir() or bundle_root.is_symlink():
         fail(f"{bundle}: missing or unsafe bundle root")
     plan = _plan.plan(repository_root, bundle, None, triple,
-                      ownership_config=ownership_config)
+                      ownership_config=ownership_config, allow_core=True)
     ownership = plan["payload_ownership_content_hash"]
     audit = _audit.audit_bundle(bundle_root)
     violations = [f"{bundle}/{item}" for item in audit["violations"]]
@@ -207,8 +214,25 @@ def _shape(condition, what):
         fail(f"malformed manifest: {what}")
 
 
+def split_envelope(text):
+    """Return (signer, claimed_hash, body); signer is None for an unsigned body."""
+    first, newline, rest = text.partition("\n")
+    if "ryeos:signed:" not in first:
+        return None, None, text
+    match = ENVELOPE.fullmatch(first)
+    if not match or not newline:
+        fail("malformed manifest: bad signature envelope")
+    claimed, signer = match.groups()
+    return signer, claimed, rest
+
+
 def load_manifest(path):
-    record = json.loads(Path(path).read_text())
+    return parse_manifest(Path(path).read_text())
+
+
+def parse_manifest(text):
+    _, _, body = split_envelope(text)
+    record = json.loads(body)
     _shape(isinstance(record, dict), "not an object")
     _shape(record.get("schema") == CANDIDATE_SCHEMA, "unknown schema")
     for key in ("digest", "bundle", "version"):
@@ -229,6 +253,50 @@ def load_manifest(path):
     if record["digest"] != digest_of(record):
         fail("manifest digest does not match its content")
     return record
+
+
+def load_authority_policy(path):
+    """Read the class -> allowed signer fingerprints data file."""
+    import yaml
+    signer, claimed, body = split_envelope(Path(path).read_text())
+    if signer is None:
+        fail("authority policy is unsigned")
+    if hashlib.sha256(body.encode()).hexdigest() != claimed:
+        fail("authority policy body does not match its signature envelope")
+    document = yaml.safe_load(body)
+    policy = document.get("candidate_authority") if isinstance(document, dict) else None
+    if not isinstance(policy, dict) or policy.get("schema") != AUTHORITY_SCHEMA:
+        fail("authority policy has an unknown schema")
+    classes = policy.get("classes")
+    if not isinstance(classes, dict):
+        fail("authority policy classes must be a mapping")
+    out = {}
+    for name, entry in classes.items():
+        signers = entry.get("signers") if isinstance(entry, dict) else None
+        if not isinstance(signers, list) or not all(
+                isinstance(s, str) and HASH.fullmatch(s) for s in signers):
+            fail(f"authority policy class {name}: signers must be SHA-256 identities")
+        out[name] = set(signers)
+    return out
+
+
+def verify_authority(text, policy):
+    """Refuse a signed manifest whose claimed class its signer may not sign."""
+    signer, claimed, body = split_envelope(text)
+    if signer is None:
+        fail("manifest is unsigned")
+    if hashlib.sha256(body.encode()).hexdigest() != claimed:
+        fail("manifest body does not match its signature envelope")
+    record = parse_manifest(text)
+    authority = record["authority"]
+    name = authority["class"]
+    if name not in policy:
+        fail(f"authority class {name!r} is not defined by the authority policy")
+    if signer not in policy[name]:
+        fail(f"authority class {name!r} may not be signed by {signer}")
+    if authority.get("publisher_fingerprint") != signer:
+        fail("manifest publisher fingerprint is not its signer")
+    return {"authority_class": name, "digest": record["digest"], "signer": signer}
 
 
 def flatten(value, prefix=""):
@@ -366,7 +434,15 @@ def main(argv=None):
     r.add_argument("--predecessor-manifest", type=Path)
     r.add_argument("--bundle-digest", action="append", default=[], metavar="NAME=SHA256",
                    help="digest of a required bundle as found now")
+    v = sub.add_parser("verify")
+    v.add_argument("--manifest", type=Path, required=True)
+    v.add_argument("--authority-policy", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "verify":
+        result = verify_authority(args.manifest.read_text(),
+                                  load_authority_policy(args.authority_policy))
+        sys.stdout.write(canonical(result) + "\n")
+        return 0
     root = args.repository_root.resolve(strict=True)
     tree = Path(os.path.abspath(args.tree))
     if args.command == "build":
