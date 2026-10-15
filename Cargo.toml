@@ -57,6 +57,7 @@ members = [
     "crates/host-adapters/lillux-oci-hook",
     "crates/host-adapters/remote-lease-core",
     "crates/host-adapters/render-sandbox-adapter",
+    "crates/host-adapters/modal-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/tools/ui-contract-exporter",

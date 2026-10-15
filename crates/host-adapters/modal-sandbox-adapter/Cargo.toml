@@ -1,0 +1,24 @@
+[package]
+name = "ryeos-modal-sandbox-lifecycle-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Modal sandbox lease lifecycle adapter over the signed RyeOS lease facade"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+lillux = { path = "../../kernel/lillux" }
+ryeos-external-execution-contract = { path = "../../engine/ryeos-external-execution-contract" }
+ryeos-http-transport = { path = "../../engine/ryeos-http-transport" }
+ryeos-remote-lease-core = { path = "../remote-lease-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = { workspace = true }
+url = "2"
+zeroize = "1"
+
+[[bin]]
+name = "ryeos-modal-sandbox-lifecycle-adapter"
+path = "src/main.rs"

@@ -3318,6 +3318,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-modal-sandbox-lifecycle-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution-contract",
+ "ryeos-http-transport",
+ "ryeos-remote-lease-core",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ryeos-node"
 version = "0.1.0"
 dependencies = [
