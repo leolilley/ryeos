@@ -326,6 +326,25 @@ fn publish_substrate_identity(app_root: &Path, identity: &SubstrateIdentity) -> 
         .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))
 }
 
+/// Record the node profile a policy-generation replacement selected in the
+/// initialized substrate identity, leaving every other field of the identity
+/// as recorded. A host class that disagrees with the recorded one is refused
+/// before this runs; the rewritten identity is validated as a whole, so the
+/// profile must still select the recorded host class.
+fn rebind_substrate_node_profile(app_root: &Path, node_profile: Option<&str>) -> Result<()> {
+    let recorded = load_substrate_identity_record(app_root)?;
+    if recorded.node_profile.as_deref() == node_profile {
+        return Ok(());
+    }
+    let mut rebound = recorded;
+    rebound.node_profile = node_profile.map(str::to_owned);
+    rebound.validate()?;
+    let path = substrate_identity_path(app_root);
+    let bytes = serde_json::to_vec_pretty(&rebound)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("rewrite substrate identity {}: {error}", path.display()))
+}
+
 fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> {
     let path = substrate_identity_path(app_root);
     let bytes = lillux::read_regular_file_bounded_no_follow(&path, 16 * 1024)
@@ -889,6 +908,15 @@ fn run_init_on_storage(
     // a crash anywhere below must leave startup refusing the incomplete
     // generation rather than accepting the preceding completion record.
     invalidate_init_completion(&opts.app_root)?;
+    // A replacement selects a new node profile; the identity this node
+    // records must name the profile its policy generation now follows. The
+    // completion record that binds the identity digest is already removed.
+    if opts.substrate_identity.is_none()
+        && opts.replace_node_policy_generation
+        && selected_node_policy_update.is_some()
+    {
+        rebind_substrate_node_profile(&opts.app_root, opts.node_profile.as_deref())?;
+    }
     let mut bundles_installed = Vec::new();
     for (index, name) in plan.install_order.iter().enumerate() {
         progress(
@@ -3115,6 +3143,46 @@ mod tests {
             fs::read(state.join(".ai/state/preserved-sentinel")).unwrap(),
             b"preserved"
         );
+    }
+
+    #[test]
+    fn explicit_policy_cut_records_each_selected_node_profile_in_the_substrate_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = InitOptions {
+            node_profile: Some("core".to_owned()),
+            ..make_opts(&state, &tmp.path().join("home"))
+        };
+        opts.substrate_identity = Some(
+            SubstrateIdentity::new(
+                format!("sha256:{}", "1".repeat(64)),
+                1,
+                Some("core".to_owned()),
+                Some("local".to_owned()),
+            )
+            .unwrap(),
+        );
+        run_init(&opts).expect("initial core generation");
+        let recorded = |state: &Path| {
+            load_substrate_identity_record(state).expect("recorded substrate identity")
+        };
+        let initial = recorded(&state);
+        assert_eq!(initial.node_profile.as_deref(), Some("core"));
+
+        for profile in ["core-scheduling", "core"] {
+            opts.node_profile = Some(profile.to_owned());
+            opts.substrate_identity = None;
+            opts.replace_node_policy_generation = true;
+            run_init(&opts).unwrap_or_else(|error| panic!("replace with {profile}: {error:#}"));
+            let identity = recorded(&state);
+            assert_eq!(identity.node_profile.as_deref(), Some(profile));
+            assert_eq!(identity.host_class, initial.host_class);
+            assert_eq!(identity.image_digest, initial.image_digest);
+        }
+
+        opts.host_class = Some("other".to_owned());
+        let refused = run_init(&opts).expect_err("a host-class change is refused");
+        assert!(format!("{refused:#}").contains("disagrees with the class"), "got: {refused:#}");
     }
 
     #[test]
