@@ -80,42 +80,11 @@ impl Drop for LiveStorePhysicalParent {
     }
 }
 
-/// Holds one owner across a stretch of fallible work. `into_inner` hands it
-/// back whole; a guard dropped while still holding it, as when a panic
-/// unwinds the stretch, retains the owner for the life of the process under
-/// its kind, where it is counted, instead of releasing or losing it.
-pub(super) struct RetainedUntilTaken<T: Send + 'static> {
-    kind: &'static str,
-    held: Option<T>,
-}
-impl<T: Send + 'static> RetainedUntilTaken<T> {
-    pub(super) fn new(kind: &'static str, owner: T) -> Self {
-        Self { kind, held: Some(owner) }
-    }
-    pub(super) fn into_inner(mut self) -> T {
-        self.held.take().expect("a retained owner leaves only through into_inner")
-    }
-}
-impl<T: Send + 'static> std::ops::Deref for RetainedUntilTaken<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        self.held.as_ref().expect("a retained owner is present until taken")
-    }
-}
-impl<T: Send + 'static> std::ops::DerefMut for RetainedUntilTaken<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.held.as_mut().expect("a retained owner is present until taken")
-    }
-}
-impl<T: Send + 'static> Drop for RetainedUntilTaken<T> {
-    fn drop(&mut self) {
-        // Still holding means the owner was never handed back: retain it
-        // whole. In a forked child `abandon` only relinquishes the copy,
-        // without allocating or locking.
-        if let Some(owner) = self.held.take() {
-            lillux::custody::abandon(self.kind, owner);
-        }
-    }
+/// Hands a held owner on whole. Every caller has already refused a foreign
+/// process before it holds anything, so a foreign copy reached here is
+/// relinquished and the process aborts.
+pub(super) fn take_held<T: Send + 'static>(held: lillux::custody::Held<T>) -> T {
+    held.take_or_abort()
 }
 
 /// Kinds under which an owner held across a fallible stretch is retained
@@ -829,18 +798,18 @@ impl LiveStateOpen {
         attempt.claimed = true;
         // No fallible operation occurs between claim and retained custody; an
         // unwind through issuance retains the claimed attempt, counted.
-        let mut attempt = RetainedUntilTaken::new(SCHEDULER_ADMISSION_UNWOUND_KIND, attempt);
+        let mut attempt = lillux::custody::Held::until_taken(SCHEDULER_ADMISSION_UNWOUND_KIND, attempt);
         let result = (|| -> Result<()> {
             let authority: Arc<dyn OriginalNativeDestinationAuthority> = self.clone();
             // SAFETY: same actual StateStore namespace, process, trusted node
             // and paid factory; only the fixed role is issued. Caller gates
             // still own scheduler selection, service mutation and shutdown.
-            attempt.inputs = Some(unsafe { OriginalNativeBoundInputs::issued(
+            attempt.get_mut().inputs = Some(unsafe { OriginalNativeBoundInputs::issued(
                 Arc::clone(&self.runtime), std::ffi::OsStr::new("scheduler.sqlite3"),
                 OriginalNativeBoundMode::OpenOrCreate, OriginalNativeDomain::NodeScheduler,
                 Arc::clone(&authority), None,
             ) }?);
-            attempt.reference = Some(unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
+            attempt.get_mut().reference = Some(unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
                 OriginalNativeDomain::NodeSchedulerSchemaReference, authority,
             ) }?);
             self.require_original(&self.factory)?;
@@ -850,10 +819,10 @@ impl LiveStateOpen {
         })();
         if let Err(error) = result {
             return Err(anyhow::Error::new(LiveSchedulerNativeAdmissionFailure {
-                error, custody: std::mem::ManuallyDrop::new(attempt.into_inner()),
+                error, custody: std::mem::ManuallyDrop::new(take_held(attempt)),
             }));
         }
-        let mut attempt = attempt.into_inner();
+        let mut attempt = take_held(attempt);
         Ok(LiveSchedulerNativeAdmission {
             factory: Arc::clone(&attempt.original.factory),
             inputs: attempt.inputs.take().expect("prepared fixed scheduler inputs"),
@@ -3204,14 +3173,23 @@ impl ReleasedLiveStateStoreStartup {
     /// the retained close progress for [`LiveStateStoreStartupRecoveryFailure::retry`].
     pub fn into_census(self, factory: Arc<OriginalNativeFactory>)
         -> std::result::Result<super::StateStoreCensus, LiveStateStoreStartupRecoveryFailure> {
-        let retain = |progress: RetainedUntilTaken<StoreStartupCloseProgress>, refusal: anyhow::Error| {
+        let retain = |progress: lillux::custody::Held<StoreStartupCloseProgress>, refusal: anyhow::Error| {
             LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
                 factory: Arc::clone(&factory),
-                progress: Mutex::new(progress.into_inner()),
+                progress: Mutex::new(take_held(progress)),
                 refusal,
             })
         };
-        let mut progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, self.into_progress());
+        // A forked child holds only a copy of this progress; it is refused here,
+        // before any `Held` exists that a later refusal would have to take back.
+        if let Err(refusal) = factory.require_original_process() {
+            return Err(LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
+                factory: Arc::clone(&factory),
+                progress: Mutex::new(self.into_progress()),
+                refusal,
+            }));
+        }
+        let mut progress = lillux::custody::Held::until_taken(STORE_STARTUP_CLOSE_UNWOUND_KIND, self.into_progress());
         let checked = (|| -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
             factory.require_original_process()?;
             progress.original()?.require_close_factory(&factory)?;
@@ -3250,7 +3228,7 @@ impl ReleasedLiveStateStoreStartup {
         let mut leases = Vec::new();
         let mut lease_retirements = Vec::new();
         let mut prior_refusals = Vec::new();
-        if let Some(closed) = progress.state_closed.take() {
+        if let Some(closed) = progress.get_mut().state_closed.take() {
             match closed.into_census(Arc::clone(&factory)) {
                 Ok(census) => {
                     let ryeos_state::state_db::LiveStateCensus { terminals: state, leases: state_leases,
@@ -3261,13 +3239,13 @@ impl ReleasedLiveStateStoreStartup {
                     prior_refusals.extend(prior_refusal);
                 }
                 Err(failure) => {
-                    progress.state_failure = Some(failure);
+                    progress.get_mut().state_failure = Some(failure);
                     return Err(retain(progress, anyhow::anyhow!(
                         "closed State refused its census; its close remains pending")));
                 }
             }
         }
-        if let Some(released) = progress.state_released.take() {
+        if let Some(released) = progress.get_mut().state_released.take() {
             match released.into_census(&factory) {
                 Ok(census) => {
                     let ryeos_state::state_db::LiveStateCensus { terminals: state, leases: state_leases,
@@ -3278,35 +3256,35 @@ impl ReleasedLiveStateStoreStartup {
                     prior_refusals.extend(prior_refusal);
                 }
                 Err((released, error)) => {
-                    progress.state_released = Some(released);
+                    progress.get_mut().state_released = Some(released);
                     return Err(retain(progress, error));
                 }
             }
         }
-        if let Some(released) = progress.operational_released.take() {
+        if let Some(released) = progress.get_mut().operational_released.take() {
             match released.into_census(&factory) {
                 Ok(operational) => terminals.extend(operational),
                 Err((released, error)) => {
-                    progress.operational_released = Some(released);
+                    progress.get_mut().operational_released = Some(released);
                     return Err(retain(progress, error));
                 }
             }
         }
         // A schema reference refused before any ticket holds only unused
         // one-shot inputs; they end in their issuing process here.
-        if let Some(released) = progress.schema_released.take() {
+        if let Some(released) = progress.get_mut().schema_released.take() {
             let has_terminal = released.terminal(&factory).map(|terminal| terminal.is_some());
             match has_terminal {
                 Ok(false) => match released.release_unused(&factory) {
                     Ok(prior) => prior_refusals.push(prior),
                     Err((released, error)) => {
-                        progress.schema_released = Some(released);
+                        progress.get_mut().schema_released = Some(released);
                         return Err(retain(progress, error));
                     }
                 },
-                Ok(true) => progress.schema_released = Some(released),
+                Ok(true) => progress.get_mut().schema_released = Some(released),
                 Err(error) => {
-                    progress.schema_released = Some(released);
+                    progress.get_mut().schema_released = Some(released);
                     return Err(retain(progress, error));
                 }
             }
@@ -3322,7 +3300,7 @@ impl ReleasedLiveStateStoreStartup {
             state_open_failure, state_recovery_failure, state_released, state_physical,
             operational_open_failure, operational_recovery_failure, operational_released,
             operational_physical, schema_failure, schema_released, prior_refusal }
-            = progress.into_inner().into_parts();
+            = take_held(progress).into_parts();
         // Every outside slot was checked empty above and every native owner's
         // terminal is in the census; the facades and opening roots end here.
         drop(store_parent);
@@ -3472,33 +3450,39 @@ impl LiveStateStoreStartupRecoveryFailure {
 /// retained whole.
 fn advance_store_startup_close(factory: Arc<OriginalNativeFactory>, progress: StoreStartupCloseProgress)
     -> std::result::Result<ReleasedLiveStateStoreStartup, LiveStateStoreStartupRecoveryFailure> {
-    let mut progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, progress);
-    let retain = |progress: RetainedUntilTaken<StoreStartupCloseProgress>, refusal: anyhow::Error| {
+    // A forked child holds only a copy of this progress; it is refused here,
+    // before any `Held` exists that a later refusal would have to take back.
+    if let Err(refusal) = factory.require_original_process() {
+        return Err(LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
+            factory: Arc::clone(&factory), progress: Mutex::new(progress), refusal }));
+    }
+    let mut progress = lillux::custody::Held::until_taken(STORE_STARTUP_CLOSE_UNWOUND_KIND, progress);
+    let retain = |progress: lillux::custody::Held<StoreStartupCloseProgress>, refusal: anyhow::Error| {
         LiveStateStoreStartupRecoveryFailure::new(StoreStartupRecoveryCustody::Closing {
-            factory: Arc::clone(&factory), progress: Mutex::new(progress.into_inner()), refusal })
+            factory: Arc::clone(&factory), progress: Mutex::new(take_held(progress)), refusal })
     };
     if let Err(error) = progress.original().and_then(|original| original.require_close_factory(&factory)) {
         return Err(retain(progress, error));
     }
-    if let Some(runtime) = progress.runtime.take() {
+    if let Some(runtime) = progress.get_mut().runtime.take() {
         match runtime.close_original_runtime(Arc::clone(&factory)) {
-            Ok(closed) => progress.runtime_closed = Some(closed),
-            Err(failure) => progress.runtime_failure = Some(failure),
+            Ok(closed) => progress.get_mut().runtime_closed = Some(closed),
+            Err(failure) => progress.get_mut().runtime_failure = Some(failure),
         }
-    } else if let Some(failure) = progress.runtime_failure.take() {
+    } else if let Some(failure) = progress.get_mut().runtime_failure.take() {
         match failure.retry() {
-            Ok(closed) => progress.runtime_closed = Some(closed),
-            Err(failure) => progress.runtime_failure = Some(failure),
+            Ok(closed) => progress.get_mut().runtime_closed = Some(closed),
+            Err(failure) => progress.get_mut().runtime_failure = Some(failure),
         }
     }
     if progress.runtime_failure.is_some() {
         return Err(retain(progress, anyhow::anyhow!("failed Store Runtime close remains pending")));
     }
-    if let Some(failure) = progress.runtime_open_failure.take() {
+    if let Some(failure) = progress.get_mut().runtime_open_failure.take() {
         match failure.retry_close() {
-            Ok(released) => progress.runtime_released = Some(released),
+            Ok(released) => progress.get_mut().runtime_released = Some(released),
             Err(failure) => {
-                progress.runtime_open_failure = Some(failure);
+                progress.get_mut().runtime_open_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store Runtime acquisition release remains pending")));
             }
         }
@@ -3515,60 +3499,60 @@ fn advance_store_startup_close(factory: Arc<OriginalNativeFactory>, progress: St
             },
         };
         let guard = match guard { Ok(guard) => guard, Err(error) => return Err(retain(progress, error)) };
-        let closed = if let Some(state) = progress.state.take() { state.close_live(Arc::clone(&factory), &guard) }
-            else { progress.state_failure.take().expect("actual State close failure").retry(&guard) };
-        match closed { Ok(closed) => progress.state_closed = Some(closed),
+        let closed = if let Some(state) = progress.get_mut().state.take() { state.close_live(Arc::clone(&factory), &guard) }
+            else { progress.get_mut().state_failure.take().expect("actual State close failure").retry(&guard) };
+        match closed { Ok(closed) => progress.get_mut().state_closed = Some(closed),
             Err(failure) => {
-                progress.state_failure = Some(failure);
+                progress.get_mut().state_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store State close remains pending")));
             } }
     }
-    if let Some(failure) = progress.state_open_failure.take() {
+    if let Some(failure) = progress.get_mut().state_open_failure.take() {
         match failure.close_retained() {
-            Ok(released) => progress.state_released = Some(released),
+            Ok(released) => progress.get_mut().state_released = Some(released),
             Err(failure) => {
-                progress.state_recovery_failure = Some(failure);
+                progress.get_mut().state_recovery_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store State opening release remains pending")));
             }
         }
-    } else if let Some(failure) = progress.state_recovery_failure.take() {
+    } else if let Some(failure) = progress.get_mut().state_recovery_failure.take() {
         match failure.retry() {
-            Ok(released) => progress.state_released = Some(released),
+            Ok(released) => progress.get_mut().state_released = Some(released),
             Err(failure) => {
-                progress.state_recovery_failure = Some(failure);
+                progress.get_mut().state_recovery_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store State opening release remains pending")));
             }
         }
     }
-    if let Some(failure) = progress.operational_open_failure.take() {
+    if let Some(failure) = progress.get_mut().operational_open_failure.take() {
         match failure.close_retained() {
-            Ok(released) => progress.operational_released = Some(released),
+            Ok(released) => progress.get_mut().operational_released = Some(released),
             Err(failure) => {
-                progress.operational_recovery_failure = Some(failure);
+                progress.get_mut().operational_recovery_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store Operational opening release remains pending")));
             }
         }
-    } else if let Some(failure) = progress.operational_recovery_failure.take() {
+    } else if let Some(failure) = progress.get_mut().operational_recovery_failure.take() {
         match failure.retry() {
-            Ok(released) => progress.operational_released = Some(released),
+            Ok(released) => progress.get_mut().operational_released = Some(released),
             Err(failure) => {
-                progress.operational_recovery_failure = Some(failure);
+                progress.get_mut().operational_recovery_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store Operational opening release remains pending")));
             }
         }
     }
-    if let Some(failure) = progress.schema_failure.take() {
+    if let Some(failure) = progress.get_mut().schema_failure.take() {
         match failure.close_retained() {
-            Ok(released) => progress.schema_released = Some(released),
+            Ok(released) => progress.get_mut().schema_released = Some(released),
             Err(failure) => {
-                progress.schema_failure = Some(failure);
+                progress.get_mut().schema_failure = Some(failure);
                 return Err(retain(progress, anyhow::anyhow!("failed Store schema reference release remains pending")));
             }
         }
     }
-    let released = ReleasedLiveStateStoreStartup { progress: std::mem::ManuallyDrop::new(progress.into_inner()) };
+    let released = ReleasedLiveStateStoreStartup { progress: std::mem::ManuallyDrop::new(take_held(progress)) };
     if let Err(error) = released.native_terminals(&factory) {
-        let progress = RetainedUntilTaken::new(STORE_STARTUP_CLOSE_UNWOUND_KIND, released.into_progress());
+        let progress = lillux::custody::Held::until_taken(STORE_STARTUP_CLOSE_UNWOUND_KIND, released.into_progress());
         return Err(retain(progress, error));
     }
     Ok(released)
@@ -3775,15 +3759,15 @@ mod custody_drop_tests {
         const KIND: &str = "ryeos-app::test-retained-until-taken";
         // Taken back, the owner is returned whole and nothing is retained.
         let before = abandoned(KIND);
-        let mut held = RetainedUntilTaken::new(KIND, vec![1u8]);
-        held.push(2);
-        assert_eq!(held.into_inner(), vec![1, 2]);
+        let mut held = lillux::custody::Held::until_taken(KIND, vec![1u8]);
+        held.get_mut().push(2);
+        assert_eq!(take_held(held), vec![1, 2]);
         assert_eq!(abandoned(KIND), before);
         // A panic unwinding the stretch retains the owner, counted.
         let unwound = std::panic::catch_unwind(|| {
-            let held = RetainedUntilTaken::new(KIND, vec![3u8]);
+            let held = lillux::custody::Held::until_taken(KIND, vec![3u8]);
             assert!(held.is_empty(), "unwind while holding");
-            held.into_inner()
+            take_held(held)
         });
         assert!(unwound.is_err());
         assert_eq!(abandoned(KIND), before + 1);

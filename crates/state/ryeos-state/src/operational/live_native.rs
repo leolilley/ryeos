@@ -1249,62 +1249,75 @@ fn startup_refusal_over_prior(error: anyhow::Error, prior: Option<anyhow::Error>
 }
 fn advance_operational_startup_close(progress: OperationalStartupCloseProgress)
     -> std::result::Result<ReleasedLiveOperationalStartup, LiveOperationalStartupRecoveryFailure> {
-    // Every native effect runs outside the retention mutex. The guard retains
-    // the actual checkout if a step panics; retries transfer it rather than
-    // reconstruct it.
-    let mut progress = crate::unwind_custody::UnwindRetained::new(OPERATIONAL_STARTUP_CLOSE_UNWIND, progress);
-    let retain = |progress: crate::unwind_custody::UnwindRetained<OperationalStartupCloseProgress>| {
-        let progress = progress.into_inner();
+    // Every native effect runs outside the retention mutex. The progress is
+    // held from here on, so a panicking step retains the actual checkout
+    // whole; retries transfer it rather than reconstruct it.
+    let factory = Arc::clone(progress.custody.original.factory());
+    if factory.require_original_process().is_err()
+        || progress.custody.original.require_original(&factory).is_err() {
+        // Refused before any step: the progress goes back unchanged, still
+        // owned by the recovery failure, in this process or a copied one.
+        return Err(LiveOperationalStartupRecoveryFailure::new(OperationalStartupRecoveryCustody::Closing {
+            factory: Arc::clone(&factory), progress: Mutex::new(progress) }));
+    }
+    let mut progress = lillux::custody::Held::until_taken(OPERATIONAL_STARTUP_CLOSE_UNWIND, progress);
+    let retain = |progress: lillux::custody::Held<OperationalStartupCloseProgress>| {
+        // The progress was held only after the original process was confirmed,
+        // so a foreign copy here means a forked child resumed this frame; it
+        // is relinquished and the process aborts.
+        let progress = progress.take_or_abort();
         LiveOperationalStartupRecoveryFailure::new(OperationalStartupRecoveryCustody::Closing {
             factory: Arc::clone(progress.custody.original.factory()), progress: Mutex::new(progress) })
     };
-    let factory = Arc::clone(progress.custody.original.factory());
-    if factory.require_original_process().is_err()
-        || progress.custody.original.require_original(&factory).is_err() { return Err(retain(progress)); }
-    if let Some(failure) = progress.custody.sync_failure.take() {
+    if let Some(failure) = progress.get_mut().custody.sync_failure.take() {
         match failure.into_parts() {
             Ok((error, owner, outcome)) => {
-                progress.custody.owner = Some(owner);
-                progress.partial_durability = Some(outcome);
-                if progress.prior_refusal.is_none() { progress.prior_refusal = Some(error); }
+                progress.get_mut().custody.owner = Some(owner);
+                progress.get_mut().partial_durability = Some(outcome);
+                if progress.prior_refusal.is_none() { progress.get_mut().prior_refusal = Some(error); }
             }
-            Err(failure) => { progress.custody.sync_failure = Some(failure); return Err(retain(progress)); }
+            Err(failure) => { progress.get_mut().custody.sync_failure = Some(failure); return Err(retain(progress)); }
         }
     }
-    if let Some(mut failure) = progress.custody.acquisition.take() {
+    if let Some(mut failure) = progress.get_mut().custody.acquisition.take() {
         if failure.retained_admission().is_some() {
             if let Err(error) = failure.recover_retained_admission() {
-                progress.custody.acquisition = Some(failure);
-                progress.prior_refusal = Some(startup_refusal_over_prior(error, progress.prior_refusal.take()));
+                progress.get_mut().custody.acquisition = Some(failure);
+                let prior = progress.get_mut().prior_refusal.take();
+                progress.get_mut().prior_refusal = Some(startup_refusal_over_prior(error, prior));
                 return Err(retain(progress));
             }
         }
         match failure.retry_close() {
-            Ok(released) => progress.released = Some(released),
-            Err(failure) => { progress.custody.acquisition = Some(failure); return Err(retain(progress)); }
+            Ok(released) => progress.get_mut().released = Some(released),
+            Err(failure) => { progress.get_mut().custody.acquisition = Some(failure); return Err(retain(progress)); }
         }
     }
-    if let Some(owner) = progress.custody.owner.take() {
+    if let Some(owner) = progress.get_mut().custody.owner.take() {
         match owner.close() {
-            Ok(closed) => progress.closed = Some(closed),
-            Err(failure) => progress.close_failure = Some(failure),
+            Ok(closed) => progress.get_mut().closed = Some(closed),
+            Err(failure) => progress.get_mut().close_failure = Some(failure),
         }
-    } else if let Some(failure) = progress.close_failure.take() {
+    } else if let Some(failure) = progress.get_mut().close_failure.take() {
         match failure.retry() {
-            Ok(closed) => progress.closed = Some(closed),
-            Err(failure) => progress.close_failure = Some(failure),
+            Ok(closed) => progress.get_mut().closed = Some(closed),
+            Err(failure) => progress.get_mut().close_failure = Some(failure),
         }
     }
     if progress.close_failure.is_some() { return Err(retain(progress)); }
-    if let Some(failure) = progress.schema_failure.take() {
+    if let Some(failure) = progress.get_mut().schema_failure.take() {
         match failure.close_retained() {
-            Ok(released) => progress.schema_released = Some(released),
-            Err(failure) => { progress.schema_failure = Some(failure); return Err(retain(progress)); }
+            Ok(released) => progress.get_mut().schema_released = Some(released),
+            Err(failure) => { progress.get_mut().schema_failure = Some(failure); return Err(retain(progress)); }
         }
     }
-    let released = ReleasedLiveOperationalStartup { progress: std::mem::ManuallyDrop::new(progress.into_inner()) };
+    let progress = match progress.take_whole() {
+        Ok(progress) => progress,
+        Err(foreign_copy) => return Err(retain(foreign_copy)),
+    };
+    let released = ReleasedLiveOperationalStartup { progress: std::mem::ManuallyDrop::new(progress) };
     if released.native_terminals(&factory).is_err() {
-        let progress = crate::unwind_custody::UnwindRetained::new(
+        let progress = lillux::custody::Held::until_taken(
             OPERATIONAL_STARTUP_CLOSE_UNWIND, released.into_progress());
         return Err(retain(progress));
     }
@@ -1453,6 +1466,45 @@ mod custody_drop_tests {
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
+    }
+
+    /// Stands in for a startup close progress: records whether its
+    /// destructor ran.
+    struct ObservedProgress(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for ObservedProgress {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn held_close_progress_handed_on_is_not_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let before = abandoned(super::OPERATIONAL_STARTUP_CLOSE_UNWIND);
+        let held = lillux::custody::Held::until_taken(super::OPERATIONAL_STARTUP_CLOSE_UNWIND, ObservedProgress(Arc::clone(&dropped)));
+        let progress = match held.take_whole() {
+            Ok(progress) => progress,
+            Err(_) => panic!("the issuing process takes its own close progress"),
+        };
+        drop(progress);
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(abandoned(super::OPERATIONAL_STARTUP_CLOSE_UNWIND), before);
+    }
+
+    #[test]
+    fn held_close_progress_unwound_mid_step_is_retained_and_counted() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let before = abandoned(super::OPERATIONAL_STARTUP_CLOSE_UNWIND);
+        let observed = Arc::clone(&dropped);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = lillux::custody::Held::until_taken(super::OPERATIONAL_STARTUP_CLOSE_UNWIND, ObservedProgress(observed));
+            panic!("unwind through the held close step");
+        }));
+        assert!(unwound.is_err());
+        assert!(!dropped.load(std::sync::atomic::Ordering::Acquire), "the unwound progress was never dropped");
+        assert_eq!(abandoned(super::OPERATIONAL_STARTUP_CLOSE_UNWIND), before + 1);
     }
 
     fn metadata(marker: Option<File>) -> OperationalStartupPhysicalMetadata {

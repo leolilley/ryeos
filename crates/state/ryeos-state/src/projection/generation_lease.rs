@@ -1,6 +1,7 @@
 //! One original native lock owner for an exact generation sidecar. Shared
 //! references retain this owner; they never open another native lock or ticket.
 use anyhow::{Context, Result};
+use lillux::custody::Held;
 use lillux_sqlite::{
     ClosedOriginalProjectionLease, OriginalNativeFactory, OriginalNativeProjectionLeaseAuthority,
     OriginalProjectionLease, OriginalProjectionLeaseDisposition, OriginalProjectionLeaseFailure,
@@ -8,7 +9,6 @@ use lillux_sqlite::{
 };
 use std::{
     ffi::OsString,
-    mem::ManuallyDrop,
     sync::{Arc, Mutex, Weak},
 };
 
@@ -20,18 +20,48 @@ enum LeaseCustody {
     Checkout,
     Retired,
 }
-/// State owns coordinate meaning; Lillux owns the actual paid lock effects.
-pub(crate) struct OriginalGenerationLease {
+const GENERATION_LEASE_KIND: &str = "ryeos-state::generation-lease";
+
+/// Everything the lease owns, in the order its release drops it. Constructible
+/// only in this module, so no caller can swap the whole out from under its
+/// custody.
+struct LeaseParts {
     // Affinity survives as a weak coordinate after native holder retirement;
     // the outside metadata owner must not keep resident storage alive.
-    process: u32,
     factory: Weak<OriginalNativeFactory>,
-    root: ManuallyDrop<lillux::PinnedDirectory>,
+    root: lillux::PinnedDirectory,
     name: OsString,
+    custody: Mutex<LeaseCustody>,
+}
+
+/// Settled exactly when the lease is retired: every other phase holds prepared
+/// inputs, a live native lock, a refusal, a closed disposition or an effect
+/// checkout, so the whole owner, its pinned root included, stays retained until
+/// the process exits.
+fn lease_parts_retired(parts: &LeaseParts) -> bool {
+    // A held lock means a step is mid-flight, so the lease is not retired. The
+    // predicate never blocks: it may run during an unwind.
+    match parts.custody.try_lock() {
+        Ok(custody) => matches!(*custody, LeaseCustody::Retired),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            matches!(*poisoned.into_inner(), LeaseCustody::Retired)
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+    }
+}
+
+/// State owns coordinate meaning; Lillux owns the actual paid lock effects.
+pub(crate) struct OriginalGenerationLease {
+    inner: Held<LeaseParts>,
     identity: (u64, u64),
-    custody: ManuallyDrop<Mutex<LeaseCustody>>,
 }
 impl OriginalGenerationLease {
+    fn from_parts(parts: LeaseParts, identity: (u64, u64)) -> Self {
+        Self {
+            inner: Held::new(GENERATION_LEASE_KIND, parts, lease_parts_retired),
+            identity,
+        }
+    }
     /// # Safety
     /// The actual original issuer must have funded this complete host/native
     /// owner and retained generation envelope before metadata/input allocation.
@@ -73,24 +103,25 @@ impl OriginalGenerationLease {
                 authority,
             )
         };
-        Ok(Arc::new(Self {
-            process: std::process::id(),
-            factory: Arc::downgrade(&factory),
-            root: ManuallyDrop::new(root),
-            name,
+        Ok(Arc::new(Self::from_parts(
+            LeaseParts {
+                factory: Arc::downgrade(&factory),
+                root,
+                name,
+                custody: Mutex::new(LeaseCustody::Prepared(inputs)),
+            },
             identity,
-            custody: ManuallyDrop::new(Mutex::new(LeaseCustody::Prepared(inputs))),
-        }))
+        )))
     }
     /// Consume only the genuinely retired owner. This moves the actual root;
     /// it performs no close and never consults a possibly released native arena.
     pub(crate) fn try_into_metadata_root(
         self: Arc<Self>,
     ) -> std::result::Result<lillux::PinnedDirectory, Arc<Self>> {
-        if crate::foreign_process(self.process) {
+        if self.inner.is_foreign() {
             return Err(self);
         }
-        let retired = match self.custody.try_lock() {
+        let retired = match self.inner.custody.try_lock() {
             Ok(custody) => matches!(&*custody, LeaseCustody::Retired),
             Err(_) => false,
         };
@@ -100,46 +131,32 @@ impl OriginalGenerationLease {
         match Arc::try_unwrap(self) {
             Ok(owner) => {
                 // Only an empty Retired phase can reach this unique transfer.
-                // Every owned field is read out exactly once and the emptied
-                // shell is never dropped; destroying the bookkeeping mutex
-                // does not close a host owner. The process and identity are
-                // plain copied facts.
-                let mut owner = ManuallyDrop::new(owner);
-                let (factory, root, name, custody) = unsafe { owner.take_whole() };
-                drop(custody);
-                drop(factory);
-                drop(name);
-                Ok(root)
+                // The actual root moves out; no close is performed and a
+                // possibly released native arena is never consulted.
+                let Self { inner, identity } = owner;
+                match inner.take_whole() {
+                    Ok(LeaseParts { factory, root, name, custody }) => {
+                        drop(factory);
+                        drop(name);
+                        drop(custody);
+                        Ok(root)
+                    }
+                    Err(inner) => Err(Arc::new(Self { inner, identity })),
+                }
             }
             Err(owner) => Err(owner),
         }
     }
-    /// Move every owned field out of this owner, leaving only emptied slots
-    /// and plain copied facts. The replacements allocate nothing, so a forked
-    /// child may call this.
-    ///
-    /// # Safety
-    /// Call at most once, from `Drop` or on a shell that is never dropped:
-    /// the taken `ManuallyDrop` slots must never be read again.
-    unsafe fn take_whole(&mut self)
-        -> (Weak<OriginalNativeFactory>, lillux::PinnedDirectory, OsString, Mutex<LeaseCustody>) {
-        unsafe {(
-            std::mem::replace(&mut self.factory, Weak::new()),
-            ManuallyDrop::take(&mut self.root),
-            std::mem::take(&mut self.name),
-            ManuallyDrop::take(&mut self.custody),
-        )}
-    }
     fn require_coordinate(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         factory.require_original_process()?;
         anyhow::ensure!(
-            Weak::ptr_eq(&Arc::downgrade(factory), &self.factory),
+            Weak::ptr_eq(&Arc::downgrade(factory), &self.inner.factory),
             "foreign original generation lease factory"
         );
-        self.root.ensure_path_binding()?;
+        self.inner.root.ensure_path_binding()?;
         let current = self
-            .root
-            .entry_no_follow(&self.name)?
+            .inner.root
+            .entry_no_follow(&self.inner.name)?
             .context("original generation lease sidecar absent")?;
         anyhow::ensure!(
             current.entry_type == lillux::PinnedEntryType::Regular
@@ -156,7 +173,7 @@ impl OriginalGenerationLease {
         terminal.require_original(&factory)?;
         let retired = {
             let mut custody = self
-                .custody
+                .inner.custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease retirement custody busy"))?;
             anyhow::ensure!(
@@ -177,7 +194,7 @@ impl OriginalGenerationLease {
     /// lease keeps that factory alias for the life of the process.
     pub(crate) fn is_retired(&self) -> Result<bool> {
         let custody = self
-            .custody
+            .inner.custody
             .try_lock()
             .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
         Ok(matches!(&*custody, LeaseCustody::Retired))
@@ -185,15 +202,15 @@ impl OriginalGenerationLease {
     pub(crate) fn metadata(&self) -> Result<std::fs::Metadata> {
         let factory = self.factory()?;
         self.require_coordinate(&factory)?;
-        self.root
-            .open_mount_entry(&self.name)?
+        self.inner.root
+            .open_mount_entry(&self.inner.name)?
             .context("original lease metadata absent")?
             .metadata()
             .map_err(anyhow::Error::from)
     }
     pub(crate) fn factory(&self) -> Result<Arc<OriginalNativeFactory>> {
         let factory = self
-            .factory
+            .inner.factory
             .upgrade()
             .context("original generation factory retired")?;
         factory.require_original_process()?;
@@ -205,7 +222,7 @@ impl OriginalGenerationLease {
     pub(crate) fn require_active(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         self.require_coordinate(factory)?;
         let custody = self
-            .custody
+            .inner.custody
             .try_lock()
             .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
         anyhow::ensure!(
@@ -219,7 +236,7 @@ impl OriginalGenerationLease {
         self.require_coordinate(&factory)?;
         let checkout = {
             let mut custody = self
-                .custody
+                .inner.custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
             anyhow::ensure!(
@@ -240,7 +257,7 @@ impl OriginalGenerationLease {
         // Restore even if an earlier observation poisoned bookkeeping; the
         // original native owner cannot be discarded by a retry refusal.
         *self
-            .custody
+            .inner.custody
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         anyhow::ensure!(
@@ -260,7 +277,7 @@ impl OriginalGenerationLease {
         self.require_coordinate(factory)?;
         let checkout = {
             let mut custody = self
-                .custody
+                .inner.custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
             anyhow::ensure!(
@@ -302,7 +319,7 @@ impl OriginalGenerationLease {
         };
         let receipt = {
             let mut custody = self
-                .custody
+                .inner.custody
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *custody = next;
@@ -321,32 +338,6 @@ impl OriginalGenerationLease {
     }
 }
 
-impl Drop for OriginalGenerationLease {
-    fn drop(&mut self) {
-        // Settled exactly when try_into_metadata_root would accept it: retired
-        // in its issuing process. Every other phase holds prepared inputs, a
-        // live native lock, a refusal, a closed disposition or an effect
-        // checkout, so the whole owner, its pinned root included, stays
-        // retained until the process exits.
-        if crate::foreign_process(self.process) {
-            // A copy in another process, forked or not, holds no native lock
-            // owner or root; it gives them up before any lock or allocation.
-            lillux::custody::relinquish_in_foreign_process(unsafe { self.take_whole() });
-            return;
-        }
-        let retired = matches!(
-            self.custody.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner),
-            LeaseCustody::Retired
-        );
-        let whole = unsafe { self.take_whole() };
-        if retired {
-            drop(whole);
-        } else {
-            lillux::custody::abandon("ryeos-state::generation-lease", whole);
-        }
-    }
-}
-
 #[cfg(test)]
 mod custody_drop_tests {
     use super::*;
@@ -356,14 +347,15 @@ mod custody_drop_tests {
     fn lease(custody: LeaseCustody) -> OriginalGenerationLease {
         let tmp = tempfile::tempdir().unwrap();
         let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        OriginalGenerationLease {
-            process: std::process::id(),
-            factory: Weak::new(),
-            root: ManuallyDrop::new(root),
-            name: OsString::from("generated.sqlite3.lease"),
-            identity: (0, 0),
-            custody: ManuallyDrop::new(Mutex::new(custody)),
-        }
+        OriginalGenerationLease::from_parts(
+            LeaseParts {
+                factory: Weak::new(),
+                root,
+                name: OsString::from("generated.sqlite3.lease"),
+                custody: Mutex::new(custody),
+            },
+            (0, 0),
+        )
     }
 
     #[test]

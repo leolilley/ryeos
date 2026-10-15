@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use lillux::custody::Held;
 use lillux::{OpenRegularFileObservation, PinnedDirectory, PinnedRegularFile};
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_engine::trust::TrustStore;
@@ -116,151 +117,260 @@ pub struct LiveNativeCapacityInputs {
     process: lillux::process_control::ExactProcessIdentity,
 }
 
+/// What a directory source holds until its same-registry membership is
+/// cached. Settled exactly when the directory owner moved into the registry:
+/// the membership alone remains and drops normally. Otherwise the original
+/// directory and any membership stay retained together until the process
+/// exits.
+pub(super) struct DirectorySourceParts {
+    owner: Option<Arc<PinnedDirectory>>,
+    registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
+}
+
 /// Exact original directory until its same-registry membership is cached.
 /// No path or identity value can construct this source.
 pub(super) struct FinalizerDirectorySource {
-    pub(super) owner: Option<std::mem::ManuallyDrop<Arc<PinnedDirectory>>>,
-    pub(super) registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
+    held: Held<DirectorySourceParts>,
 }
 impl FinalizerDirectorySource {
     pub(super) fn retained(owner: Arc<PinnedDirectory>) -> Self {
-        Self { owner: Some(std::mem::ManuallyDrop::new(owner)), registration: None }
+        const KIND: &str = "ryeos-node::native-capacity-finalizer-directory";
+        Self {
+            held: Held::new(
+                KIND,
+                DirectorySourceParts { owner: Some(owner), registration: None },
+                |parts| parts.owner.is_none(),
+            ),
+        }
     }
 
     /// True once the directory owner moved into a registry membership; only
     /// the plain registration, if any, remains.
     pub(super) fn owner_transferred(&self) -> bool {
-        self.owner.is_none()
+        self.held.owner.is_none()
+    }
+
+    /// Move the open directory owner out, leaving the source without one.
+    pub(super) fn take_owner(&mut self) -> Option<Arc<PinnedDirectory>> {
+        self.held.get_mut().owner.take()
+    }
+
+    /// Put an owner back into an empty slot; an occupied slot refuses and
+    /// hands the offered owner back, so nothing is replaced.
+    pub(super) fn restore_owner(&mut self, owner: Arc<PinnedDirectory>)
+        -> std::result::Result<(), Arc<PinnedDirectory>> {
+        let parts = self.held.get_mut();
+        if parts.owner.is_some() { return Err(owner); }
+        parts.owner = Some(owner);
+        Ok(())
+    }
+
+    /// Record the registry membership in an empty slot; an occupied slot
+    /// refuses and hands the offered membership back.
+    pub(super) fn set_registration(
+        &mut self,
+        registration: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
+    ) -> std::result::Result<(), lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration> {
+        let parts = self.held.get_mut();
+        if parts.registration.is_some() { return Err(registration); }
+        parts.registration = Some(registration);
+        Ok(())
     }
 }
-impl Drop for FinalizerDirectorySource {
-    fn drop(&mut self) {
-        // Settled exactly when the directory owner moved into the registry:
-        // the membership alone remains and drops normally. The owner slot is
-        // taken exactly once, here; otherwise the original directory and any
-        // membership stay retained together until the process exits.
-        const KIND: &str = "ryeos-node::native-capacity-finalizer-directory";
-        if lillux::exec::in_forked_child() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((self.owner.take(), self.registration.take()));
-            return;
-        }
-        if let Some(owner) = self.owner.take() {
-            lillux::custody::abandon(KIND, (std::mem::ManuallyDrop::into_inner(owner), self.registration.take()));
-        }
+impl std::ops::Deref for FinalizerDirectorySource {
+    type Target = DirectorySourceParts;
+    fn deref(&self) -> &DirectorySourceParts {
+        &self.held
     }
+}
+
+/// What a control source holds during the post-settlement registry join.
+/// Settled exactly when the open source moved on: the close owner and
+/// membership carry their own disposal and drop normally. Otherwise the open
+/// descriptor, any close owner and any membership stay retained together
+/// until the process exits.
+pub(super) struct ControlSourceParts {
+    pinned_file: Option<PinnedRegularFile>,
+    duplicate: Option<File>,
+    owner: Option<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>>,
+    registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
 }
 
 /// Actual account/input descriptor during the post-settlement registry join.
 /// Each transition keeps either the authentic open source, its close owner, or
 /// its exact registry membership until the next consuming stage succeeds.
 pub(super) struct FinalizerControlSource {
-    pub(super) pinned_file: Option<std::mem::ManuallyDrop<PinnedRegularFile>>,
-    pub(super) duplicate: Option<std::mem::ManuallyDrop<File>>,
-    pub(super) owner: Option<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>>,
-    pub(super) registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
+    held: Held<ControlSourceParts>,
 }
 impl FinalizerControlSource {
+    fn held(parts: ControlSourceParts) -> Self {
+        const KIND: &str = "ryeos-node::native-capacity-finalizer-control";
+        Self {
+            held: Held::new(KIND, parts, |parts| {
+                parts.pinned_file.is_none() && parts.duplicate.is_none()
+            }),
+        }
+    }
     pub(super) fn pinned_file(file: PinnedRegularFile) -> Self {
-        Self { pinned_file: Some(std::mem::ManuallyDrop::new(file)), duplicate: None,
-            owner: None, registration: None }
+        Self::held(ControlSourceParts {
+            pinned_file: Some(file), duplicate: None, owner: None, registration: None,
+        })
     }
     pub(super) fn duplicate(file: File) -> Self {
-        Self { pinned_file: None, duplicate: Some(std::mem::ManuallyDrop::new(file)),
-            owner: None, registration: None }
+        Self::held(ControlSourceParts {
+            pinned_file: None, duplicate: Some(file), owner: None, registration: None,
+        })
     }
 
     /// True once the open source moved into its close owner or registry
     /// membership; neither the original pin nor the duplicate remains.
     pub(super) fn source_transferred(&self) -> bool {
-        self.pinned_file.is_none() && self.duplicate.is_none()
+        self.held.pinned_file.is_none() && self.held.duplicate.is_none()
+    }
+
+    /// Move the original pinned descriptor out.
+    pub(super) fn take_pinned_file(&mut self) -> Option<PinnedRegularFile> {
+        self.held.get_mut().pinned_file.take()
+    }
+
+    /// Move the captured duplicate descriptor out.
+    pub(super) fn take_duplicate(&mut self) -> Option<File> {
+        self.held.get_mut().duplicate.take()
+    }
+
+    /// Move the close owner out.
+    pub(super) fn take_owner(&mut self) -> Option<Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
+        self.held.get_mut().owner.take()
+    }
+
+    /// Put a close owner into an empty slot; an occupied slot refuses and
+    /// hands the offered owner back, so nothing is replaced.
+    pub(super) fn set_owner(&mut self, owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>)
+        -> std::result::Result<(), Arc<lillux_sqlite::RetainedOriginalFinalizerFile>> {
+        let parts = self.held.get_mut();
+        if parts.owner.is_some() { return Err(owner); }
+        parts.owner = Some(owner);
+        Ok(())
+    }
+
+    /// Record the registry membership in an empty slot; an occupied slot
+    /// refuses and hands the offered membership back.
+    pub(super) fn set_registration(
+        &mut self,
+        registration: lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
+    ) -> std::result::Result<(), lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration> {
+        let parts = self.held.get_mut();
+        if parts.registration.is_some() { return Err(registration); }
+        parts.registration = Some(registration);
+        Ok(())
     }
 }
-impl Drop for FinalizerControlSource {
-    fn drop(&mut self) {
-        // Settled exactly when the open source moved on: the close owner and
-        // membership carry their own disposal and drop normally. Each slot is
-        // taken exactly once, here; otherwise the open descriptor, any close
-        // owner and any membership stay retained together until the process
-        // exits.
-        const KIND: &str = "ryeos-node::native-capacity-finalizer-control";
-        let settled = self.source_transferred();
-        let taken = (
-            self.pinned_file.take().map(std::mem::ManuallyDrop::into_inner),
-            self.duplicate.take().map(std::mem::ManuallyDrop::into_inner),
-            self.owner.take(),
-            self.registration.take(),
-        );
-        if lillux::exec::in_forked_child() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
-        if settled {
-            drop(taken);
-        } else {
-            lillux::custody::abandon(KIND, taken);
-        }
+impl std::ops::Deref for FinalizerControlSource {
+    type Target = ControlSourceParts;
+    fn deref(&self) -> &ControlSourceParts {
+        &self.held
     }
 }
 
-/// Original admission descriptors after account settlement. These affine
-/// fields are handed to the same preallocated registry as the Store graph;
-/// `ManuallyDrop` keeps any source that has not yet registered from being
-/// mistaken for an observed descriptor close during refusal handling.
-pub(super) struct NativeCapacityInputFinalizationSources {
-    pub(super) root: Option<FinalizerDirectorySource>,
-    pub(super) runtime: Option<FinalizerDirectorySource>,
-    pub(super) completion_parent: Option<FinalizerDirectorySource>,
-    pub(super) completion_file: Option<FinalizerControlSource>,
-    pub(super) completion_duplicate: Option<FinalizerControlSource>,
-    pub(super) policy_parent: Option<FinalizerDirectorySource>,
-    pub(super) policy_file: Option<FinalizerControlSource>,
-    pub(super) policy_duplicate: Option<FinalizerControlSource>,
-    pub(super) exclusion_alias: Option<std::mem::ManuallyDrop<Arc<StateLockLease>>>,
-    pub(super) clock_alias: Option<std::mem::ManuallyDrop<Arc<lillux::time::RetainedOccupancyClock>>>,
+/// The slots of the input finalization frame, in release order. Settled
+/// exactly when consumed: nothing remains to drop. Otherwise every retained
+/// source and alias stays retained together until the process exits.
+pub(super) struct InputSourcesParts {
+    root: Option<FinalizerDirectorySource>,
+    runtime: Option<FinalizerDirectorySource>,
+    completion_parent: Option<FinalizerDirectorySource>,
+    completion_file: Option<FinalizerControlSource>,
+    completion_duplicate: Option<FinalizerControlSource>,
+    policy_parent: Option<FinalizerDirectorySource>,
+    policy_file: Option<FinalizerControlSource>,
+    policy_duplicate: Option<FinalizerControlSource>,
+    exclusion_alias: Option<Arc<StateLockLease>>,
+    clock_alias: Option<Arc<lillux::time::RetainedOccupancyClock>>,
 }
-impl NativeCapacityInputFinalizationSources {
-    /// True once every source and both aliases moved on: the frame holds
-    /// nothing, which is what final consumption requires of it.
-    pub(super) fn consumed(&self) -> bool {
+impl InputSourcesParts {
+    fn consumed(&self) -> bool {
         self.root.is_none() && self.runtime.is_none()
             && self.completion_parent.is_none() && self.completion_file.is_none()
             && self.completion_duplicate.is_none() && self.policy_parent.is_none()
             && self.policy_file.is_none() && self.policy_duplicate.is_none()
             && self.exclusion_alias.is_none() && self.clock_alias.is_none()
     }
+}
 
-    /// Move every slot out exactly once, leaving this frame empty.
-    fn take_frame(&mut self) -> Self {
-        Self {
-            root: self.root.take(),
-            runtime: self.runtime.take(),
-            completion_parent: self.completion_parent.take(),
-            completion_file: self.completion_file.take(),
-            completion_duplicate: self.completion_duplicate.take(),
-            policy_parent: self.policy_parent.take(),
-            policy_file: self.policy_file.take(),
-            policy_duplicate: self.policy_duplicate.take(),
-            exclusion_alias: self.exclusion_alias.take(),
-            clock_alias: self.clock_alias.take(),
-        }
+/// Original admission descriptors after account settlement. These affine
+/// fields are handed to the same preallocated registry as the Store graph;
+/// the held frame keeps any source that has not yet registered from being
+/// mistaken for an observed descriptor close during refusal handling.
+pub(super) struct NativeCapacityInputFinalizationSources {
+    held: Held<InputSourcesParts>,
+}
+impl NativeCapacityInputFinalizationSources {
+    fn held(parts: InputSourcesParts) -> Self {
+        const KIND: &str = "ryeos-node::native-capacity-input-sources";
+        Self { held: Held::new(KIND, parts, InputSourcesParts::consumed) }
+    }
+
+    /// True once every source and both aliases moved on: the frame holds
+    /// nothing, which is what final consumption requires of it.
+    pub(super) fn consumed(&self) -> bool {
+        self.held.consumed()
+    }
+
+    /// The four directory slots, in registration order.
+    pub(super) fn directory_slots(&mut self) -> [&mut Option<FinalizerDirectorySource>; 4] {
+        let parts = self.held.get_mut();
+        [&mut parts.root, &mut parts.runtime, &mut parts.completion_parent, &mut parts.policy_parent]
+    }
+
+    /// The four control slots, in registration order.
+    pub(super) fn control_slots(&mut self) -> [&mut Option<FinalizerControlSource>; 4] {
+        let parts = self.held.get_mut();
+        [
+            &mut parts.completion_file, &mut parts.completion_duplicate,
+            &mut parts.policy_file, &mut parts.policy_duplicate,
+        ]
+    }
+
+    /// Move the admission exclusion alias out.
+    pub(super) fn take_exclusion_alias(&mut self) -> Option<Arc<StateLockLease>> {
+        self.held.get_mut().exclusion_alias.take()
+    }
+
+    /// Move the clock alias out.
+    pub(super) fn take_clock_alias(&mut self) -> Option<Arc<lillux::time::RetainedOccupancyClock>> {
+        self.held.get_mut().clock_alias.take()
+    }
+
+    /// Put the clock alias back into an empty slot; an occupied slot refuses
+    /// and hands the offered alias back, so nothing is replaced.
+    pub(super) fn restore_clock_alias(&mut self, alias: Arc<lillux::time::RetainedOccupancyClock>)
+        -> std::result::Result<(), Arc<lillux::time::RetainedOccupancyClock>> {
+        let parts = self.held.get_mut();
+        if parts.clock_alias.is_some() { return Err(alias); }
+        parts.clock_alias = Some(alias);
+        Ok(())
+    }
+
+    /// End every source slot and the exclusion alias after their receipts
+    /// were validated. Each source is itself held, so ending a slot is
+    /// supervised; the clock alias is left for its own retirement.
+    pub(super) fn end_validated_sources(&mut self) {
+        let parts = self.held.get_mut();
+        parts.root = None;
+        parts.runtime = None;
+        parts.completion_parent = None;
+        parts.completion_file = None;
+        parts.completion_duplicate = None;
+        parts.policy_parent = None;
+        parts.policy_file = None;
+        parts.policy_duplicate = None;
+        parts.exclusion_alias = None;
     }
 }
-impl Drop for NativeCapacityInputFinalizationSources {
-    fn drop(&mut self) {
-        // Settled exactly when consumed: nothing remains to drop. Otherwise
-        // every retained source and alias is taken exactly once, here, and
-        // stays retained together until the process exits.
-        const KIND: &str = "ryeos-node::native-capacity-input-sources";
-        if lillux::exec::in_forked_child() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(self.take_frame());
-            return;
-        }
-        if !self.consumed() {
-            lillux::custody::abandon(KIND, self.take_frame());
-        }
+impl std::ops::Deref for NativeCapacityInputFinalizationSources {
+    type Target = InputSourcesParts;
+    fn deref(&self) -> &InputSourcesParts {
+        &self.held
     }
 }
 
@@ -272,7 +382,7 @@ fn quote_native_capacity_input_finalization_sources()
         .context("native input directory owner layout overflow")?;
     let directory_bytes = directory_owner.checked_mul(4)
         .context("native input directory source quote overflow")?;
-    let bytes = u64::try_from(std::mem::size_of::<NativeCapacityInputFinalizationSources>())?
+    let bytes = u64::try_from(std::mem::size_of::<InputSourcesParts>())?
         .checked_add(u64::try_from(directory_bytes)?)
         .context("native input finalization source quote overflow")?;
     // One bounded outside-work unit for each of four directories, four file
@@ -446,7 +556,7 @@ impl LiveNativeCapacityInputs {
         } = self;
         let (completion_parent, completion_file, completion_duplicate) = completion.into_finalization_parts();
         let (policy_parent, policy_file, policy_duplicate) = policy_file.into_finalization_parts();
-        Ok(NativeCapacityInputFinalizationSources {
+        Ok(NativeCapacityInputFinalizationSources::held(InputSourcesParts {
             root: Some(FinalizerDirectorySource::retained(Arc::new(root))),
             runtime: Some(FinalizerDirectorySource::retained(runtime.into())),
             completion_parent: Some(FinalizerDirectorySource::retained(Arc::new(completion_parent))),
@@ -455,9 +565,9 @@ impl LiveNativeCapacityInputs {
             policy_parent: Some(FinalizerDirectorySource::retained(Arc::new(policy_parent))),
             policy_file: Some(FinalizerControlSource::pinned_file(policy_file)),
             policy_duplicate: Some(FinalizerControlSource::duplicate(policy_duplicate)),
-            exclusion_alias: Some(std::mem::ManuallyDrop::new(exclusion)),
-            clock_alias: Some(std::mem::ManuallyDrop::new(clock)),
-        })
+            exclusion_alias: Some(exclusion),
+            clock_alias: Some(clock),
+        }))
     }
 
     pub(crate) fn require_original(&self, cleanup: bool) -> Result<()> {
@@ -514,7 +624,7 @@ mod custody_drop_tests {
     const FRAME: &str = "ryeos-node::native-capacity-input-sources";
 
     fn empty_frame() -> NativeCapacityInputFinalizationSources {
-        NativeCapacityInputFinalizationSources {
+        NativeCapacityInputFinalizationSources::held(InputSourcesParts {
             root: None,
             runtime: None,
             completion_parent: None,
@@ -525,7 +635,7 @@ mod custody_drop_tests {
             policy_duplicate: None,
             exclusion_alias: None,
             clock_alias: None,
-        }
+        })
     }
 
     #[test]
@@ -541,7 +651,7 @@ mod custody_drop_tests {
         assert_eq!(Arc::strong_count(&owner), 2, "the directory alias stays retained");
 
         let mut transferred = FinalizerDirectorySource::retained(Arc::clone(&owner));
-        drop(transferred.owner.take().map(std::mem::ManuallyDrop::into_inner));
+        drop(transferred.take_owner());
         assert!(transferred.owner_transferred());
         drop(transferred);
         assert_eq!(lillux::custody::abandoned_custody().count(DIRECTORY), before + 1);
@@ -562,7 +672,7 @@ mod custody_drop_tests {
         let mut transferred = FinalizerControlSource::duplicate(
             File::create(directory.path().join("transferred")).unwrap(),
         );
-        drop(transferred.duplicate.take().map(std::mem::ManuallyDrop::into_inner));
+        drop(transferred.take_duplicate());
         assert!(transferred.source_transferred());
         drop(transferred);
         assert_eq!(lillux::custody::abandoned_custody().count(CONTROL), before + 1);
@@ -581,7 +691,7 @@ mod custody_drop_tests {
         assert_eq!(unchanged.count(FRAME), before.count(FRAME));
 
         let mut frame = empty_frame();
-        frame.root = Some(FinalizerDirectorySource::retained(Arc::clone(&owner)));
+        frame.held.get_mut().root = Some(FinalizerDirectorySource::retained(Arc::clone(&owner)));
         assert!(!frame.consumed());
         drop(frame);
         let after = lillux::custody::abandoned_custody();

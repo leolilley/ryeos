@@ -979,7 +979,6 @@ fn crate_sources_hold_no_forget_and_no_undropped_manual_owner() {
         "state_db/destination_join.rs",
         "operational/live_native.rs",
         "operational/original.rs",
-        "unwind_custody.rs",
     ] {
         assert!(files.contains(&src.join(required)), "gate lost {required}");
     }

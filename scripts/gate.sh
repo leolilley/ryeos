@@ -38,6 +38,14 @@ gate_fail() {
     if [[ "$gate_tty" == 1 ]]; then ryeos_term_fail "$*"; else printf 'gate: %s\n' "$*" >&2; fi
 }
 
+# The custody token ban is a text scan: it runs before any build, whatever
+# the options, so a banned token fails fast.
+gate_info "custody token ban"
+if ! "$ROOT/scripts/ci/check-custody-tokens.sh"; then
+    gate_fail "custody token ban refused"
+    exit 1
+fi
+
 # Default publisher signing key + owner — used by populate-bundles.sh.
 # Override with KEY=... OWNER=... if you have a different setup.
 KEY="${KEY:-$ROOT/.dev-keys/PUBLISHER_DEV.pem}"

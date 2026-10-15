@@ -1582,9 +1582,9 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         StoreCloseCustody::Shared(_) => unreachable!("shared custody resolved before native close"),
     };
     // An unwind through the close retains the progress whole, counted.
-    let mut progress = live_native::RetainedUntilTaken::new(STORE_CLOSE_UNWOUND_KIND, progress);
+    let mut progress = lillux::custody::Held::until_taken(STORE_CLOSE_UNWOUND_KIND, progress);
     if let Err(error) = progress.metadata.original().and_then(|original| original.require_close_factory(&factory)) {
-        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress.into_inner())));
+        return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(live_native::take_held(progress))));
     }
     // Resolve the real CAS guard before taking either SQL owner, preserving
     // both unchanged if the exact existing anchor cannot be acquired.
@@ -1592,37 +1592,37 @@ fn advance_close(factory: Arc<OriginalNativeFactory>, custody: StoreCloseCustody
         .context("actual Store pinned authority absent before close")
         .and_then(|authority| authority.acquire_exclusive_guard(false)) {
         Ok(guard) => guard,
-        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(progress.into_inner()))),
+        Err(error) => return Err(retain(prior.unwrap_or(error), StoreCloseCustody::Progress(live_native::take_held(progress)))),
     };
-    if let Some(runtime) = progress.runtime.take() {
+    if let Some(runtime) = progress.get_mut().runtime.take() {
         match runtime.close_original_runtime(Arc::clone(&factory)) {
-            Ok(closed) => progress.runtime_closed = Some(closed),
-            Err(failure) => progress.runtime_failure = Some(failure),
+            Ok(closed) => progress.get_mut().runtime_closed = Some(closed),
+            Err(failure) => progress.get_mut().runtime_failure = Some(failure),
         }
-    } else if let Some(failure) = progress.runtime_failure.take() {
+    } else if let Some(failure) = progress.get_mut().runtime_failure.take() {
         match failure.retry() {
-            Ok(closed) => progress.runtime_closed = Some(closed),
-            Err(failure) => progress.runtime_failure = Some(failure),
+            Ok(closed) => progress.get_mut().runtime_closed = Some(closed),
+            Err(failure) => progress.get_mut().runtime_failure = Some(failure),
         }
     }
     if progress.runtime_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(progress.into_inner())));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live Runtime close pending")), StoreCloseCustody::Progress(live_native::take_held(progress))));
     }
-    if let Some(state) = progress.state.take() {
+    if let Some(state) = progress.get_mut().state.take() {
         match state.close_live(Arc::clone(&factory), &guard) {
-            Ok(closed) => progress.state_closed = Some(closed),
-            Err(failure) => progress.state_failure = Some(failure),
+            Ok(closed) => progress.get_mut().state_closed = Some(closed),
+            Err(failure) => progress.get_mut().state_failure = Some(failure),
         }
-    } else if let Some(failure) = progress.state_failure.take() {
+    } else if let Some(failure) = progress.get_mut().state_failure.take() {
         match failure.retry(&guard) {
-            Ok(closed) => progress.state_closed = Some(closed),
-            Err(failure) => progress.state_failure = Some(failure),
+            Ok(closed) => progress.get_mut().state_closed = Some(closed),
+            Err(failure) => progress.get_mut().state_failure = Some(failure),
         }
     }
     if progress.state_failure.is_some() {
-        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(progress.into_inner())));
+        return Err(retain(prior.unwrap_or_else(|| anyhow!("live State close pending")), StoreCloseCustody::Progress(live_native::take_held(progress))));
     }
-    let closed = ClosedLiveStateStore { progress: std::mem::ManuallyDrop::new(progress.into_inner()), prior_refusal: prior };
+    let closed = ClosedLiveStateStore { progress: std::mem::ManuallyDrop::new(live_native::take_held(progress)), prior_refusal: prior };
     if let Err(error) = closed.native_terminals(&factory) { return Err(retain(error, StoreCloseCustody::Closed(closed))); }
     Ok(closed)
 }
