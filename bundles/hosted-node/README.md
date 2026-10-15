@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:16:01Z:6f3ea40fb650b54471156c6af311e8a48814351e8218c5217644ed6c8525db2e:Fir0w3W+wDyVzmaWQIRcow1qQFQzhof+QTMVCziwRSWRIACYJxTPQVCKyhHU0562L7r0WTvwg7olfk7NBq79Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T17:43:32Z:3d985f9995b97fa94748a26f70148d36eaa7d1b251fc3e56f7ed6acb21bd5162:uHh4FgbsAXLgVpw4pODGNgapp05V1LmgM69e7eZsQYJ0rPWqYyKS3MFwySyVZPm0lKa6C3myNRj0YBR8fzC1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Hosted-Node Bundle
 
 The `hosted-node` bundle is the core-only profile marker and operator
