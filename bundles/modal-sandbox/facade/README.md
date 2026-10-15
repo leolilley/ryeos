@@ -1,7 +1,7 @@
 # RyeOS Modal lease facade
 
 `ryeos_lease_facade.py` is a small Modal app that turns Modal sandboxes into
-RyeOS leases behind six fixed HTTPS routes. Modal's own client protocol is
+RyeOS leases behind eight fixed HTTPS routes. Modal's own client protocol is
 gRPC over HTTP/2; the facade lets the RyeOS lifecycle adapter drive leases
 over plain HTTP/1.1 JSON instead. It holds no state of its own: every lease
 fact lives on the Modal sandbox (its name in the lease app, its tags, and
@@ -29,6 +29,8 @@ All routes are `POST` with a JSON object body, at
 | `/v1/terminate` | exactly one of `sandbox_id`, `name` | terminates, then polls until a 60 s monotonic-clock deadline and returns the observed terminal state; `already_terminal` when it had ended before the call |
 | `/v1/upload` | `sandbox_id`, `content_b64`, `sha256` | writes the one guest file to `/ryeos/guest/entrypoint`, mode 0755 |
 | `/v1/run-once` | `sandbox_id`, `stdin_b64` | writes `/ryeos/run.stdin` and releases the guest; `released: true` with the stdin digest |
+| `/v1/stage` | `sandbox_id`, `slot`, `offset`, `content_b64`, `chunk_sha256` | appends one chunk to the opaque slot file `/ryeos/stage/<slot>`; `slot_bytes` is the size after the append |
+| `/v1/stage-seal` | `sandbox_id`, `slot`, `total_bytes`, `sha256` | digests the slot file inside the sandbox, then seals the slot; `sealed: true`, `already_sealed` on a repeat with the same digest |
 | `/v1/list` | `lease_set` | `sandbox_ids` of running leases of that lease set, `untagged_sandbox_ids` of every untagged sandbox in the lease app, `truncated` past 256 entries |
 
 `get` and `terminate` report `found: false` when Modal has no such sandbox.
@@ -45,12 +47,13 @@ object with:
 - `guest_image`: the declared guest image identity,
   `modal.debian_slim(python_version=3.12)+mkdir -p /ryeos/guest`
 - `modal_client`: the Modal client version in the facade's container
-- `operation`: `create`, `get`, `terminate`, `upload`, `run_once`, `list`, or
+- `operation`: `create`, `get`, `terminate`, `upload`, `stage`, `stage_seal`, `run_once`, `list`, or
   `unknown` for an unknown path
 - `ok`: `true` for observations, `false` for refusals and provider failures
 
 Request bodies are bounded per route before they are read: 64 KiB for
-`create`, `get`, `terminate` and `list`; the encoded 64 KiB stdin plus 4 KiB
+`create`, `get`, `terminate`, `stage-seal` and `list`; the encoded 32 MiB
+chunk plus 4 KiB for `stage`; the encoded 64 KiB stdin plus 4 KiB
 for `run-once`; the encoded 64 MiB upload plus 4 KiB for `upload`. The
 received bytes must equal `Content-Length`. Before parsing, the body may hold
 at most 32 `{` and `[` bytes in total (a full create needs 7; base64 holds
@@ -85,7 +88,7 @@ errors, and function timeouts (300 s).
   is unique among running sandboxes.
 - Policy digest: create computes `policy_sha256`, the SHA-256 of the
   canonical JSON (sorted keys, no spaces) of `policy`: schema
-  `ryeos.modal_lease_policy.v1`, `lease_set`, `timeout_seconds`, cpu, memory,
+  `ryeos.modal_lease_policy.v2`, `lease_set`, `timeout_seconds`, cpu, memory,
   `block_network`, the sorted allow list, the image identity and the sandbox
   command. A repeated create succeeds only when the running lease's stored
   digest matches; otherwise it is refused as `name_taken_policy_mismatch`
@@ -126,8 +129,37 @@ errors, and function timeouts (300 s).
   reach) and as an atomic `mkdir /ryeos/upload.claimed`; either one blocks a
   second upload. After the write and `chmod`, `mkdir /ryeos/upload.done`
   and the tag set to the content digest mark it complete.
+- Stage: opaque named slots filled by sequential chunks, independent of the
+  upload. A slot name matches `[a-z0-9-]{1,32}`; a lease starts at most 4
+  distinct slots (the first chunk of a slot starts it). A chunk is 1 byte to
+  32 MiB decoded, must match `chunk_sha256`, and is appended to
+  `/ryeos/stage/<slot>` only when the file's current size (stat inside the
+  sandbox, 0 when absent) equals `offset`; otherwise `offset_mismatch` with
+  the current `slot_bytes`. The chunk is claimed by an atomic `mkdir
+  /ryeos/stage-claim/<slot>/c<offset>`; a second claim of the same offset is
+  `chunk_already_claimed` and a failed append after its claim leaves the slot
+  wedged (terminate and recreate, as for upload). The slot total is at most
+  4 GiB + 64 KiB (`slot_too_large`). A sealed slot takes no more chunks
+  (`slot_sealed`). The slot constants (4 slots, 32 MiB chunk, 4 GiB + 64 KiB
+  slot) are in the policy record (`policy.stage`), hence in `policy_sha256`.
+- Stage-seal: `total_bytes` (1 to the slot cap) must equal the file size
+  (`seal_size_mismatch`) and `sha256` must equal `sha256sum` of the file
+  run inside the sandbox (`seal_digest_mismatch`). Then the tag
+  `ryeos_stage_<slot>=<sha256>` is set and `mkdir /ryeos/stage/<slot>.done`
+  marks it sealed. Sealing again with the same digest is a no-op success;
+  with another digest it is `seal_digest_conflict`. Sealing a slot that
+  never received a chunk is `slot_not_started`. A repeated seal also checks
+  `total_bytes` against the file size. Sealing takes a claim `mkdir
+  /ryeos/stage/<slot>.sealing` (released if the seal is refused); a chunk
+  checks for it after taking its chunk claim and again after the append, and
+  fails closed with `guest_step_failed` if a seal or the run claim raced in.
+  Stage and a new seal are refused with `run_once_already_claimed` once the
+  run was claimed. A slot is only started by a chunk at offset 0, checked
+  before any claim is made; a refusal after starting a still-empty slot
+  removes the start claim.
 - Run-once: once per lease, only after a completed upload (the content-digest
-  tag and `/ryeos/upload.done` both present). The claim is the `ryeos_run`
+  tag and `/ryeos/upload.done` both present) and with every started slot
+  sealed (`slot_not_sealed`, naming the slot). The claim is the `ryeos_run`
   tag plus `mkdir /ryeos/run.claimed`. Stdin is the base64 decode of
   `stdin_b64`, at most 64 KiB, written verbatim to `/ryeos/run.stdin`; the
   guest reads it as a regular file and sees end of file after it. `mkdir
@@ -184,9 +216,15 @@ non-UTF-8 and nesting the parser cannot hold). Policy refusals:
 | `not_facade_sandbox` | reached by id without the lease tags |
 | `not_lease_app_sandbox` | reached by id, but the lease app's sandbox of that name is another one |
 | `sandbox_terminated` | upload or run on an ended lease |
-| `upload_already_claimed`, `run_once_already_claimed` | second upload or run |
+| `upload_already_claimed`, `run_once_already_claimed` | second upload or run; also a chunk or a new seal after the run was claimed |
 | `upload_not_complete` | run-once before a completed upload |
-| `guest_step_failed` | a fixed `chmod`/`mkdir` step failed |
+| `invalid_slot`, `invalid_offset`, `invalid_total_bytes` | stage syntax |
+| `chunk_too_large`, `chunk_empty`, `chunk_sha256_mismatch` | a chunk over 32 MiB decoded, with no bytes, or not matching `chunk_sha256` |
+| `offset_mismatch`, `chunk_already_claimed` | a chunk not at the slot's current size; a second claim of one offset |
+| `too_many_slots`, `slot_too_large` | a fifth slot; a slot past 4 GiB + 64 KiB |
+| `slot_sealed`, `slot_not_started`, `slot_not_sealed` | chunk after (or during) seal; seal of an unstarted slot; run-once with an unsealed started slot |
+| `seal_size_mismatch`, `seal_digest_mismatch`, `seal_digest_conflict` | seal checks |
+| `guest_step_failed` | a fixed `chmod`/`mkdir` step failed; or a seal or the run claim landed while a chunk was in flight |
 
 ## Live checks before the first deploy is trusted
 
@@ -241,6 +279,28 @@ sandbox:
     concurrency): the 1024 MiB function memory is sized for one upload
     (about 90 MB of JSON, its parsed string and the decoded bytes). Raising
     input concurrency needs this redone.
+
+21. `Sandbox.open(path, 'ab')` appends, and `exec(...)` exposes `stdout.read()`
+    (used for `stat -c %s`, `sha256sum` and `ls -1`) before `wait()` returns
+    the exit code.
+22. A slot can reach 4 GiB + 64 KiB by 32 MiB appends: the sandbox disk holds
+    it, the append of a 32 MiB chunk through `Sandbox.open` is accepted, and
+    the facade function (1024 MiB) survives one full-size chunk request
+    (about 43 MB of JSON, its parsed string and the decoded bytes).
+23. Modal's web request body limit admits the 32 MiB chunk frame (about 43
+    MB of JSON) and `Content-Length` reaches the app.
+24. Tag limits: a sandbox accepts the base lease tags plus `ryeos_upload`,
+    `ryeos_run` and four `ryeos_stage_<slot>` tags (up to 41-character keys,
+    64-character values); the facade's `_set_tags` replaces the whole set.
+25. The seal digest: `sha256sum` of a 4 GiB slot completes inside the exec
+    time limits and its output is what the facade compares; a guest cannot
+    forge the tag (see 15).
+26. `ls -1`, `stat`, `sha256sum`, `rmdir` and `mkdir -p` exist in the
+    `debian_slim` image and run as the exec user.
+27. `exec(...)` calls in the facade have no explicit timeout, because the
+    fake SDK's `exec(*argv)` does not model one. Confirm that Modal's
+    `Sandbox.exec(..., timeout=...)` is accepted, then bound the fixed
+    steps (`_run`/`_read`), with a generous bound for the 4 GiB `sha256sum`.
 
 ## Tests
 

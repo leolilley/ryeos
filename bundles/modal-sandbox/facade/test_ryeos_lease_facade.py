@@ -29,19 +29,29 @@ class ProviderBoom(Exception):
 
 
 class FakeProcess:
-    def __init__(self, code):
+    def __init__(self, code, out=''):
         self.code = code
+        self.stdout = FakeStream(out)
 
     def wait(self):
         return self.code
 
 
+class FakeStream:
+    def __init__(self, text):
+        self.text = text
+
+    def read(self):
+        return self.text
+
+
 class FakeFile(contextlib.AbstractContextManager):
-    def __init__(self, sandbox, path):
-        self.sandbox, self.path = sandbox, path
+    def __init__(self, sandbox, path, append=False):
+        self.sandbox, self.path, self.append = sandbox, path, append
 
     def write(self, data):
-        self.sandbox.files[self.path] = data
+        old = self.sandbox.files.get(self.path, b'') if self.append else b''
+        self.sandbox.files[self.path] = old + data
 
     def __exit__(self, *exc):
         return False
@@ -82,18 +92,33 @@ class FakeSandbox:
     def exec(self, *argv):
         self.execs.append(argv)
         code = 0
+        out = ''
         if argv[0] in self.fail_exec:
             code = 1
+        elif argv[:2] == ('mkdir', '-p'):
+            self.dirs.update(argv[2:])
+        elif argv[0] == 'rmdir':
+            self.dirs.discard(argv[1])
+        elif argv[:2] == ('test', '-f'):
+            code = 0 if argv[2] in self.files else 1
+        elif argv[:3] == ('stat', '-c', '%s'):
+            out = str(len(self.files[argv[3]])) + '\n'
+        elif argv[0] == 'sha256sum':
+            out = hashlib.sha256(self.files[argv[1]]).hexdigest() + '  ' + argv[1] + '\n'
+        elif argv[:2] == ('ls', '-1'):
+            prefix = argv[2] + '/'
+            names = {d[len(prefix):].split('/')[0] for d in self.dirs if d.startswith(prefix)}
+            out = ''.join(n + '\n' for n in sorted(names))
         elif argv[0] == 'mkdir':
             code = 1 if argv[1] in self.dirs else 0
             self.dirs.add(argv[1])
         elif argv[:2] == ('test', '-d'):
             code = 0 if argv[2] in self.dirs else 1
-        return FakeProcess(code)
+        return FakeProcess(code, out)
 
     def open(self, path, mode):
-        assert mode == 'wb'
-        return FakeFile(self, path)
+        assert mode in ('wb', 'ab')
+        return FakeFile(self, path, append=mode == 'ab')
 
 
 class FakeProvider:
@@ -281,7 +306,8 @@ class FacadeTest(unittest.TestCase):
         self.assertEqual(self.record['functions']['web']['memory'], 1024)
         self.assertEqual(self.record['functions']['web']['timeout'], 300)
         self.assertEqual(set(self.facade.ROUTES), {
-            '/v1/create', '/v1/get', '/v1/terminate', '/v1/upload', '/v1/run-once', '/v1/list'})
+            '/v1/create', '/v1/get', '/v1/terminate', '/v1/upload', '/v1/run-once', '/v1/list',
+            '/v1/stage', '/v1/stage-seal'})
 
     def test_facade_reads_no_credentials(self):
         code = FACADE_PATH.read_text().split('"""', 2)[2]
@@ -742,8 +768,9 @@ class FacadeTest(unittest.TestCase):
                          (True, ['/ryeos/guest/entrypoint'], '/ryeos/run.stdin'))
         self.assertEqual((run['stdin_bytes'], run['stdin_sha256']), (len(stdin), hashlib.sha256(stdin).hexdigest()))
         self.assertEqual(sandbox.files['/ryeos/run.stdin'], stdin)
-        self.assertEqual(sandbox.execs[-3:], [
-            ('test', '-d', '/ryeos/upload.done'), ('mkdir', '/ryeos/run.claimed'), ('mkdir', '/ryeos/run.go')])
+        self.assertEqual(sandbox.execs[-4:], [
+            ('test', '-d', '/ryeos/upload.done'), ('test', '-d', '/ryeos/stage-claim'),
+            ('mkdir', '/ryeos/run.claimed'), ('mkdir', '/ryeos/run.go')])
         self.assertEqual(sandbox.tags['ryeos_run'], run['stdin_sha256'])
         self.refused(self.facade.handle_run_once, {'sandbox_id': out['sandbox_id'], 'stdin_b64': ''}, 'run_once_already_claimed')
         sandbox.dirs.discard('/ryeos/run.claimed')
@@ -769,6 +796,284 @@ class FacadeTest(unittest.TestCase):
         self.refused(self.facade.handle_run_once, {'sandbox_id': sid, 'stdin_b64': '', 'args': ['-c']}, 'command_refused')
         self.refused(self.facade.handle_run_once, {'sandbox_id': sid, 'stdin_b64': 'not base64!'}, 'invalid_base64')
         self.refused(self.facade.handle_run_once, {'sandbox_id': sid, 'stdin_b64': b64(b'x' * (64 * 1024 + 1))}, 'stdin_too_large')
+
+    # Stage
+
+    def staged(self, sid, slot, offset, data, **overrides):
+        body = {'sandbox_id': sid, 'slot': slot, 'offset': offset, 'content_b64': b64(data),
+                'chunk_sha256': hashlib.sha256(data).hexdigest()}
+        body.update(overrides)
+        return self.facade.handle_stage(body)
+
+    def seal_body(self, sid, slot, data, **overrides):
+        body = {'sandbox_id': sid, 'slot': slot, 'total_bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        body.update(overrides)
+        return body
+
+    def test_stage_appends_in_order_and_seal_digests_in_the_sandbox(self):
+        out = self.created()
+        sid = out['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        status, one = self.staged(sid, 'part-a', 0, b'hello ')
+        self.assertEqual(status, 200, one)
+        self.assertEnvelope(one, 'stage')
+        self.assertEqual((one['path'], one['slot_bytes']), ('/ryeos/stage/part-a', 6))
+        status, two = self.staged(sid, 'part-a', 6, b'world')
+        self.assertEqual((status, two['slot_bytes']), (200, 11))
+        self.assertEqual(sandbox.files['/ryeos/stage/part-a'], b'hello world')
+        self.assertIn('/ryeos/stage-claim/part-a/c0', sandbox.dirs)
+        self.assertIn('/ryeos/stage-claim/part-a/c6', sandbox.dirs)
+        data = b'hello world'
+        status, sealed = self.facade.handle_stage_seal(self.seal_body(sid, 'part-a', data))
+        self.assertEqual(status, 200, sealed)
+        self.assertEnvelope(sealed, 'stage_seal')
+        self.assertEqual((sealed['sealed'], sealed['already_sealed']), (True, False))
+        self.assertEqual(sandbox.tags['ryeos_stage_part-a'], hashlib.sha256(data).hexdigest())
+        self.assertIn('/ryeos/stage/part-a.done', sandbox.dirs)
+        self.assertIn(('sha256sum', '/ryeos/stage/part-a'), sandbox.execs)
+
+    def test_stage_offset_mismatch_is_refused(self):
+        sid = self.created()['sandbox_id']
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 5, b'x'), 'offset_mismatch')
+        self.staged(sid, 'a', 0, b'abc')
+        out = self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 1, b'x'), 'offset_mismatch')
+        self.assertEqual(out['slot_bytes'], 3)
+        self.assertEqual(self.provider.by_id[sid].files['/ryeos/stage/a'], b'abc')
+
+    def staged_body(self, sid, slot, offset, data, **overrides):
+        body = {'sandbox_id': sid, 'slot': slot, 'offset': offset, 'content_b64': b64(data),
+                'chunk_sha256': hashlib.sha256(data).hexdigest()}
+        body.update(overrides)
+        return body
+
+    def test_stage_double_chunk_claim(self):
+        sid = self.created()['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        self.staged(sid, 'a', 0, b'abc')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'abc'), 'offset_mismatch')
+        # A chunk whose claim exists but whose bytes never landed is not retried.
+        sandbox.files['/ryeos/stage/a'] = b''
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'abc'), 'chunk_already_claimed')
+        self.assertEqual(sandbox.files['/ryeos/stage/a'], b'')
+
+    def test_stage_chunk_cap(self):
+        sid = self.created()['sandbox_id']
+        self.facade.MAX_STAGE_CHUNK_BYTES = 4
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'12345'), 'chunk_too_large')
+        status, _ = self.staged(sid, 'a', 0, b'1234')
+        self.assertEqual(status, 200)
+
+    def test_stage_chunk_sha256_mismatch_and_syntax(self):
+        sid = self.created()['sandbox_id']
+        wrong = hashlib.sha256(b'other').hexdigest()
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x', chunk_sha256=wrong), 'chunk_sha256_mismatch')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x', chunk_sha256='AB'), 'invalid_sha256')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x', content_b64='!!'), 'invalid_base64')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b''), 'chunk_empty')
+        self.assertEqual(self.provider.by_id[sid].files, {})
+
+    def test_stage_slot_count_cap(self):
+        sid = self.created()['sandbox_id']
+        for i in range(4):
+            self.assertEqual(self.staged(sid, f's{i}', 0, b'x')[0], 200)
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 's4', 0, b'x'), 'too_many_slots')
+        self.assertNotIn('/ryeos/stage-claim/s4', self.provider.by_id[sid].dirs)
+        # An existing slot still takes chunks.
+        self.assertEqual(self.staged(sid, 's0', 1, b'y')[0], 200)
+
+    def test_stage_slot_total_cap(self):
+        sid = self.created()['sandbox_id']
+        self.facade.MAX_STAGE_SLOT_BYTES = 6
+        self.assertEqual(self.staged(sid, 'a', 0, b'abcd')[0], 200)
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 4, b'efg'), 'slot_too_large')
+        self.assertEqual(self.staged(sid, 'a', 4, b'ef')[0], 200)
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 7, b'x'), 'invalid_offset')
+        self.assertEqual(self.facade.MAX_STAGE_SLOT_BYTES, 6)
+
+    def test_stage_constants(self):
+        self.assertEqual(self.facade.MAX_STAGE_SLOTS, 4)
+        self.assertEqual(self.facade.MAX_STAGE_CHUNK_BYTES, 32 * 1024 * 1024)
+        self.assertEqual(self.facade.MAX_STAGE_SLOT_BYTES, 4 * 1024 ** 3 + 64 * 1024)
+
+    def test_stage_slot_caps_are_in_the_policy_digest(self):
+        record = self.created()['policy']
+        self.assertEqual(record['stage'], {
+            'max_slots': 4, 'max_chunk_bytes': 32 * 1024 * 1024, 'max_slot_bytes': 4 * 1024 ** 3 + 64 * 1024})
+        other = dict(record, stage=dict(record['stage'], max_slots=5))
+        self.assertNotEqual(self.facade.policy_digest(record), self.facade.policy_digest(other))
+
+    def test_stage_bad_slot_name_offset_and_fields(self):
+        sid = self.created()['sandbox_id']
+        for slot in ('', 'A', 'a.b', 'a/b', '..', 'x' * 33, 'a b', 5, None):
+            self.refused(self.facade.handle_stage, self.staged_body(sid, slot, 0, b'x'), 'invalid_slot')
+        for offset in (-1, '0', 1.0, True, None):
+            self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', offset, b'x'), 'invalid_offset')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x', path='/x'), 'path_refused')
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x', mode='x'), 'unknown_field')
+        self.refused(self.facade.handle_stage, {'sandbox_id': sid, 'slot': 'a'}, 'missing_field')
+        self.assertEqual(self.staged(sid, 'a-' + '0' * 30, 0, b'x')[0], 200)
+
+    def test_stage_nonzero_first_offset_leaves_the_slot_not_started(self):
+        out, sandbox = self.uploaded()
+        sid = out['sandbox_id']
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 5, b'x'), 'offset_mismatch')
+        self.assertNotIn('/ryeos/stage-claim/a', sandbox.dirs)
+        self.assertNotIn(('mkdir', '/ryeos/stage-claim/a'), sandbox.execs)
+        status, run = self.facade.handle_run_once({'sandbox_id': sid, 'stdin_b64': ''})
+        self.assertEqual(status, 200, run)
+
+    def test_stage_start_claim_removed_when_refused_after_starting(self):
+        out = self.created()
+        sid = out['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        sandbox.files['/ryeos/stage/a'] = b'stray'
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x'), 'offset_mismatch')
+        self.assertNotIn('/ryeos/stage-claim/a', sandbox.dirs)
+
+    def test_stage_seal_race_fails_closed(self):
+        out = self.created()
+        sid = out['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        self.assertEqual(self.staged(sid, 'a', 0, b'abc')[0], 200)
+        real_open = sandbox.open
+
+        def racing_open(path, mode):
+            sandbox.dirs.add('/ryeos/stage/a.sealing')
+            return real_open(path, mode)
+
+        sandbox.open = racing_open
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 3, b'def'), 'guest_step_failed')
+        sandbox.open = real_open
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 6, b'x'), 'slot_sealed')
+
+    def test_stage_seal_claim_released_on_refusal_and_blocks_chunks_while_held(self):
+        out = self.created()
+        sid = out['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        self.staged(sid, 'a', 0, b'abc')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', total_bytes=9), 'seal_size_mismatch')
+        self.assertNotIn('/ryeos/stage/a.sealing', sandbox.dirs)
+        self.assertEqual(self.staged(sid, 'a', 3, b'd')[0], 200)
+        sandbox.dirs.add('/ryeos/stage/a.sealing')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abcd'), 'slot_sealed')
+
+    def test_stage_and_new_seal_refused_after_run_once(self):
+        out, sandbox = self.uploaded()
+        sid = out['sandbox_id']
+        self.assertEqual(self.facade.handle_run_once({'sandbox_id': sid, 'stdin_b64': ''})[0], 200)
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x'), 'run_once_already_claimed')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'x'), 'run_once_already_claimed')
+        self.assertNotIn('/ryeos/stage-claim/a', sandbox.dirs)
+
+    def test_idempotent_seal_checks_total_bytes(self):
+        out = self.created()
+        sid = out['sandbox_id']
+        self.staged(sid, 'a', 0, b'abc')
+        self.assertEqual(self.facade.handle_stage_seal(self.seal_body(sid, 'a', b'abc'))[0], 200)
+        status, again = self.facade.handle_stage_seal(self.seal_body(sid, 'a', b'abc'))
+        self.assertEqual((status, again['already_sealed']), (200, True))
+        out = self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', total_bytes=99), 'seal_size_mismatch')
+        self.assertEqual(out['slot_bytes'], 3)
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abd'), 'seal_digest_conflict')
+
+    def test_stage_requires_a_live_owned_sandbox(self):
+        sid = self.created()['sandbox_id']
+        foreign = self.provider.add_foreign()
+        self.refused(self.facade.handle_stage, self.staged_body(foreign.object_id, 'a', 0, b'x'), 'not_facade_sandbox')
+        self.facade.handle_terminate({'sandbox_id': sid})
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 0, b'x'), 'sandbox_terminated')
+
+    def test_seal_digest_mismatch(self):
+        sid = self.created()['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        self.staged(sid, 'a', 0, b'abc')
+        wrong = hashlib.sha256(b'abd').hexdigest()
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', sha256=wrong), 'seal_digest_mismatch')
+        self.assertNotIn('/ryeos/stage/a.done', sandbox.dirs)
+        self.assertNotIn('ryeos_stage_a', sandbox.tags)
+        # The digest is the sandbox's own, not the caller's chunk digests.
+        sandbox.files['/ryeos/stage/a'] = b'abd'
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc'), 'seal_digest_mismatch')
+
+    def test_seal_size_mismatch_and_syntax(self):
+        sid = self.created()['sandbox_id']
+        self.staged(sid, 'a', 0, b'abc')
+        out = self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', total_bytes=4), 'seal_size_mismatch')
+        self.assertEqual(out['slot_bytes'], 3)
+        for total in (0, -1, '3', True, 4 * 1024 ** 3 + 64 * 1024 + 1):
+            self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', total_bytes=total), 'invalid_total_bytes')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'a', b'abc', sha256='zz'), 'invalid_sha256')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'b', b'abc'), 'slot_not_started')
+        self.refused(self.facade.handle_stage_seal, self.seal_body(sid, 'B', b'abc'), 'invalid_slot')
+
+    def test_reseal_same_digest_ok_different_refused(self):
+        sid = self.created()['sandbox_id']
+        sandbox = self.provider.by_id[sid]
+        self.staged(sid, 'a', 0, b'abc')
+        body = self.seal_body(sid, 'a', b'abc')
+        self.assertEqual(self.facade.handle_stage_seal(body)[0], 200)
+        history = len(sandbox.tag_history)
+        status, again = self.facade.handle_stage_seal(body)
+        self.assertEqual((status, again['already_sealed']), (200, True))
+        self.assertEqual(len(sandbox.tag_history), history)
+        other = self.seal_body(sid, 'a', b'abd')
+        self.refused(self.facade.handle_stage_seal, other, 'seal_digest_conflict')
+
+    def test_stage_after_seal_is_refused(self):
+        sid = self.created()['sandbox_id']
+        self.staged(sid, 'a', 0, b'abc')
+        self.facade.handle_stage_seal(self.seal_body(sid, 'a', b'abc'))
+        self.refused(self.facade.handle_stage, self.staged_body(sid, 'a', 3, b'd'), 'slot_sealed')
+        self.assertEqual(self.provider.by_id[sid].files['/ryeos/stage/a'], b'abc')
+
+    def test_run_once_needs_every_started_slot_sealed(self):
+        out, sandbox = self.uploaded()
+        sid = out['sandbox_id']
+        self.staged(sid, 'a', 0, b'abc')
+        self.staged(sid, 'b', 0, b'xyz')
+        run = {'sandbox_id': sid, 'stdin_b64': ''}
+        self.facade.handle_stage_seal(self.seal_body(sid, 'a', b'abc'))
+        refusal = self.refused(self.facade.handle_run_once, run, 'slot_not_sealed')
+        self.assertEqual(refusal['slot'], 'b')
+        self.assertNotIn('/ryeos/run.claimed', sandbox.dirs)
+        self.facade.handle_stage_seal(self.seal_body(sid, 'b', b'xyz'))
+        status, released = self.facade.handle_run_once(run)
+        self.assertEqual((status, released['released']), (200, True))
+
+    def test_run_once_without_any_slot_is_unchanged(self):
+        out, _ = self.uploaded()
+        status, released = self.facade.handle_run_once({'sandbox_id': out['sandbox_id'], 'stdin_b64': ''})
+        self.assertEqual((status, released['released']), (200, True))
+
+    def test_stage_request_caps(self):
+        cap = self.facade.ROUTE_BODY_BYTES['stage']
+        self.assertEqual(cap, (32 * 1024 * 1024 // 3 + 1) * 4 + 4096)
+        self.assertNotIn('stage_seal', self.facade.ROUTE_BODY_BYTES)
+        status, out = call_asgi(self.facade, '/v1/stage', b'{}', headers=[(b'content-length', str(cap + 1).encode())])
+        self.assertEqual((status, out['refusal']), (413, 'body_too_large'))
+        status, out = call_asgi(self.facade, '/v1/stage-seal', b'{}', headers=[(b'content-length', str(64 * 1024 + 1).encode())])
+        self.assertEqual((status, out['refusal']), (413, 'body_too_large'))
+        # A full-size chunk frame passes the cap and the structure check.
+        sid = self.created()['sandbox_id']
+        data = b'\0' * (32 * 1024 * 1024)
+        body = json.dumps(self.staged_body(sid, 'a', 0, data)).encode()
+        self.assertLessEqual(len(body), cap)
+        status, out = call_asgi(self.facade, '/v1/stage', body)
+        self.assertEqual((status, out['operation']), (200, 'stage'), out)
+        self.assertEqual(out['slot_bytes'], len(data))
+
+    def test_stage_routes_round_trip_through_asgi(self):
+        sid = self.created()['sandbox_id']
+        status, out = call_asgi(self.facade, '/v1/stage', json.dumps(self.staged_body(sid, 'a', 0, b'abc')).encode())
+        self.assertEqual(status, 200, out)
+        status, out = call_asgi(self.facade, '/v1/stage-seal', json.dumps(self.seal_body(sid, 'a', b'abc')).encode())
+        self.assertEqual((status, out['sealed']), (200, True), out)
+
+    def test_facade_stays_meaning_blind(self):
+        code = FACADE_PATH.read_text().split('"""', 2)[2].lower()
+        for needle in ('import', 'package', 'runtime', 'launcher'):
+            lines = [l for l in code.splitlines() if needle in l and not l.lstrip().startswith(('import ', 'from '))]
+            self.assertEqual(lines, [], needle)
 
     # List
 

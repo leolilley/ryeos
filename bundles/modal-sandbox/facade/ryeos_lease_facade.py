@@ -1,7 +1,7 @@
-# ryeos:signed:2026-10-15T00:48:47Z:dfb26f981a05c4879037455033be2acf695730cd22e3e6d18f12575887700221:Ar17HzXBhePQGrgd41mQT9CLoFmxurUw64geny+JdcXk/RA81Ni1ku7PyftaHWpRzkWJm6rzbbXboX4y3G+2Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T20:11:12Z:d30da7730b2ab3de94dab818b4b59a6b66ed91e417791850dcdf6e32b3d3cbe8:HbEvXvAuNW42oJNbsCzWfJ4NXonuL0NohleEnf1PKL7uU8AjR//HLiqaOCtW5sYcdGWe/9isSE6kt5cXi0StAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """RyeOS Modal lease facade: fixed HTTP routes over Modal sandboxes.
 
-One ``asgi_app`` behind Modal proxy auth serves six fixed POST paths. The only
+One ``asgi_app`` behind Modal proxy auth serves eight fixed POST paths. The only
 request header read is ``Content-Length``, used to refuse oversized bodies
 before they are read. Each body is a JSON object checked against one fixed
 lease policy; anything else is refused by name. The facade never chooses an
@@ -29,7 +29,7 @@ from typing import Any, Callable, Mapping
 import modal
 
 RESPONSE_SCHEMA = 'ryeos.modal_lease_facade.response.v1'
-POLICY_SCHEMA = 'ryeos.modal_lease_policy.v1'
+POLICY_SCHEMA = 'ryeos.modal_lease_policy.v2'
 FACADE_APP_NAME = 'ryeos-lease-facade'
 LEASE_APP_NAME = 'ryeos-lease-sandboxes'
 FACADE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -48,6 +48,8 @@ UPLOAD_CLAIM = '/ryeos/upload.claimed'
 UPLOAD_DONE = '/ryeos/upload.done'
 RUN_CLAIM = '/ryeos/run.claimed'
 RUN_RELEASE = '/ryeos/run.go'
+STAGE_DIR = '/ryeos/stage'
+STAGE_CLAIM_DIR = '/ryeos/stage-claim'
 LEASE_INIT = (
     f'while [ ! -d {RUN_RELEASE} ]; do sleep 1; done; '
     f'exec {GUEST_ENTRYPOINT} < {RUN_STDIN}'
@@ -56,12 +58,19 @@ LEASE_COMMAND = ('/bin/sh', '-c', LEASE_INIT)
 GUEST_IMAGE_IDENTITY = f'modal.debian_slim(python_version=3.12)+mkdir -p {GUEST_DIR}'
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_STDIN_BYTES = 64 * 1024
+# Staged slots: opaque named files filled by sequential chunks and sealed by
+# digest. These constants are part of the policy record, so the pinned policy
+# digest covers them.
+MAX_STAGE_SLOTS = 4
+MAX_STAGE_CHUNK_BYTES = 32 * 1024 * 1024
+MAX_STAGE_SLOT_BYTES = 4 * 1024 * 1024 * 1024 + 64 * 1024
 MAX_BODY_BYTES = 64 * 1024
 # Routes carrying base64 payloads get room for the encoded payload plus a
 # small JSON frame; every other route is held to MAX_BODY_BYTES.
 ROUTE_BODY_BYTES = {
     'upload': (MAX_UPLOAD_BYTES // 3 + 1) * 4 + 4096,
     'run_once': (MAX_STDIN_BYTES // 3 + 1) * 4 + 4096,
+    'stage': (MAX_STAGE_CHUNK_BYTES // 3 + 1) * 4 + 4096,
 }
 # No valid request needs more than a handful of objects and arrays (create
 # needs at most 7); base64 text contains neither bracket.
@@ -75,6 +84,7 @@ LEASE_NAME_TAG = 'ryeos_lease_name'
 POLICY_TAG = 'ryeos_policy'
 UPLOAD_TAG = 'ryeos_upload'
 RUN_TAG = 'ryeos_run'
+STAGE_TAG_PREFIX = 'ryeos_stage_'
 CLAIMED = 'claimed'
 
 _LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
@@ -83,6 +93,7 @@ _LEASE_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,62}')
 _SANDBOX_ID = re.compile(r'sb-[A-Za-z0-9]{1,64}')
 _SHA256_HEX = re.compile(r'[0-9a-f]{64}')
 _PRINTABLE_FIELD = re.compile(r'[A-Za-z0-9_]{1,32}')
+_SLOT_NAME = re.compile(r'[a-z0-9-]{1,32}')
 _DECIMAL = re.compile(r'[0-9]{1,12}')
 
 # Request fields with a named refusal of their own, so that a caller probing
@@ -253,6 +264,11 @@ def policy_record(lease_set: str, timeout: int, network: dict) -> dict:
         'outbound_domain_allowlist': sorted(network.get('outbound_domain_allowlist', [])),
         'image': GUEST_IMAGE_IDENTITY,
         'command': list(LEASE_COMMAND),
+        'stage': {
+            'max_slots': MAX_STAGE_SLOTS,
+            'max_chunk_bytes': MAX_STAGE_CHUNK_BYTES,
+            'max_slot_bytes': MAX_STAGE_SLOT_BYTES,
+        },
     }
 
 
@@ -307,7 +323,9 @@ def _tagged(tags: Mapping[str, str]) -> bool:
 
 def _public_tags(tags: Mapping[str, str]) -> dict:
     keys = (LEASE_SET_TAG, LEASE_NAME_TAG, POLICY_TAG, UPLOAD_TAG, RUN_TAG)
-    return {key: tags[key] for key in keys if key in tags}
+    public = {key: tags[key] for key in keys if key in tags}
+    public.update({key: value for key, value in tags.items() if key.startswith(STAGE_TAG_PREFIX)})
+    return public
 
 
 def _owned_by_id(sandbox) -> tuple[dict, bool]:
@@ -344,6 +362,13 @@ def _run(sandbox, *argv: str) -> int:
 def _step(sandbox, *argv: str) -> None:
     if _run(sandbox, *argv) != 0:
         raise Refusal('guest_step_failed', f'fixed step {argv[0]} failed')
+
+
+def _read(sandbox, *argv: str) -> tuple[int, str]:
+    """Run a fixed argv and return (exit code, stdout text)."""
+    process = sandbox.exec(*argv)
+    text = process.stdout.read()
+    return process.wait(), text if isinstance(text, str) else bytes(text).decode('utf-8', 'replace')
 
 
 def _guarded(operation: str, action: Callable[[], tuple[int, dict]]) -> tuple[int, dict]:
@@ -520,6 +545,181 @@ def handle_upload(body: Any) -> tuple[int, dict]:
     return _guarded('upload', action)
 
 
+def _slot(value: Any) -> str:
+    if not _matches(_SLOT_NAME, value):
+        raise Refusal('invalid_slot', 'slot must match [a-z0-9-]{1,32}')
+    return value
+
+
+def _stage_file(slot: str) -> str:
+    return f'{STAGE_DIR}/{slot}'
+
+
+def _stage_sealed_dir(slot: str) -> str:
+    return f'{STAGE_DIR}/{slot}.done'
+
+
+def _stage_claims(slot: str) -> str:
+    return f'{STAGE_CLAIM_DIR}/{slot}'
+
+
+def _stage_sealing_dir(slot: str) -> str:
+    return f'{STAGE_DIR}/{slot}.sealing'
+
+
+def _refuse_after_run_claim(sandbox, tags: dict) -> None:
+    if RUN_TAG in tags or _run(sandbox, 'test', '-d', RUN_CLAIM) == 0:
+        raise Refusal('run_once_already_claimed', 'the one run for this lease was already claimed')
+
+
+def _refuse_if_sealing(sandbox, slot: str) -> None:
+    if _run(sandbox, 'test', '-d', _stage_sealed_dir(slot)) == 0:
+        raise Refusal('slot_sealed', 'the slot is sealed and takes no more chunks')
+    if _run(sandbox, 'test', '-d', _stage_sealing_dir(slot)) == 0:
+        raise Refusal('slot_sealed', 'the slot is being sealed and takes no more chunks')
+
+
+def _refuse_if_raced(sandbox, slot: str) -> None:
+    """Fail closed when a seal or the run claim landed while a chunk was in flight."""
+    if (
+        _run(sandbox, 'test', '-d', _stage_sealed_dir(slot)) == 0
+        or _run(sandbox, 'test', '-d', _stage_sealing_dir(slot)) == 0
+        or _run(sandbox, 'test', '-d', RUN_CLAIM) == 0
+    ):
+        raise Refusal('guest_step_failed', 'the slot was sealed or the run claimed while the chunk was in flight')
+
+
+def _started_slots(sandbox) -> list[str]:
+    if _run(sandbox, 'test', '-d', STAGE_CLAIM_DIR) != 0:
+        return []
+    code, text = _read(sandbox, 'ls', '-1', STAGE_CLAIM_DIR)
+    if code != 0:
+        raise Refusal('guest_step_failed', 'fixed step ls failed')
+    return sorted(line for line in text.split('\n') if line)
+
+
+def _stage_size(sandbox, slot: str) -> int:
+    path = _stage_file(slot)
+    if _run(sandbox, 'test', '-f', path) != 0:
+        return 0
+    code, text = _read(sandbox, 'stat', '-c', '%s', path)
+    if code != 0 or not _matches(_DECIMAL, text.strip()):
+        raise Refusal('guest_step_failed', 'fixed step stat failed')
+    return int(text.strip())
+
+
+def handle_stage(body: Any) -> tuple[int, dict]:
+    def action():
+        _check_fields(body, {'sandbox_id', 'slot', 'offset', 'content_b64', 'chunk_sha256'})
+        sandbox_id = _sandbox_id(body['sandbox_id'])
+        slot = _slot(body['slot'])
+        offset = body['offset']
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= MAX_STAGE_SLOT_BYTES:
+            raise Refusal('invalid_offset', f'offset must be an integer in [0, {MAX_STAGE_SLOT_BYTES}]')
+        expected = body['chunk_sha256']
+        if not _matches(_SHA256_HEX, expected):
+            raise Refusal('invalid_sha256', 'chunk_sha256 must be 64 lowercase hex digits')
+        data = _b64(body['content_b64'], 'chunk', MAX_STAGE_CHUNK_BYTES)
+        if not data:
+            raise Refusal('chunk_empty', 'a chunk carries at least one byte')
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise Refusal('chunk_sha256_mismatch', 'content does not match chunk_sha256')
+        if offset + len(data) > MAX_STAGE_SLOT_BYTES:
+            raise Refusal('slot_too_large', f'a slot holds at most {MAX_STAGE_SLOT_BYTES} bytes')
+        sandbox, tags = _live_owned(sandbox_id)
+        _step(sandbox, 'mkdir', '-p', STAGE_DIR, STAGE_CLAIM_DIR)
+        _refuse_after_run_claim(sandbox, tags)
+        _refuse_if_sealing(sandbox, slot)
+        # A slot not yet started only starts at offset 0, checked before any
+        # claim is created so a refused first chunk leaves nothing behind.
+        started = _run(sandbox, 'test', '-d', _stage_claims(slot)) == 0
+        if not started and offset != 0:
+            raise Refusal('offset_mismatch', 'offset must equal the slot size so far', slot_bytes=0)
+        fresh = False
+        try:
+            if not started and _run(sandbox, 'mkdir', _stage_claims(slot)) == 0:
+                fresh = True
+                # First chunk of this slot: take a slot of the lease's budget,
+                # then re-count so concurrent starters cannot jointly exceed it.
+                if len(_started_slots(sandbox)) > MAX_STAGE_SLOTS:
+                    raise Refusal('too_many_slots', f'at most {MAX_STAGE_SLOTS} slots per lease')
+            size = _stage_size(sandbox, slot)
+            if size != offset:
+                raise Refusal('offset_mismatch', 'offset must equal the slot size so far', slot_bytes=size)
+            if _run(sandbox, 'mkdir', f'{_stage_claims(slot)}/c{offset}') != 0:
+                raise Refusal('chunk_already_claimed', 'this chunk of the slot was already claimed')
+        except Refusal:
+            if fresh:
+                _run(sandbox, 'rmdir', _stage_claims(slot))
+            raise
+        # A seal or run claim taken after the checks above must not be missed.
+        _refuse_if_raced(sandbox, slot)
+        with sandbox.open(_stage_file(slot), 'ab') as handle:
+            handle.write(data)
+        _refuse_if_raced(sandbox, slot)
+        if _stage_size(sandbox, slot) != offset + len(data):
+            raise Refusal('guest_step_failed', 'the slot size after the append is not the expected one')
+        return _response(
+            'stage', 200, ok=True, sandbox_id=sandbox_id, slot=slot, path=_stage_file(slot),
+            offset=offset, bytes=len(data), slot_bytes=offset + len(data), sha256=expected,
+        )
+
+    return _guarded('stage', action)
+
+
+def handle_stage_seal(body: Any) -> tuple[int, dict]:
+    def action():
+        _check_fields(body, {'sandbox_id', 'slot', 'total_bytes', 'sha256'})
+        sandbox_id = _sandbox_id(body['sandbox_id'])
+        slot = _slot(body['slot'])
+        total = body['total_bytes']
+        if isinstance(total, bool) or not isinstance(total, int) or not 1 <= total <= MAX_STAGE_SLOT_BYTES:
+            raise Refusal('invalid_total_bytes', f'total_bytes must be an integer in [1, {MAX_STAGE_SLOT_BYTES}]')
+        expected = body['sha256']
+        if not _matches(_SHA256_HEX, expected):
+            raise Refusal('invalid_sha256', 'sha256 must be 64 lowercase hex digits')
+        sandbox, tags = _live_owned(sandbox_id)
+        tag = f'{STAGE_TAG_PREFIX}{slot}'
+        if _run(sandbox, 'test', '-d', _stage_sealed_dir(slot)) == 0:
+            if tags.get(tag) != expected:
+                raise Refusal('seal_digest_conflict', 'the slot is already sealed with another digest')
+            size = _stage_size(sandbox, slot)
+            if size != total:
+                raise Refusal('seal_size_mismatch', 'total_bytes does not match the slot size', slot_bytes=size)
+            return _response(
+                'stage_seal', 200, ok=True, sandbox_id=sandbox_id, slot=slot, sealed=True,
+                already_sealed=True, bytes=total, sha256=expected,
+            )
+        _refuse_after_run_claim(sandbox, tags)
+        if _run(sandbox, 'test', '-d', _stage_claims(slot)) != 0:
+            raise Refusal('slot_not_started', 'the slot has no chunks')
+        # The seal claim stops new chunks; it is released if the seal is refused.
+        if _run(sandbox, 'mkdir', _stage_sealing_dir(slot)) != 0:
+            raise Refusal('slot_sealed', 'the slot is already being sealed')
+        try:
+            size = _stage_size(sandbox, slot)
+            if size != total:
+                raise Refusal('seal_size_mismatch', 'total_bytes does not match the slot size', slot_bytes=size)
+            code, text = _read(sandbox, 'sha256sum', _stage_file(slot))
+            digest = text.split(' ', 1)[0]
+            if code != 0 or not _matches(_SHA256_HEX, digest):
+                raise Refusal('guest_step_failed', 'fixed step sha256sum failed')
+            if digest != expected:
+                raise Refusal('seal_digest_mismatch', 'the slot content does not match sha256')
+            _set_tags(sandbox, tags, **{tag: expected})
+            _step(sandbox, 'mkdir', _stage_sealed_dir(slot))
+        except Refusal:
+            if _run(sandbox, 'test', '-d', _stage_sealed_dir(slot)) != 0:
+                _run(sandbox, 'rmdir', _stage_sealing_dir(slot))
+            raise
+        return _response(
+            'stage_seal', 200, ok=True, sandbox_id=sandbox_id, slot=slot, sealed=True,
+            already_sealed=False, bytes=total, sha256=expected,
+        )
+
+    return _guarded('stage_seal', action)
+
+
 def handle_run_once(body: Any) -> tuple[int, dict]:
     def action():
         _check_fields(body, {'sandbox_id', 'stdin_b64'})
@@ -530,6 +730,9 @@ def handle_run_once(body: Any) -> tuple[int, dict]:
             raise Refusal('run_once_already_claimed', 'the one run for this lease was already claimed')
         if not _matches(_SHA256_HEX, tags.get(UPLOAD_TAG)) or _run(sandbox, 'test', '-d', UPLOAD_DONE) != 0:
             raise Refusal('upload_not_complete', 'run-once needs a completed upload first')
+        for slot in _started_slots(sandbox):
+            if _run(sandbox, 'test', '-d', _stage_sealed_dir(slot)) != 0:
+                raise Refusal('slot_not_sealed', 'every started slot must be sealed before run-once', slot=slot)
         if _run(sandbox, 'mkdir', RUN_CLAIM) != 0:
             raise Refusal('run_once_already_claimed', 'the one run for this lease was already claimed')
         tags = _set_tags(sandbox, tags, **{RUN_TAG: CLAIMED})
@@ -580,6 +783,8 @@ HANDLERS: Mapping[str, Callable[[Any], tuple[int, dict]]] = {
     'get': handle_get,
     'terminate': handle_terminate,
     'upload': handle_upload,
+    'stage': handle_stage,
+    'stage_seal': handle_stage_seal,
     'run_once': handle_run_once,
     'list': handle_list,
 }
@@ -588,6 +793,8 @@ ROUTES = {
     '/v1/get': 'get',
     '/v1/terminate': 'terminate',
     '/v1/upload': 'upload',
+    '/v1/stage': 'stage',
+    '/v1/stage-seal': 'stage_seal',
     '/v1/run-once': 'run_once',
     '/v1/list': 'list',
 }
