@@ -15,8 +15,6 @@ pub mod bundle_events;
 pub mod bundle_outbox;
 pub mod capability;
 pub mod chain;
-#[cfg(test)]
-mod custody_drop_gate;
 pub mod event_types;
 pub mod external_content;
 pub mod external_execution;

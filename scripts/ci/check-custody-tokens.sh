@@ -10,7 +10,9 @@
 #
 # Also banned outside lillux: mem::transmute and ptr::drop_in_place.
 #
-# `//` comments are stripped before matching. Files on the LEGACY list are not
+# Comments (`//` and nested `/* */`) are stripped before matching, outside
+# string and char literals only (scripts/ci/strip-rust-comments.py), so a
+# `//` inside a URL string hides nothing. Files on the LEGACY list are not
 # yet migrated; each carries the maximum number of banned lines it may still
 # hold (file:max). More hits than that fail, so a listed file cannot gain new
 # ones; once a listed file has no hits left it must be removed from the list,
@@ -21,6 +23,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
+STRIP="$ROOT/scripts/ci/strip-rust-comments.py"
+
 # The one accepted foreign-function handoff: a lease boxed for SQLite's C API.
 EXCEPTION_FILE=crates/kernel/lillux-sqlite/src/binding.rs
 EXCEPTION_PATTERN='Box::into_raw[[:space:]]*\('
@@ -29,17 +33,16 @@ LEGACY=(
     crates/bin/daemon/src/main.rs:7
     crates/daemon/ryeos-node/src/native_capacity/reservation.rs:6
     crates/kernel/lillux-sqlite/src/binding.rs:1
-    crates/kernel/lillux-sqlite/src/custody_drop_gate.rs:18
+    crates/kernel/lillux-sqlite/src/custody_drop_gate.rs:20
     crates/kernel/lillux-sqlite/src/lib.rs:19
     crates/kernel/lillux-sqlite/src/native.rs:134
     crates/kernel/lillux-sqlite/src/original_host_owner.rs:13
     crates/kernel/lillux-sqlite/src/original_physical_custody.rs:9
-    crates/state/ryeos-state/src/custody_drop_gate.rs:46
 )
 
 banned='(^|[^A-Za-z0-9_])forget[[:space:]]*(\(|::<)|mem::forget|mem::\{[^}]*forget([^A-Za-z0-9_]|$)'
 banned+='|ManuallyDrop|MaybeUninit|mem::zeroed|mem::\{[^}]*zeroed|ptr::read|ptr::\{[^}]*read'
-banned+='|Box::leak|::leak[[:space:]]*\(|\.leak[[:space:]]*\([[:space:]]*\)|::into_raw[[:space:]]*\('
+banned+='|Box::leak|::leak[[:space:]]*\(|\.leak[[:space:]]*\([[:space:]]*\)|::into_raw[[:space:]]*\(|\.into_raw[[:space:]]*\('
 banned+='|(std|core)::mem[[:space:]]+as[[:space:]]|(std|core)::mem::[A-Za-z_]+[[:space:]]+as[[:space:]]'
 banned+='|(std|core)::mem::\{[^}]*[[:space:]]as[[:space:]]|(std|core)::\{[^}]*mem[[:space:]]+as[[:space:]]'
 banned+='|mem::transmute|mem::\{[^}]*transmute|ptr::drop_in_place|ptr::\{[^}]*drop_in_place'
@@ -52,13 +55,40 @@ scan() {
     if grep -qE 'lillux::custody|Held<' "$file"; then
         pattern+="|$lint_silencer"
     fi
-    sed 's://.*$::' "$file" | grep -nE "$pattern" | while IFS= read -r hit; do
+    python3 "$STRIP" <"$file" | grep -nE "$pattern" | while IFS= read -r hit; do
         if [[ "$file" == "$EXCEPTION_FILE" ]] && grep -qE "$EXCEPTION_PATTERN" <<<"${hit#*:}"; then
             continue
         fi
         printf '%s:%s\n' "$file" "$hit"
     done || true
 }
+
+# --self-test: prove the comment stripper hides only real comments.
+if [[ "${1:-}" == --self-test ]]; then
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    check() { # name, expected hit count, source
+        printf '%s\n' "$3" >"$dir/case.rs"
+        local got
+        got="$(scan "$dir/case.rs" | wc -l)"
+        if [[ "$got" != "$2" ]]; then
+            printf 'self-test %s: expected %s hits, got %s\n' "$1" "$2" "$got" >&2
+            exit 1
+        fi
+    }
+    check url-then-token 1 'let u = "http://x"; std::mem::forget(o);'
+    check line-comment 0 'let a = 1; // std::mem::forget(o)'
+    check block-comment 0 '/* std::mem::forget(o) */ let a = 1;'
+    check multiline-block 0 $'/* open\n std::mem::forget(o)\n*/'
+    check nested-block 0 '/* a /* b */ std::mem::forget(o) */'
+    check code-after-block 1 '/* c */ std::mem::forget(o);'
+    check raw-string-url 1 'let u = r#"http://x"#; ManuallyDrop::new(o);'
+    check method-into-raw 1 'let p = cstring.into_raw();'
+    check path-into-raw 1 'let p = Box::into_raw(b);'
+    check lifetime-not-char 1 "fn f<'a>(x: &'a str) { ManuallyDrop::new(x); }"
+    printf 'self-test passed\n'
+    exit 0
+fi
 
 declare -A legacy=() maximum=()
 for entry in "${LEGACY[@]}"; do
