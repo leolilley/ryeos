@@ -193,7 +193,7 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         profiles.sort();
-        assert_eq!(profiles.len(), 13, "update provider-environment profile expectations");
+        assert_eq!(profiles.len(), 14, "update provider-environment profile expectations");
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         for path in profiles {
             let profile_name = path
@@ -212,7 +212,7 @@ mod tests {
             validate_declaration(&provider, &execution)
                 .unwrap_or_else(|error| panic!("{profile_name}: {error:#}"));
             let expected: &[&str] = match profile_name.as_str() {
-                "hosted-workflow" => &["OPENAI_API_KEY"],
+                "f5r-controller" | "hosted-workflow" => &["OPENAI_API_KEY"],
                 // Authority-class profiles never declare a provider source.
                 "release-authority" | "central-host" | "standard-central-auth"
                 | "bundle-source" => &[],

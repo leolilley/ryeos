@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T09:38:49Z:c193781f9f085963b8022341400a103093d1c2edee5254058674dc878fe6646a:MOMManE0+uMjg2vz6pyTqMa3orkTT81MMWhmiDBAfvA6cxofbrUQAII90GVC956Z/IijeYvQ+KLvGo73y2SNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:b2fa185efe6a7ea4525e9acc33b0c2c72def3d62a6adaa64b3656b1616fa5075:LuX9BY/kxHHuuapb9JPsJPJPIUVvvcKUTKfKxqEHQ2T6J1ndwaHil2efXlXgLBioApr0RjMaCIklkdXIoZLeCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
@@ -16,7 +16,7 @@ is the ordinary four-verb surface below, plus one explicit administrator
 transition for nodes that require host supervision:
 
 ```bash
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ryeos start
 ryeos stop
 ryeos node status

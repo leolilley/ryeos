@@ -470,6 +470,7 @@ pub fn populate_initialized_state_with_profile_and_identities(
         format!("sha256:{}", "1".repeat(64)),
         1,
         Some(profile.name().to_owned()),
+        Some(FAST_FIXTURE_HOST_CLASS.to_owned()),
     )
     .context("construct fast-fixture substrate identity")?;
     let substrate_path = state_path.join(AI_DIR).join("node/substrate-identity.json");
@@ -960,7 +961,10 @@ fn materialize_seed_node_policy_generation(
             selected_profile.name()
         );
     }
-    let mut profile = profile;
+    // Every fast-fixture node runs under its profile's local class.
+    let mut profile = profile
+        .for_host_class(FAST_FIXTURE_HOST_CLASS)
+        .with_context(|| format!("select the local class of profile {}", selected_profile.name()))?;
     let isolation = profile
         .policies
         .get_mut("isolation")
@@ -991,6 +995,37 @@ fn materialize_seed_node_policy_generation(
     Ok(())
 }
 
+/// Host class every fast-fixture node is initialized under.
+const FAST_FIXTURE_HOST_CLASS: &str = "local";
+
+/// The isolation mode (`enforce` or `disabled`) of the host class a
+/// fast-fixture node at `state_path` runs under, read from its signed node
+/// policy. Under `enforce` a launched tool runs in the sandbox; under
+/// `disabled` it runs directly on the host with the node account's file
+/// access, so tests that judge a tool's file reach branch on this.
+pub fn node_isolation_mode(state_path: &Path) -> Result<String> {
+    let path = state_path
+        .join(AI_DIR)
+        .join("node")
+        .join("policies")
+        .join("isolation.yaml");
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read node isolation policy {}", path.display()))?;
+    let document: serde_json::Value =
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))
+            .with_context(|| format!("parse node isolation policy {}", path.display()))?;
+    document
+        .pointer(&format!("/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}/mode"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| {
+            format!(
+                "node isolation policy {} names no mode for the {FAST_FIXTURE_HOST_CLASS} class",
+                path.display()
+            )
+        })
+}
+
 /// Derive the fixture isolation member for a node started directly by this
 /// harness.
 ///
@@ -1016,9 +1051,9 @@ fn materialize_seed_node_policy_generation(
 /// an administrator-prepared host-backed node, not this harness.
 fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
     let policy = isolation
-        .get_mut("policy")
+        .pointer_mut(&format!("/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}"))
         .and_then(serde_json::Value::as_object_mut)
-        .context("isolation member has no policy mapping")?;
+        .context("isolation member has no fast-fixture host class")?;
     let scoped = matches!(
         policy
             .get("process_scopes")
@@ -1077,23 +1112,22 @@ fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
         }
     }
     *floor = retained;
-    if let Some(filesystem) = policy
-        .get_mut("filesystem")
-        .and_then(serde_json::Value::as_object_mut)
+    if policy.get("proc_filesystem").and_then(serde_json::Value::as_str)
+        == Some("pid_namespace_nested")
     {
-        if filesystem.get("proc_filesystem").and_then(serde_json::Value::as_str)
-            == Some("pid_namespace_nested")
-        {
-            filesystem.insert(
-                "proc_filesystem".to_owned(),
-                serde_json::Value::String("pid_namespace".to_owned()),
-            );
-        }
+        policy.insert(
+            "proc_filesystem".to_owned(),
+            serde_json::Value::String("pid_namespace".to_owned()),
+        );
     }
-    let typed: ryeos_engine::isolation::IsolationPolicy =
-        serde_json::from_value(serde_json::Value::Object(policy.clone()))
-            .context("parse direct-host fixture isolation policy")?;
-    ryeos_engine::isolation::IsolationRuntime::validate_policy(&typed)
+    let typed: ryeos_engine::isolation::IsolationPolicyDocument = serde_json::from_value(
+        isolation
+            .get("policy")
+            .cloned()
+            .context("isolation member has no policy mapping")?,
+    )
+    .context("parse direct-host fixture isolation policy")?;
+    ryeos_engine::isolation::IsolationRuntime::validate_policy_document(&typed)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("validate direct-host fixture isolation policy")?;
     Ok(())

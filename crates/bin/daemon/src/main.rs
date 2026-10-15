@@ -3353,7 +3353,10 @@ async fn run(
     };
 
     // Recheck the signed whole-init fence after recovery while holding the
-    // same node state lock as initialization.
+    // same node state lock as initialization. The fence refuses a policy
+    // generation whose isolation policy is for a host class other than the
+    // one the signed substrate identity binds, so the daemon never starts
+    // under another class's floor and lane.
     bootstrap::verify_initialized(&config)?;
     if bundle_set_recovery
         == Some(ryeos_app::bundle_set_transaction::RecoveryDecision::CompleteExactNew)

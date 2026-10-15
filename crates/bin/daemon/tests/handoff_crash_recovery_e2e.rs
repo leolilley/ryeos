@@ -655,12 +655,14 @@ fn opt_in_trusted_portable_session(state_path: &Path, node: &SigningKey) -> Resu
     );
     let mut policy: serde_json::Value = serde_yaml::from_str(&body)?;
     anyhow::ensure!(
-        policy.pointer("/policy/mode") == Some(&serde_json::json!("disabled"))
-            && policy.pointer("/policy/trusted_process_group_sessions")
+        policy.pointer("/policy/host_classes/local/mode")
+            == Some(&serde_json::json!("disabled"))
+            && policy.pointer("/policy/host_classes/local/trusted_process_group_sessions")
                 == Some(&serde_json::json!(false)),
         "trusted lost-ACK fixture requires an unmodified disabled-isolation seed"
     );
-    policy["policy"]["trusted_process_group_sessions"] = serde_json::json!(true);
+    policy["policy"]["host_classes"]["local"]["trusted_process_group_sessions"] =
+        serde_json::json!(true);
     std::fs::write(
         &policy_path,
         lillux::signature::sign_content_at(

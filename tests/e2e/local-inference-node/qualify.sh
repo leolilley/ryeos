@@ -496,7 +496,7 @@ PY
 
 init_args=(
     init --non-interactive --app-root "$node_root" --source "$qualification_source"
-    --node-profile full --bind 127.0.0.1:0 --uds-path "$uds_path"
+    --node-profile full --host-class local --bind 127.0.0.1:0 --uds-path "$uds_path"
 )
 if [[ -n "$trust_file" ]]; then
     init_args+=(--trust-file "$trust_file")

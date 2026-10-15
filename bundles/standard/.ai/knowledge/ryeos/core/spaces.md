@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-02T08:20:18Z:69fb29944f596e19b870ec1b5594583b94c23f79f4f056e78d8a4abafbd9428f:ZuOR8Q3ExDwSVgd7sqw5VusMg/aRaNO8On8bGKrKvxEoBWUL5k5/2Z1brsN8+MGfvopmK+9pPexWJgT/Yd1QCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:143eaa2e1bd8d5bc5300844fe459cb4e6d417b810cbf90272161264e1fbfa851:5BREYJhDDwSsnzk5UsvwRLPNfNp5nxr6J8omGYDzCjc8QqZGG1cGEqFcYagLz1FueIgU6Bwa+nJz8x/8Wu8rDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -99,19 +99,23 @@ Bundles are installed by `ryeos init` (not the daemon). The CLI:
 
 ```bash
 # Packaged install (default source):
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 
 # Development:
-ryeos init --source bundles --node-profile full \
+ryeos init --source bundles --node-profile full --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 
 # Distribution image entrypoint:
 ryeos init --source /opt/ryeos \
-  --node-profile "$RYEOS_INIT_NODE_PROFILE"
+  --node-profile "$RYEOS_INIT_NODE_PROFILE" \
+  --host-class "$RYEOS_INIT_HOST_CLASS"
 ```
 
 Fresh initialization has no absent-policy fallback. The selected signed init
-profile names the exact source bundle inventory and all required node-policy
+profile is narrowed to the one host class the deployment names (`local` on a
+host the operator runs, `hosted` in a hosting provider's container, among the
+classes the profile declares); the image never sets the class. The profile
+names the exact source bundle inventory and all required node-policy
 sections; a mismatch fails before installation.
 
 Init is **idempotent** — running it again preserves keys, atomically

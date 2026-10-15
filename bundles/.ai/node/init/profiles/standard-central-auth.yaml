@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:f16f4de029b64901636c1fbdc4f64cddeee2de54edcfba324c1f6c44c45eca4c:Y6jffXqH48MNB76X12R3K3uSsaCtQkFkVMdfVgZleQmd+NM8F45hYO3f4HP8rz1lRqDHwthEJGOn+YR/ttOLCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T12:31:24Z:cb634d0f293c7c4347699992dbd711d7518c07a4ced4fa85730e574309a9b197:V2e5tmq78CnKEarKv7w5IXBLA+0YVUyU+HCO+LhAPbXTOerh6eSBNCUooezv3PybOawVkDdi4gMadbdCnH/dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above Standard; source-only, admission pending.
 schema: 1
 exact_bundles:
@@ -241,22 +241,31 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, storage:durable_root, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        mode: unconfigured
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -330,7 +339,7 @@ policies:
     enabled: false
     limits: null
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

@@ -87,23 +87,25 @@ expect_rejected validate_source_publisher_trust "$tmp/missing.toml" 1 "$official
 # signed complete-generation validator without a profile fallback.
 install_policy_root="$tmp/install-policy-root"
 build_install_init_profile_args \
-    "$install_policy_root/.ai/node/policies" full 0
-[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile full" ]]
+    "$install_policy_root/.ai/node/policies" full 0 local
+[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile full --host-class local" ]]
+expect_rejected build_install_init_profile_args \
+    "$install_policy_root/.ai/node/policies" full 0 ""
 [[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 1 ]]
 mkdir -p "$install_policy_root/.ai/node/policies"
 build_install_init_profile_args \
-    "$install_policy_root/.ai/node/policies" full 0
+    "$install_policy_root/.ai/node/policies" full 0 local
 [[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
 [[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
 rm -rf "$install_policy_root/.ai/node/policies"
 : > "$install_policy_root/.ai/node/policies"
 build_install_init_profile_args \
-    "$install_policy_root/.ai/node/policies" full 0
+    "$install_policy_root/.ai/node/policies" full 0 local
 [[ ${#INSTALL_INIT_PROFILE_ARGS[@]} -eq 0 ]]
 [[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 0 ]]
 build_install_init_profile_args \
-    "$install_policy_root/.ai/node/policies" hosted-workflow 1
-[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    "$install_policy_root/.ai/node/policies" hosted-workflow 1 hosted
+[[ "${INSTALL_INIT_PROFILE_ARGS[*]}" == "--node-profile hosted-workflow --host-class hosted --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
 [[ "$INSTALL_PUBLISH_INITIAL_POLICY" -eq 1 ]]
 
 # Repeated documents from one selected publisher are all validated but produce

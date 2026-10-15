@@ -146,6 +146,9 @@ impl ProcessControlReadinessReason {
 pub struct IsolationInspection {
     pub source: Option<PathBuf>,
     pub version: u32,
+    /// The host class the deployment declared at initialization, whose
+    /// floor and isolation lane this policy carries.
+    pub host_class: String,
     pub mode: IsolationMode,
     pub digest: Option<String>,
     pub backend: IsolationBackendInspection,
@@ -155,6 +158,8 @@ pub struct IsolationInspection {
     /// Signed executable names of inits trusted to exit with their only
     /// child, which can make the node's exit end its container enclosure.
     pub enclosure_inits: Vec<String>,
+    /// Signed hard lifetime of the node's host class, when declared.
+    pub host_lifetime_bound: Option<lillux::process_control::HostLifetimeBound>,
     /// Populated only after the retained provider's actual placement/barrier/
     /// termination probe succeeded, never from a list of implemented features.
     pub process_scope_capabilities: BTreeSet<lillux::ProcessScopeCapability>,

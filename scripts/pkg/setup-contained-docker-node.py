@@ -159,7 +159,7 @@ def main():
                 run("start", args.name, capture=False)
         else:
             mount = f"type=bind,src={state / 'app'},dst=/data/app"
-            profile_args = [] if os.path.lexists(state / "app/.ai/node/policies") else ["--node-profile", "contained-workflow"]
+            profile_args = [] if os.path.lexists(state / "app/.ai/node/policies") else ["--node-profile", "contained-workflow", "--host-class", "local"]
             # Offline initialization uses the exact image, fixed non-root account
             # and signed contained profile. Validators need nested namespaces;
             # process-scope admission belongs to the subsequent hooked daemon.

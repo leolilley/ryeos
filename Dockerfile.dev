@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
@@ -58,7 +59,6 @@ COPY bundles/hosted-node /opt/ryeos/hosted-node
 COPY bundles/codex       /opt/ryeos/codex
 COPY bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY bundles/opencode    /opt/ryeos/opencode
-COPY bundles/local-inference /opt/ryeos/local-inference
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

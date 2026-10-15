@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:3085f28eca9fc55646aa446e3af7ed36e495c20a2815618bc98afd18c3b3aded:2ChIr3zamAW6L7vF0XJUqmJcxkABRFxnuZhxTsx/A42Pa+X0U75zwpjWFCsi8Q7OczF1M7GGQTQ7Poh+2WZxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T12:31:24Z:1ab9c2f3fce6deac2186b0c8ce5ac8ad07c0749a10342e68e739442730373a7b:PH7Ra03VhnHBJr01xc6vasqXiLIgBi+bGTjron7USw2Xcnj4cntkna6keWfpHYV0ffUvvwx2BBQ5VllZBKdYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -260,29 +260,38 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, isolation:namespaces, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, isolation:namespaces, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # The protected host-runtime binding supplies the opaque qualified
+            # Lillux provider. Policy never contains native cgroup coordinates.
+            mode: required
+            control_timeout_ms: 5000
+          # This profile requires qualified Lillux scopes. It must never select the
+          # weaker trusted direct-process-group worker lifecycle.
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace_nested
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        # The protected host-runtime binding supplies the opaque qualified
-        # Lillux provider. Policy never contains native cgroup coordinates.
-        mode: required
-        control_timeout_ms: 5000
-      # This profile requires qualified Lillux scopes. It must never select the
-      # weaker trusted direct-process-group worker lifecycle.
-      trusted_process_group_sessions: false
-      mode: enforce
-      backend:
-        bundle: core
-        implementation: linux-lillux
       filesystem:
-        proc_filesystem: pid_namespace_nested
         live_project:
           mode: fixed_parents
           limits:
@@ -383,7 +392,7 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

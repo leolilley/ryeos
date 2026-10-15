@@ -3069,6 +3069,8 @@ mod tests {
                 serde_json::Value::Null;
         }
         let generation = profile
+            .for_host_class("local")
+            .unwrap()
             .validated_generation(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
             .unwrap();
         let trust = ryeos_engine::trust::TrustStore::from_signers(vec![

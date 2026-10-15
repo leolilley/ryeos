@@ -57,6 +57,7 @@ shift
 app_root=""
 source_dir=""
 node_profile=""
+host_class=""
 substrate_digest=""
 substrate_protocol=""
 while (( $# > 0 )); do
@@ -65,6 +66,7 @@ while (( $# > 0 )); do
         --app-root) app_root="${2:-}"; shift 2 ;;
         --source) source_dir="${2:-}"; shift 2 ;;
         --node-profile) node_profile="${2:-}"; shift 2 ;;
+        --host-class) host_class="${2:-}"; shift 2 ;;
         --substrate-image-digest) substrate_digest="${2:-}"; shift 2 ;;
         --substrate-protocol) substrate_protocol="${2:-}"; shift 2 ;;
         *) echo "unexpected init argument: $1" >&2; exit 2 ;;
@@ -76,6 +78,8 @@ done
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
+# The verification root is a local preflight of the full profile.
+[[ "$host_class" == local ]]
 if [[ -n "$node_profile" ]]; then
     profile="$source_dir/.ai/node/init/profiles/$node_profile.yaml"
     [[ -f "$profile" ]]

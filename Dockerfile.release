@@ -8,6 +8,10 @@
 # Only contained qualification targets may select the development publication.
 # Official images and archives always depend on the checked published stage.
 ARG CONTAINED_PUBLICATION_STAGE=published
+# The composition images (core, core-scheduling, standard, f5r-controller)
+# select their publication the same way: `published` for official images,
+# `development-publication` for candidate builds signed with a development key.
+ARG PUBLICATION_STAGE=published
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -122,6 +126,131 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
 
+# Composition images compile their node pair from the selected publication
+# with exactly the native features their bundle set selects, so an image never
+# carries a scheduler or provider-setup implementation its bundles omit.
+FROM ${PUBLICATION_STAGE} AS composition-publication
+
+# Core: no optional native features.
+FROM composition-publication AS core-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/core && \
+    cp /build/target-cache/release/ryeosd /build/target/core/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core/ryeos
+
+# Core with the scheduling bundle: the scheduler, no provider setup.
+FROM composition-publication AS core-scheduling-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-scheduling "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/core-scheduling && \
+    cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-scheduling/ryeos
+
+# Remote-authoring controller: provider setup for Standard, no scheduler.
+FROM composition-publication AS controller-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/f5r-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos
+
+# Standard: the scheduler and provider setup its bundles select.
+FROM composition-publication AS standard-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features standard "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/standard && \
+    cp /build/target-cache/release/ryeosd /build/target/standard/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/standard/ryeos
+
 FROM ${CONTAINED_PUBLICATION_STAGE} AS contained-publication
 
 FROM scratch AS bundle-artifact
@@ -141,6 +270,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 COPY --from=node-runtime /usr/local/ /usr/local/
 WORKDIR /app
@@ -159,13 +289,13 @@ RUN groupadd --gid 10000 ryeos && \
     install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
 FROM workflow-runtime AS ryeos-standard
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
-COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/standard     /opt/ryeos/standard
+COPY --from=standard-pair /build/target/standard/ryeosd /usr/local/bin/ryeosd
+COPY --from=standard-pair /build/target/standard/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/standard     /opt/ryeos/standard
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -311,6 +441,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 WORKDIR /app
 
@@ -389,6 +520,103 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+# Composition images. Each is one bundle set with its exact native features;
+# the capability floor the node holds is selected at first boot from the
+# profile's signed host classes by RYEOS_INIT_HOST_CLASS, which the deployment
+# sets and the image never does.
+FROM hosted-runtime AS ryeos-core
+COPY --from=core-pair /build/target/core/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-pair /build/target/core/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-scheduling
+COPY --from=core-scheduling-pair /build/target/core-scheduling/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-scheduling-pair /build/target/core-scheduling/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-scheduling
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-scheduling"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+# The remote-authoring controller runs Codex workers, so it uses the workflow
+# runtime with Node.js beside Python.
+FROM workflow-runtime AS ryeos-f5r-controller
+COPY --from=controller-pair /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-pair /build/target/f5r-controller/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/standard /opt/ryeos/standard
+COPY --from=composition-publication /build/bundles/codex /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/render-sandbox /opt/ryeos/render-sandbox
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="f5r-controller"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"

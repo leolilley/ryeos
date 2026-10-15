@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:437454f82d8144eb9812c8c576eac34a351b1259eed20243b36f2eda6207898c:XXW0ioRCOQ87gMeM2XDmwGjhBDIbWawn2C3l9afRWjhTmjB6J5PTq4Y1r6XsRX3YGa/SWMoUp0VeKXx5jwrEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T12:31:25Z:bc1fea9bf609d02715e17365c8d2fbdaf11122f6458268193682b26e234607aa:8UVQPcajz67gXW39k2TthIES+fEMk6Oe0x5AA4CQz0IsOoIfvlvx010qGoxIp+qKX9rO21gT6EPy0rpIFRFJCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -238,22 +238,49 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, storage:durable_root, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        hosted:
+          # A hosting provider's container (Railway, a Render service, plain
+          # Docker). It has no qualified per-job process scopes and commonly no
+          # swap and no CAP_IPC_LOCK, so the floor accepts a resident region
+          # proven only by the absence of swap at startup (residency:swap_absent),
+          # which a later swapon ends. Jobs die with the node because the node is
+          # pid 1 of its container, or its parent is a pid 1 named in
+          # enclosure_inits; the trusted_init names carry that weaker grade and
+          # the report names which proof met each entry. Jobs run without a
+          # sandbox.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
+        local:
+          # A host the operator runs the node on directly.
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        mode: unconfigured
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -327,7 +354,7 @@ policies:
     enabled: false
     limits: null
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

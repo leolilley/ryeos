@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shlex
 import stat
 import tempfile
 import unittest
@@ -459,7 +460,13 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
         self.assertIn("ryeos_bundle_set_names full", qualifier)
         self.assertIn('--source "$qualification_source"', qualifier)
-        self.assertIn("--node-profile full", qualifier)
+        init_block = re.search(r"^init_args=\(\n(.*?)^\)$", qualifier, re.M | re.S)
+        self.assertIsNotNone(init_block)
+        init_args = shlex.split(init_block.group(1))
+        self.assertEqual(init_args[:2], ["init", "--non-interactive"])
+        for flag, value in (("--node-profile", "full"), ("--host-class", "local")):
+            self.assertEqual(init_args.count(flag), 1, flag)
+            self.assertEqual(init_args[init_args.index(flag) + 1], value, flag)
         self.assertIn('minimum_free_bytes="2147483648"', qualifier)
         self.assertIn(
             '"$node_root/.ai/node/policies/external_content.yaml"', qualifier

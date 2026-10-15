@@ -21,7 +21,7 @@ class AuthorityCalibrationAssets(unittest.TestCase):
         self.assertIn("run_authority_calibration", handler)
         self.assertNotIn("AuthorityCalibrationRunner>()", handler)
         self.assertIn("AUTHORITY_CALIBRATION_CLAIM", contract)
-        self.assertIn("bundle_publication_authority_calibration_v2", contract)
+        self.assertIn("bundle_publication_authority_calibration_v3", contract)
         self.assertIn("source_snapshot_hash", graph)
         self.assertIn("required: [project_path, source_snapshot_hash, execution_environment]", graph)
         self.assertIn('execution_environment: "${inputs.execution_environment}"', graph)

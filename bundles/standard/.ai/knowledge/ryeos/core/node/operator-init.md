@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T20:48:06Z:d65406aeea853630ea62f7f8910d2641a5b427d706d03a5154c9250ff2ab76fd:BkOQyqCQlsU9HA2ehSL3xIp7RDMPWZO73CN2/QxYIZYA4TIpN9UrdYXmLPJ8PqnaEiAZt3An0Wor4rvuui28Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:87dbd29654a8a1684e94dc2e869ef697156cd00baa529426178c9b73f650ab0a:HfLPdCcKxTEkyE1K2IRiTKPGR9vPUU2m/pkaVHNMwosOjMWyDvhRsyDa+ykhHENWynFkrN3RAwbyvH8agX0fAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -17,7 +17,7 @@ registrations. The daemon must not substitute for it.
 ## Inputs
 
 ```bash
-ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...] [--node-profile <name>]
+ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...] [--node-profile <name> --host-class <class>]
 ```
 
 Defaults are `/usr/share/ryeos` for source and the XDG data dir
@@ -25,9 +25,14 @@ Defaults are `/usr/share/ryeos` for source and the XDG data dir
 or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile <name>` to select a complete publisher-signed init profile from
 `<source>/.ai/node/init/profiles/<name>.yaml`. Packaged full installs use
-`--node-profile full`; each lean distribution uses its exact same-named
-profile. Selection is never inferred from the bundles present in the source,
-and absence fails rather than manufacturing an implicit default.
+`--node-profile full --host-class local`; each lean distribution uses its exact
+same-named profile. `--host-class <class>` names which of the profile's
+declared host classes the node runs under (`local` on a host the operator
+runs, `hosted` in a hosting provider's container); the node holds that class's
+signed capability floor and isolation lane, and keeps the class for life.
+Neither selection is inferred from the bundles present in the source or from
+what the host proves, and absence fails rather than manufacturing an implicit
+default.
 
 ## Init sequence
 
@@ -151,7 +156,7 @@ complete accepted body.
 When the current registry adds or removes a mandatory section, the predecessor
 generation is intentionally undecodable and `policy-apply` cannot treat it as
 current authority. Use the explicit stopped-node
-`ryeos node reset policy-generation --node-profile <name> --confirm` cutover
+`ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm` cutover
 against the trusted packaged source. There is no implicit migration or
 fallback.
 

@@ -216,6 +216,12 @@ build_ryeos_daemon_args() {
 # mapped profile, while any present generation occupant is preserved and left to
 # Rust's signed complete-generation validation. A malformed or partial occupant
 # therefore fails; packaging never falls back to the profile.
+#
+# Whenever the profile is passed, the deployment must also declare its host
+# class in RYEOS_INIT_HOST_CLASS. The image never sets it: the class selects
+# which of the profile's signed capability floors the node holds, and it is a
+# property of where the image is deployed, never inferred from the image or
+# from what the host happens to prove.
 build_ryeos_init_args() {
   local source_dir="$1"
   local app_root="$2"
@@ -234,6 +240,7 @@ build_ryeos_init_args() {
     echo "[entrypoint] RYEOS_SUBSTRATE_PROTOCOL must be a nonzero integer" >&2
     return 1
   }
+  local -a profile_args=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
   INIT_ARGS=(
     init
     --non-interactive
@@ -243,10 +250,12 @@ build_ryeos_init_args() {
     --substrate-image-digest "${RYEOS_SUBSTRATE_IMAGE##*@}"
     --substrate-protocol "$RYEOS_SUBSTRATE_PROTOCOL"
   )
+  warn_on_changed_host_class "$app_root"
   case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
     0|"")
       if [[ ! -e "$policy_generation" && ! -L "$policy_generation" ]]; then
-        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+        require_init_host_class || return 1
+        INIT_ARGS+=("${profile_args[@]}" --host-class "$RYEOS_INIT_HOST_CLASS")
       else
         echo "[entrypoint] preserving existing signed node policy generation"
       fi
@@ -254,13 +263,16 @@ build_ryeos_init_args() {
     1)
       if [[ -e "$policy_generation" || -L "$policy_generation" ]]; then
         echo "[entrypoint] explicitly replacing obsolete signed node policy generation"
+        require_init_host_class || return 1
         INIT_ARGS+=(
-          --node-profile "$RYEOS_INIT_NODE_PROFILE"
+          "${profile_args[@]}"
+          --host-class "$RYEOS_INIT_HOST_CLASS"
           --replace-node-policy-generation
           --confirm-node-policy-generation-replacement
         )
       else
-        INIT_ARGS+=(--node-profile "$RYEOS_INIT_NODE_PROFILE")
+        require_init_host_class || return 1
+        INIT_ARGS+=("${profile_args[@]}" --host-class "$RYEOS_INIT_HOST_CLASS")
       fi
       ;;
     *)
@@ -268,6 +280,40 @@ build_ryeos_init_args() {
       return 1
       ;;
   esac
+}
+
+# The host class an initialized node recorded in its substrate identity, or
+# nothing when the node has none recorded. Rust verifies the signed record;
+# this read only informs the warning below.
+recorded_host_class() {
+  local identity="$1/.ai/node/substrate-identity.json"
+  local content
+
+  [[ -f "$identity" && ! -L "$identity" ]] || return 0
+  content="$(<"$identity")"
+  if [[ "$content" =~ \"host_class\"[[:space:]]*:[[:space:]]*\"([a-z][a-z0-9_]*)\" ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# A node's host class is fixed when it is initialized. A deployment that now
+# declares another class is told so plainly: the node keeps its recorded
+# class, and init refuses any profile selection for the new one.
+warn_on_changed_host_class() {
+  local recorded
+
+  [[ -n "${RYEOS_INIT_HOST_CLASS:-}" ]] || return 0
+  recorded="$(recorded_host_class "$1")"
+  if [[ -n "$recorded" && "$recorded" != "$RYEOS_INIT_HOST_CLASS" ]]; then
+    echo "[entrypoint] warning: RYEOS_INIT_HOST_CLASS is $RYEOS_INIT_HOST_CLASS, but this node was initialized under host class $recorded. A node's host class does not change: it keeps $recorded. Set RYEOS_INIT_HOST_CLASS=$recorded, or start a fresh app root to run under $RYEOS_INIT_HOST_CLASS." >&2
+  fi
+}
+
+require_init_host_class() {
+  [[ -n "${RYEOS_INIT_HOST_CLASS:-}" ]] || {
+    echo "[entrypoint] RYEOS_INIT_HOST_CLASS is required to initialize from RYEOS_INIT_NODE_PROFILE; set it to a host class the profile declares (for example local or hosted)" >&2
+    return 1
+  }
 }
 
 build_execution_history_schema_cut_args() {

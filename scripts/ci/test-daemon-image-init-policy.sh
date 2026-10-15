@@ -155,13 +155,35 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
-for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow ryeos-substrate; do
+# Named release targets that run the generic daemon entrypoint. Each inherits
+# one of the two separately asserted runtime bases, read from its FROM line.
+release_daemon_stages=(
+    ryeos-standard
+    ryeos-central-host
+    ryeos-local-inference
+    ryeos-hosted-workflow
+    ryeos-substrate
+    ryeos-core
+    ryeos-core-scheduling
+    ryeos-f5r-controller
+)
+release_runtime_base() {
+    local stage="$1" base
+    base="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage" \
+        | awk 'tolower($1) == "from" { print $2; exit }')"
+    case "$base" in
+        workflow-runtime|hosted-runtime) printf '%s\n' "$base" ;;
+        *)
+            echo "Dockerfile.release target $stage is not built on an asserted runtime base: ${base:-<none>}" >&2
+            return 1
+            ;;
+    esac
+}
+for stage in "${release_daemon_stages[@]}"; do
     final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
     if ! grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$final_stage"; then
         # The named final stages inherit the separately asserted runtime base.
-        runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
-        [[ "$stage" == ryeos-hosted-workflow || "$stage" == ryeos-substrate ]] && \
-            runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
+        runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$(release_runtime_base "$stage")")"
         grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$runtime_stage" || {
             echo "Dockerfile.release target $stage does not inherit an installed tini" >&2
             exit 1
@@ -238,6 +260,9 @@ assert_runtime_bundle_inventory Dockerfile.release local-inference ryeos-local-i
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-contained-workflow
 assert_runtime_bundle_inventory Dockerfile.release bundle-source ryeos-substrate
+assert_runtime_bundle_inventory Dockerfile.release core ryeos-core
+assert_runtime_bundle_inventory Dockerfile.release core-scheduling ryeos-core-scheduling
+assert_runtime_bundle_inventory Dockerfile.release f5r-controller ryeos-f5r-controller
 
 assert_runtime_init_profile() {
     local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
@@ -272,6 +297,68 @@ assert_runtime_init_profile Dockerfile.release central-host ryeos-central-host
 assert_runtime_init_profile Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-workflow
 assert_runtime_init_profile Dockerfile.release bundle-source ryeos-substrate
+assert_runtime_init_profile Dockerfile.release core ryeos-core
+assert_runtime_init_profile Dockerfile.release core-scheduling ryeos-core-scheduling
+assert_runtime_init_profile Dockerfile.release f5r-controller ryeos-f5r-controller
+
+# The host class selects which of a profile's signed capability floors the node
+# holds. It describes where an image is deployed, so no image may preset it.
+for path in "$root"/Dockerfile*; do
+    [[ -f "$path" ]] || continue
+    if dockerfile_instructions "$path" | grep -Eq '^(ENV|ARG) RYEOS_INIT_HOST_CLASS([= ]|$)'; then
+        echo "$(basename "$path") presets RYEOS_INIT_HOST_CLASS; the deployment must declare it" >&2
+        exit 1
+    fi
+done
+
+# Composition targets run a node pair compiled with exactly the native
+# features of their own bundle set, from the selectable composition
+# publication, never the full-featured release pair.
+assert_composition_pair() {
+    local stage="$1" pair="$2" bundle_set="$3" final_stage pair_stage binary
+    final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
+    pair_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$pair")"
+    for binary in ryeosd ryeos; do
+        [[ "$(grep -Ec "^COPY --from=$pair /build/target/$bundle_set/$binary /usr/local/bin/$binary$" <<<"$final_stage")" -eq 1 ]] || {
+            echo "Dockerfile.release target $stage must take $binary from $pair" >&2
+            exit 1
+        }
+    done
+    if grep -E '^COPY --from=' <<<"$final_stage" | grep -Ev "^COPY --from=($pair|composition-publication) " >/dev/null; then
+        echo "Dockerfile.release target $stage copies from outside its pair and the composition publication" >&2
+        exit 1
+    fi
+    grep -Eq '^FROM composition-publication AS ' <<<"$pair_stage" || {
+        echo "Dockerfile.release stage $pair is not built from the composition publication" >&2
+        exit 1
+    }
+    grep -Fq "ryeos_bundle_set_cargo_features $bundle_set " <<<"$pair_stage" || {
+        echo "Dockerfile.release stage $pair does not take its features from the $bundle_set bundle set" >&2
+        exit 1
+    }
+    grep -Fq -- '--no-default-features -p ryeosd -p ryeos-cli' <<<"$pair_stage" || {
+        echo "Dockerfile.release stage $pair must build the node pair without default features" >&2
+        exit 1
+    }
+}
+assert_composition_pair ryeos-core core-pair core
+assert_composition_pair ryeos-core-scheduling core-scheduling-pair core-scheduling
+assert_composition_pair ryeos-f5r-controller controller-pair f5r-controller
+assert_composition_pair ryeos-standard standard-pair standard
+grep -Fxq 'ARG PUBLICATION_STAGE=published' <<<"$(dockerfile_instructions "$root/Dockerfile.release")" || {
+    echo "Dockerfile.release must default the composition publication to the published stage" >&2
+    exit 1
+}
+grep -Fxq 'FROM ${PUBLICATION_STAGE} AS composition-publication' <<<"$(dockerfile_instructions "$root/Dockerfile.release")" || {
+    echo "Dockerfile.release composition publication must follow PUBLICATION_STAGE" >&2
+    exit 1
+}
+# The selected features are themselves bundle-set data: no scheduler where the
+# set has no scheduling bundle, no provider setup where it has no Standard.
+[[ -z "$(ryeos_bundle_set_cargo_features core ryeosd)" ]]
+[[ "$(ryeos_bundle_set_cargo_features core-scheduling ryeosd)" == ryeosd/scheduling ]]
+[[ "$(ryeos_bundle_set_cargo_features f5r-controller ryeosd)" == ryeosd/model-provider-setup ]]
+[[ "$(ryeos_bundle_set_cargo_features standard ryeosd)" == ryeosd/scheduling,ryeosd/model-provider-setup ]]
 
 # Contained startup receives its profile through the admitted worker binding,
 # rather than the generic image entrypoint. Keep the declared requirement exact
@@ -334,8 +421,15 @@ fi
     RYEOS_SUBSTRATE_PROTOCOL=1
     substrate_args="--substrate-image-digest sha256:$(printf '1%.0s' {1..64}) --substrate-protocol 1"
     rm -rf "$policy_test_root/.ai"
+    # The profile is never passed without a declared host class.
+    unset RYEOS_INIT_HOST_CLASS
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint initialized a profile without a declared host class" >&2
+        exit 1
+    fi
+    RYEOS_INIT_HOST_CLASS=hosted
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081'
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --host-class hosted" ]]
 
     # A present generation is preserved. Even a malformed occupant takes this
     # path so real RyeOS rejects it instead of silently falling back to seed.
@@ -343,21 +437,66 @@ fi
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
     [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
+    # A declared class that differs from the recorded one is warned about
+    # plainly; the same class, or no record, is silent.
+    printf '{\n  "schema": "ryeos/substrate-identity/v2",\n  "host_class": "local"\n}\n' \
+        > "$policy_test_root/.ai/node/substrate-identity.json"
+    changed="$(build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' 2>&1 >/dev/null)"
+    grep -Fq 'warning: RYEOS_INIT_HOST_CLASS is hosted, but this node was initialized under host class local' <<<"$changed"
+    RYEOS_INIT_HOST_CLASS=local
+    unchanged="$(build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' 2>&1 >/dev/null)"
+    if grep -Fq 'warning:' <<<"$unchanged"; then
+        echo "entrypoint warned about an unchanged or unrecorded host class" >&2
+        exit 1
+    fi
+    RYEOS_INIT_HOST_CLASS=hosted
+    rm "$policy_test_root/.ai/node/substrate-identity.json"
+    unrecorded="$(build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' 2>&1 >/dev/null)"
+    if grep -Fq 'warning:' <<<"$unrecorded"; then
+        echo "entrypoint warned about an unchanged or unrecorded host class" >&2
+        exit 1
+    fi
+
     # Replacement is an explicit one-boot opt-in and remains part of the same
     # locked init transaction as exact bundle reconciliation.
     RYEOS_RESET_NODE_POLICY_GENERATION=1
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --host-class hosted --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    unset RYEOS_INIT_HOST_CLASS
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint replaced a policy generation without a declared host class" >&2
+        exit 1
+    fi
     RYEOS_RESET_NODE_POLICY_GENERATION=invalid
     if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an invalid policy replacement opt-in" >&2
         exit 1
     fi
     unset RYEOS_RESET_NODE_POLICY_GENERATION
+    # Preserving a present generation selects nothing, so it needs no class.
+    build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
+    RYEOS_INIT_HOST_CLASS=hosted
     rm -rf "$policy_test_root/.ai/node/policies"
     : > "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
     [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
+
+    # A mount nested under the app root is refused before anything changes.
+    # No mount can be created unprivileged, so the app root's device number is
+    # overridden: every entry then reads as another filesystem.
+    nested_root="$policy_test_root/nested-mount"
+    mkdir -p "$nested_root/inner"
+    : > "$nested_root/inner/file"
+    [[ -z "$(first_entry_on_other_device "$nested_root" "$(stat -c %d "$nested_root")")" ]]
+    [[ -n "$(first_entry_on_other_device "$nested_root" 0)" ]]
+    before="$(stat -c '%u:%g' "$nested_root/inner" "$nested_root/inner/file")"
+    if hand_app_root_to_node_account "$nested_root" 0 >/dev/null 2>&1; then
+        echo "entrypoint re-owned a tree containing a nested mount" >&2
+        exit 1
+    fi
+    [[ "$(stat -c '%u:%g' "$nested_root/inner" "$nested_root/inner/file")" == "$before" ]]
+    rm -rf "$nested_root"
 
     # Execution-history schema cuts carry their exact predecessor/current
     # epochs. Repeated boots are handled by the CLI's idempotent cut contract.
@@ -416,11 +555,8 @@ for image in "${daemon_images[@]}"; do
         exit 1
     fi
 done
-for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow ryeos-substrate; do
-    final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
-    runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
-    [[ "$stage" == ryeos-hosted-workflow || "$stage" == ryeos-substrate ]] && \
-        runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" hosted-runtime)"
+for stage in "${release_daemon_stages[@]}"; do
+    runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$(release_runtime_base "$stage")")"
     [[ "$(grep -Eic '^run test -x /usr/bin/python3$' <<<"$runtime_stage")" -eq 1 ]] || {
         echo "Dockerfile.release target $stage does not inherit a proven Python runtime" >&2
         exit 1
@@ -459,6 +595,21 @@ grep -Fq 'target "contained-workflow-qualification"' "$release_bake" || {
 }
 if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
     echo "contained qualification candidate must not enter official release promotion" >&2
+    exit 1
+fi
+composition_bake="$root/docker-bake.composition.hcl"
+for target in core core-scheduling standard f5r-controller; do
+    grep -Fq "target \"$target\"" "$composition_bake" || {
+        echo "composition Bake contract is missing target $target" >&2
+        exit 1
+    }
+done
+grep -Fq 'PUBLICATION_STAGE = PUBLICATION_STAGE' "$composition_bake" || {
+    echo "composition Bake contract must pass the selected publication stage" >&2
+    exit 1
+}
+if grep -Fq 'docker-bake.composition.hcl' "$release_workflow"; then
+    echo "composition candidates must not enter official release promotion" >&2
     exit 1
 fi
 [[ "$(grep -Fc 'cache-to' "$release_bake")" -eq 1 ]] || {

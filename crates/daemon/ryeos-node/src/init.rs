@@ -125,6 +125,12 @@ pub struct InitOptions {
     /// an exact bundle inventory and the first complete node-policy
     /// generation. It is create-once and never becomes live policy authority.
     pub node_profile: Option<String>,
+    /// Host class the deployment declares this node runs on, named
+    /// explicitly with the profile. It selects which of the profile's
+    /// declared floors and isolation lanes the node's policy carries, and is
+    /// bound into the substrate identity. Never inferred from what the host
+    /// proves; a class the profile does not declare is refused.
+    pub host_class: Option<String>,
     /// Deployment-authorized identity of the immutable substrate carrying this
     /// node. Required for a fresh initialization; an existing node reloads and
     /// verifies the record and refuses contradictory replacement input.
@@ -175,13 +181,15 @@ pub struct InitReport {
     pub bundles_installed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_class: Option<String>,
     pub substrate_identity: SubstrateIdentity,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
 
 const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v4";
-const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v1";
+const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v2";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
 const INIT_SEED_MAX_BYTES: u64 = ryeos_node_runtime::node_document::MAX_ITEM_BYTES;
 
@@ -199,7 +207,9 @@ struct InitCompletionBody {
 }
 
 /// Immutable deployment identity used when admitting independently published
-/// bundle sets. The profile is required-nullable so absence is itself bound.
+/// bundle sets. The profile and host class are required-nullable so absence
+/// is itself bound; a profile is always bound together with the host class
+/// the deployment declared for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubstrateIdentity {
@@ -207,15 +217,22 @@ pub struct SubstrateIdentity {
     pub image_digest: String,
     pub protocol: u32,
     pub node_profile: Option<String>,
+    pub host_class: Option<String>,
 }
 
 impl SubstrateIdentity {
-    pub fn new(image_digest: String, protocol: u32, node_profile: Option<String>) -> Result<Self> {
+    pub fn new(
+        image_digest: String,
+        protocol: u32,
+        node_profile: Option<String>,
+        host_class: Option<String>,
+    ) -> Result<Self> {
         let identity = Self {
             schema: SUBSTRATE_IDENTITY_SCHEMA.to_owned(),
             image_digest,
             protocol,
             node_profile,
+            host_class,
         };
         identity.validate()?;
         Ok(identity)
@@ -237,7 +254,17 @@ impl SubstrateIdentity {
             ryeos_node_runtime::node_policy::generation::validate_init_profile_name(profile)
                 .context("validate substrate node-profile binding")?;
         }
+        validate_host_class_selection(self.node_profile.as_deref(), self.host_class.as_deref())
+            .context("validate substrate host-class binding")?;
         Ok(())
+    }
+
+    /// The host class this identity binds. Every initialized node names one
+    /// with its profile; an identity without one cannot vouch for any class.
+    pub fn bound_host_class(&self) -> Result<&str> {
+        self.host_class
+            .as_deref()
+            .context("this node's substrate identity binds no host class; initialize it with --node-profile and --host-class")
     }
 
     pub fn digest(&self) -> Result<String> {
@@ -246,6 +273,36 @@ impl SubstrateIdentity {
             lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
         ))
     }
+}
+
+/// A profile is selected together with the host class the deployment
+/// declares for it, and a host class only together with a profile.
+fn validate_host_class_selection(node_profile: Option<&str>, host_class: Option<&str>) -> Result<()> {
+    match (node_profile, host_class) {
+        (Some(_), None) => bail!(
+            "a node profile is selected with an explicit host class (--host-class); none was given"
+        ),
+        (None, Some(host_class)) => {
+            bail!("host class `{host_class}` was given without a node profile to select it from")
+        }
+        (Some(_), Some(host_class)) if !ryeos_engine::isolation::valid_host_class_name(host_class) => {
+            bail!("host class `{host_class}` is not a canonical name")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `profile` narrowed to the host class the deployment named for it.
+fn select_profile_host_class(
+    name: &str,
+    profile: &ryeos_node_runtime::node_policy::generation::NodeInitProfile,
+    host_class: Option<&str>,
+) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
+    validate_host_class_selection(Some(name), host_class)?;
+    let host_class = host_class.context("a node profile is selected with an explicit host class")?;
+    profile
+        .for_host_class(host_class)
+        .with_context(|| format!("select host class `{host_class}` of node profile {name}"))
 }
 
 fn substrate_identity_path(app_root: &Path) -> PathBuf {
@@ -474,13 +531,27 @@ fn run_init_on_storage(
             if identity.node_profile != opts.node_profile {
                 bail!("substrate identity node-profile binding disagrees with initialization");
             }
+            if identity.host_class != opts.host_class {
+                bail!("substrate identity host-class binding disagrees with initialization");
+            }
             publish_substrate_identity(&opts.app_root, identity)?;
         }
         None => {
-            load_substrate_identity_record(&opts.app_root).context(
+            let recorded = load_substrate_identity_record(&opts.app_root).context(
                 "fresh initialization requires explicit --substrate-image-digest and --substrate-protocol",
             )?;
+            if opts.host_class.is_some() && recorded.host_class != opts.host_class {
+                bail!(
+                    "host class {} disagrees with the class this node was initialized under ({}); \
+                     a node's host class does not change",
+                    opts.host_class.as_deref().unwrap_or("none"),
+                    recorded.host_class.as_deref().unwrap_or("none")
+                );
+            }
         }
+    }
+    if let Some(name) = opts.node_profile.as_deref() {
+        validate_host_class_selection(Some(name), opts.host_class.as_deref())?;
     }
     let bootstrap_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
         app_root: Some(opts.app_root.clone()),
@@ -537,6 +608,7 @@ fn run_init_on_storage(
         let trust = TrustStore::load(None, &operator_config_root)
             .context("load trust store for the selected node profile")?;
         let profile = load_trusted_init_node_profile(&opts.source_dir, name, &trust)?;
+        let profile = select_profile_host_class(name, &profile, opts.host_class.as_deref())?;
         require_profile_storage(name, &profile, &opts.app_root, observe_storage)?;
     }
 
@@ -630,7 +702,11 @@ fn run_init_on_storage(
     let selected_node_profile = opts
         .node_profile
         .as_deref()
-        .map(|name| load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store))
+        .map(|name| {
+            load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store).and_then(
+                |profile| select_profile_host_class(name, &profile, opts.host_class.as_deref()),
+            )
+        })
         .transpose()?;
     if let Some(profile) = selected_node_profile.as_ref() {
         let mut available = discovered.into_iter().collect::<BTreeMap<_, _>>();
@@ -1073,6 +1149,7 @@ fn run_init_on_storage(
         vault_pubkey_fingerprint,
         bundles_installed,
         node_profile: opts.node_profile.clone(),
+        host_class: opts.host_class.clone(),
         substrate_identity: load_substrate_identity_record(&opts.app_root)?,
         next_steps,
     })
@@ -1594,6 +1671,10 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if substrate_identity.digest()? != document.body.substrate_identity_digest {
         bail!("substrate identity differs from the signed init completion record");
     }
+    // The node runs under the isolation policy of the class its identity
+    // binds, and no other: refuse a generation for another class here, so
+    // the daemon and every stopped-node tool refuse it before using it.
+    generation.require_host_class(substrate_identity.bound_host_class()?)?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust_store,
@@ -2327,11 +2408,13 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("full".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
@@ -2460,6 +2543,153 @@ mod tests {
         assert!(!state.join(".ai/node/vault/public_key.pem").exists());
     }
 
+    fn authored_profile(name: &str) -> ryeos_node_runtime::node_policy::generation::NodeInitProfile {
+        let raw = fs::read_to_string(
+            workspace_root().join(format!("bundles/.ai/node/init/profiles/{name}.yaml")),
+        )
+        .unwrap();
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap()
+    }
+
+    #[test]
+    fn a_profile_is_selected_only_with_a_host_class_it_declares() {
+        let core = authored_profile("core");
+        let hosted = select_profile_host_class("core", &core, Some("hosted")).unwrap();
+        assert_eq!(hosted.host_classes().unwrap(), ["hosted"]);
+        let local = select_profile_host_class("core", &core, Some("local")).unwrap();
+        assert_eq!(local.host_classes().unwrap(), ["local"]);
+
+        let missing = format!("{:#}", select_profile_host_class("core", &core, None).unwrap_err());
+        assert!(missing.contains("explicit host class (--host-class)"), "{missing}");
+        let undeclared =
+            format!("{:#}", select_profile_host_class("core", &core, Some("edge")).unwrap_err());
+        assert!(undeclared.contains("does not declare host class `edge`"), "{undeclared}");
+        // A profile without a hosted variant does not run hosted.
+        let full = authored_profile("full");
+        let refused =
+            format!("{:#}", select_profile_host_class("full", &full, Some("hosted")).unwrap_err());
+        assert!(refused.contains("it declares local"), "{refused}");
+        let noncanonical =
+            format!("{:#}", select_profile_host_class("core", &core, Some("Hosted")).unwrap_err());
+        assert!(noncanonical.contains("not a canonical name"), "{noncanonical}");
+    }
+
+    #[test]
+    fn every_authored_profile_compiles_under_each_host_class_it_declares() {
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let directory = workspace_root().join("bundles/.ai/node/init/profiles");
+        let mut names = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| {
+                entry.unwrap().path().file_stem().unwrap().to_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert!(names.contains(&"f5r-controller".to_owned()), "{names:?}");
+        for name in names {
+            let profile = authored_profile(&name);
+            let path = directory.join(format!("{name}.yaml"));
+            profile.validate(&table, &path).unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            for host_class in profile.host_classes().unwrap() {
+                let selected = select_profile_host_class(&name, &profile, Some(&host_class))
+                    .unwrap_or_else(|error| panic!("{name} {host_class}: {error:#}"));
+                selected
+                    .validated_generation(&table, &path)
+                    .unwrap_or_else(|error| panic!("{name} {host_class}: {error:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_substrate_identity_binds_the_host_class_with_the_profile() {
+        let digest = format!("sha256:{}", "1".repeat(64));
+        let bound = SubstrateIdentity::new(
+            digest.clone(),
+            1,
+            Some("core".to_owned()),
+            Some("hosted".to_owned()),
+        )
+        .unwrap();
+        let other = SubstrateIdentity::new(
+            digest.clone(),
+            1,
+            Some("core".to_owned()),
+            Some("local".to_owned()),
+        )
+        .unwrap();
+        assert_ne!(bound.digest().unwrap(), other.digest().unwrap());
+        assert!(SubstrateIdentity::new(digest.clone(), 1, Some("core".to_owned()), None).is_err());
+        assert!(SubstrateIdentity::new(digest.clone(), 1, None, Some("hosted".to_owned())).is_err());
+        SubstrateIdentity::new(digest, 1, None, None).unwrap();
+        let mut previous = serde_json::to_value(&bound).unwrap();
+        previous["schema"] = "ryeos/substrate-identity/v1".into();
+        previous.as_object_mut().unwrap().remove("host_class");
+        assert!(serde_json::from_value::<SubstrateIdentity>(previous.clone())
+            .map_err(anyhow::Error::from)
+            .and_then(|identity| identity.validate())
+            .is_err());
+    }
+
+    #[test]
+    fn run_init_refuses_an_undeclared_host_class_before_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, tmp.path());
+        opts.host_class = Some("hosted".to_owned());
+        opts.substrate_identity = Some(
+            SubstrateIdentity::new(
+                format!("sha256:{}", "1".repeat(64)),
+                1,
+                Some("full".to_owned()),
+                Some("hosted".to_owned()),
+            )
+            .unwrap(),
+        );
+        let error = format!("{:#}", run_init(&opts).expect_err("full declares no hosted class"));
+        assert!(error.contains("does not declare host class `hosted`"), "{error}");
+        assert!(!state.join(".ai/config/keys/signing/private_key.pem").exists());
+        assert!(!state.join(".ai/node/identity/private_key.pem").exists());
+
+        let mut unbound = make_opts(&state, tmp.path());
+        unbound.host_class = None;
+        let error = format!("{:#}", run_init(&unbound).expect_err("profile without a class"));
+        assert!(error.contains("host-class binding disagrees"), "{error}");
+    }
+
+    #[test]
+    fn run_init_records_the_selected_host_class_in_the_binding_and_the_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let report = run_init(&make_opts(&state, tmp.path())).expect("init full");
+        assert_eq!(report.host_class.as_deref(), Some("local"));
+        assert_eq!(
+            report.substrate_identity.host_class.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            load_verified_substrate_identity(&state).unwrap().host_class.as_deref(),
+            Some("local")
+        );
+        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+            &state,
+            &trust,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+        .unwrap();
+        let isolation = snapshot
+            .require::<ryeos_engine::isolation::IsolationPolicy>()
+            .unwrap();
+        assert_eq!(isolation.host_class, "local");
+
+        // The class of an initialized node does not change on re-init.
+        let mut other = make_opts(&state, tmp.path());
+        other.host_class = Some("hosted".to_owned());
+        other.substrate_identity = None;
+        let error = format!("{:#}", run_init(&other).unwrap_err());
+        assert!(error.contains("a node's host class does not change"), "{error}");
+    }
+
     #[test]
     fn run_init_installs_the_exact_hosted_node_profile_without_standard() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2487,11 +2717,13 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-node".to_owned()),
+            host_class: Some("hosted".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("hosted-node".to_owned()),
+                    Some("hosted".to_owned()),
                 )
                 .unwrap(),
             ),
@@ -2723,6 +2955,66 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_generation_for_another_host_class_is_refused_even_when_sealed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .expect("stopped-node authority");
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let trust_store =
+            TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            &state,
+            &trust_store,
+            &table,
+        )
+        .expect("current policy generation");
+        // The same isolation policy, declared for `hosted` on a node whose
+        // signed identity binds `local`.
+        let mut policies = current.policies().clone();
+        let classes = policies
+            .get_mut("isolation")
+            .and_then(|body| body.pointer_mut("/policy/host_classes"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("isolation host classes");
+        let local = classes.remove("local").expect("the node's local class");
+        classes.insert("hosted".to_owned(), local);
+        let update = current
+            .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
+            .expect("the reclassed generation compiles on its own");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .expect("node identity");
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
+            &state,
+            &update,
+            &identity,
+            &trust_store,
+            &state_lock,
+        )
+        .expect("publish reclassed policy");
+        seal_init_completion_after_policy_update(&state, update.generation().digest(), &state_lock)
+            .expect("seal the reclassed generation");
+
+        let refused = format!(
+            "{:#}",
+            verify_init_completion(&state).expect_err("a reclassed node must not verify")
+        );
+        assert!(
+            refused.contains("for host class `hosted`")
+                && refused.contains("initialized under host class `local`"),
+            "{refused}"
+        );
+        assert!(load_verified_substrate_identity(&state).is_err());
+    }
+
+    #[test]
     fn reinit_admits_the_prospective_generation_without_decoding_the_predecessor() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -2792,7 +3084,8 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("hosted-workflow".to_owned()),
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
             skip_preflight: true,
@@ -2802,7 +3095,7 @@ mod tests {
         let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
         let profile = load_trusted_init_node_profile(
             &workspace_root().join("bundles"),
-            "hosted-workflow",
+            "standard",
             &trust,
         )
         .unwrap();
@@ -2901,11 +3194,13 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("full".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
@@ -2932,11 +3227,13 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
             node_profile: Some("full".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("full".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
@@ -3322,11 +3619,13 @@ typo_field: oops
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("full".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),

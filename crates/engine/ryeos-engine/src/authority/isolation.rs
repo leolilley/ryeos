@@ -51,10 +51,12 @@ pub use inspection::{
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 pub use policy::{
-    ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
-    IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationLiveProjectPolicy, IsolationMode,
-    IsolationNetworkMode, IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy,
-    IsolationProcessScopePolicy, floor_requires_outright, nested_sandbox_from,
+    AUTHORING_HOST_CLASS, ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
+    IsolationFilesystemPolicy, IsolationHostClass, IsolationLimitsPolicy,
+    IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode, IsolationNetworkPolicy,
+    IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
+    IsolationProcessScopePolicy, IsolationSharedFilesystemPolicy, MAX_HOST_CLASSES,
+    floor_requires_outright, nested_sandbox_from, valid_host_class_name,
 };
 use provenance::redacted_plan_digest;
 pub use provenance::{
@@ -1584,6 +1586,12 @@ impl IsolationRuntime {
                 policy.version, ISOLATION_POLICY_VERSION
             )));
         }
+        if !valid_host_class_name(&policy.host_class) {
+            return Err(refused(format!(
+                "isolation host class {:?} is not a canonical name",
+                policy.host_class
+            )));
+        }
         validate_policy_semantics(policy)?;
         // The nested sandbox is one permission with two signed halves: the
         // floor requires `isolation:namespaces` outright, and the proc
@@ -1629,6 +1637,37 @@ impl IsolationRuntime {
         }
         if policy.mode == IsolationMode::Enforce {
             validate_enforced_limits(&policy.limits)?;
+        }
+        Ok(())
+    }
+
+    /// Validate a signed policy document: every host class it declares
+    /// must be canonically named and, combined with the shared policy, be
+    /// a valid runtime policy on its own. Whether the document may declare
+    /// more than one class is its holder's rule, not checked here.
+    pub fn validate_policy_document(document: &IsolationPolicyDocument) -> Result<(), EngineError> {
+        if document.version != ISOLATION_POLICY_VERSION {
+            return Err(refused(format!(
+                "unsupported node isolation policy version {} (expected {})",
+                document.version, ISOLATION_POLICY_VERSION
+            )));
+        }
+        if document.host_classes.is_empty() || document.host_classes.len() > MAX_HOST_CLASSES {
+            return Err(refused(format!(
+                "isolation policy must declare between 1 and {MAX_HOST_CLASSES} host classes"
+            )));
+        }
+        for name in document.host_classes.keys() {
+            let selected = document
+                .narrowed(name)
+                .and_then(IsolationPolicyDocument::into_selected_policy)
+                .map_err(refused)?;
+            Self::validate_policy(&selected).map_err(|error| match error {
+                EngineError::IsolationPolicyRefused { reason } => {
+                    refused(format!("isolation host class `{name}`: {reason}"))
+                }
+                other => other,
+            })?;
         }
         Ok(())
     }
@@ -5341,11 +5380,13 @@ impl IsolationRuntime {
             inspection: IsolationInspection {
                 source,
                 version: policy.version,
+                host_class: policy.host_class,
                 mode: policy.mode,
                 digest,
                 process_scopes: policy.process_scopes,
                 requires_capabilities: policy.requires_capabilities,
                 enclosure_inits: policy.enclosure_inits,
+                host_lifetime_bound: policy.host_lifetime_bound,
                 process_scope_capabilities,
                 process_scope_readiness,
                 backend: IsolationBackendInspection {
@@ -6090,6 +6131,9 @@ fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError
                 "isolation enclosure_inits names {init:?}, which is not an executable file name"
             )));
         }
+    }
+    if let Some(reason) = policy.host_lifetime_bound.as_ref().and_then(|bound| bound.refusal()) {
+        return Err(refused(format!("isolation {reason}")));
     }
     let scoped = policy.required_process_scope_capabilities();
     match &policy.process_scopes {
@@ -10833,6 +10877,22 @@ mod tests {
         assert!(IsolationRuntime::validate_policy(&inits).is_err());
         inits.enclosure_inits = vec!["/usr/bin/tini".to_owned()];
         assert!(IsolationRuntime::validate_policy(&inits).is_err());
+        let mut bounded = scoped_without_sandbox.clone();
+        bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
+            provider: "render-sandbox".to_owned(),
+            seconds: 86_400,
+        });
+        IsolationRuntime::validate_policy(&bounded).unwrap();
+        let value = serde_json::to_value(&bounded).unwrap();
+        assert_eq!(value["host_lifetime_bound"]["seconds"], 86_400);
+        assert_eq!(serde_json::from_value::<IsolationPolicy>(value).unwrap(), bounded);
+        assert!(serde_json::to_value(&scoped_without_sandbox).unwrap().get("host_lifetime_bound").is_none());
+        bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
+            provider: "render-sandbox".to_owned(),
+            seconds: 0,
+        });
+        let error = IsolationRuntime::validate_policy(&bounded).unwrap_err().to_string();
+        assert!(error.contains("host lifetime bound must be positive"), "{error}");
         assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
         assert!(!scoped_without_sandbox.nested_sandbox());
         let mut value = serde_json::to_value(&policy).unwrap();
@@ -10915,6 +10975,65 @@ mod tests {
                 providers: providers.iter().map(|id| (*id).to_owned()).collect(),
             },
         )
+    }
+
+    #[test]
+    fn a_policy_document_validates_every_declared_host_class() {
+        let shared = IsolationPolicy::disabled_for_authoring();
+        let mut document = IsolationPolicyDocument::from_selected_policy(shared);
+        let base = document.host_classes.remove(AUTHORING_HOST_CLASS).unwrap();
+        let mut local = base.clone();
+        local.requires_capabilities = vec!["accounting".into(), "time".into()];
+        let mut hosted = base;
+        hosted.requires_capabilities = vec![
+            spec(None, &["accounting", "residency:swap_absent"], &[], &[]),
+            spec(
+                Some("recovery:enclosure_trusted_init"),
+                &[],
+                &["measured", "trusted"],
+                &[],
+            ),
+            spec(
+                Some("termination:enclosure_trusted_init"),
+                &[],
+                &["measured", "trusted"],
+                &[],
+            ),
+            "time".into(),
+        ];
+        document.host_classes = [
+            ("hosted".to_owned(), hosted.clone()),
+            ("local".to_owned(), local),
+        ]
+        .into();
+        IsolationRuntime::validate_policy_document(&document).unwrap();
+
+        // A malformed floor in one class is refused under that class's name.
+        let mut unsorted = document.clone();
+        unsorted.host_classes.get_mut("hosted").unwrap().requires_capabilities.reverse();
+        let error = IsolationRuntime::validate_policy_document(&unsorted)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("isolation host class `hosted`"), "{error}");
+        assert!(error.contains("sorted and unique"), "{error}");
+
+        let mut misnamed = document.clone();
+        misnamed.host_classes.insert("Hosted".to_owned(), hosted);
+        let error = IsolationRuntime::validate_policy_document(&misnamed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a canonical name"), "{error}");
+
+        let mut none = document.clone();
+        none.host_classes.clear();
+        assert!(IsolationRuntime::validate_policy_document(&none).is_err());
+
+        let mut previous = document;
+        previous.version = ISOLATION_POLICY_VERSION - 1;
+        let error = IsolationRuntime::validate_policy_document(&previous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported node isolation policy version 9"), "{error}");
     }
 
     #[test]

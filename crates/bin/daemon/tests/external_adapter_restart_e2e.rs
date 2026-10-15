@@ -1587,9 +1587,9 @@ async fn prepare_signed_direct_qualification_fixture(
             );
             policy["policy"]["limits"]["verified_artifact_file_bytes"] = json!(268_435_456);
             policy["policy"]["limits"]["verified_artifact_total_bytes"] = json!(1_073_741_824);
-            let isolation: ryeos_engine::isolation::IsolationPolicy =
+            let isolation: ryeos_engine::isolation::IsolationPolicyDocument =
                 serde_json::from_value(policy["policy"].clone())?;
-            ryeos_engine::isolation::IsolationRuntime::validate_policy(&isolation)?;
+            ryeos_engine::isolation::IsolationRuntime::validate_policy_document(&isolation)?;
             std::fs::write(
                 &policy_path,
                 lillux::signature::sign_content_at(
@@ -3114,8 +3114,11 @@ async fn recorded_managed_realization_replays_after_daemon_restart() -> anyhow::
             let mut document: Value = serde_yaml::from_str(
                 &lillux::signature::strip_signature_lines(&std::fs::read_to_string(&path)?),
             )?;
-            let mut isolation: ryeos_engine::isolation::IsolationPolicy =
+            let document_policy: ryeos_engine::isolation::IsolationPolicyDocument =
                 serde_json::from_value(document["policy"].clone())?;
+            let mut isolation = document_policy
+                .into_selected_policy()
+                .map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
                 !isolation.trusted_process_group_sessions,
                 "unexpected trusted fixture"
@@ -3130,7 +3133,9 @@ async fn recorded_managed_realization_replays_after_daemon_restart() -> anyhow::
             isolation.network.mode = ryeos_engine::isolation::IsolationNetworkMode::Isolated;
             isolation.network.runtime_files.clear();
             ryeos_engine::isolation::IsolationRuntime::validate_policy(&isolation)?;
-            document["policy"] = serde_json::to_value(isolation)?;
+            document["policy"] = serde_json::to_value(
+                ryeos_engine::isolation::IsolationPolicyDocument::from_selected_policy(isolation),
+            )?;
             // Disposable node setup, before bootstrap seals its signed policy.
             // No installed policy or process-scope requirement is weakened.
             std::fs::write(

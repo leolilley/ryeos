@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:06a6a4819700333727613d4b28778281de43bbf986b62c30515efd09efa65a7b:PFhy4GAOxueeZrw7DzqNdnCTzpyFveSkamcM+pwj6lX7q2UYUx6v3kKBYlOD2EFT0JR/olEjrIn2H6iQ/RlIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T12:31:24Z:cfcfce6370839fde01078818f6bad977e7b8ee4546646cd74afb164ffe646591:uO4yDPjmn2nAu8vYGaOR1D1HzqBX9mJJQzRZua4hw004QfGCgN9ZiocI6gzk4Jn31lYbRIfT1/WG2LMys/vLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -211,29 +211,38 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
-      # class also accepts a resident region proven only by the absence of
-      # swap at startup (residency:swap_absent), which a later swapon ends.
-      # This disposable class does not require storage:durable_root. On an
-      # ephemeral app root every restart starts a new node identity, and an
-      # always-restart policy relies on the platform's own backoff, since no
-      # restart-inhibit record survives on that root to pace it.
-      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        hosted:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
+          # class also accepts a resident region proven only by the absence of
+          # swap at startup (residency:swap_absent), which a later swapon ends.
+          # This disposable class does not require storage:durable_root. On an
+          # ephemeral app root every restart starts a new node identity, and an
+          # always-restart policy relies on the platform's own backoff, since no
+          # restart-inhibit record survives on that root to pace it.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        mode: unconfigured
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -317,7 +326,7 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

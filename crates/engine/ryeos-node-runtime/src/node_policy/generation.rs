@@ -42,7 +42,42 @@ impl NodeInitProfile {
             bail!("node policy set exact_bundles is empty");
         }
         validate_sorted_unique_bundle_names(&self.exact_bundles)?;
-        validate_policy_bodies(policy_table, &self.policies, source_file)
+        for host_class in self.host_classes()? {
+            let selected = self.for_host_class(&host_class)?;
+            validate_policy_bodies(policy_table, &selected.policies, source_file)
+                .with_context(|| format!("validate node profile host class `{host_class}`"))?;
+        }
+        Ok(())
+    }
+
+    /// Host classes this profile declares in its isolation policy.
+    pub fn host_classes(&self) -> Result<Vec<String>> {
+        let body = self
+            .policies
+            .get(super::sections::isolation::SECTION_NAME)
+            .context("node profile has no isolation policy")?;
+        super::sections::isolation::declared_host_classes(body)
+            .context("read the host classes of the node profile")
+    }
+
+    /// This profile with its isolation policy narrowed to the one host
+    /// class the deployment names. A class the profile does not declare is
+    /// refused; no other class stands in for it.
+    pub fn for_host_class(&self, host_class: &str) -> Result<Self> {
+        let declared = self.host_classes()?;
+        if !declared.iter().any(|name| name == host_class) {
+            bail!(
+                "node profile does not declare host class `{host_class}`; it declares {}",
+                declared.join(", ")
+            );
+        }
+        let mut selected = self.clone();
+        let body = selected
+            .policies
+            .get_mut(super::sections::isolation::SECTION_NAME)
+            .context("node profile has no isolation policy")?;
+        *body = super::sections::isolation::select_host_class(body, host_class)?;
+        Ok(selected)
     }
 
     pub fn exact_bundles(&self) -> &[String] {
@@ -106,6 +141,32 @@ impl NodePolicyGeneration {
 
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// Refuse unless this generation's isolation policy is the one for
+    /// `host_class`, the class the node's signed substrate identity binds.
+    /// A node's host class is fixed at initialization: a policy for another
+    /// class would run the node under a floor and lane chosen for a
+    /// different kind of host.
+    pub fn require_host_class(&self, host_class: &str) -> Result<()> {
+        let body = self
+            .policies
+            .get(super::sections::isolation::SECTION_NAME)
+            .context("node policy generation has no isolation policy")?;
+        let declared = super::sections::isolation::declared_host_classes(body)?;
+        if declared != [host_class] {
+            bail!(
+                "the isolation policy is for host class {}, but this node was initialized \
+                 under host class `{host_class}`; a node's host class does not change, so \
+                 apply an isolation policy for `{host_class}`",
+                declared
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// Prepare a complete replacement while retaining the exact observed
@@ -282,10 +343,14 @@ fn policy_bodies_digest(policies: &BTreeMap<String, Value>) -> Result<String> {
 /// schema. Verify the complete predecessor's signatures, replace exactly the
 /// requested member, then compile every resulting member before publication.
 /// Runtime loaders remain strict; this is not a predecessor reader or fallback.
+/// `host_class` is the class the node's signed substrate identity binds; a
+/// resulting generation whose isolation policy is for any other class is
+/// refused.
 pub fn prepare_policy_member_replacement(
     app_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
+    host_class: &str,
     section: &str,
     body: Value,
     source_file: &Path,
@@ -302,6 +367,7 @@ pub fn prepare_policy_member_replacement(
     let expected = ExpectedPolicyGeneration::ExactDigest(policy_bodies_digest(&policies)?);
     policies.insert(section.to_owned(), body);
     let generation = validate_policy_generation(policy_table, policies, source_file)?;
+    generation.require_host_class(host_class)?;
     Ok(NodePolicyUpdate {
         generation,
         expected,
@@ -648,9 +714,85 @@ mod tests {
             let body = lillux::signature::strip_signature_lines(&raw);
             let profile: NodeInitProfile = serde_yaml::from_str(&body).unwrap();
             profile
-                .validated_generation(&table, &path)
+                .validate(&table, &path)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            let host_classes = profile.host_classes().unwrap();
+            assert!(!host_classes.is_empty(), "{}", path.display());
+            for host_class in host_classes {
+                profile
+                    .for_host_class(&host_class)
+                    .and_then(|selected| selected.validated_generation(&table, &path))
+                    .unwrap_or_else(|error| {
+                        panic!("{} {host_class}: {error:#}", path.display())
+                    });
+            }
         }
+    }
+
+    fn authored_profile(name: &str) -> NodeInitProfile {
+        let raw = std::fs::read_to_string(
+            ryeos_engine::test_support::workspace_root()
+                .join(format!("bundles/.ai/node/init/profiles/{name}.yaml")),
+        )
+        .unwrap();
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap()
+    }
+
+    #[test]
+    fn composition_profiles_declare_a_local_and_a_hosted_class_and_init_selects_one() {
+        let table = NodePolicyTable::new();
+        let path = Path::new("profile.yaml");
+        for name in ["core", "core-scheduling", "f5r-controller", "standard"] {
+            let profile = authored_profile(name);
+            assert_eq!(profile.host_classes().unwrap(), ["hosted", "local"], "{name}");
+            // The unselected profile is not a node generation.
+            let error = format!("{:#}", profile.validated_generation(&table, path).unwrap_err());
+            assert!(error.contains("exactly one host class"), "{name}: {error}");
+            let refused = format!("{:#}", profile.for_host_class("edge").unwrap_err());
+            assert!(
+                refused.contains("does not declare host class `edge`")
+                    && refused.contains("hosted, local"),
+                "{name}: {refused}"
+            );
+            for host_class in ["hosted", "local"] {
+                let selected = profile.for_host_class(host_class).unwrap();
+                assert_eq!(selected.host_classes().unwrap(), [host_class]);
+                let policy: ryeos_engine::isolation::IsolationPolicy =
+                    selected.typed_policy(&table, path).unwrap();
+                assert_eq!(policy.host_class, host_class);
+                // Every policy other than isolation is the profile's own.
+                for (section, body) in profile.policies() {
+                    if section != "isolation" {
+                        assert_eq!(&selected.policies()[section], body);
+                    }
+                }
+            }
+        }
+        // The hosted floor names the weaker grades a hosted container can
+        // prove and never the per-scope guarantees only a qualified host
+        // supervisor provides.
+        let hosted: ryeos_engine::isolation::IsolationPolicy = authored_profile("core")
+            .for_host_class("hosted")
+            .unwrap()
+            .typed_policy(&table, path)
+            .unwrap();
+        let names = hosted
+            .requires_capabilities
+            .iter()
+            .map(|entry| entry.label())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"any_of(accounting, residency:swap_absent)".to_owned()), "{names:?}");
+        assert!(names.iter().any(|label| label.contains("termination:enclosure_trusted_init")), "{names:?}");
+        assert!(hosted.required_process_scope_capabilities().is_empty(), "{names:?}");
+        let local: ryeos_engine::isolation::IsolationPolicy = authored_profile("core")
+            .for_host_class("local")
+            .unwrap()
+            .typed_policy(&table, path)
+            .unwrap();
+        assert!(!local.required_process_scope_capabilities().is_empty());
+        // A profile without a hosted variant declares only its local class.
+        assert_eq!(authored_profile("full").host_classes().unwrap(), ["local"]);
+        assert_eq!(authored_profile("hosted-node").host_classes().unwrap(), ["hosted"]);
     }
 
     #[test]
@@ -693,6 +835,7 @@ mod tests {
             root.path(),
             &trust,
             &table,
+            "local",
             "isolation",
             replacement.clone(),
             &source,
@@ -703,6 +846,47 @@ mod tests {
                 assert_eq!(&update.generation.policies[section], body);
             }
         }
+        // The node's host class is fixed: a replacement isolation policy for
+        // another class is refused, and so is any replacement on a node whose
+        // binding names a class the resulting policy is not for.
+        let mut reclassed = replacement.clone();
+        let classes = reclassed["policy"]["host_classes"].as_object_mut().unwrap();
+        let local = classes.remove("local").unwrap();
+        classes.insert("hosted".to_owned(), local);
+        let refused = format!(
+            "{:#}",
+            prepare_policy_member_replacement(
+                root.path(),
+                &trust,
+                &table,
+                "local",
+                "isolation",
+                reclassed,
+                &source,
+            )
+            .err()
+            .expect("a replacement for another host class is refused")
+        );
+        assert!(
+            refused.contains("for host class `hosted`")
+                && refused.contains("initialized under host class `local`"),
+            "{refused}"
+        );
+        let refused = format!(
+            "{:#}",
+            prepare_policy_member_replacement(
+                root.path(),
+                &trust,
+                &table,
+                "hosted",
+                "isolation",
+                replacement.clone(),
+                &source,
+            )
+            .err()
+            .expect("a replacement for another host class is refused")
+        );
+        assert!(refused.contains("a node's host class does not change"), "{refused}");
         // A different obsolete body is still a different predecessor. Exact
         // byte authority matters even though the retired schema is opaque.
         std::fs::write(
@@ -730,6 +914,7 @@ mod tests {
             root.path(),
             &trust,
             &table,
+            "local",
             "isolation",
             replacement,
             &source,

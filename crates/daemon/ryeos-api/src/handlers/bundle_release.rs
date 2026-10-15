@@ -292,6 +292,7 @@ fn authority_measure_handler(
                 && calibration.substrate_protocol == installed_substrate.protocol,
             "authority calibration measured another installed substrate"
         );
+        require_calibrated_composition(&calibration, &installed_substrate)?;
         anyhow::ensure!(
             calibration.portable.owner_principal == request.portable_qualification_owner_principal
                 && calibration.portable.qualification_attestation_hash
@@ -1380,6 +1381,24 @@ fn verified_calibration_environment(
     Ok(result)
 }
 
+/// Refuse unless this node runs under the init profile and host class the
+/// calibration was measured under, as its signed substrate identity binds.
+fn require_calibrated_composition(
+    calibration: &ryeos_app::bundle_publication::calibration::AuthorityCalibrationEvidence,
+    installed: &ryeos_node::SubstrateIdentity,
+) -> anyhow::Result<()> {
+    let host_class = installed.bound_host_class()?;
+    anyhow::ensure!(
+        installed.node_profile.as_deref() == Some(calibration.node_profile.as_str())
+            && host_class == calibration.host_class,
+        "authority calibration was measured under profile `{}` on host class `{}`; this node runs profile `{}` on host class `{host_class}`",
+        calibration.node_profile,
+        calibration.host_class,
+        installed.node_profile.as_deref().unwrap_or("none"),
+    );
+    Ok(())
+}
+
 fn calibrated_catalog_environment(
     catalog: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundleCatalogPolicy,
     source_generation: &ReleaseSourceGeneration,
@@ -1401,6 +1420,12 @@ fn calibrated_catalog_environment(
         calibration.execution_environment == catalog.calibration_execution_environment,
         "catalog execution environment differs from its signed calibration"
     );
+    // Release products, the substrate build receipt among them, come only
+    // from the composition and kind of host the calibration measured.
+    require_calibrated_composition(
+        &calibration,
+        &ryeos_node::load_verified_substrate_identity(&state.config.app_root)?,
+    )?;
     let selected = CalibrationEnvironmentSelection {
         static_link_inputs: catalog
             .calibration_execution_environment
@@ -1607,6 +1632,11 @@ async fn run_authority_calibration(
         schema: AUTHORITY_CALIBRATION_SCHEMA.to_owned(),
         source_snapshot_hash: request.source_snapshot_hash,
         node_signer_fingerprint: state.identity.fingerprint().to_owned(),
+        node_profile: installed
+            .node_profile
+            .clone()
+            .context("calibration requires a node initialized with a profile")?,
+        host_class: installed.bound_host_class()?.to_owned(),
         substrate_image_digest: installed.image_digest,
         substrate_protocol: installed.protocol,
         portable: portable.lane,

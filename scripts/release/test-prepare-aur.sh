@@ -72,7 +72,7 @@ grep -Fq 'ryeos-bundles-$pkgver-x86_64.tar.gz::https://github.com/leolilley/ryeo
     "$tmp/out/ryeos/PKGBUILD"
 grep -Fq "'$expected_bundle'" "$tmp/out/ryeos/PKGBUILD"
 ! grep -Fq "$expected_bundle" "$tmp/out/ryeos-mcp/PKGBUILD"
-grep -Fq 'ryeos init --node-profile full' "$tmp/out/ryeos/ryeos.install"
+grep -Fq 'ryeos init --node-profile full --host-class local' "$tmp/out/ryeos/ryeos.install"
 
 mv "$bundle_root/.ai/node/init/profiles/hosted-workflow.yaml" \
     "$tmp/hosted-workflow.yaml"

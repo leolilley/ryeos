@@ -914,7 +914,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME> --host-class <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
         #[cfg(feature = "model-provider-setup")]
         "setup" => (
@@ -965,7 +965,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "node reset policy-generation" => (
             "ryeos node reset policy-generation",
             "Replace an obsolete node-policy generation",
-            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
+            "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
         ),
         "start" => (
             "ryeos start",
@@ -1027,6 +1027,10 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             (
                 "--node-profile <NAME>",
                 "Publisher-signed source-root init profile (required on fresh nodes)",
+            ),
+            (
+                "--host-class <NAME>",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile",
             ),
             ("--app-root <DIR>", "Application root"),
         ],

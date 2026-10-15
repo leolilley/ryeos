@@ -53,21 +53,23 @@ Signed command aliases still use their declared selector-to-service mappings.
 ### `ryeos init`
 
 ```bash
-ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
+ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
 Packaged installs use `/usr/share/ryeos` by default. The full package selects
 its exact complete seed explicitly:
 
 ```bash
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ```
 
 Fresh init refuses an absent selector; bundle presence never implies one.
+`--host-class` is given exactly when `--node-profile` is, and names one of the
+profile's declared host classes (`full` declares only `local`).
 Development usage:
 
 ```bash
-ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`
@@ -199,7 +201,7 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
-ryeos node reset policy-generation --node-profile <name> --confirm [--source <dir>] [--trust-file <file>]...
+ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation

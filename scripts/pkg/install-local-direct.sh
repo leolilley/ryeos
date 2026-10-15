@@ -70,6 +70,10 @@ Options:
                         exact_bundles match --bundle-set. For example,
                         development selects enforced hosted-development policy
                         over the full bundle set without creating another set.
+  --host-class NAME     Host class this host is declared as at first init; the
+                        selected profile must declare it. A direct install
+                        runs the node on this host itself.
+                        (default: local)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
   --cargo-target-dir DIR
@@ -197,13 +201,15 @@ build_install_init_profile_args() {
     local policy_generation_path="$1"
     local mapped_profile="$2"
     local replace_generation="$3"
+    local host_class="$4"
 
-    [[ -n "$mapped_profile" ]] || return 1
+    [[ -n "$mapped_profile" && -n "$host_class" ]] || return 1
     INSTALL_INIT_PROFILE_ARGS=()
     INSTALL_PUBLISH_INITIAL_POLICY=0
     if [[ "$replace_generation" == "1" ]]; then
         INSTALL_INIT_PROFILE_ARGS=(
             --node-profile "$mapped_profile"
+            --host-class "$host_class"
             --replace-node-policy-generation
             --confirm-node-policy-generation-replacement
         )
@@ -213,7 +219,7 @@ build_install_init_profile_args() {
         # pass this installer boundary.
         INSTALL_PUBLISH_INITIAL_POLICY=1
     elif [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
-        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile")
+        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile" --host-class "$host_class")
         INSTALL_PUBLISH_INITIAL_POLICY=1
     fi
 }
@@ -549,6 +555,7 @@ key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="RyeOS Development"
 bundle_set="full"
 node_profile_override=""
+init_host_class="local"
 jobs=""            # forwarded to populate as cargo -j N
 cargo_target_root="$repo_root/target"
 crates=""          # forwarded to populate to rebuild only these Cargo packages
@@ -610,6 +617,11 @@ while [[ $# -gt 0 ]]; do
         --node-profile)
             [[ $# -ge 2 ]] || die "--node-profile requires a value"
             node_profile_override="$2"
+            shift 2
+            ;;
+        --host-class)
+            [[ $# -ge 2 ]] || die "--host-class requires a value"
+            init_host_class="$2"
             shift 2
             ;;
         --jobs)
@@ -879,7 +891,8 @@ if [[ $run_init -eq 1 ]]; then
         die "--node-profile selects first publication only; use --reset-node-policy-generation to replace an existing generation explicitly"
     fi
     build_install_init_profile_args \
-        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
+        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" \
+        "$init_host_class" || \
         die "could not resolve init-profile arguments"
     if ! preflight_existing_node_policy \
         "$policy_generation_path" "$reset_node_policy_generation" "${bundle_names[@]}"; then

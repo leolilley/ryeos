@@ -62,9 +62,26 @@ impl Drop for Launch {
 }
 
 impl Launch {
-    /// Prepare the Core fixture, let `edit` rewrite the isolation policy
-    /// mapping, re-sign it with the fixture node key, seal, and spawn.
+    /// Prepare the Core fixture, let `edit` rewrite the local class of the
+    /// isolation policy, re-sign it with the fixture node key, seal, and
+    /// spawn.
     fn spawn(edit: impl FnOnce(&mut Value)) -> Result<Self> {
+        // The fixture node runs under the profile's local class.
+        Self::spawn_with_policy_document(|document| {
+            edit(
+                document
+                    .pointer_mut("/policy/host_classes/local")
+                    .context("fixture isolation policy has no local class")?,
+            );
+            Ok(())
+        })
+    }
+
+    /// Prepare the Core fixture, let `edit` rewrite the whole signed
+    /// isolation member (its `policy` document holds the document-level
+    /// `version` and the `host_classes` map), re-sign it with the fixture
+    /// node key, seal, and spawn.
+    fn spawn_with_policy_document(edit: impl FnOnce(&mut Value) -> Result<()>) -> Result<Self> {
         let (node_dir, app_root) = common::copy_core_to_temp();
         let user_dir = tempfile::tempdir()?;
         let socket_dir = tempfile::tempdir()?;
@@ -78,7 +95,7 @@ impl Launch {
         let raw = std::fs::read_to_string(&policy_path)?;
         let mut document: Value =
             serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))?;
-        edit(document.get_mut("policy").context("fixture isolation policy has no policy mapping")?);
+        edit(&mut document)?;
         std::fs::write(
             &policy_path,
             lillux::signature::sign_content_at(
@@ -320,20 +337,37 @@ fn doctor_shows_the_provider_of_every_proof_and_of_every_met_entry() -> Result<(
 }
 
 #[test]
-fn isolation_policy_version_8_is_refused_as_foreign() -> Result<()> {
-    // A foreign policy version is refused when the initialized state is
-    // sealed, before any daemon can start on it; the refusal is the policy
-    // section's own text, and no restart inhibition is written because no
-    // start was attempted.
-    let error = match Launch::spawn(|policy| policy["version"] = json!(8)) {
+fn isolation_policy_version_9_is_refused_as_foreign() -> Result<()> {
+    // The version belongs to the policy document that holds the host
+    // classes, not to any one class. A foreign document version is refused
+    // when the initialized state is sealed, before any daemon can start on
+    // it; the refusal is the policy section's own text, and no restart
+    // inhibition is written because no start was attempted.
+    let error = match Launch::spawn_with_policy_document(|document| {
+        let policy = document
+            .get_mut("policy")
+            .and_then(Value::as_object_mut)
+            .context("fixture isolation member has no policy document")?;
+        anyhow::ensure!(
+            policy.contains_key("host_classes"),
+            "fixture isolation policy document has no host_classes map"
+        );
+        anyhow::ensure!(
+            policy.get("version") == Some(&json!(10)),
+            "fixture isolation policy document is not version 10: {:?}",
+            policy.get("version")
+        );
+        policy.insert("version".to_owned(), json!(9));
+        Ok(())
+    }) {
         Ok(mut launch) => {
             let (status, stderr) = launch.wait_exit()?;
-            anyhow::bail!("a version 8 policy was sealed and started: {status}\n{stderr}");
+            anyhow::bail!("a version 9 policy was sealed and started: {status}\n{stderr}");
         }
         Err(error) => format!("{error:#}"),
     };
     assert!(
-        error.contains("unsupported node isolation policy version 8 (expected 9)"),
+        error.contains("unsupported node isolation policy version 9 (expected 10)"),
         "{error}"
     );
     Ok(())

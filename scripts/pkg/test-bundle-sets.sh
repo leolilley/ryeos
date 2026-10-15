@@ -69,9 +69,9 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling release-authority" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller release-authority" ]]
 # Native node/caller authentication does not require application sessions.
-for set_name in core core-scheduling standard local-inference hosted-node hosted-workflow bundle-source; do
+for set_name in core core-scheduling f5r-controller standard local-inference hosted-node hosted-workflow bundle-source; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   assert_rejected contains central-auth "${members[@]}"
 done
@@ -92,13 +92,15 @@ for set_name in full central-host standard standard-central-auth local-inference
 done
 for package in ryeosd ryeos-cli ryeos-api; do
   [[ "$(ryeos_bundle_set_cargo_features core-scheduling "$package")" == "$package/scheduling" ]]
+  # The controller carries Standard without scheduling.
+  [[ "$(ryeos_bundle_set_cargo_features f5r-controller "$package")" == "$package/model-provider-setup" ]]
 done
 for set_name in hosted-node bundle-source core; do
   for package in ryeosd ryeos-cli ryeos-api; do
     [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" ]]
   done
 done
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-authority release-artifacts; do
+for set_name in full central-host standard standard-central-auth local-inference hosted-workflow f5r-controller release-authority release-artifacts; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/directive-handlers,ryeos-handler-bins/graph-handlers" ]]
 done
 for set_name in core core-scheduling hosted-node bundle-source; do
@@ -117,6 +119,13 @@ mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-sche
 [[ "${core_scheduling_bins[*]}" == "core" ]]
 for forbidden in central-auth standard local-inference hosted-node codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core_scheduling[@]}"
+done
+mapfile -t f5r_controller < <(ryeos_bundle_set_names f5r-controller)
+[[ "${f5r_controller[*]}" == "core standard codex render-sandbox" ]]
+mapfile -t f5r_controller_bins < <(ryeos_bundle_set_bin_managed_names f5r-controller)
+[[ "${f5r_controller_bins[*]}" == "core standard codex render-sandbox" ]]
+for forbidden in central-auth scheduling hosted-node opencode local-inference bundle-release; do
+  assert_rejected contains "$forbidden" "${f5r_controller[@]}"
 done
 [[ -z "$(ryeos_bundle_set_cargo_features full ryeos-core-tools)" ]]
 assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
@@ -146,7 +155,7 @@ grep -Fq 'sudo cp -a "$bundle_dir/specs" "$share_dir/$name/specs"' \
   "$ROOT/scripts/pkg/install-local-direct.sh"
 grep -Fq 'cp -a "$bundle_dir/specs" "$pkgdir/usr/share/ryeos/$name/specs"' \
   "$ROOT/deploy/aur/ryeos/PKGBUILD"
-for ordinary_set in full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling; do
+for ordinary_set in full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   assert_rejected contains bundle-release "${ordinary_members[@]}"
   [[ -z "$(ryeos_bundle_set_host_support_bins "$ordinary_set")" ]]
@@ -159,7 +168,7 @@ assert_rejected ryeos_bundle_set_node_init_profile release-artifacts
 assert_rejected ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling contained-workflow development release-authority" ]]
+[[ "${node_init_profiles[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller contained-workflow development release-authority" ]]
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set development)" == "full" ]]
 [[ "$(ryeos_node_init_profile_bundle_set release-authority)" == "release-authority" ]]
@@ -196,10 +205,30 @@ for profile_name in "${node_init_profiles[@]}"; do
   )"
   grep -Fxq '    schema: 4' <<<"$execution_section"
   grep -Eq '^    producer_resource_ceiling:($| null$)' <<<"$execution_section"
-  if [[ "$profile_name" == hosted-workflow ]]; then
-    grep -Eq '^      trusted_process_group_sessions: true$' "$node_init_profile"
+  # The isolation policy declares its host classes as data: the
+  # composition profiles a strict local class and a hosted class, the hosted
+  # workflow profiles only a hosted class, every other profile only its
+  # local class. Initialization selects one, named by the deployment.
+  grep -Fxq '      version: 10' "$node_init_profile"
+  grep -Fxq '      host_classes:' "$node_init_profile"
+  declared_host_classes="$(
+    sed -n '/^      host_classes:$/,/^      [a-z_]*:/p' "$node_init_profile" \
+      | sed -nE 's/^        ([a-z][a-z0-9_]*):$/\1/p' | tr '\n' ' '
+  )"
+  case "$profile_name" in
+    core|core-scheduling|standard|f5r-controller)
+      [[ "$declared_host_classes" == "hosted local " ]] ;;
+    hosted-node|hosted-workflow)
+      [[ "$declared_host_classes" == "hosted " ]] ;;
+    *)
+      [[ "$declared_host_classes" == "local " ]] ;;
+  esac
+  if [[ "$profile_name" == hosted-workflow || "$profile_name" == f5r-controller ]]; then
+    assert_rejected grep -Eq '^          trusted_process_group_sessions: false$' "$node_init_profile"
+    grep -Eq '^          trusted_process_group_sessions: true$' "$node_init_profile"
   else
-    grep -Eq '^      trusted_process_group_sessions: false$' "$node_init_profile"
+    assert_rejected grep -Eq '^          trusted_process_group_sessions: true$' "$node_init_profile"
+    grep -Eq '^          trusted_process_group_sessions: false$' "$node_init_profile"
   fi
   profile_bundle_set="$(ryeos_node_init_profile_bundle_set "$profile_name")"
   expected_exact_bundles="$(ryeos_bundle_set_names "$profile_bundle_set" | sort)"
@@ -315,6 +344,25 @@ grep -Fq -- 'build --release --locked -p ryeosd -p ryeos-cli -p ryeos-core-tools
 assert_rejected grep -Fq -- 'scheduling' <<<"$reduced_daemon_output"
 assert_rejected grep -Fq -- 'model-provider-setup' <<<"$reduced_daemon_output"
 test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
+
+# The controller rebuild selects provider setup without the scheduler.
+set +e
+controller_daemon_output="$(
+  RYEOS_TTY=never \
+  CARGO=/bin/echo \
+  CARGO_TARGET_DIR="$scope_tmp/target" \
+    "$scope_tmp/repo/scripts/populate-bundles.sh" \
+      --key "$scope_tmp/publisher.pem" \
+      --owner test \
+      --bundle-set f5r-controller \
+      --crates ryeosd 2>&1
+)"
+controller_daemon_status=$?
+set -e
+[[ "$controller_daemon_status" -eq 2 ]]
+grep -Fq -- '--features ryeosd/model-provider-setup,ryeos-cli/model-provider-setup' \
+  <<<"$controller_daemon_output"
+assert_rejected grep -Fq -- 'scheduling' <<<"$controller_daemon_output"
 
 static_package_cases=(
   'ryeos-session-exec|ryeos-session-exec'

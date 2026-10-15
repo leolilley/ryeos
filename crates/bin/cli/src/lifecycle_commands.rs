@@ -358,6 +358,11 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long)]
     node_profile: String,
 
+    /// Host class the node was initialized under; the replacement profile
+    /// must declare it. A node's host class does not change.
+    #[arg(long)]
+    host_class: String,
+
     /// Additional publisher trust doc(s) needed to verify the replacement
     /// profile and selected source bundles.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
@@ -382,7 +387,11 @@ impl NodePolicyGenerationResetArgs {
             anyhow::bail!("replacing the complete node-policy generation requires --confirm");
         }
         ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
-            .context("validate node init profile name")
+            .context("validate node init profile name")?;
+        if !ryeos_engine::isolation::valid_host_class_name(&self.host_class) {
+            anyhow::bail!("host class `{}` is not a canonical name", self.host_class);
+        }
+        Ok(())
     }
 }
 
@@ -406,6 +415,7 @@ fn run_node_policy_generation_reset_command(
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: Some(args.node_profile.clone()),
+        host_class: Some(args.host_class.clone()),
         substrate_identity: None,
         replace_node_policy_generation: true,
         skip_preflight: false,
@@ -416,6 +426,7 @@ fn run_node_policy_generation_reset_command(
         crate::tty::write_json(&serde_json::json!({
             "status": "replaced",
             "node_profile": args.node_profile,
+            "host_class": args.host_class,
             "app_root": report.app_root,
             "node_fingerprint": report.node_key_fingerprint,
             "bundles": report.bundles_installed,
@@ -489,10 +500,15 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
+    // The replacement generation must stay the isolation policy of the host
+    // class the node's signed substrate identity binds.
+    let substrate = ryeos_node::load_verified_substrate_identity(&config.app_root)
+        .context("verify the node's substrate identity for policy apply")?;
     let update = ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
         &config.app_root,
         &trust_store,
         &table,
+        substrate.bound_host_class()?,
         &args.section,
         body,
         &args.source,
@@ -1231,6 +1247,14 @@ struct InitArgs {
     #[arg(long)]
     node_profile: Option<String>,
 
+    /// Host class naming the kind of host this node runs on (for example
+    /// `local` for a host the operator runs, `hosted` for a hosting
+    /// provider's container). Required with --node-profile; it must be a
+    /// class the profile declares, and it selects that profile's floor for
+    /// the class. It is fixed at initialization.
+    #[arg(long, requires = "node_profile")]
+    host_class: Option<String>,
+
     /// Immutable OCI digest of the substrate image executing this node.
     #[arg(long, requires = "substrate_protocol")]
     substrate_image_digest: Option<String>,
@@ -1273,6 +1297,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             digest,
             protocol,
             args.node_profile.clone(),
+            args.host_class.clone(),
         )?),
         (None, None) => None,
         _ => unreachable!("clap enforces paired substrate identity arguments"),
@@ -1284,6 +1309,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
+        host_class: args.host_class,
         substrate_identity,
         replace_node_policy_generation: args.replace_node_policy_generation,
         skip_preflight: false,
@@ -2436,6 +2462,7 @@ fn capability_section(
         "profile",
         composition.profile.as_deref().unwrap_or("unrecorded"),
     ));
+    section.rows.push(crate::tty::Row::key_value("host class", &composition.host_class));
     section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
     section.rows.push(crate::tty::Row::key_value(
         "compiled features",
@@ -3187,12 +3214,17 @@ mod tests {
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: Some("hosted-node".to_owned()),
+                host_class: "hosted".to_owned(),
                 bundles: vec!["core".to_owned()],
                 compiled_features: vec!["model-provider-setup".to_owned(), "scheduling".to_owned()],
                 policy_generation: "fixture".to_owned(),
             },
             exposure: NodeExposure::unattested(vec!["[::]:8080".to_owned()]),
             host: HostFacts::observe(0, std::path::Path::new("/")),
+            credential_home: lillux::process_control::PrivateDirectoryFacts::observe(
+                std::path::Path::new("/"),
+                std::path::Path::new("/"),
+            ),
             provided: std::collections::BTreeMap::new(),
             missing,
             capacity: std::collections::BTreeMap::new(),
@@ -3295,6 +3327,7 @@ mod tests {
         NodePolicyGenerationResetArgs {
             source: PathBuf::from("/usr/share/ryeos"),
             node_profile: "full".to_string(),
+            host_class: "local".to_string(),
             trust_files: Vec::new(),
             app_root: None,
             confirm,
@@ -3310,6 +3343,24 @@ mod tests {
         let mut invalid = policy_generation_reset_args(true);
         invalid.node_profile = "../full".to_string();
         assert!(invalid.validate().is_err());
+
+        let mut noncanonical = policy_generation_reset_args(true);
+        noncanonical.host_class = "Local".to_string();
+        assert!(noncanonical.validate().is_err());
+    }
+
+    #[test]
+    fn init_takes_a_host_class_only_with_a_node_profile() {
+        use clap::Parser as _;
+        let parsed = InitArgs::try_parse_from([
+            "--node-profile",
+            "core",
+            "--host-class",
+            "hosted",
+        ])
+        .unwrap();
+        assert_eq!(parsed.host_class.as_deref(), Some("hosted"));
+        assert!(InitArgs::try_parse_from(["--host-class", "hosted"]).is_err());
     }
 
     #[test]
