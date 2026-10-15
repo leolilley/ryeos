@@ -20,7 +20,9 @@ pub(crate) enum DirectProtocolRoute {
 pub(crate) fn direct_protocol_route(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Option<DirectProtocolRoute> {
-    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+    use ryeos_engine::protocol_vocabulary::{
+        CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape,
+    };
     if protocol.descriptor.lifecycle.mode == LifecycleMode::Managed
         && protocol.descriptor.stdin.shape == StdinShape::Opaque
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
@@ -919,7 +921,8 @@ async fn dispatch_tool_subprocess(
     // Admitted before the direct program is finalized or any process is
     // spawned: a tool declaring a node guarantee this node does not prove
     // leaves nothing behind.
-    let effective_caps = admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
+    let effective_caps =
+        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
 
     let parent_thread_id = request
         .parent_execution_context
@@ -1153,7 +1156,10 @@ mod direct_continuation_producer_controls {
     fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             if path.is_dir() {
                 if name != "tests" && name != "target" && !name.starts_with('.') {
                     visit(&path, files);
@@ -1194,7 +1200,8 @@ mod direct_continuation_producer_controls {
             for name in ["DispatchRequest {", "DispatchLaunchOptions {"] {
                 for (index, _) in source.match_indices(name) {
                     let prefix = &source[..index];
-                    if prefix.ends_with("struct ") || prefix.ends_with("impl ")
+                    if prefix.ends_with("struct ")
+                        || prefix.ends_with("impl ")
                         || prefix.ends_with("for ")
                     {
                         continue;
@@ -1310,17 +1317,22 @@ mod direct_protocol_tests {
         protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
-        ))).unwrap();
+        )))
+        .unwrap();
         // Canonical label cannot determine the mechanics or grant readiness.
         protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
-        assert_eq!(direct_protocol_route(&protocol), Some(DirectProtocolRoute::QualificationOpaqueCallback));
+        assert_eq!(
+            direct_protocol_route(&protocol),
+            Some(DirectProtocolRoute::QualificationOpaqueCallback)
+        );
         assert!(uses_direct_subprocess_plan(&protocol));
         let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
         assert!(error.to_string().contains("selected route remains refused"));
         assert!(classify_managed_protocol(&protocol, "tool").is_err());
         protocol.descriptor.qualification_callback = None;
         assert_eq!(direct_protocol_route(&protocol), None);
-        protocol.descriptor.qualification_callback = Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
+        protocol.descriptor.qualification_callback =
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert_eq!(direct_protocol_route(&protocol), None);
     }
 
@@ -1330,7 +1342,8 @@ mod direct_protocol_tests {
         original.descriptor = serde_yaml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
-        ))).unwrap();
+        )))
+        .unwrap();
         let mut changed = original.clone();
         changed.descriptor.capabilities.allows_detached = true;
         assert_eq!(direct_protocol_route(&changed), None);
@@ -1338,11 +1351,16 @@ mod direct_protocol_tests {
         changed.descriptor.stdin.shape = StdinShape::LaunchEnvelope;
         assert_eq!(direct_protocol_route(&changed), None);
         let mut changed = original.clone();
-        changed.descriptor.stdout.shape = ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
+        changed.descriptor.stdout.shape =
+            ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
         assert_eq!(direct_protocol_route(&changed), None);
         let mut changed = original;
-        changed.descriptor.callback_channel = ryeos_engine::protocol_vocabulary::CallbackChannel::None;
-        assert_eq!(direct_protocol_route(&changed), Some(DirectProtocolRoute::Ordinary));
+        changed.descriptor.callback_channel =
+            ryeos_engine::protocol_vocabulary::CallbackChannel::None;
+        assert_eq!(
+            direct_protocol_route(&changed),
+            Some(DirectProtocolRoute::Ordinary)
+        );
         assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
     }
 

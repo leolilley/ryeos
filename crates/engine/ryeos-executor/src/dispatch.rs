@@ -407,7 +407,9 @@ pub(crate) enum InvocationRootCarrier<'a> {
 }
 
 impl InvocationRootCarrier<'_> {
-    fn requires_selected(self) -> bool { matches!(self, Self::Required(_)) }
+    fn requires_selected(self) -> bool {
+        matches!(self, Self::Required(_))
+    }
 }
 
 /// Context struct for subprocess dispatch, carrying all the hop-derived
@@ -3518,7 +3520,10 @@ fn admit_tool_node_requirements(
     };
     let requires = ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires)
         .map_err(|reason| {
-            DispatchError::InvalidRef(item_ref.to_string(), format!("invalid `requires`: {reason}"))
+            DispatchError::InvalidRef(
+                item_ref.to_string(),
+                format!("invalid `requires`: {reason}"),
+            )
         })?;
     ryeos_app::node_requirement_admission::admit_item_requirements(node, item_ref, &requires)
         .map_err(|error| DispatchError::CapabilityRejected {
@@ -3560,7 +3565,10 @@ pub(crate) fn refuse_in_process_node_requirements(
     };
     let requires = ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires)
         .map_err(|reason| {
-            DispatchError::InvalidRef(item_ref.to_string(), format!("invalid `requires`: {reason}"))
+            DispatchError::InvalidRef(
+                item_ref.to_string(),
+                format!("invalid `requires`: {reason}"),
+            )
         })?;
     let declared = match (
         requires.node.is_empty(),
@@ -3643,7 +3651,14 @@ pub async fn dispatch(
     // and constructing the unboxed nested future can exhaust the worker stack
     // before the selected leaf gets a chance to run.
     Box::pin(dispatch_inner(
-        item_ref, None, None, request, ctx, state, None, InvocationRootCarrier::Ordinary,
+        item_ref,
+        None,
+        None,
+        request,
+        ctx,
+        state,
+        None,
+        InvocationRootCarrier::Ordinary,
     ))
     .await
 }
@@ -3840,13 +3855,21 @@ pub async fn dispatch_verified(
     if request.lifecycle_authority.ownership
         == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
-        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state, None)
-            .await
-            .map_err(|error| {
-                DispatchError::Internal(anyhow::anyhow!(
-                    "daemon-owned verified dispatch task ended before settlement: {error}"
-                ))
-            })?;
+        return dispatch_daemon_owned_inner(
+            item_ref,
+            Some(verified),
+            None,
+            request,
+            ctx,
+            state,
+            None,
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned verified dispatch task ended before settlement: {error}"
+            ))
+        })?;
     }
     Box::pin(dispatch_inner(
         item_ref,
@@ -3916,20 +3939,37 @@ pub async fn dispatch_with_application_publication(
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let state = publication.app().as_ref();
-    if launch_handoff.is_none() && request.lifecycle_authority.ownership
-        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    if launch_handoff.is_none()
+        && request.lifecycle_authority.ownership
+            == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
         return dispatch_daemon_owned_inner(
-            item_ref, None, handler_context, request, ctx, state,
+            item_ref,
+            None,
+            handler_context,
+            request,
+            ctx,
+            state,
             Some(publication.attachment().clone()),
-        ).await.map_err(|error| DispatchError::Internal(anyhow::anyhow!(
-            "daemon-owned publication dispatch ended before settlement: {error}"
-        )))?;
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned publication dispatch ended before settlement: {error}"
+            ))
+        })?;
     }
     let result = Box::pin(dispatch_inner(
-        item_ref, None, handler_context, request, ctx, state, launch_handoff,
+        item_ref,
+        None,
+        handler_context,
+        request,
+        ctx,
+        state,
+        launch_handoff,
         InvocationRootCarrier::Available(publication.attachment()),
-    )).await;
+    ))
+    .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
         handoff.publish_dispatch_failure(error);
     }
@@ -3947,11 +3987,20 @@ pub async fn dispatch_with_selected_invocation(
     state: &AppState,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
-    attachment.validate_for_store(&state.state_store).map_err(DispatchError::Internal)?;
+    attachment
+        .validate_for_store(&state.state_store)
+        .map_err(DispatchError::Internal)?;
     let result = Box::pin(dispatch_inner(
-        item_ref, None, handler_context, request, ctx, state,
-        launch_handoff, InvocationRootCarrier::Required(attachment),
-    )).await;
+        item_ref,
+        None,
+        handler_context,
+        request,
+        ctx,
+        state,
+        launch_handoff,
+        InvocationRootCarrier::Required(attachment),
+    ))
+    .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
         handoff.publish_dispatch_failure(error);
     }
@@ -5910,12 +5959,7 @@ pub fn preflight_root_dispatch(
                             // prove fails before a thread_id is minted, not in
                             // the background after 202.
                             if let Some(v) = verified.as_ref() {
-                                admit_tool_launch(
-                                    state,
-                                    &v.resolved,
-                                    &hop_ref.to_string(),
-                                    ctx,
-                                )?;
+                                admit_tool_launch(state, &v.resolved, &hop_ref.to_string(), ctx)?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
                                 // wrapper subprocess thread. Resolve the chain
@@ -6347,7 +6391,9 @@ async fn dispatch_by(
         runtime,
         root_subject,
     } = params;
-    if invocation_root.requires_selected() && !matches!(&terminator, TerminatorDecl::Subprocess { .. }) {
+    if invocation_root.requires_selected()
+        && !matches!(&terminator, TerminatorDecl::Subprocess { .. })
+    {
         return Err(DispatchError::Internal(anyhow::anyhow!(
             "selected invocation requires its owned subprocess driver"
         )));
@@ -7987,7 +8033,10 @@ requires:
             &ctx,
         )
         .unwrap_err();
-        assert!(matches!(error, DispatchError::CapabilityRejected { .. }), "{error}");
+        assert!(
+            matches!(error, DispatchError::CapabilityRejected { .. }),
+            "{error}"
+        );
         let message = error.to_string();
         assert!(message.contains("launch refused"), "{message}");
         assert!(
@@ -8008,7 +8057,9 @@ requires:
         )
         .unwrap_err();
         assert!(
-            error.to_string().contains("this node has no signed capability report"),
+            error
+                .to_string()
+                .contains("this node has no signed capability report"),
             "{error}"
         );
     }
@@ -8024,25 +8075,29 @@ requires:
         let error =
             refuse_in_process_node_requirements(&resolved.resolved_item, &resolved.item_ref)
                 .unwrap_err();
-        assert!(matches!(error, DispatchError::CapabilityRejected { .. }), "{error}");
+        assert!(
+            matches!(error, DispatchError::CapabilityRejected { .. }),
+            "{error}"
+        );
         let message = error.to_string();
         assert!(
             message.contains("declares `requires.node` and `requires.credential_kinds`"),
             "{message}"
         );
-        assert!(message.contains("runs in-process inside the daemon"), "{message}");
+        assert!(
+            message.contains("runs in-process inside the daemon"),
+            "{message}"
+        );
 
         let node_only = resolved_tool_with_extra(
             &bundle,
             "service:example-bundle/node-only",
             requires_extra(json!({ "node": ["persistence:durable_state"] })),
         );
-        let message = refuse_in_process_node_requirements(
-            &node_only.resolved_item,
-            &node_only.item_ref,
-        )
-        .unwrap_err()
-        .to_string();
+        let message =
+            refuse_in_process_node_requirements(&node_only.resolved_item, &node_only.item_ref)
+                .unwrap_err()
+                .to_string();
         assert!(message.contains("declares `requires.node`,"), "{message}");
 
         // An item declaring neither, or no `requires` at all, is admitted.
@@ -8051,8 +8106,7 @@ requires:
             "service:example-bundle/caps-only",
             requires_extra(json!({ "capabilities": { "manifest": [] } })),
         );
-        refuse_in_process_node_requirements(&caps_only.resolved_item, &caps_only.item_ref)
-            .unwrap();
+        refuse_in_process_node_requirements(&caps_only.resolved_item, &caps_only.item_ref).unwrap();
         let plain = resolved_tool(&bundle, "service:example-bundle/plain");
         refuse_in_process_node_requirements(&plain.resolved_item, &plain.item_ref).unwrap();
     }

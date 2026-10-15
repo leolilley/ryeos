@@ -3544,12 +3544,13 @@ mod tests {
             let target =
                 lillux::PinnedDirectory::open_or_create(&dir.path().join("output")).unwrap();
             let budget = PrivateMaterializationBudget::new(4096);
-            let restore = |guard: &ryeos_state::CasMutationGuard,
-                           store: Option<&ryeos_app::state_store::StateStore>| {
-                restore_workspace_output_tree(
-                    &authority, guard, &target, hash, storage, &budget, store,
-                )
-            };
+            let restore =
+                |guard: &ryeos_state::CasMutationGuard,
+                 store: Option<&ryeos_app::state_store::StateStore>| {
+                    restore_workspace_output_tree(
+                        &authority, guard, &target, hash, storage, &budget, store,
+                    )
+                };
             assert!(
                 restore(&guard, Some(&owner)).is_err(),
                 "live generation must not be repaired"

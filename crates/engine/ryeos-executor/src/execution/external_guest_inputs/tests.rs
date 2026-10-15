@@ -234,7 +234,8 @@ fn product_input_redemption_retains_sorted_descriptors_exact_manifest_and_origin
 fn consumer_inventory_uses_retained_normal_and_large_realizations_without_worker_coordinates() {
     for large in [false, true] {
         let temporary = tempfile::tempdir().unwrap();
-        let (_state_owner, state) = ryeos_app::state::test_support::build(temporary.path()).unwrap();
+        let (_state_owner, state) =
+            ryeos_app::state::test_support::build(temporary.path()).unwrap();
         let (entry, value) = fixture(large);
         let authority = state.state_store.pinned_state_authority().unwrap();
         let cas = authority.cas_store().unwrap();

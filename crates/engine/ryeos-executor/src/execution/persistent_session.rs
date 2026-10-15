@@ -34,12 +34,12 @@ use ryeos_state::objects::{
 
 mod custody;
 
+use super::external_structured_session_relay::{
+    ExternalStructuredSessionRelayCursor, ExternalStructuredSessionRelayPump,
+};
 use super::launch_preparation::{
     PreparedContentDependency, PreparedEvidenceAttachment, PreparedExecutionDependency,
     PreparedRuntimeLaunch, RefBindingLaunchRecord,
-};
-use super::external_structured_session_relay::{
-    ExternalStructuredSessionRelayCursor, ExternalStructuredSessionRelayPump,
 };
 
 /// Closed, secret-free recovery diagnostic vocabulary for persistent-session
@@ -246,9 +246,8 @@ struct HeldPersistentSession {
     socket: lillux::InheritedDuplexChannel,
     lifelines: Vec<Box<dyn Send + Sync>>,
     relay_health: Option<ryeos_app::persistent_session::PersistentSessionRelayHealthCell>,
-    relay_owner: Option<
-        std::sync::Arc<dyn ryeos_app::persistent_session::PersistentSessionRelayOwner>,
-    >,
+    relay_owner:
+        Option<std::sync::Arc<dyn ryeos_app::persistent_session::PersistentSessionRelayOwner>>,
     retirement_observer: Option<ryeos_app::persistent_session::PersistentSessionCleanupObserver>,
 }
 
@@ -2772,7 +2771,9 @@ impl AdmittedTrustedResourceCleanupContract {
 }
 
 fn admit_session_resource_cleanup_contract(
-    node: Option<&ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy>,
+    node: Option<
+        &ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy,
+    >,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<Option<AdmittedTrustedResourceCleanupContract>> {
     ryeos_engine::protocols::descriptor::validate_session_resource_cleanup_contract(session)
@@ -3525,9 +3526,10 @@ fn await_external_candidate_ready_inner(
                 | ExternalCandidateStartProgress::CleanupRequired
         ) {
             if transport.is_none() {
-                transport = ryeos_app::external_placement::inspect_external_session_controller_transport(
-                    state, placement,
-                )?;
+                transport =
+                    ryeos_app::external_placement::inspect_external_session_controller_transport(
+                        state, placement,
+                    )?;
                 if let Some(
                     ryeos_app::external_placement::ExternalSessionControllerTransport::Relay {
                         poll_interval_ms,
@@ -3993,12 +3995,10 @@ fn spawn_capsule_process_held(
         inherited_fds.extend(connector_descriptors);
         if let Some(relay_pump) = relay_pump {
             relay_health = Some(relay_pump.health_cell());
-            relay_owner = Some(
-                std::sync::Arc::new(relay_pump)
-                    as std::sync::Arc<
-                        dyn ryeos_app::persistent_session::PersistentSessionRelayOwner,
-                    >,
-            );
+            relay_owner = Some(std::sync::Arc::new(relay_pump)
+                as std::sync::Arc<
+                    dyn ryeos_app::persistent_session::PersistentSessionRelayOwner,
+                >);
             // This Arc is a custody anchor for the existing pooled precontact
             // retention slot. Health and stop/join remain on the typed owner
             // transferred separately into StartedPersistentSession.
@@ -4771,9 +4771,15 @@ fn validate_retained_bundle_member_source_trust(
         ("runtime owner", owner_signer),
         (
             "Bundle selection",
-            member_source_proof.selected_bundle.signer_fingerprint.as_str(),
+            member_source_proof
+                .selected_bundle
+                .signer_fingerprint
+                .as_str(),
         ),
-        ("executor manifest", executor_manifest_signer_fingerprint.as_str()),
+        (
+            "executor manifest",
+            executor_manifest_signer_fingerprint.as_str(),
+        ),
     ] {
         if !engine.node_trust_store.is_trusted(fingerprint) {
             bail!("persistent-session retained {label} signer is no longer trusted");
@@ -5004,11 +5010,11 @@ mod tests {
 
     #[test]
     fn trusted_resource_cleanup_agreement_requires_exact_node_and_product() {
-        use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy;
         use ryeos_engine::contracts::{
             ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
             ExecutionTargetLimits,
         };
+        use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionResourcePolicy;
         let session = realization_delivery_session(
             PersistentSessionProcessMode::PooledRequests,
             PersistentSessionCleanupAuthority::TrustedProcessGroup,

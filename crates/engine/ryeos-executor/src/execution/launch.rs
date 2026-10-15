@@ -12653,9 +12653,9 @@ mod tests {
                 view.provide(name, ProofSource::Measured, HOST_PROVIDER, "fixture");
             }
             let extensions = ryeos_app::extension_state::ExtensionState::new();
-            extensions.insert(std::sync::Arc::new(NodeCapabilityReportReader::new(move || {
-                Ok(view.clone())
-            })));
+            extensions.insert(std::sync::Arc::new(NodeCapabilityReportReader::new(
+                move || Ok(view.clone()),
+            )));
             extensions
         };
         let met = admit_launch_node_requirements(
@@ -12718,7 +12718,10 @@ mod tests {
             Some(&requires),
         )
         .unwrap_err();
-        assert!(matches!(error, BuildAndLaunchError::CapabilityRejected { .. }));
+        assert!(matches!(
+            error,
+            BuildAndLaunchError::CapabilityRejected { .. }
+        ));
         assert!(!error.retryable_launch_interruption());
         // A report that cannot be read just now is not a refusal: it is a
         // transient interruption, so a recovered execution stays recoverable
@@ -12796,7 +12799,14 @@ mod tests {
             };
             claim
         };
-        let status = |thread_id: &str| state.state_store.get_thread(thread_id).unwrap().unwrap().status;
+        let status = |thread_id: &str| {
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .status
+        };
 
         // A node report that could not be read just now: the follow child
         // stays `created` for the follow reconciler to re-drive.
@@ -12840,7 +12850,10 @@ mod tests {
             unavailable,
             "follow-child launch",
         );
-        assert!(matches!(returned, BuildAndLaunchError::LaunchPreparation(_)));
+        assert!(matches!(
+            returned,
+            BuildAndLaunchError::LaunchPreparation(_)
+        ));
         assert!(returned.to_string().contains("unavailable"), "{returned}");
         assert_eq!(status("T-follow-unavailable"), "failed");
         drop(claim);
@@ -12859,7 +12872,10 @@ mod tests {
             refused,
             "follow-child launch",
         );
-        assert!(matches!(returned, BuildAndLaunchError::CapabilityRejected { .. }));
+        assert!(matches!(
+            returned,
+            BuildAndLaunchError::CapabilityRejected { .. }
+        ));
         assert_eq!(status("T-follow-refused"), "failed");
         drop(claim);
     }

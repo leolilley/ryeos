@@ -1402,13 +1402,15 @@ async fn prepare_follow_children(
                 admitted_children.get(item_index),
                 Some(AdmittedFollowChildRequest::Persisted(_))
             ) {
-            Box::pin(crate::execution::launch::prepare_existing_follow_child_launch(
-                state,
-                child_thread_id,
-                &meta,
-                launch_provenance,
-                launch_parent_context.clone(),
-            ))
+            Box::pin(
+                crate::execution::launch::prepare_existing_follow_child_launch(
+                    state,
+                    child_thread_id,
+                    &meta,
+                    launch_provenance,
+                    launch_parent_context.clone(),
+                ),
+            )
             .await?
         } else {
             Box::pin(crate::execution::launch::prepare_follow_child_launch(

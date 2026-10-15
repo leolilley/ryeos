@@ -40,7 +40,8 @@ pub mod runtime_dispatch;
 mod selected_invocation_root;
 pub use selected_invocation_root::{
     SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, abandoned_selected_compositions,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
+    abandoned_selected_compositions,
 };
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
@@ -2314,10 +2315,10 @@ fn require_workspace_quiescence_qualified(
 ) -> Result<()> {
     match process_scopes {
         ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
-        ryeos_engine::isolation::IsolationProcessScopePolicy::Required { control_timeout_ms: _ } => {
-            ryeos_app::process::require_scope_quiescence_qualified(qualified)
-                .with_context(|| format!("{operation} refused before it started"))
-        }
+        ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: _,
+        } => ryeos_app::process::require_scope_quiescence_qualified(qualified)
+            .with_context(|| format!("{operation} refused before it started")),
     }
 }
 
@@ -2554,9 +2555,15 @@ mod pinned_child_authority_tests {
             "{:#}",
             require_bound_scopes_quiescence_qualified(&targets, &unconfigured).unwrap_err()
         );
-        assert!(message.contains("before any process group was stopped"), "{message}");
+        assert!(
+            message.contains("before any process group was stopped"),
+            "{message}"
+        );
         assert!(message.contains("process group leader 49"), "{message}");
-        assert!(message.contains("this node did not qualify scope quiescence"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
         // Strict groups alone need no scope guarantee.
         require_bound_scopes_quiescence_qualified(&targets[..1], &unconfigured).unwrap();
         let qualified: std::collections::BTreeSet<_> =
@@ -2608,23 +2615,27 @@ mod pinned_child_authority_tests {
         .err()
         .expect("unqualified scope quiescence must refuse");
         assert!(
-            error.to_string().contains("this node did not qualify scope quiescence"),
+            error
+                .to_string()
+                .contains("this node did not qualify scope quiescence"),
             "{error:#}"
         );
 
         let required = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
             control_timeout_ms: 1000,
         };
-        let error =
-            require_workspace_quiescence_qualified(
-                &required,
-                &without_quiescence,
-                "exclusive workspace operation",
-            )
-            .unwrap_err();
+        let error = require_workspace_quiescence_qualified(
+            &required,
+            &without_quiescence,
+            "exclusive workspace operation",
+        )
+        .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("refused before it started"), "{message}");
-        assert!(message.contains("this node did not qualify scope quiescence"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
         let mut with_quiescence = without_quiescence.clone();
         with_quiescence.insert(lillux::ProcessScopeCapability::Quiescence);
         require_workspace_quiescence_qualified(
@@ -2675,7 +2686,8 @@ mod pinned_child_authority_tests {
     #[test]
     fn unqualified_callback_freeze_refuses_while_the_workspace_is_still_active() {
         let (temp, _store_owner, mut state) =
-            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
         state.isolation = unqualified_scope_quiescence_isolation(temp.path());
         let workspace_id = "workspace-runtime-parent";
         let parent = "T-runtime-parent";
@@ -2708,7 +2720,10 @@ mod pinned_child_authority_tests {
             message.contains("callback workspace freeze refused before it started"),
             "{message}"
         );
-        assert!(message.contains("this node did not qualify scope quiescence"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
         let after = state
             .state_store
             .execution_workspace(workspace_id)
@@ -2721,7 +2736,8 @@ mod pinned_child_authority_tests {
     #[test]
     fn unqualified_workspace_input_capture_refuses_before_any_operation_phase_moves() {
         let (temp, _store_owner, mut state) =
-            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
         state.isolation = unqualified_scope_quiescence_isolation(temp.path());
         let workspace_id = "workspace-runtime-parent";
         let before = state
@@ -2750,8 +2766,17 @@ mod pinned_child_authority_tests {
             message.contains("workspace-input capture refused before it started"),
             "{message}"
         );
-        assert!(message.contains("this node did not qualify scope quiescence"), "{message}");
-        assert!(state.state_store.runtime_action_intents().unwrap().is_empty());
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
         let after = state
             .state_store
             .execution_workspace(workspace_id)
@@ -2832,9 +2857,11 @@ mod pinned_child_authority_tests {
         use std::os::unix::fs::MetadataExt as _;
 
         let state_root = tempfile::tempdir().unwrap();
-        let state_db =
-            ryeos_app::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_app::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();

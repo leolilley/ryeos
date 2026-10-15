@@ -1,8 +1,8 @@
 //! Daemon-owned selected invocation storage and immutable publication.
 //! Publication does not authorize native contact or certify settlement.
-use std::sync::{Arc, Weak};
 use crate::{SelectedApplicationPublication, SelectedRootClose};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 const CAPACITY: usize = 32;
 
@@ -37,7 +37,14 @@ enum RootPhase<B> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum RootLoanError { WrongIdentity, WrongState, Closed, Refused, Poisoned, Exhausted }
+enum RootLoanError {
+    WrongIdentity,
+    WrongState,
+    Closed,
+    Refused,
+    Poisoned,
+    Exhausted,
+}
 
 // Private generic mechanics serve destructor probes only; production is closed
 // to the concrete SelectedWholeOwner + actual opaque App ticket types below.
@@ -53,7 +60,10 @@ struct SlotCore<O, T, B> {
     restoration_conflict: Option<LoanFrame<O, B>>,
 }
 
-struct LoanFrame<O, B> { owner: Box<O>, borrower: B }
+struct LoanFrame<O, B> {
+    owner: Box<O>,
+    borrower: B,
+}
 
 struct RootLoan<'root, O, T, B> {
     destination: &'root std::sync::Mutex<SlotCore<O, T, B>>,
@@ -63,7 +73,8 @@ struct RootLoan<'root, O, T, B> {
 
 impl<O, T: Eq, B: Eq + Clone> SlotCore<O, T, B> {
     fn reserve_loan(
-        destination: &std::sync::Mutex<Self>, ticket: &T,
+        destination: &std::sync::Mutex<Self>,
+        ticket: &T,
     ) -> Result<u64, RootLoanError> {
         let mut slot = match destination.lock() {
             Ok(slot) => slot,
@@ -72,9 +83,15 @@ impl<O, T: Eq, B: Eq + Clone> SlotCore<O, T, B> {
                 return Err(RootLoanError::Poisoned);
             }
         };
-        if &slot.ticket != ticket { return Err(RootLoanError::WrongIdentity); }
-        if slot.closed { return Err(RootLoanError::Closed); }
-        if slot.refused { return Err(RootLoanError::Refused); }
+        if &slot.ticket != ticket {
+            return Err(RootLoanError::WrongIdentity);
+        }
+        if slot.closed {
+            return Err(RootLoanError::Closed);
+        }
+        if slot.refused {
+            return Err(RootLoanError::Refused);
+        }
         if slot.phase != RootPhase::Occupied || slot.owner.is_none() {
             return Err(RootLoanError::WrongState);
         }
@@ -86,7 +103,10 @@ impl<O, T: Eq, B: Eq + Clone> SlotCore<O, T, B> {
     }
 
     fn finish_reserved_loan<'root>(
-        destination: &'root std::sync::Mutex<Self>, ticket: &T, reservation: u64, borrower: B,
+        destination: &'root std::sync::Mutex<Self>,
+        ticket: &T,
+        reservation: u64,
+        borrower: B,
     ) -> Result<RootLoan<'root, O, T, B>, RootLoanError> {
         // Production B is an opaque Arc-backed ticket: clone never allocates.
         // Generic instantiations are private mechanical fixtures only.
@@ -102,7 +122,9 @@ impl<O, T: Eq, B: Eq + Clone> SlotCore<O, T, B> {
                 return Err(RootLoanError::Poisoned);
             }
         };
-        if &slot.ticket != ticket { return Err(RootLoanError::WrongIdentity); }
+        if &slot.ticket != ticket {
+            return Err(RootLoanError::WrongIdentity);
+        }
         if slot.phase != RootPhase::BorrowReserved(reservation) || slot.owner.is_none() {
             return Err(RootLoanError::WrongState);
         }
@@ -110,29 +132,45 @@ impl<O, T: Eq, B: Eq + Clone> SlotCore<O, T, B> {
             // App has issued this borrower but no physical loan started. The
             // Box remains rooted and the exact App return obligation retained.
             slot.phase = RootPhase::RestoredAwaitingBorrowAck(recorded_borrower);
-            return Err(if slot.closed { RootLoanError::Closed } else { RootLoanError::Refused });
+            return Err(if slot.closed {
+                RootLoanError::Closed
+            } else {
+                RootLoanError::Refused
+            });
         }
         slot.phase = RootPhase::Borrowed(recorded_borrower);
         slot.last_returned = None;
         let frame = slot.owner.take().map(|owner| LoanFrame { owner, borrower });
         drop(slot);
-        Ok(RootLoan { destination, frame, invariant: std::marker::PhantomData })
+        Ok(RootLoan {
+            destination,
+            frame,
+            invariant: std::marker::PhantomData,
+        })
     }
 
     #[cfg(test)]
     fn begin_loan<'root>(
-        destination: &'root std::sync::Mutex<Self>, ticket: &T, borrower: B,
+        destination: &'root std::sync::Mutex<Self>,
+        ticket: &T,
+        borrower: B,
     ) -> Result<RootLoan<'root, O, T, B>, RootLoanError> {
         let reservation = Self::reserve_loan(destination, ticket)?;
         Self::finish_reserved_loan(destination, ticket, reservation, borrower)
     }
 
     fn validate_return(&self, ticket: &T, borrower: &B) -> Result<(), RootLoanError> {
-        if &self.ticket != ticket { return Err(RootLoanError::WrongIdentity); }
-        if self.owner.is_none() { return Err(RootLoanError::WrongState); }
+        if &self.ticket != ticket {
+            return Err(RootLoanError::WrongIdentity);
+        }
+        if self.owner.is_none() {
+            return Err(RootLoanError::WrongState);
+        }
         if self.phase == RootPhase::RestoredAwaitingBorrowAck(borrower.clone())
             || (self.phase == RootPhase::Occupied && self.last_returned.as_ref() == Some(borrower))
-        { return Ok(()); }
+        {
+            return Ok(());
+        }
         Err(RootLoanError::WrongState)
     }
 
@@ -180,7 +218,9 @@ impl<O, T, B> Drop for RootLoan<'_, O, T, B> {
 
 #[cfg(target_os = "linux")]
 struct SelectedRetainedSlot {
-    slot: std::sync::Mutex<SlotCore<SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
+    slot: std::sync::Mutex<
+        SlotCore<SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+    >,
 }
 
 /// Invariant lexical loan of the SAME concrete root owner. Private fields and
@@ -195,7 +235,12 @@ struct SelectedRetainedSlot {
 /// ```
 #[cfg(target_os = "linux")]
 pub struct SelectedDedicatedInvocationLoan<'root> {
-    inner: RootLoan<'root, SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+    inner: RootLoan<
+        'root,
+        SelectedWholeOwner,
+        ryeos_app::SelectedTicket,
+        ryeos_app::SelectedBorrowTicket,
+    >,
 }
 
 // No selected native implementation on other hosts; the type stays uninhabited.
@@ -216,8 +261,17 @@ impl SelectedRetainedSlot {
     // No caller/constructor installs this type. App borrow tickets name only
     // metadata; obtaining one does not mint a lower native loan.
     fn begin_loan(
-        &self, store: &ryeos_app::state_store::StateStore, ticket: &ryeos_app::SelectedTicket,
-    ) -> anyhow::Result<RootLoan<'_, SelectedWholeOwner, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>> {
+        &self,
+        store: &ryeos_app::state_store::StateStore,
+        ticket: &ryeos_app::SelectedTicket,
+    ) -> anyhow::Result<
+        RootLoan<
+            '_,
+            SelectedWholeOwner,
+            ryeos_app::SelectedTicket,
+            ryeos_app::SelectedBorrowTicket,
+        >,
+    > {
         {
             let slot = match self.slot.lock() {
                 Ok(slot) => slot,
@@ -226,9 +280,15 @@ impl SelectedRetainedSlot {
                     anyhow::bail!("selected root identity check poisoned; whole owner retained");
                 }
             };
-            let owner = slot.owner.as_ref().ok_or_else(|| anyhow::anyhow!("selected whole owner is borrowed"))?;
+            let owner = slot
+                .owner
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("selected whole owner is borrowed"))?;
             let (thread, claim, guarded_owner) = owner.invocation.claim_identity();
-            anyhow::ensure!(ticket.matches_claim(thread, claim, guarded_owner), "selected actual claim differs from root ticket");
+            anyhow::ensure!(
+                ticket.matches_claim(thread, claim, guarded_owner),
+                "selected actual claim differs from root ticket"
+            );
         }
         let reservation = SlotCore::reserve_loan(&self.slot, ticket)
             .map_err(|error| anyhow::anyhow!("selected root reservation refused: {error:?}"))?;
@@ -236,7 +296,10 @@ impl SelectedRetainedSlot {
         let borrower = match store.begin_selected_metadata_borrow(ticket) {
             Ok(borrower) => borrower,
             Err(error) => {
-                let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+                let mut slot = self
+                    .slot
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
                 slot.refused = true;
                 // No rollback based on an assumed failed App mutation. Keep
                 // BorrowReserved and the original whole Box for reconciliation.
@@ -248,36 +311,49 @@ impl SelectedRetainedSlot {
     }
 
     fn begin_dedicated_loan(
-        &self, store: &ryeos_app::state_store::StateStore, ticket: &ryeos_app::SelectedTicket,
+        &self,
+        store: &ryeos_app::state_store::StateStore,
+        ticket: &ryeos_app::SelectedTicket,
     ) -> anyhow::Result<SelectedDedicatedInvocationLoan<'_>> {
         {
-            let slot = self.slot.lock()
+            let slot = self
+                .slot
+                .lock()
                 .map_err(|_| anyhow::anyhow!("dedicated root slot poisoned; owner retained"))?;
-            let owner = slot.owner.as_ref()
+            let owner = slot
+                .owner
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("dedicated root whole owner is already borrowed"))?;
-            let admission = owner.invocation.dedicated_admission()
-                .ok_or_else(|| anyhow::anyhow!("remote consumer proof cannot mint dedicated root loan"))?;
-            anyhow::ensure!(admission.invocation() == ticket,
-                "dedicated root loan differs from exact installed admission");
+            let admission = owner.invocation.dedicated_admission().ok_or_else(|| {
+                anyhow::anyhow!("remote consumer proof cannot mint dedicated root loan")
+            })?;
+            anyhow::ensure!(
+                admission.invocation() == ticket,
+                "dedicated root loan differs from exact installed admission"
+            );
         }
         // Existing two-phase reservation preserves Box on App error and Drop
         // restores it before ACK. This wrapper has no native owner extraction.
-        Ok(SelectedDedicatedInvocationLoan { inner: self.begin_loan(store, ticket)? })
+        Ok(SelectedDedicatedInvocationLoan {
+            inner: self.begin_loan(store, ticket)?,
+        })
     }
 
     fn acknowledge_pending_return(
-        &self, store: &ryeos_app::state_store::StateStore,
+        &self,
+        store: &ryeos_app::state_store::StateStore,
     ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
         acknowledge_pending_return(&self.slot, store)
     }
-
 }
 
 // Private shared adapter: production uses the concrete whole owner; unit
 // controls use destructor probes with genuine App metadata/claim fixtures.
 // No native factory, generic cleanup callback or external borrower is needed.
 fn acknowledge_pending_return<O>(
-    destination: &std::sync::Mutex<SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
+    destination: &std::sync::Mutex<
+        SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+    >,
     store: &ryeos_app::state_store::StateStore,
 ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
     acknowledge_pending_return_to(destination, store)
@@ -288,25 +364,35 @@ fn acknowledge_pending_return<O>(
 /// that does not hold the borrower's claim, since one process keeps a single
 /// live Store at a time.
 trait SelectedReturnLedger {
-    fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()>;
+    fn mark_selected_metadata_restored(
+        &self,
+        borrower: &ryeos_app::SelectedBorrowTicket,
+    ) -> anyhow::Result<()>;
     fn ack_selected_borrow_return(
-        &self, borrower: &ryeos_app::SelectedBorrowTicket,
+        &self,
+        borrower: &ryeos_app::SelectedBorrowTicket,
     ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn>;
 }
 
 impl SelectedReturnLedger for ryeos_app::state_store::StateStore {
-    fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()> {
+    fn mark_selected_metadata_restored(
+        &self,
+        borrower: &ryeos_app::SelectedBorrowTicket,
+    ) -> anyhow::Result<()> {
         ryeos_app::state_store::StateStore::mark_selected_metadata_restored(self, borrower)
     }
     fn ack_selected_borrow_return(
-        &self, borrower: &ryeos_app::SelectedBorrowTicket,
+        &self,
+        borrower: &ryeos_app::SelectedBorrowTicket,
     ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
         ryeos_app::state_store::StateStore::ack_selected_borrow_return(self, borrower)
     }
 }
 
 fn acknowledge_pending_return_to<O>(
-    destination: &std::sync::Mutex<SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>,
+    destination: &std::sync::Mutex<
+        SlotCore<O, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+    >,
     store: &dyn SelectedReturnLedger,
 ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
     let (borrower, original_owner) = {
@@ -318,16 +404,25 @@ fn acknowledge_pending_return_to<O>(
                 slot
             }
         };
-        anyhow::ensure!(slot.restoration_conflict.is_none(), "selected restoration conflict retains both owners");
+        anyhow::ensure!(
+            slot.restoration_conflict.is_none(),
+            "selected restoration conflict retains both owners"
+        );
         let borrower = match &slot.phase {
             RootPhase::RestoredAwaitingBorrowAck(borrower) => borrower.clone(),
-            RootPhase::Occupied => slot.last_returned.clone()
+            RootPhase::Occupied => slot
+                .last_returned
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("selected root has no pending/replayed return"))?,
             _ => anyhow::bail!("selected root is not physically restored"),
         };
         slot.validate_return(borrower.invocation(), &borrower)
-            .map_err(|error| anyhow::anyhow!("selected retained return identity refused: {error:?}"))?;
-        let owner = slot.owner.as_deref()
+            .map_err(|error| {
+                anyhow::anyhow!("selected retained return identity refused: {error:?}")
+            })?;
+        let owner = slot
+            .owner
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("selected root whole owner is absent"))?;
         (borrower, std::ptr::from_ref(owner))
     };
@@ -343,20 +438,30 @@ fn acknowledge_pending_return_to<O>(
             slot
         }
     };
-    anyhow::ensure!(slot.restoration_conflict.is_none(), "selected conflict remains retained after App ACK");
+    anyhow::ensure!(
+        slot.restoration_conflict.is_none(),
+        "selected conflict remains retained after App ACK"
+    );
     anyhow::ensure!(
         slot.owner.as_deref().map(std::ptr::from_ref) == Some(original_owner),
         "selected whole owner changed during return acknowledgment"
     );
     slot.complete_return(borrower.invocation(), &borrower)
-        .map_err(|error| anyhow::anyhow!("selected root return acknowledgment pending: {error:?}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("selected root return acknowledgment pending: {error:?}")
+        })?;
     // Poison is deliberately NOT cleared and sticky refusal is unchanged.
     // Only exact App/root return metadata reconciles, never native/empty proof.
     Ok(returned)
 }
 
 struct SelectedRoot {
-    generation: std::sync::Mutex<Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>>,
+    generation: std::sync::Mutex<
+        Option<(
+            Arc<ryeos_app::state_store::StateStore>,
+            ryeos_app::SelectedGeneration,
+        )>,
+    >,
     #[cfg(target_os = "linux")]
     retained: std::sync::Mutex<SelectedRetainedRoot>,
     closed: AtomicBool,
@@ -366,7 +471,9 @@ impl SelectedRoot {
     fn has_unresolved_owners(&self) -> bool {
         // Shutdown must not wait for an in-flight registration or slot writer.
         // Contention is unresolved custody, never a positive empty receipt.
-        if self.generation.try_lock().is_err() { return true; }
+        if self.generation.try_lock().is_err() {
+            return true;
+        }
         #[cfg(target_os = "linux")]
         {
             match self.retained.try_lock() {
@@ -376,13 +483,18 @@ impl SelectedRoot {
             }
         }
         #[cfg(not(target_os = "linux"))]
-        { false }
+        {
+            false
+        }
     }
 }
 
 pub struct SelectedInvocationCompositionBarrier {
     root: Arc<SelectedRoot>,
-    registered_generation: Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>,
+    registered_generation: Option<(
+        Arc<ryeos_app::state_store::StateStore>,
+        ryeos_app::SelectedGeneration,
+    )>,
 }
 
 #[derive(Clone)]
@@ -426,16 +538,30 @@ impl SelectedInvocationCompositionBarrier {
             }),
             closed: AtomicBool::new(false),
         });
-        let attachment = SelectedInvocationAttachment { root: Arc::downgrade(&root) };
-        (Self { root, registered_generation: None }, attachment)
+        let attachment = SelectedInvocationAttachment {
+            root: Arc::downgrade(&root),
+        };
+        (
+            Self {
+                root,
+                registered_generation: None,
+            },
+            attachment,
+        )
     }
 
     /// Bind only the actual shared AppState generation; this never arms contact.
-    pub fn arm_from_app_generation(&mut self, app: &ryeos_app::state::AppState) -> anyhow::Result<()> {
+    pub fn arm_from_app_generation(
+        &mut self,
+        app: &ryeos_app::state::AppState,
+    ) -> anyhow::Result<()> {
         self.register_from_store(&app.state_store)
     }
 
-    fn register_from_store(&mut self, store: &Arc<ryeos_app::state_store::StateStore>) -> anyhow::Result<()> {
+    fn register_from_store(
+        &mut self,
+        store: &Arc<ryeos_app::state_store::StateStore>,
+    ) -> anyhow::Result<()> {
         if self.root.closed.load(Ordering::Acquire) {
             anyhow::bail!("empty selected composition is closed");
         }
@@ -444,10 +570,19 @@ impl SelectedInvocationCompositionBarrier {
         }
         let generation = store.register_selected_bookkeeping_generation()?;
         // Store work is complete before acquiring root publication storage.
-        let mut registered = self.root.generation.lock()
+        let mut registered = self
+            .root
+            .generation
+            .lock()
             .map_err(|_| anyhow::anyhow!("selected root generation storage poisoned"))?;
-        anyhow::ensure!(!self.root.closed.load(Ordering::Acquire), "selected root closed during registration");
-        anyhow::ensure!(registered.is_none(), "selected root generation already registered");
+        anyhow::ensure!(
+            !self.root.closed.load(Ordering::Acquire),
+            "selected root closed during registration"
+        );
+        anyhow::ensure!(
+            registered.is_none(),
+            "selected root generation already registered"
+        );
         *registered = Some((Arc::clone(store), generation.clone()));
         self.registered_generation = Some((Arc::clone(store), generation));
         Ok(())
@@ -456,17 +591,26 @@ impl SelectedInvocationCompositionBarrier {
     /// Capture the actual armed App/Executor generation in one immutable object.
     /// This publication is a carrier, not a product or contact admission.
     pub fn publication(
-        &self, app: Arc<ryeos_app::state::AppState>,
+        &self,
+        app: Arc<ryeos_app::state::AppState>,
     ) -> anyhow::Result<Arc<SelectedApplicationPublication>> {
-        let (store, _) = self.registered_generation.as_ref()
+        let (store, _) = self
+            .registered_generation
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("selected publication generation is unarmed"))?;
-        anyhow::ensure!(Arc::ptr_eq(store, &app.state_store),
-            "selected publication App belongs to another Store generation");
-        anyhow::ensure!(!self.root.closed.load(Ordering::Acquire),
-            "selected publication root is closed");
+        anyhow::ensure!(
+            Arc::ptr_eq(store, &app.state_store),
+            "selected publication App belongs to another Store generation"
+        );
+        anyhow::ensure!(
+            !self.root.closed.load(Ordering::Acquire),
+            "selected publication root is closed"
+        );
         Ok(Arc::new(SelectedApplicationPublication {
             app,
-            attachment: SelectedInvocationAttachment { root: Arc::downgrade(&self.root) },
+            attachment: SelectedInvocationAttachment {
+                root: Arc::downgrade(&self.root),
+            },
         }))
     }
 
@@ -497,19 +641,30 @@ impl SelectedInvocationCompositionBarrier {
     /// close. Refuses while admission is open or any selected owner remains,
     /// and leaves both registrations in place if they disagree.
     pub fn release_closed_store_generation(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.root.closed.load(Ordering::Acquire),
-            "selected root admission is still open");
-        anyhow::ensure!(!self.root.has_unresolved_owners(),
-            "selected invocation owners remain unresolved");
-        let mut generation = self.root.generation.lock()
+        anyhow::ensure!(
+            self.root.closed.load(Ordering::Acquire),
+            "selected root admission is still open"
+        );
+        anyhow::ensure!(
+            !self.root.has_unresolved_owners(),
+            "selected invocation owners remain unresolved"
+        );
+        let mut generation = self
+            .root
+            .generation
+            .lock()
             .map_err(|_| anyhow::anyhow!("selected root generation poisoned"))?;
         let consistent = match (generation.as_ref(), self.registered_generation.as_ref()) {
             (None, None) => true,
-            (Some((root_store, _)), Some((barrier_store, _))) => Arc::ptr_eq(root_store, barrier_store),
+            (Some((root_store, _)), Some((barrier_store, _))) => {
+                Arc::ptr_eq(root_store, barrier_store)
+            }
             _ => false,
         };
-        anyhow::ensure!(consistent,
-            "selected root and barrier disagree on the registered Store generation");
+        anyhow::ensure!(
+            consistent,
+            "selected root and barrier disagree on the registered Store generation"
+        );
         let root_registration = generation.take();
         drop(generation);
         let barrier_registration = self.registered_generation.take();
@@ -536,7 +691,10 @@ impl SelectedRootAdmissionFence {
 /// reported unresolved custody.
 struct AbandonedSelectedComposition {
     _root: Arc<SelectedRoot>,
-    _registered_generation: Option<(Arc<ryeos_app::state_store::StateStore>, ryeos_app::SelectedGeneration)>,
+    _registered_generation: Option<(
+        Arc<ryeos_app::state_store::StateStore>,
+        ryeos_app::SelectedGeneration,
+    )>,
 }
 
 /// The kind under which a selected composition barrier dropped with
@@ -569,7 +727,8 @@ impl Drop for SelectedInvocationCompositionBarrier {
 
 impl SelectedInvocationAttachment {
     pub(crate) fn validate_for_store(
-        &self, store: &Arc<ryeos_app::state_store::StateStore>,
+        &self,
+        store: &Arc<ryeos_app::state_store::StateStore>,
     ) -> anyhow::Result<()> {
         self.validate_for_store_identity(Arc::as_ptr(store))
     }
@@ -577,23 +736,37 @@ impl SelectedInvocationAttachment {
     /// The Store generation check by identity alone: the root must be armed
     /// with exactly the Store at `store`.
     fn validate_for_store_identity(
-        &self, store: *const ryeos_app::state_store::StateStore,
+        &self,
+        store: *const ryeos_app::state_store::StateStore,
     ) -> anyhow::Result<()> {
-        let root = self.root.upgrade()
+        let root = self
+            .root
+            .upgrade()
             .ok_or_else(|| anyhow::anyhow!("selected invocation root detached"))?;
-        anyhow::ensure!(!root.closed.load(Ordering::Acquire), "selected invocation root closed");
-        let generation = root.generation.lock()
+        anyhow::ensure!(
+            !root.closed.load(Ordering::Acquire),
+            "selected invocation root closed"
+        );
+        let generation = root
+            .generation
+            .lock()
             .map_err(|_| anyhow::anyhow!("selected root generation poisoned"))?;
-        let (registered, _) = generation.as_ref()
+        let (registered, _) = generation
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("selected invocation root unarmed"))?;
-        anyhow::ensure!(std::ptr::eq(Arc::as_ptr(registered), store), "selected invocation Store generation mismatch");
+        anyhow::ensure!(
+            std::ptr::eq(Arc::as_ptr(registered), store),
+            "selected invocation Store generation mismatch"
+        );
         Ok(())
     }
 
     pub fn installation_refusal(&self) -> SelectedInstallationRefusal {
         match self.root.upgrade() {
             None => SelectedInstallationRefusal::Detached,
-            Some(root) if root.closed.load(Ordering::Acquire) => SelectedInstallationRefusal::Closed,
+            Some(root) if root.closed.load(Ordering::Acquire) => {
+                SelectedInstallationRefusal::Closed
+            }
             Some(_) => SelectedInstallationRefusal::Unarmed,
         }
     }
@@ -605,16 +778,29 @@ mod tests {
 
     struct DropProbe(Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for DropProbe {
-        fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
-    fn mechanical_slot() -> (std::sync::Mutex<SlotCore<DropProbe, u64, u64>>, Arc<std::sync::atomic::AtomicUsize>) {
+    fn mechanical_slot() -> (
+        std::sync::Mutex<SlotCore<DropProbe, u64, u64>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        (std::sync::Mutex::new(SlotCore {
-            owner: Some(Box::new(DropProbe(Arc::clone(&drops)))), ticket: 7,
-            phase: RootPhase::Occupied, last_returned: None, closed: false, refused: false,
-            next_reservation: 1, restoration_conflict: None,
-        }), drops)
+        (
+            std::sync::Mutex::new(SlotCore {
+                owner: Some(Box::new(DropProbe(Arc::clone(&drops)))),
+                ticket: 7,
+                phase: RootPhase::Occupied,
+                last_returned: None,
+                closed: false,
+                refused: false,
+                next_reservation: 1,
+                restoration_conflict: None,
+            }),
+            drops,
+        )
     }
 
     #[test]
@@ -623,14 +809,20 @@ mod tests {
         let original = slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe;
         let error = (|| -> Result<(), ()> {
             let loan = SlotCore::begin_loan(&slot, &7, 11).unwrap();
-            assert_eq!(loan.frame.as_ref().unwrap().owner.as_ref() as *const DropProbe, original);
+            assert_eq!(
+                loan.frame.as_ref().unwrap().owner.as_ref() as *const DropProbe,
+                original
+            );
             assert!(slot.lock().unwrap().owner.is_none());
             Err(())
         })();
         assert!(error.is_err());
         {
             let mut state = slot.lock().unwrap();
-            assert_eq!(state.owner.as_deref().unwrap() as *const DropProbe, original);
+            assert_eq!(
+                state.owner.as_deref().unwrap() as *const DropProbe,
+                original
+            );
             assert_eq!(state.phase, RootPhase::RestoredAwaitingBorrowAck(11));
             state.complete_return(&7, &11).unwrap();
         }
@@ -639,7 +831,10 @@ mod tests {
             panic!("mechanical unwind");
         }));
         assert!(panic.is_err());
-        assert_eq!(slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe, original);
+        assert_eq!(
+            slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe,
+            original
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(slot); // Fixture only: no native/upper owner or settlement receipt.
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -687,7 +882,10 @@ mod tests {
             };
             assert!(state.refused && state.closed);
             assert_eq!(state.phase, RootPhase::RestoredAwaitingBorrowAck(11));
-            assert_eq!(state.owner.as_deref().unwrap() as *const DropProbe, original);
+            assert_eq!(
+                state.owner.as_deref().unwrap() as *const DropProbe,
+                original
+            );
         }
         assert!(SlotCore::begin_loan(&slot, &7, 12).is_err());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -705,7 +903,10 @@ mod tests {
         slot.lock().unwrap().phase = RootPhase::Occupied;
         slot.lock().unwrap().closed = true;
         assert!(SlotCore::begin_loan(&slot, &7, 11).is_err());
-        assert_eq!(slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe, original);
+        assert_eq!(
+            slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe,
+            original
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
 
@@ -713,14 +914,23 @@ mod tests {
     fn two_phase_close_and_wrong_reservation_keep_original_owner_rooted() {
         let (slot, drops) = mechanical_slot();
         let reservation = SlotCore::reserve_loan(&slot, &7).unwrap();
-        assert_eq!(slot.lock().unwrap().phase, RootPhase::BorrowReserved(reservation));
+        assert_eq!(
+            slot.lock().unwrap().phase,
+            RootPhase::BorrowReserved(reservation)
+        );
         // This gap models an App transition with no root lock held.
         assert!(SlotCore::finish_reserved_loan(&slot, &7, reservation + 1, 11).is_err());
         assert!(slot.lock().unwrap().owner.is_some());
-        assert_eq!(slot.lock().unwrap().phase, RootPhase::BorrowReserved(reservation));
+        assert_eq!(
+            slot.lock().unwrap().phase,
+            RootPhase::BorrowReserved(reservation)
+        );
         slot.lock().unwrap().closed = true;
         assert!(SlotCore::finish_reserved_loan(&slot, &7, reservation, 11).is_err());
-        assert_eq!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(11));
+        assert_eq!(
+            slot.lock().unwrap().phase,
+            RootPhase::RestoredAwaitingBorrowAck(11)
+        );
         assert!(slot.lock().unwrap().owner.is_some());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
@@ -736,7 +946,10 @@ mod tests {
         let state = slot.lock().unwrap();
         assert!(state.refused);
         assert_eq!(state.phase, RootPhase::RestorationConflict);
-        assert_eq!(state.restoration_conflict.as_ref().unwrap().owner.as_ref() as *const DropProbe, original);
+        assert_eq!(
+            state.restoration_conflict.as_ref().unwrap().owner.as_ref() as *const DropProbe,
+            original
+        );
         assert!(state.owner.is_some());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
@@ -744,29 +957,50 @@ mod tests {
     /// The owner dereferences to the Store `Arc`, closes the Store when
     /// dropped and stays on the opening thread.
     fn actual_store(root: &std::path::Path) -> ryeos_app::test_support::TestStateStore {
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node.pem")).unwrap();
-        let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity));
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node.pem")).unwrap();
+        let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         ryeos_app::test_support::TestStateStore::open(root, signer, Arc::new(trust)).unwrap()
     }
 
-    type MetadataProbeSlot = std::sync::Mutex<SlotCore<DropProbe, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>>;
+    type MetadataProbeSlot = std::sync::Mutex<
+        SlotCore<DropProbe, ryeos_app::SelectedTicket, ryeos_app::SelectedBorrowTicket>,
+    >;
 
-    fn actual_metadata_probe() -> (tempfile::TempDir, ryeos_app::test_support::TestStateStore, MetadataProbeSlot, Arc<std::sync::atomic::AtomicUsize>) {
+    fn actual_metadata_probe() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        MetadataProbeSlot,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let store = actual_store(root.path());
-        store.reserve_fresh_thread_launch_active(
-            "T-adapter", "fixture-claim", ryeos_app::runtime_db::daemon_generation_id(),
-        ).unwrap().unwrap();
+        store
+            .reserve_fresh_thread_launch_active(
+                "T-adapter",
+                "fixture-claim",
+                ryeos_app::runtime_db::daemon_generation_id(),
+            )
+            .unwrap()
+            .unwrap();
         // App metadata only; no born capsule, lower owner or native issuer.
-        let borrower = store.fixture_selected_restored_metadata("T-adapter").unwrap();
+        let borrower = store
+            .fixture_selected_restored_metadata("T-adapter")
+            .unwrap();
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let slot = std::sync::Mutex::new(SlotCore {
             owner: Some(Box::new(DropProbe(Arc::clone(&drops)))),
             ticket: borrower.invocation().clone(),
-            phase: RootPhase::RestoredAwaitingBorrowAck(borrower), last_returned: None,
-            closed: false, refused: false, next_reservation: 1, restoration_conflict: None,
+            phase: RootPhase::RestoredAwaitingBorrowAck(borrower),
+            last_returned: None,
+            closed: false,
+            refused: false,
+            next_reservation: 1,
+            restoration_conflict: None,
         });
         (root, store, slot, drops)
     }
@@ -776,12 +1010,16 @@ mod tests {
     /// borrower it was offered.
     struct ForeignReturnLedger(std::sync::Mutex<Vec<ryeos_app::SelectedBorrowTicket>>);
     impl SelectedReturnLedger for ForeignReturnLedger {
-        fn mark_selected_metadata_restored(&self, borrower: &ryeos_app::SelectedBorrowTicket) -> anyhow::Result<()> {
+        fn mark_selected_metadata_restored(
+            &self,
+            borrower: &ryeos_app::SelectedBorrowTicket,
+        ) -> anyhow::Result<()> {
             self.0.lock().unwrap().push(borrower.clone());
             anyhow::bail!("selected borrower durable claim is absent")
         }
         fn ack_selected_borrow_return(
-            &self, _borrower: &ryeos_app::SelectedBorrowTicket,
+            &self,
+            _borrower: &ryeos_app::SelectedBorrowTicket,
         ) -> anyhow::Result<ryeos_app::SelectedBorrowReturn> {
             panic!("a refused restoration mark never reaches the return acknowledgment")
         }
@@ -800,10 +1038,22 @@ mod tests {
         let wrong = ForeignReturnLedger(std::sync::Mutex::new(Vec::new()));
         assert!(acknowledge_pending_return_to(&slot, &wrong).is_err());
         assert_eq!(*wrong.0.lock().unwrap(), vec![retained.clone()]);
-        assert_eq!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(retained));
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::Returned);
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::AlreadyReturned);
-        assert_eq!(slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe, pointer);
+        assert_eq!(
+            slot.lock().unwrap().phase,
+            RootPhase::RestoredAwaitingBorrowAck(retained)
+        );
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::AlreadyReturned
+        );
+        assert_eq!(
+            slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe,
+            pointer
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
     }
 
@@ -814,9 +1064,23 @@ mod tests {
             RootPhase::RestoredAwaitingBorrowAck(borrower) => borrower.clone(),
             _ => panic!("fixture pending return"),
         };
-        assert!(store.release_thread_launch_claim("T-adapter", "fixture-claim").is_err());
-        assert_eq!(store.get_launch_claim("T-adapter").unwrap().unwrap().claim_id, "fixture-claim");
-        assert_eq!(slot.lock().unwrap().phase, RootPhase::RestoredAwaitingBorrowAck(before));
+        assert!(
+            store
+                .release_thread_launch_claim("T-adapter", "fixture-claim")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .get_launch_claim("T-adapter")
+                .unwrap()
+                .unwrap()
+                .claim_id,
+            "fixture-claim"
+        );
+        assert_eq!(
+            slot.lock().unwrap().phase,
+            RootPhase::RestoredAwaitingBorrowAck(before)
+        );
         assert!(slot.lock().unwrap().owner.is_some());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert!(acknowledge_pending_return(&slot, &store).is_ok());
@@ -838,8 +1102,14 @@ mod tests {
             panic!("post-App-ACK poison");
         }));
         assert!(panic.is_err());
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::AlreadyReturned);
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::AlreadyReturned);
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::AlreadyReturned
+        );
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::AlreadyReturned
+        );
         assert!(slot.is_poisoned());
         let state = slot.lock().unwrap_or_else(|poison| poison.into_inner());
         assert!(state.refused);
@@ -861,15 +1131,31 @@ mod tests {
         };
         let reservation = SlotCore::reserve_loan(&slot, &ticket).unwrap();
         let second = store.begin_selected_metadata_borrow(&ticket).unwrap();
-        assert!(slot.lock().unwrap().complete_return(&ticket, &first).is_err());
+        assert!(
+            slot.lock()
+                .unwrap()
+                .complete_return(&ticket, &first)
+                .is_err()
+        );
         slot.lock().unwrap().closed = true;
         // Consumes the only external second borrower; the adapter must recover
         // its exact identity from the retained phase after this error.
         assert!(SlotCore::finish_reserved_loan(&slot, &ticket, reservation, second).is_err());
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::Returned);
-        assert_eq!(acknowledge_pending_return(&slot, &store).unwrap(), ryeos_app::SelectedBorrowReturn::AlreadyReturned);
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::Returned
+        );
+        assert_eq!(
+            acknowledge_pending_return(&slot, &store).unwrap(),
+            ryeos_app::SelectedBorrowReturn::AlreadyReturned
+        );
         assert!(store.ack_selected_borrow_return(&first).is_err());
-        assert!(slot.lock().unwrap().complete_return(&ticket, &first).is_err());
+        assert!(
+            slot.lock()
+                .unwrap()
+                .complete_return(&ticket, &first)
+                .is_err()
+        );
         assert!(slot.lock().unwrap().closed);
         assert!(slot.lock().unwrap().owner.is_some());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -881,22 +1167,44 @@ mod tests {
         let store = actual_store(root.path());
         let (mut barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
         barrier.register_from_store(&store).unwrap();
-        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, store.store()));
+        assert!(Arc::ptr_eq(
+            &barrier.registered_generation.as_ref().unwrap().0,
+            store.store()
+        ));
         // Registration is one-shot: a registered barrier refuses before it
         // consults whatever Store is offered, this one or any other.
-        assert!(barrier.register_from_store(&Arc::clone(store.store())).is_err());
-        assert!(Arc::ptr_eq(&barrier.registered_generation.as_ref().unwrap().0, store.store()));
+        assert!(
+            barrier
+                .register_from_store(&Arc::clone(store.store()))
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            &barrier.registered_generation.as_ref().unwrap().0,
+            store.store()
+        ));
         assert!(attachment.validate_for_store(&store).is_ok());
         // One process keeps a single live Store, so another Store generation
         // is offered by identity alone.
-        assert!(attachment.validate_for_store_identity(std::ptr::null()).is_err());
+        assert!(
+            attachment
+                .validate_for_store_identity(std::ptr::null())
+                .is_err()
+        );
         let elsewhere = std::sync::Arc::new(0_u8);
-        assert!(attachment
-            .validate_for_store_identity(std::sync::Arc::as_ptr(&elsewhere).cast())
-            .is_err());
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
+        assert!(
+            attachment
+                .validate_for_store_identity(std::sync::Arc::as_ptr(&elsewhere).cast())
+                .is_err()
+        );
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Unarmed
+        );
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Closed
+        );
     }
 
     #[test]
@@ -924,7 +1232,10 @@ mod tests {
         store.close_process_attachment_admission().unwrap();
         assert!(barrier.register_from_store(&store).is_err());
         assert!(barrier.registered_generation.is_none());
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Unarmed
+        );
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert!(barrier.register_from_store(&store).is_err());
         assert!(barrier.registered_generation.is_none());
@@ -940,12 +1251,21 @@ mod tests {
             assert!(retained.slots.iter().all(Option::is_none));
         }
         assert!(!barrier.has_unresolved_owners());
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Unarmed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Unarmed
+        );
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Closed
+        );
         drop(barrier);
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Detached);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Detached
+        );
     }
 
     #[test]
@@ -957,7 +1277,10 @@ mod tests {
             panic!("fixture unwind");
         }));
         assert!(result.is_err());
-        assert_eq!(observer.installation_refusal(), SelectedInstallationRefusal::Detached);
+        assert_eq!(
+            observer.installation_refusal(),
+            SelectedInstallationRefusal::Detached
+        );
     }
 }
 
@@ -970,7 +1293,10 @@ mod selected_close_controls {
         let (barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Closed
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -979,7 +1305,10 @@ mod selected_close_controls {
         let (barrier, attachment) = SelectedInvocationCompositionBarrier::bootstrap();
         let retained = barrier.root.retained.lock().unwrap();
         assert_eq!(barrier.close(), SelectedRootClose::Unresolved);
-        assert_eq!(attachment.installation_refusal(), SelectedInstallationRefusal::Closed);
+        assert_eq!(
+            attachment.installation_refusal(),
+            SelectedInstallationRefusal::Closed
+        );
         drop(retained);
         assert_eq!(barrier.close(), SelectedRootClose::Closed);
     }
