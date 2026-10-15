@@ -9,6 +9,9 @@ use crate::error::EngineError;
 const MAX_CACHE_ENTRIES: usize = 256;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+// One entry never exceeds the whole cache, so the per-entry bound is the only
+// admission bound an insert needs.
+const _: () = assert!(MAX_CACHE_ENTRY_BYTES <= MAX_CACHE_BYTES);
 const MAX_IN_FLIGHT_BUILDS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,7 +153,7 @@ impl ParseResultCache {
                 .map(|encoded| encoded.len())
                 .unwrap_or(MAX_CACHE_ENTRY_BYTES.saturating_add(1));
             let estimated_bytes = key.estimated_bytes().saturating_add(value_bytes);
-            if estimated_bytes <= MAX_CACHE_ENTRY_BYTES && estimated_bytes <= MAX_CACHE_BYTES {
+            if estimated_bytes <= MAX_CACHE_ENTRY_BYTES {
                 insert_entry(&mut state, &key, value, estimated_bytes);
                 emit_metric("fill", "success", source_bytes, estimated_bytes, 0);
             } else {
