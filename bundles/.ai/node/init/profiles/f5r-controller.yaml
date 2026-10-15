@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-14T19:21:04Z:d29b7b5a77c5508c6859c25f8e9ee0c90587119fc918edbed12d2400a48896bd:3K/mOe7L7DHwhKa+prBqRNnTfjtcH/7Ngjd4m/zOOeMJ7OI/sHHbYk27Q4wdo3zwhSUvUAmvYnyfWsHj8QQsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T01:38:13Z:444680ca2e7dabac7961e1d3ea39d2e9db72a695e6e7a0dbc0fcc33efdb25741:f2DCRz1zL0SHENFhIQ1tDMUcHnLCxhmsOuE4d6PDy/Xf0Yy0CPgWAWD9R3xPq90dhm7j4O8e1DzOKPBKnhAzAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -397,6 +397,9 @@ policies:
       - name: OPENAI_API_KEY
         recipients:
           principals: []
+          # Grant this exact capability to the receiving principal; a
+          # wildcard grant such as `*` or `ryeos.receive.*` does not satisfy
+          # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:

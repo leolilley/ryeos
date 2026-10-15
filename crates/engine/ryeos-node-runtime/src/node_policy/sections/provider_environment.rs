@@ -101,9 +101,10 @@ impl ProviderEnvironmentRecipients {
             }
         }
         for capability in &self.capabilities {
-            // A recipient capability names one exact capability. Holders of
-            // a granted wildcard covering it still qualify; a wildcard here
-            // would instead admit every holder of any matching grant.
+            // A recipient capability names one exact capability, and only a
+            // grant of that exact capability qualifies; a wildcard grant
+            // covering it does not. A wildcard here would admit every holder
+            // of any matching grant.
             if capability.contains('*') || capability.contains('?') {
                 bail!("recipient capability `{capability}` must not be a wildcard pattern");
             }

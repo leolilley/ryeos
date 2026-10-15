@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-14T12:31:24Z:badd4dccc09043dcebf02b9934685591ee3adc1f523e5afa24ea091bd03a5905:fQKBSOzNnYCsz5zAiKMYUGqI4buMC2blafEesDfeM7XHCQ7edODGzDnBtJOGX+gCTPh4pA1wI1r7qEcuRk/xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T01:38:13Z:a0df87fd20fc5b06887b7bd8e992f7e6bb718c21df419bca9146ca5fb20f3cf5:N23gvwf3tToKYKyQlYjGdDL9llGmHWcl25a381wWUSiUIyGOREhA2uowWOifMZRT8D0/9g8vUYiFZmPBvE3mBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -387,6 +387,9 @@ policies:
       - name: OPENAI_API_KEY
         recipients:
           principals: []
+          # Grant this exact capability to the receiving principal; a
+          # wildcard grant such as `*` or `ryeos.receive.*` does not satisfy
+          # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:

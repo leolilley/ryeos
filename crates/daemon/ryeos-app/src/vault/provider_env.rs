@@ -101,9 +101,9 @@ impl ProviderEnvironment {
     /// in which case every declared name is in play. Requested names the
     /// node does not declare are left to delivery, which reports them
     /// outside the declaration. Every declared name in play must list the
-    /// principal or a capability the principal holds; otherwise admission
-    /// is refused naming the first such name and the principal. The
-    /// returned names, sorted, are what the admitted authority seals.
+    /// principal or a capability the principal holds exactly; otherwise
+    /// admission is refused naming the first such name. The returned names,
+    /// sorted, are what the admitted authority seals.
     pub fn admit_recipient(
         &self,
         principal: &str,
@@ -117,12 +117,8 @@ impl ProviderEnvironment {
             {
                 continue;
             }
-            if !recipient_allowed(&entry.recipients, principal, capabilities) {
-                bail!(
-                    "provider-environment name `{}` is not delivered to principal `{principal}`: \
-                     the node policy lists neither that principal nor a capability it holds",
-                    entry.name
-                );
+            if let Some(refusal) = judge_recipient(&entry.recipients, principal, capabilities) {
+                bail!("{}", refusal.message(&entry.name, principal));
             }
             admitted.push(entry.name.clone());
         }
@@ -131,24 +127,24 @@ impl ProviderEnvironment {
 
     /// Requested names the live declaration carries whose current recipient
     /// rule does not admit `principal` holding `capabilities`, in request
-    /// order. Names the live declaration lacks are not judged here; delivery
-    /// reports them missing.
+    /// order, each with the reason it is refused. Names the live declaration
+    /// lacks are not judged here; delivery reports them missing.
     pub fn refused_recipient_names(
         &self,
         requested: &[String],
         principal: &str,
         capabilities: &[String],
-    ) -> Vec<String> {
+    ) -> Vec<(String, RecipientRefusal)> {
         requested
             .iter()
-            .filter(|name| {
-                self.declared
+            .filter_map(|name| {
+                let index = self
+                    .declared
                     .binary_search_by(|entry| entry.name.as_str().cmp(name.as_str()))
-                    .is_ok_and(|index| {
-                        !recipient_allowed(&self.declared[index].recipients, principal, capabilities)
-                    })
+                    .ok()?;
+                judge_recipient(&self.declared[index].recipients, principal, capabilities)
+                    .map(|refusal| (name.clone(), refusal))
             })
-            .cloned()
             .collect()
     }
 
@@ -167,29 +163,72 @@ impl ProviderEnvironment {
     }
 }
 
-fn recipient_allowed(
+/// Why one declared provider-environment name is not delivered to a
+/// requesting principal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipientRefusal {
+    /// Neither the principal nor any capability it holds, exactly or by a
+    /// covering wildcard, is listed for the name.
+    NotListed,
+    /// The principal holds a wildcard grant that covers the listed
+    /// `capability`, but not the capability itself. A recipient capability
+    /// names a deliberate grant of one secret; a broad wildcard grant made
+    /// for other reasons never carries it.
+    WildcardOnly { capability: String },
+}
+
+impl RecipientRefusal {
+    /// The refusal text for `name` requested by `principal`. Never carries
+    /// a value.
+    pub fn message(&self, name: &str, principal: &str) -> String {
+        match self {
+            Self::NotListed => format!(
+                "provider-environment name `{name}` is not delivered to principal `{principal}`: \
+                 the node policy lists neither that principal nor a capability it holds"
+            ),
+            Self::WildcardOnly { capability } => format!(
+                "provider environment {name} requires the exact recipient capability \
+                 {capability}; wildcard grants do not satisfy it (principal `{principal}`)"
+            ),
+        }
+    }
+}
+
+/// Judge one name's recipient rule. A listed principal admits; otherwise a
+/// listed capability admits only when the principal holds that exact
+/// capability string. A wildcard grant covering a listed capability is
+/// refused by name rather than reported as unlisted.
+fn judge_recipient(
     recipients: &ProviderEnvironmentRecipients,
     principal: &str,
     capabilities: &[String],
-) -> bool {
+) -> Option<RecipientRefusal> {
     if recipients
         .principals
         .iter()
         .any(|candidate| candidate == principal)
     {
-        return true;
+        return None;
     }
-    !recipients.capabilities.is_empty()
-        && ryeos_runtime::authorizer::Authorizer::new()
-            .authorize(
-                capabilities,
-                &ryeos_runtime::authorizer::AuthorizationPolicy::Protected {
-                    all_of: vec![ryeos_runtime::authorizer::CapabilityClause {
-                        any_of: recipients.capabilities.clone(),
-                    }],
-                },
-            )
-            .is_ok()
+    if recipients
+        .capabilities
+        .iter()
+        .any(|listed| capabilities.iter().any(|held| held == listed))
+    {
+        return None;
+    }
+    recipients
+        .capabilities
+        .iter()
+        .find(|listed| {
+            capabilities
+                .iter()
+                .any(|held| ryeos_runtime::authorizer::cap_matches(held, listed))
+        })
+        .map(|listed| RecipientRefusal::WildcardOnly {
+            capability: listed.clone(),
+        })
+        .or(Some(RecipientRefusal::NotListed))
 }
 
 impl std::fmt::Debug for ProviderEnvironment {
@@ -306,23 +345,13 @@ mod tests {
             .to_string();
         assert!(error.contains("`A_KEY`") && error.contains("`fp:mallory`"), "{error}");
         assert!(!error.contains("value-a") && !error.contains("value-b"), "{error}");
-        // A capability recipient admits holders of the exact capability or a
-        // granted wildcard covering it, and nobody else.
+        // A capability recipient admits holders of the exact capability and
+        // nobody else.
         assert_eq!(
             environment
                 .admit_recipient(
                     "fp:bob",
                     &strings(&["ryeos.receive.provider_env.b_key"]),
-                    Some(&strings(&["B_KEY"]))
-                )
-                .unwrap(),
-            ["B_KEY"]
-        );
-        assert_eq!(
-            environment
-                .admit_recipient(
-                    "fp:bob",
-                    &strings(&["ryeos.receive.provider_env.*"]),
                     Some(&strings(&["B_KEY"]))
                 )
                 .unwrap(),
@@ -368,5 +397,79 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    const WILDCARD_GRANTS: [&str; 5] = [
+        "*",
+        "ryeos.*",
+        "ryeos.receive.*",
+        "ryeos.receive.provider_env.*",
+        "ryeos.receive.provider_env.b_?ey",
+    ];
+
+    #[test]
+    fn admission_accepts_only_the_exact_recipient_capability() {
+        let environment = capability_declaration();
+        // The exact capability is admitted, also alongside wildcards.
+        assert_eq!(
+            environment
+                .admit_recipient(
+                    "fp:bob",
+                    &strings(&["*", "ryeos.receive.provider_env.b_key"]),
+                    Some(&strings(&["B_KEY"]))
+                )
+                .unwrap(),
+            ["B_KEY"]
+        );
+        for wildcard in WILDCARD_GRANTS {
+            let error = environment
+                .admit_recipient("fp:bob", &strings(&[wildcard]), Some(&strings(&["B_KEY"])))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(
+                    "provider environment B_KEY requires the exact recipient capability \
+                     ryeos.receive.provider_env.b_key; wildcard grants do not satisfy it"
+                ),
+                "{wildcard}: {error}"
+            );
+            assert!(!error.contains("value-b"), "{error}");
+            // An open declaration refuses the same way.
+            let error = environment
+                .admit_recipient("fp:alice", &strings(&[wildcard]), None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("wildcard grants do not satisfy it"), "{wildcard}: {error}");
+        }
+    }
+
+    #[test]
+    fn live_re_judgement_refuses_each_wildcard_by_name() {
+        let environment = capability_declaration();
+        let requested = strings(&["A_KEY", "B_KEY"]);
+        assert!(
+            environment
+                .refused_recipient_names(
+                    &strings(&["B_KEY"]),
+                    "fp:bob",
+                    &strings(&["ryeos.receive.provider_env.b_key"])
+                )
+                .is_empty()
+        );
+        for wildcard in WILDCARD_GRANTS {
+            assert_eq!(
+                environment.refused_recipient_names(&requested, "fp:bob", &strings(&[wildcard])),
+                vec![
+                    ("A_KEY".to_owned(), RecipientRefusal::NotListed),
+                    (
+                        "B_KEY".to_owned(),
+                        RecipientRefusal::WildcardOnly {
+                            capability: "ryeos.receive.provider_env.b_key".to_owned(),
+                        }
+                    ),
+                ],
+                "{wildcard}"
+            );
+        }
     }
 }

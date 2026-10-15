@@ -81,7 +81,7 @@ pub use ryeos_vault::policy::{
     validate_key_name, validate_secret_value,
 };
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
-pub use provider_env::ProviderEnvironment;
+pub use provider_env::{ProviderEnvironment, RecipientRefusal};
 
 /// The principal a delivery is made to. Capability scopes are not part of
 /// it: a provider-environment authority carries the scopes its admission
@@ -570,12 +570,24 @@ fn read_authorized_secret_values(
             principal,
             recipient_scopes,
         );
+        // A name withheld only because its admission carried a covering
+        // wildcard rather than the exact listed capability is refused by
+        // that name and capability.
+        if let Some((name, refusal)) = withdrawn
+            .iter()
+            .find(|(_, refusal)| matches!(refusal, RecipientRefusal::WildcardOnly { capability: _ }))
+        {
+            return Err(VaultReadError::AuthorityViolation(
+                refusal.message(name, principal),
+            ));
+        }
         if !withdrawn.is_empty() {
+            let names: Vec<&str> = withdrawn.iter().map(|(name, _)| name.as_str()).collect();
             return Err(VaultReadError::AuthorityViolation(format!(
                 "provider-environment name(s) [{}] are not delivered to principal `{principal}`: \
                  the node's current recipient policy lists neither that principal nor a capability \
                  its admission was granted",
-                withdrawn.join(", ")
+                names.join(", ")
             )));
         }
     }
@@ -1777,6 +1789,62 @@ mod tests {
             authorize_secret_delivery(&sources, OP, &names(&["OPENAI_API_KEY"]), &inherited)
                 .unwrap();
         assert_eq!(delivered.get("OPENAI_API_KEY"), Some("sk-parent"));
+    }
+
+    #[test]
+    fn provider_environment_delivery_requires_the_exact_sealed_capability() {
+        let vault = fixed_vault(&[]);
+        let environment = ProviderEnvironment::captured(
+            vec![
+                ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName {
+                    name: "B_KEY".to_string(),
+                    recipients: ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentRecipients {
+                        principals: Vec::new(),
+                        capabilities: names(&["ryeos.receive.provider_env.b_key"]),
+                    },
+                },
+            ],
+            vec![("B_KEY".to_string(), zeroize::Zeroizing::new("value-b".to_string()))],
+        )
+        .unwrap();
+        let sources = SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+        };
+        let sealed = |scopes: &[&str]| {
+            ryeos_state::objects::ExecutionProjectAuthority::projectless(
+                ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                    declared_names: names(&["B_KEY"]),
+                    recipient_principal: "op".to_string(),
+                    recipient_scopes: names(scopes),
+                    name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                },
+            )
+            .unwrap()
+        };
+        let delivered = authorize_secret_delivery(
+            &sources,
+            OP,
+            &names(&["B_KEY"]),
+            &sealed(&["ryeos.receive.provider_env.b_key"]),
+        )
+        .unwrap();
+        assert_eq!(delivered.get("B_KEY"), Some("value-b"));
+        for wildcard in ["*", "ryeos.*", "ryeos.receive.*", "ryeos.receive.provider_env.*"] {
+            let error =
+                authorize_secret_delivery(&sources, OP, &names(&["B_KEY"]), &sealed(&[wildcard]))
+                    .unwrap_err();
+            assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+            let message = error.to_string();
+            assert!(
+                message.contains(
+                    "provider environment B_KEY requires the exact recipient capability \
+                     ryeos.receive.provider_env.b_key; wildcard grants do not satisfy it"
+                ),
+                "{wildcard}: {message}"
+            );
+            assert!(!message.contains("value-b"), "{message}");
+        }
     }
 
     #[test]

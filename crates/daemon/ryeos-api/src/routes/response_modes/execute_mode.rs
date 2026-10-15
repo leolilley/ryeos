@@ -2620,14 +2620,20 @@ mod tests {
             sealed_provider(&authority),
             (vec!["ANTHROPIC_API_KEY".to_owned()], "fp:bob".to_owned())
         );
-        let authority = admit_provider(
-            &environment,
-            &policy,
-            "fp:bob",
-            &["ryeos.receive.provider_env.*".to_owned()],
-        )
-        .unwrap();
-        assert_eq!(sealed_provider(&authority).0, ["ANTHROPIC_API_KEY"]);
+        // Wildcard grants covering the listed capability are refused by name.
+        for wildcard in ["*", "ryeos.*", "ryeos.receive.*", "ryeos.receive.provider_env.*"] {
+            let error = admit_provider(&environment, &policy, "fp:bob", &[wildcard.to_owned()])
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!(
+                    "provider environment ANTHROPIC_API_KEY requires the exact recipient \
+                     capability {RECEIVE_ANTHROPIC}; wildcard grants do not satisfy it"
+                )),
+                "{wildcard}: {message}"
+            );
+            assert!(!message.contains(ANTHROPIC_VALUE), "{message}");
+        }
         let error = admit_provider(&environment, &policy, "fp:bob", &[]).unwrap_err();
         assert_plain_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
         // Holding the capability for one name does not reach another.

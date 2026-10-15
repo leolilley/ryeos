@@ -9451,6 +9451,14 @@ async fn qualify_candidate(
             "hosted execution placement changed while candidate qualification was reserved".into(),
         ));
     }
+    // Judge the invocation's placement before any reservation, reconcile or
+    // fact append, so a refused caller leaves the session exactly as it was.
+    require_disposition_placement(
+        &state,
+        &qualification_root_id,
+        &session.chain_root_id,
+        DispositionOperation::Qualification,
+    )?;
     if req.evaluator_chain_root_id == session.chain_root_id {
         return Err(HandlerError::BadRequest(
             "candidate qualification requires an independent evaluator execution chain".into(),
@@ -10104,6 +10112,14 @@ async fn discard(
             "hosted execution placement changed while candidate discard was reserved".into(),
         ));
     }
+    // Judge the invocation's placement before any reservation, reconcile or
+    // fact append, so a refused caller leaves the session exactly as it was.
+    require_disposition_placement(
+        &state,
+        &disposition_root_id,
+        &session.chain_root_id,
+        DispositionOperation::Discard,
+    )?;
     if session.state == "discarding"
         && session
             .publication_result
@@ -10511,10 +10527,22 @@ async fn publish(
     }))
 }
 
-/// A candidate qualification is a direct invocation (its own chain root) or
-/// an inline callback child, with proven in-process lineage, of a thread in
-/// the session's own chain. A member of any other chain, or a member without
-/// that lineage, is refused.
+/// Whether a disposition operation (qualification or discard) runs inside
+/// the session it disposes of: the session root itself or any member of the
+/// session's chain, inline callback children included. Work inside a
+/// session never qualifies or discards that session's candidate.
+fn disposition_inside_session(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+) -> bool {
+    chain_root_id == session_chain_root_id || thread_id == session_chain_root_id
+}
+
+/// A candidate qualification is a direct invocation: its own chain root,
+/// outside the session's chain and never the session itself. An inline
+/// callback child of a thread in the session's own chain is refused exactly
+/// as discard refuses it, and a member of any other chain is refused.
 fn qualification_placement_admitted(
     thread_id: &str,
     chain_root_id: &str,
@@ -10522,12 +10550,15 @@ fn qualification_placement_admitted(
     placement: &ryeos_app::state_store::RecordedThreadPlacement,
 ) -> bool {
     use ryeos_app::state_store::RecordedThreadPlacement;
+    if disposition_inside_session(thread_id, chain_root_id, session_chain_root_id) {
+        return false;
+    }
     match placement {
         RecordedThreadPlacement::Root => chain_root_id == thread_id,
         RecordedThreadPlacement::InProcessMember {
-            chain_root_id: born_in,
+            chain_root_id: _,
             upstream_thread_id: _,
-        } => born_in == chain_root_id && chain_root_id == session_chain_root_id,
+        } => false,
         RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
     }
 }
@@ -10544,7 +10575,7 @@ fn discard_placement_admitted(
     placement: &ryeos_app::state_store::RecordedThreadPlacement,
 ) -> bool {
     use ryeos_app::state_store::RecordedThreadPlacement;
-    if chain_root_id == session_chain_root_id || thread_id == session_chain_root_id {
+    if disposition_inside_session(thread_id, chain_root_id, session_chain_root_id) {
         return false;
     }
     match placement {
@@ -10555,6 +10586,88 @@ fn discard_placement_admitted(
         } => born_in == chain_root_id,
         RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
     }
+}
+
+/// The candidate disposition operation whose invocation placement is judged.
+#[derive(Debug, Clone, Copy)]
+enum DispositionOperation {
+    Qualification,
+    Discard,
+}
+
+impl DispositionOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Qualification => "candidate qualification",
+            Self::Discard => "candidate discard",
+        }
+    }
+
+    fn admitted(
+        self,
+        thread_id: &str,
+        chain_root_id: &str,
+        session_chain_root_id: &str,
+        placement: &ryeos_app::state_store::RecordedThreadPlacement,
+    ) -> bool {
+        match self {
+            Self::Qualification => qualification_placement_admitted(
+                thread_id,
+                chain_root_id,
+                session_chain_root_id,
+                placement,
+            ),
+            Self::Discard => {
+                discard_placement_admitted(thread_id, chain_root_id, session_chain_root_id, placement)
+            }
+        }
+    }
+}
+
+/// Refuse a disposition whose recorded invocation root sits in a placement
+/// the operation does not admit. Reads only; callers run it before any
+/// durable write so a refusal never leaves a reservation or a fact behind.
+fn require_disposition_placement(
+    state: &AppState,
+    root_id: &str,
+    session_chain_root_id: &str,
+    operation: DispositionOperation,
+) -> Result<(), HandlerError> {
+    let label = operation.label();
+    let invocation = state
+        .state_store
+        .get_thread(root_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal(format!("{label} invocation root is not recorded")))?;
+    let placement = state
+        .state_store
+        .recorded_thread_placement(root_id)
+        .map_err(internal)?;
+    if invocation.thread_id != root_id {
+        return Err(internal(format!(
+            "{label} invocation root has a contradictory identity"
+        )));
+    }
+    if disposition_inside_session(root_id, &invocation.chain_root_id, session_chain_root_id) {
+        return Err(HandlerError::BadRequest(format!(
+            "{label} refused: invocation `{root_id}` runs inside the session's own chain \
+             `{session_chain_root_id}`; a session's candidate is disposed of only from outside \
+             that session"
+        )));
+    }
+    if !operation.admitted(
+        root_id,
+        &invocation.chain_root_id,
+        session_chain_root_id,
+        &placement,
+    ) {
+        return Err(HandlerError::BadRequest(format!(
+            "{label} refused: invocation `{root_id}` in chain `{}` is not a placement admitted \
+             for {label}",
+            invocation.chain_root_id
+        )));
+    }
+    Ok(())
 }
 
 fn internal(error: impl std::fmt::Display) -> HandlerError {
@@ -10804,25 +10917,169 @@ mod tests {
     use super::{discard_placement_admitted, qualification_placement_admitted};
 
     #[test]
-    fn qualification_admits_roots_and_inline_children_of_the_session_chain() {
+    fn qualification_admits_only_direct_roots_outside_the_session_chain() {
         use ryeos_app::state_store::RecordedThreadPlacement;
         let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
             chain_root_id: chain.to_owned(),
             upstream_thread_id: "T-placement".to_owned(),
         };
-        let check = |chain: &str, placement: &RecordedThreadPlacement| {
-            qualification_placement_admitted("T-qualify", chain, "T-session", placement)
+        let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
+            qualification_placement_admitted(thread, chain, "T-session", placement)
         };
-        assert!(check("T-qualify", &RecordedThreadPlacement::Root));
-        assert!(check("T-session", &member("T-session")));
-        assert!(!check("T-unrelated", &member("T-unrelated")));
-        assert!(!check("T-session", &member("T-unrelated")));
+        assert!(check("T-qualify", "T-qualify", &RecordedThreadPlacement::Root));
+        // The session itself and an inline child of the session's own chain
+        // are refused, as discard refuses them.
+        assert!(!check("T-session", "T-session", &RecordedThreadPlacement::Root));
+        assert!(!check("T-qualify", "T-session", &member("T-session")));
+        assert!(!discard_placement_admitted(
+            "T-qualify",
+            "T-session",
+            "T-session",
+            &member("T-session")
+        ));
+        // Stricter than discard: an inline child of another chain, which
+        // discard admits, is refused for qualification.
+        assert!(discard_placement_admitted(
+            "T-qualify",
+            "T-operator",
+            "T-session",
+            &member("T-operator")
+        ));
+        assert!(!check("T-qualify", "T-operator", &member("T-operator")));
+        // Members of other chains, and members without proven lineage.
+        assert!(!check("T-qualify", "T-unrelated", &member("T-unrelated")));
+        assert!(!check("T-qualify", "T-session", &member("T-unrelated")));
         assert!(!check(
+            "T-qualify",
             "T-session",
             &RecordedThreadPlacement::OtherMember {
                 chain_root_id: "T-session".to_owned()
             }
         ));
+    }
+
+    fn placement_thread(thread_id: &str, chain_root_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "directive:test".to_owned(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }
+        });
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_owned(),
+            chain_root_id: chain_root_id.to_owned(),
+            kind: "directive".to_owned(),
+            item_ref: "directive:test".to_owned(),
+            executor_ref: "native:test".to_owned(),
+            launch_mode: "wait".to_owned(),
+            current_site_id: "site:test".to_owned(),
+            origin_site_id: "site:test".to_owned(),
+            upstream_thread_id: (thread_id != chain_root_id).then(|| chain_root_id.to_owned()),
+            requested_by: Some("fp:test".to_owned()),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy,
+        }
+    }
+
+    /// Birth `child_id` as an inline in-process child of the root
+    /// `parent_id`, with the lineage the placement judgement proves.
+    fn birth_inline_child(
+        store: &ryeos_app::state_store::StateStore,
+        parent_id: &str,
+        child_id: &str,
+    ) -> ryeos_app::state_store::InProcessHandlerControl {
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            );
+        store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &placement_thread(child_id, parent_id),
+                vec![ryeos_app::state_store::NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload: serde_json::json!({}),
+                }],
+                &metadata,
+                &owner,
+            )
+            .expect("publish in-process child");
+        owner
+    }
+
+    #[test]
+    fn disposition_placement_is_refused_before_any_durable_write() {
+        use super::{DispositionOperation, require_disposition_placement};
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let root = tempfile::tempdir().expect("tempdir");
+        let (store_owner, state) =
+            ryeos_app::state::test_support::build(root.path()).expect("test application");
+        let store = &state.state_store;
+        for root_id in ["T-session", "T-operator", "T-qualify"] {
+            store
+                .create_thread_for_test(&placement_thread(root_id, root_id))
+                .expect("root thread");
+        }
+        let _session_child = birth_inline_child(store, "T-session", "T-session-child");
+        let _operator_child = birth_inline_child(store, "T-operator", "T-operator-child");
+        assert!(matches!(
+            store.recorded_thread_placement("T-session-child").expect("placement"),
+            RecordedThreadPlacement::InProcessMember {
+                chain_root_id: _,
+                upstream_thread_id: _
+            }
+        ));
+        let judge = |root_id: &str, operation: DispositionOperation| {
+            require_disposition_placement(&state, root_id, "T-session", operation)
+        };
+        let refusal = |result: Result<(), crate::handler_error::HandlerError>| match result {
+            Err(crate::handler_error::HandlerError::BadRequest(message)) => message,
+            other => panic!("expected a BadRequest refusal, got {other:?}"),
+        };
+        // A direct root outside the session is admitted for both.
+        judge("T-qualify", DispositionOperation::Qualification).expect("direct qualification");
+        judge("T-qualify", DispositionOperation::Discard).expect("direct discard");
+
+        // An inline child of the session's own chain is refused by both,
+        // naming the reason. The judgement only reads, and both handlers run
+        // it before their reservation, reconcile and fact append.
+        for operation in [DispositionOperation::Qualification, DispositionOperation::Discard] {
+            let message = refusal(judge("T-session-child", operation));
+            assert!(
+                message.contains("runs inside the session's own chain `T-session`"),
+                "{message}"
+            );
+            let message = refusal(judge("T-session", operation));
+            assert!(message.contains("inside the session's own chain"), "{message}");
+        }
+
+        // An inline child of another chain: discard admits it, qualification
+        // refuses it.
+        judge("T-operator-child", DispositionOperation::Discard).expect("inline discard");
+        let message = refusal(judge("T-operator-child", DispositionOperation::Qualification));
+        assert!(
+            message.contains("is not a placement admitted for candidate qualification"),
+            "{message}"
+        );
+        drop(state);
+        drop(store_owner);
     }
 
     #[test]
