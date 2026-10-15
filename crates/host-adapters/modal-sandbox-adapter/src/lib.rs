@@ -4,9 +4,11 @@
 //! facade's fixed routes; the signed provider spec pins the facade source
 //! digest every reply must carry.
 //!
-//! Guest activation delivery is declared but not wired: an activation request
-//! settles as pending without any provider contact.
+//! Guest activation is delivered only when the signed spec declares the
+//! staged sequence; it always settles pending, and the guest's own
+//! authenticated channel alone can establish Ready.
 
+pub mod activation;
 pub mod facade;
 pub mod lease_ops;
 pub mod provider_spec;
@@ -22,7 +24,8 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_HOSTS_FD_ENV,
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV,
-    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV,
+    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+    LIFECYCLE_SIGNED_IMPORT_FD_ENV,
     LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
     LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
     LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
@@ -234,29 +237,39 @@ fn operate() -> Result<()> {
         None => BTreeSet::new(),
     };
     let egress_policy = provider_spec.egress_policy(&lease_egress)?;
-    // Guest activation delivery is not wired: it settles pending with no
-    // provider contact, before any guest input, credential or network input
-    // is read.
-    match &request {
-        LifecycleAdapterRequest::ActivateSupervisor {
-            common, activation, ..
-        }
-        | LifecycleAdapterRequest::ReconcileSupervisorActivation {
-            common, activation, ..
-        } => {
-            let response = LifecycleAdapterResponse::SupervisorPending {
-                operation_id: common.operation_id.clone(),
-                activation_request_digest: activation.activation_request_digest.clone(),
-            };
-            response.validate_for(&request)?;
-            return write_response(&response);
-        }
-        LifecycleAdapterRequest::Allocate { reservation, .. } => {
-            deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
-        }
-        LifecycleAdapterRequest::ReconcileAllocation { .. }
-        | LifecycleAdapterRequest::Terminate { .. }
-        | LifecycleAdapterRequest::ReconcileTermination { .. } => {}
+    // Reconciling an activation never contacts the provider: it settles
+    // pending before any guest input, credential or network input is read.
+    if let Some(response) = reconcile_activation_response(&request) {
+        response.validate_for(&request)?;
+        return write_response(&response);
+    }
+    // A spec that does not declare the staged sequence refuses a claimed
+    // activation before any guest input, credential or network input is read.
+    let prepared = if let LifecycleAdapterRequest::ActivateSupervisor {
+        common: _,
+        occurrence: _,
+        activation,
+        guest_input_identity: _,
+        guest_input_projection: _,
+        guest_package: _,
+        import_ticket: _,
+    } = &request
+    {
+        require_declared_activation(&provider_spec)?;
+        deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
+        // SAFETY: the trusted lifecycle runner installed each of these
+        // descriptors exactly once for this operation.
+        Some(unsafe { activation::PreparedActivation::from_environment(&request) }?)
+    } else {
+        ensure!(
+            std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
+                && std::env::var_os(LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV).is_none(),
+            "signed guest import or assignment was supplied outside first activation"
+        );
+        None
+    };
+    if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
+        deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
     }
     if matches!(&request, LifecycleAdapterRequest::ReconcileAllocation { .. }) {
         ensure!(
@@ -311,13 +324,58 @@ fn operate() -> Result<()> {
             occurrence,
             termination,
         } => lease_ops::observe_termination(&client, common, occurrence, termination),
-        LifecycleAdapterRequest::ActivateSupervisor { .. }
-        | LifecycleAdapterRequest::ReconcileSupervisorActivation { .. } => {
-            anyhow::bail!("activation requests settle before provider contact")
+        LifecycleAdapterRequest::ActivateSupervisor {
+            common,
+            occurrence,
+            activation,
+            guest_input_identity: _,
+            guest_input_projection: _,
+            guest_package: _,
+            import_ticket: _,
+        } => {
+            let prepared = prepared
+                .as_ref()
+                .context("first activation lost its verified sealed inputs")?;
+            // Once this call begins any step may have reached the facade, and
+            // even a complete delivery is not an authenticated Ready: every
+            // outcome is pending for the guest's own channel to settle.
+            activation::pending_unless_refused(
+                prepared.contact(&client, &occurrence.occurrence_id),
+            )?;
+            LifecycleAdapterResponse::SupervisorPending {
+                operation_id: common.operation_id.clone(),
+                activation_request_digest: activation.activation_request_digest.clone(),
+            }
+        }
+        LifecycleAdapterRequest::ReconcileSupervisorActivation { .. } => {
+            anyhow::bail!("activation reconciliation settles before provider contact")
         }
     };
     response.validate_for(&request)?;
     write_response(&response)
+}
+
+/// Reconciling an activation is observation only: pending, no contact.
+fn reconcile_activation_response(
+    request: &LifecycleAdapterRequest,
+) -> Option<LifecycleAdapterResponse> {
+    match request {
+        LifecycleAdapterRequest::ReconcileSupervisorActivation {
+            common, activation, ..
+        } => Some(LifecycleAdapterResponse::SupervisorPending {
+            operation_id: common.operation_id.clone(),
+            activation_request_digest: activation.activation_request_digest.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn require_declared_activation(spec: &ProviderSpec) -> Result<()> {
+    ensure!(
+        spec.declares_activation(),
+        "signed Modal provider spec does not declare supervisor activation"
+    );
+    Ok(())
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
@@ -501,6 +559,62 @@ mod tests {
         descending.reverse();
         value.tls_roots_der_base64 = descending;
         assert!(validate_settings(&value).is_err());
+    }
+
+    fn declared_spec_bytes() -> Vec<u8> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../fixtures/provider-spec.json")).unwrap();
+        value["operations"]["activate_supervisor"] = serde_json::json!({
+            "kind": "stage_then_upload_then_run_once",
+            "stage_route": "stage",
+            "seal_route": "stage_seal",
+            "upload_route": "upload",
+            "run_route": "run_once",
+        });
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn an_undeclared_spec_refuses_activation_and_a_declared_one_allows_it() {
+        let undeclared = include_bytes!("../fixtures/provider-spec.json");
+        let spec = parse_lease_spec(undeclared, &lillux::sha256_hex(undeclared)).unwrap();
+        assert!(require_declared_activation(&spec).is_err());
+        let declared = declared_spec_bytes();
+        let spec = parse_lease_spec(&declared, &lillux::sha256_hex(&declared)).unwrap();
+        require_declared_activation(&spec).unwrap();
+    }
+
+    #[test]
+    fn reconciling_an_activation_settles_pending_without_contact() {
+        use ryeos_external_execution_contract::{
+            BoundOccurrence, LifecycleOperationCommon, SupervisorActivationIntent,
+        };
+        let request = LifecycleAdapterRequest::ReconcileSupervisorActivation {
+            common: LifecycleOperationCommon {
+                schema: 1,
+                protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+                operation_id: "op".into(),
+                binding_hash: "1".repeat(64),
+                settings_digest: "2".repeat(64),
+            },
+            occurrence: BoundOccurrence {
+                request_digest: "3".repeat(64),
+                occurrence_id: "sb-1".into(),
+            },
+            activation: SupervisorActivationIntent {
+                activation_request_digest: "4".repeat(64),
+                supervisor_runtime_hash: "5".repeat(64),
+                launcher_artifact_hash: "6".repeat(64),
+                attachment_deadline_ms: 1,
+                execution_timeout_seconds: 1,
+                post_execution_timeout_seconds: 1,
+                channel_max_bytes: 1,
+            },
+        };
+        assert!(matches!(
+            reconcile_activation_response(&request),
+            Some(LifecycleAdapterResponse::SupervisorPending { .. })
+        ));
     }
 
     #[test]

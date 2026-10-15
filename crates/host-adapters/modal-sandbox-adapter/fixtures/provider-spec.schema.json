@@ -52,13 +52,23 @@
         "policy": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schema", "cpu", "memory_mib", "image", "command"],
+          "required": ["schema", "cpu", "memory_mib", "image", "command", "stage"],
           "properties": {
-            "schema": { "const": "ryeos.modal_lease_policy.v1" },
+            "schema": { "const": "ryeos.modal_lease_policy.v2" },
             "cpu": { "type": "number", "exclusiveMinimum": 0 },
             "memory_mib": { "type": "integer", "minimum": 1 },
             "image": { "type": "string", "minLength": 1 },
-            "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+            "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            "stage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["max_slots", "max_chunk_bytes", "max_slot_bytes"],
+              "properties": {
+                "max_slots": { "const": 4 },
+                "max_chunk_bytes": { "const": 33554432 },
+                "max_slot_bytes": { "const": 4295032832 }
+              }
+            }
           }
         }
       }

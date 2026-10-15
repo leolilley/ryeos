@@ -28,6 +28,41 @@ pub const FACADE_RESPONSE_SCHEMA: &str = "ryeos.modal_lease_facade.response.v1";
 pub const PROVIDER_MAXIMUM_LEASE_SECONDS: u32 = 24 * 60 * 60;
 /// The facade refuses lifetimes below this.
 pub const PROVIDER_MINIMUM_LEASE_SECONDS: u32 = 60;
+/// The policy record schema this adapter recomputes.
+pub const FACADE_POLICY_SCHEMA: &str = "ryeos.modal_lease_policy.v2";
+/// The largest chunk the facade appends to a staged slot in one request.
+pub const STAGE_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
+/// The largest staged slot the facade holds.
+pub const STAGE_SLOT_BYTES: u64 = 4 * 1024 * 1024 * 1024 + 64 * 1024;
+/// The most staged slots the facade starts on one lease.
+pub const STAGE_SLOTS: u32 = 4;
+/// The largest executable the facade's upload route takes.
+pub const UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest request body the shared HTTP client sends from memory; it
+/// refuses any larger in-memory body limit, so no route's request may need
+/// more than this.
+pub const TRANSPORT_IN_MEMORY_BODY_BYTES: u64 = 64 * 1024 * 1024;
+/// The JSON frame allowance around a base64 payload in a request body.
+const REQUEST_FRAME_BYTES: u64 = 4096;
+/// The request-body size a payload of this many bytes needs: its base64
+/// form plus the JSON frame.
+const fn encoded_request_bytes(payload: u64) -> u64 {
+    (payload / 3 + 1) * 4 + REQUEST_FRAME_BYTES
+}
+/// The largest payload whose encoded request still fits the transport's
+/// in-memory body ceiling.
+const fn largest_payload_within(ceiling: u64) -> u64 {
+    (ceiling - REQUEST_FRAME_BYTES) / 4 * 3 - 1
+}
+/// The largest launcher the adapter uploads: the facade accepts
+/// `UPLOAD_BYTES`, but the adapter's encoded request must fit the
+/// transport's in-memory ceiling, so it is stricter.
+pub const LAUNCHER_UPLOAD_BYTES: u64 = {
+    let fit = largest_payload_within(TRANSPORT_IN_MEMORY_BODY_BYTES);
+    if fit < UPLOAD_BYTES { fit } else { UPLOAD_BYTES }
+};
+/// The largest stdin the facade's run-once route takes.
+pub const RUN_STDIN_BYTES: u64 = 64 * 1024;
 /// The facade accepts at most this many allow-list rules.
 const FACADE_MAX_RULES: u32 = 4;
 
@@ -100,6 +135,16 @@ pub struct FacadePolicyInputs {
     pub memory_mib: u32,
     pub image: String,
     pub command: Vec<String>,
+    pub stage: StagePolicyInputs,
+}
+
+/// The facade's fixed staging limits, part of its policy record.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StagePolicyInputs {
+    pub max_slots: u32,
+    pub max_chunk_bytes: u64,
+    pub max_slot_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -108,6 +153,7 @@ enum OperationKind {
     CreateOnce,
     ObserveExactOccurrence,
     UploadThenRunOncePending,
+    StageThenUploadThenRunOnce,
     TerminateOnceThenObserveExact,
     ControllerRelayedGuestFrames,
     UnsupportedPending,
@@ -123,6 +169,8 @@ pub enum RouteName {
     Terminate,
     Upload,
     RunOnce,
+    Stage,
+    StageSeal,
 }
 
 impl RouteName {
@@ -133,6 +181,8 @@ impl RouteName {
             Self::Terminate => "/v1/terminate",
             Self::Upload => "/v1/upload",
             Self::RunOnce => "/v1/run-once",
+            Self::Stage => "/v1/stage",
+            Self::StageSeal => "/v1/stage-seal",
         }
     }
 
@@ -144,6 +194,23 @@ impl RouteName {
             Self::Terminate => "terminate",
             Self::Upload => "upload",
             Self::RunOnce => "run_once",
+            Self::Stage => "stage",
+            Self::StageSeal => "stage_seal",
+        }
+    }
+
+    /// The most request-body bytes the facade accepts on this route: the
+    /// base64 form of the route's payload plus a small JSON frame, or the
+    /// facade's small-body bound.
+    pub fn request_body_limit(self) -> u64 {
+        let encoded = encoded_request_bytes;
+        match self {
+            Self::Stage => encoded(STAGE_CHUNK_BYTES),
+            Self::Upload => encoded(LAUNCHER_UPLOAD_BYTES),
+            Self::RunOnce => encoded(RUN_STDIN_BYTES),
+            Self::Create | Self::GetByName | Self::GetById | Self::Terminate | Self::StageSeal => {
+                64 * 1024
+            }
         }
     }
 }
@@ -217,6 +284,10 @@ struct OperationDecl {
     #[serde(default, deserialize_with = "non_null_option")]
     run_route: Option<RouteName>,
     #[serde(default, deserialize_with = "non_null_option")]
+    stage_route: Option<RouteName>,
+    #[serde(default, deserialize_with = "non_null_option")]
+    seal_route: Option<RouteName>,
+    #[serde(default, deserialize_with = "non_null_option")]
     body: Option<CreateBody>,
     #[serde(default, deserialize_with = "non_null_option")]
     bind_proof_profile: Option<ProofProfile>,
@@ -235,6 +306,8 @@ impl OperationDecl {
             observation_route: None,
             upload_route: None,
             run_route: None,
+            stage_route: None,
+            seal_route: None,
             body: None,
             bind_proof_profile: None,
             no_occurrence_proof_profile: None,
@@ -279,6 +352,20 @@ impl OperationDecl {
             terminal_proof_profile: Some(ProofProfile::ModalFacadeTerminalV1),
             ..Self::bare(OperationKind::ObserveExactOccurrence)
         }
+    }
+
+    fn activate_supervisor() -> Self {
+        Self {
+            stage_route: Some(RouteName::Stage),
+            seal_route: Some(RouteName::StageSeal),
+            upload_route: Some(RouteName::Upload),
+            run_route: Some(RouteName::RunOnce),
+            ..Self::bare(OperationKind::StageThenUploadThenRunOnce)
+        }
+    }
+
+    fn guest_channel() -> Self {
+        Self::bare(OperationKind::ControllerRelayedGuestFrames)
     }
 
     fn is_unsupported(&self) -> bool {
@@ -353,7 +440,10 @@ impl ProviderSpec {
                 && valid_facade_name(&facade.lease_app)
                 && valid_facade_name(&facade.endpoint_label)
                 && facade.response_schema == FACADE_RESPONSE_SCHEMA
-                && facade.policy.schema == "ryeos.modal_lease_policy.v1"
+                && facade.policy.schema == FACADE_POLICY_SCHEMA
+                && facade.policy.stage.max_slots == STAGE_SLOTS
+                && facade.policy.stage.max_chunk_bytes == STAGE_CHUNK_BYTES
+                && facade.policy.stage.max_slot_bytes == STAGE_SLOT_BYTES
                 && facade.policy.cpu.is_finite()
                 && facade.policy.cpu > 0.0
                 && facade.policy.memory_mib > 0
@@ -392,12 +482,17 @@ impl ProviderSpec {
                 && operations.snapshot.is_unsupported(),
             "provider spec declares an operation this adapter does not implement"
         );
-        // Guest activation and the guest channel stay unsupported until
-        // activation exists, so Ready is never attested.
+        // Activation is the one staged sequence this adapter implements, and
+        // the guest channel exists only beside it.
+        let activation = operations.activate_supervisor == OperationDecl::activate_supervisor();
         ensure!(
-            operations.activate_supervisor.is_unsupported()
-                && operations.guest_channel.is_unsupported(),
-            "provider spec declares an activation or guest channel this adapter does not implement"
+            activation || operations.activate_supervisor.is_unsupported(),
+            "provider spec declares an activation this adapter does not implement"
+        );
+        ensure!(
+            operations.guest_channel.is_unsupported()
+                || (activation && operations.guest_channel == OperationDecl::guest_channel()),
+            "provider spec declares a guest channel without the activation it rides on"
         );
         ensure!(
             operations.terminate == OperationDecl::terminate()
@@ -409,6 +504,11 @@ impl ProviderSpec {
 
     pub fn facade(&self) -> &FacadePin {
         &self.facade
+    }
+
+    /// Whether the signed spec declares the staged activation sequence.
+    pub fn declares_activation(&self) -> bool {
+        self.operations.activate_supervisor == OperationDecl::activate_supervisor()
     }
 
     pub fn reconciles_allocation(&self) -> bool {
@@ -442,6 +542,9 @@ impl ProviderSpec {
             && self.operations.reconcile_termination == OperationDecl::reconcile_termination()
         {
             capabilities.insert(LifecycleCapability::ExactTerminalObservation);
+        }
+        if self.declares_activation() {
+            capabilities.insert(LifecycleCapability::SupervisorActivation);
         }
         capabilities
     }
@@ -545,7 +648,7 @@ impl LeaseProviderFacts for ProviderSpec {
     }
 
     fn guest_activation_declared(&self) -> bool {
-        false
+        self.declares_activation()
     }
 
     fn network_policy_capability(&self) -> &NetworkPolicyCapability {
@@ -609,7 +712,7 @@ mod tests {
         let spec = ProviderSpec::parse(FIXTURE, &schema_digest()).unwrap();
         assert_eq!(
             spec.facade().sha256,
-            "a9ebf7940e72bdfad4264c5075df04689681998ab1b0994d9588cc451fcb67ba"
+            "a06e28fb71e06cbf476499427375c2af54f158590dd8082536dc11664cfa5d03"
         );
         assert_eq!(spec.facade().app, "ryeos-lease-facade");
         assert_eq!(spec.facade().lease_app, "ryeos-lease-sandboxes");
@@ -720,7 +823,8 @@ mod tests {
             ("memory_mib", serde_json::json!(0)),
             ("image", serde_json::json!("")),
             ("command", serde_json::json!([])),
-            ("schema", serde_json::json!("ryeos.modal_lease_policy.v2")),
+            ("schema", serde_json::json!("ryeos.modal_lease_policy.v1")),
+            ("stage", serde_json::json!({"max_slots": 5, "max_chunk_bytes": 33554432, "max_slot_bytes": 4295032832u64})),
             ("extra", serde_json::json!(1)),
         ] {
             let mut value = fixture_value();
@@ -815,6 +919,97 @@ mod tests {
             value["operations"][operation] = patch;
             assert!(parse_value(&value).is_err(), "{operation}");
         }
+    }
+
+    fn declared_value() -> serde_json::Value {
+        let mut value = fixture_value();
+        value["operations"]["activate_supervisor"] = serde_json::json!({
+            "kind": "stage_then_upload_then_run_once",
+            "stage_route": "stage",
+            "seal_route": "stage_seal",
+            "upload_route": "upload",
+            "run_route": "run_once",
+        });
+        value
+    }
+
+    #[test]
+    fn activation_and_the_guest_channel_are_available_only_when_declared() {
+        let spec = parse_value(&fixture_value()).unwrap();
+        assert!(!spec.guest_activation_declared());
+        assert!(!spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        let spec = parse_value(&declared_value()).unwrap();
+        assert!(spec.guest_activation_declared());
+        assert!(spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        assert_eq!(
+            spec.guest_channel_profile().unwrap(),
+            GuestChannelProfile::UnsupportedPending
+        );
+        let mut value = declared_value();
+        value["operations"]["guest_channel"] =
+            serde_json::json!({"kind": "controller_relayed_guest_frames"});
+        let spec = parse_value(&value).unwrap();
+        assert_eq!(
+            spec.guest_channel_profile().unwrap(),
+            GuestChannelProfile::ControllerRelayedFrames
+        );
+    }
+
+    #[test]
+    fn a_declared_activation_must_be_exactly_the_implemented_sequence() {
+        for (field, bad) in [
+            ("stage_route", serde_json::json!("upload")),
+            ("seal_route", serde_json::json!("stage")),
+            ("upload_route", serde_json::json!("run_once")),
+            ("run_route", serde_json::json!("upload")),
+            ("extra", serde_json::json!(1)),
+        ] {
+            let mut value = declared_value();
+            value["operations"]["activate_supervisor"][field] = bad;
+            assert!(parse_value(&value).is_err(), "{field}");
+        }
+        let mut value = declared_value();
+        value["operations"]["activate_supervisor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("seal_route");
+        assert!(parse_value(&value).is_err());
+        let mut value = declared_value();
+        value["operations"]["guest_channel"] =
+            serde_json::json!({"kind": "controller_relayed_guest_frames", "route": "create"});
+        assert!(parse_value(&value).is_err());
+    }
+
+    #[test]
+    fn the_request_body_limits_cover_the_staged_chunk() {
+        assert!(RouteName::Stage.request_body_limit() > STAGE_CHUNK_BYTES * 4 / 3);
+        assert!(RouteName::Upload.request_body_limit() > LAUNCHER_UPLOAD_BYTES * 4 / 3);
+        assert_eq!(RouteName::StageSeal.request_body_limit(), 64 * 1024);
+        assert_eq!(RouteName::Stage.path(), "/v1/stage");
+        assert_eq!(RouteName::StageSeal.path(), "/v1/stage-seal");
+    }
+
+    #[test]
+    fn every_route_fits_the_transport_ceiling() {
+        for route in [
+            RouteName::Create,
+            RouteName::GetByName,
+            RouteName::GetById,
+            RouteName::Terminate,
+            RouteName::Upload,
+            RouteName::RunOnce,
+            RouteName::Stage,
+            RouteName::StageSeal,
+        ] {
+            assert!(
+                route.request_body_limit() <= TRANSPORT_IN_MEMORY_BODY_BYTES,
+                "{route:?}"
+            );
+        }
+        assert!(RouteName::Stage.request_body_limit() <= TRANSPORT_IN_MEMORY_BODY_BYTES);
+        assert!(LAUNCHER_UPLOAD_BYTES <= UPLOAD_BYTES);
+        assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES) <= TRANSPORT_IN_MEMORY_BODY_BYTES);
+        assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES + 1) > TRANSPORT_IN_MEMORY_BODY_BYTES);
     }
 
     #[test]

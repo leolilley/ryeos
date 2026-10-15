@@ -20,7 +20,7 @@ pub const MAX_REPLY_BYTES: usize = 256 * 1024;
 
 /// Every refusal code the facade documents. A reply naming another code is
 /// not attested.
-const KNOWN_REFUSALS: [&str; 51] = [
+const KNOWN_REFUSALS: [&str; 67] = [
     "unknown_route",
     "method_not_allowed",
     "content_length_required",
@@ -72,6 +72,22 @@ const KNOWN_REFUSALS: [&str; 51] = [
     "run_once_already_claimed",
     "upload_not_complete",
     "guest_step_failed",
+    "invalid_slot",
+    "invalid_offset",
+    "invalid_total_bytes",
+    "chunk_too_large",
+    "chunk_empty",
+    "chunk_sha256_mismatch",
+    "offset_mismatch",
+    "chunk_already_claimed",
+    "too_many_slots",
+    "slot_too_large",
+    "slot_sealed",
+    "slot_not_started",
+    "slot_not_sealed",
+    "seal_size_mismatch",
+    "seal_digest_mismatch",
+    "seal_digest_conflict",
 ];
 
 pub const NAME_TAKEN_POLICY_MISMATCH: &str = "name_taken_policy_mismatch";
@@ -201,6 +217,28 @@ pub struct RunOnceObservation {
     pub stdin_sha256: String,
 }
 
+/// The facade's acknowledgement of one appended chunk.
+#[derive(Debug, Deserialize)]
+pub struct StageObservation {
+    pub sandbox_id: String,
+    pub slot: String,
+    pub offset: u64,
+    pub bytes: u64,
+    pub slot_bytes: u64,
+    pub sha256: String,
+}
+
+/// The facade's acknowledgement of one sealed slot.
+#[derive(Debug, Deserialize)]
+pub struct SealObservation {
+    pub sandbox_id: String,
+    pub slot: String,
+    pub sealed: bool,
+    pub already_sealed: bool,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
 pub struct FacadeClient<'a, T: FacadeTransport> {
     transport: &'a T,
     pin: &'a FacadePin,
@@ -259,6 +297,48 @@ impl<'a, T: FacadeTransport> FacadeClient<'a, T> {
                 "sandbox_id": sandbox_id,
                 "content_b64": base64::engine::general_purpose::STANDARD.encode(content),
                 "sha256": lillux::sha256_hex(content),
+            }),
+        )
+    }
+
+    /// Append `chunk` to `slot` at `offset`. The facade appends only when
+    /// `offset` equals the slot's current size.
+    pub fn stage(
+        &self,
+        sandbox_id: &str,
+        slot: &str,
+        offset: u64,
+        chunk: &[u8],
+    ) -> Result<Reply, CallError> {
+        use base64::Engine as _;
+        self.call(
+            RouteName::Stage,
+            &json!({
+                "sandbox_id": sandbox_id,
+                "slot": slot,
+                "offset": offset,
+                "content_b64": base64::engine::general_purpose::STANDARD.encode(chunk),
+                "chunk_sha256": lillux::sha256_hex(chunk),
+            }),
+        )
+    }
+
+    /// Seal `slot`: the facade digests the staged file and refuses a size or
+    /// digest other than these.
+    pub fn stage_seal(
+        &self,
+        sandbox_id: &str,
+        slot: &str,
+        total_bytes: u64,
+        sha256: &str,
+    ) -> Result<Reply, CallError> {
+        self.call(
+            RouteName::StageSeal,
+            &json!({
+                "sandbox_id": sandbox_id,
+                "slot": slot,
+                "total_bytes": total_bytes,
+                "sha256": sha256,
             }),
         )
     }
@@ -399,6 +479,11 @@ pub fn expected_policy_record(
         "outbound_domain_allowlist": sorted,
         "image": pin.policy.image,
         "command": pin.policy.command,
+        "stage": {
+            "max_slots": pin.policy.stage.max_slots,
+            "max_chunk_bytes": pin.policy.stage.max_chunk_bytes,
+            "max_slot_bytes": pin.policy.stage.max_slot_bytes,
+        },
     })
 }
 
@@ -423,11 +508,16 @@ pub mod test_support {
             "endpoint_label": "ryeos-lease",
             "response_schema": "ryeos.modal_lease_facade.response.v1",
             "policy": {
-                "schema": "ryeos.modal_lease_policy.v1",
+                "schema": "ryeos.modal_lease_policy.v2",
                 "cpu": 1.0,
                 "memory_mib": 1024,
                 "image": "image",
                 "command": ["/bin/sh"],
+                "stage": {
+                    "max_slots": 4,
+                    "max_chunk_bytes": 33554432,
+                    "max_slot_bytes": 4295032832u64,
+                },
             },
         }))
         .unwrap()
@@ -646,6 +736,54 @@ mod tests {
     }
 
     #[test]
+    fn stage_requests_are_fixed_shapes_over_the_stage_routes() {
+        let (fake, pin) = client_for(vec![
+            envelope("stage", 200, json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "offset": 0, "bytes": 3, "slot_bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
+            envelope("stage_seal", 200, json!({"ok": true, "sandbox_id": "sb-1", "slot": "pkg", "sealed": true, "already_sealed": false, "bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
+            refusal("stage", "offset_mismatch"),
+            refusal("stage_seal", "seal_digest_mismatch"),
+        ]);
+        let client = FacadeClient::new(&fake, &pin);
+        let staged = client.stage("sb-1", "pkg", 0, b"abc").unwrap();
+        let sealed = client.stage_seal("sb-1", "pkg", 3, &lillux::sha256_hex(b"abc")).unwrap();
+        assert_eq!(
+            client.stage("sb-1", "pkg", 9, b"x").unwrap().refusal(),
+            Some("offset_mismatch")
+        );
+        assert_eq!(
+            client.stage_seal("sb-1", "pkg", 3, &"0".repeat(64)).unwrap().refusal(),
+            Some("seal_digest_mismatch")
+        );
+        let requests = fake.requests.borrow();
+        assert_eq!(requests[0].0, RouteName::Stage);
+        assert_eq!(
+            requests[0].1,
+            json!({"sandbox_id": "sb-1", "slot": "pkg", "offset": 0, "content_b64": "YWJj", "chunk_sha256": lillux::sha256_hex(b"abc")})
+        );
+        assert_eq!(requests[1].0, RouteName::StageSeal);
+        assert_eq!(
+            requests[1].1,
+            json!({"sandbox_id": "sb-1", "slot": "pkg", "total_bytes": 3, "sha256": lillux::sha256_hex(b"abc")})
+        );
+        assert_eq!(staged.observation::<StageObservation>().unwrap().slot_bytes, 3);
+        assert!(sealed.observation::<SealObservation>().unwrap().sealed);
+    }
+
+    #[test]
+    fn a_stage_reply_from_another_pin_is_not_attested() {
+        let (fake, pin) = client_for(vec![envelope_with(
+            "stage",
+            200,
+            &"b".repeat(64),
+            json!({"ok": true}),
+        )]);
+        assert_eq!(
+            FacadeClient::new(&fake, &pin).stage("sb-1", "pkg", 0, b"a").unwrap_err(),
+            CallError::PinMismatch
+        );
+    }
+
+    #[test]
     fn sorted_compact_digest_matches_a_python_style_canonical_form() {
         let value = json!({"b": [1, {"z": true, "a": null}], "a": "x\"y", "c": 3});
         let expected = "{\"a\":\"x\\\"y\",\"b\":[1,{\"a\":null,\"z\":true}],\"c\":3}";
@@ -672,7 +810,7 @@ mod tests {
         );
         assert_eq!(
             sorted_compact_sha256(&record),
-            "ae315d6e1392eaeeb8ee9da7f2b5eb30fa9a0be653d4fb8d6e15cf176d025a29"
+            "87ec993c0f85617625df04d078bebb0d3c70ee5ade309709ae57333e868143aa"
         );
     }
 }

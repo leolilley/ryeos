@@ -9,6 +9,7 @@ description = "Modal sandbox lease lifecycle adapter over the signed RyeOS lease
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+hex = { workspace = true }
 lillux = { path = "../../kernel/lillux" }
 ryeos-external-execution-contract = { path = "../../engine/ryeos-external-execution-contract" }
 ryeos-http-transport = { path = "../../engine/ryeos-http-transport" }

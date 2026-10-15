@@ -80,9 +80,7 @@ impl FacadeTransport for HttpFacadeTransport<'_> {
         {
             return Err(TransportFailure::NoRequestSent);
         }
-        let mut limits = Limits::control_plane();
-        limits.response_body_bytes = MAX_REPLY_BYTES as u64;
-        limits.response_body_wire_bytes = MAX_REPLY_BYTES as u64 * 2;
+        let limits = limits_for(route);
         let request = HttpRequest {
             method: "POST".into(),
             url,
@@ -120,6 +118,16 @@ impl FacadeTransport for HttpFacadeTransport<'_> {
             body: bytes,
         })
     }
+}
+
+/// The request limits for one route: the control-plane defaults with the
+/// request body bound raised to what this route's payload needs.
+fn limits_for(route: RouteName) -> Limits {
+    let mut limits = Limits::control_plane();
+    limits.request_body_bytes = route.request_body_limit();
+    limits.response_body_bytes = MAX_REPLY_BYTES as u64;
+    limits.response_body_wire_bytes = MAX_REPLY_BYTES as u64 * 2;
+    limits
 }
 
 fn has_json_content_type(headers: &[Header]) -> bool {
@@ -181,6 +189,14 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn limits_follow_the_route_body_bound() {
+        for route in [RouteName::Create, RouteName::Stage, RouteName::Upload, RouteName::RunOnce] {
+            assert_eq!(limits_for(route).request_body_bytes, route.request_body_limit());
+        }
+        assert!(limits_for(RouteName::Stage).request_body_bytes > 32 * 1024 * 1024);
     }
 
     #[test]
