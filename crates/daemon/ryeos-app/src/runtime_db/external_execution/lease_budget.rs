@@ -3,14 +3,17 @@
 //!
 //! Workload: remote leases a lifecycle adapter creates for placed sessions,
 //! each of which costs provider spend for as long as it lives. Node policy
-//! caps how many are held at once and how many lease-seconds the leases
-//! reserved in the last 24 hours may use. A lease reserves its whole
-//! lifetime in the same transaction that reserves its allocation, before the
-//! adapter is asked to create anything, so the worst case stays bounded even
-//! when a create's outcome is unknown. When the allocation settles, the lease
-//! is released in that same settling transaction: it stops counting as held,
-//! and only the seconds it actually lasted stay charged. A lease that does not
-//! fit is refused with the limit it met; nothing is queued.
+//! caps how many are held at once and how many budget seconds the leases
+//! reserved in the last 24 hours may use. One lease-second costs as many
+//! budget seconds as the budget weight its admitted provider spec declares,
+//! so a costlier provider (a GPU lease, say) spends the same daily budget
+//! faster. A lease reserves its whole weighted lifetime in the same
+//! transaction that reserves its allocation, before the adapter is asked to
+//! create anything, so the worst case stays bounded even when a create's
+//! outcome is unknown. When the allocation settles, the lease is released in
+//! that same settling transaction: it stops counting as held, and only the
+//! seconds it actually lasted, at its weight, stay charged. A lease that does
+//! not fit is refused with the limit it met; nothing is queued.
 //!
 //! A held lease is released only by settlement, never by elapsed time: a
 //! quarantined allocation whose provider occurrence is unresolved keeps its
@@ -26,6 +29,7 @@ CREATE TABLE external_execution_lease_budget (
     placement_thread_id TEXT PRIMARY KEY,
     reserved_at_ms INTEGER NOT NULL CHECK (reserved_at_ms > 0),
     reserved_seconds INTEGER NOT NULL CHECK (reserved_seconds > 0),
+    budget_weight INTEGER NOT NULL CHECK (budget_weight BETWEEN 1 AND 1000),
     released_at_ms INTEGER,
     charged_seconds INTEGER,
     CHECK ((released_at_ms IS NULL AND charged_seconds IS NULL)
@@ -47,6 +51,7 @@ WHEN OLD.released_at_ms IS NOT NULL
  OR NEW.placement_thread_id != OLD.placement_thread_id
  OR NEW.reserved_at_ms != OLD.reserved_at_ms
  OR NEW.reserved_seconds != OLD.reserved_seconds
+ OR NEW.budget_weight != OLD.budget_weight
 BEGIN SELECT RAISE(ABORT, 'a lease budget is released once and otherwise immutable'); END;
 CREATE TRIGGER external_execution_lease_budget_held_no_delete
 BEFORE DELETE ON external_execution_lease_budget
@@ -65,18 +70,20 @@ BEGIN
 END;
 "#;
 
-/// One lease's charge against the node budget, taken from node policy: the
-/// lease's whole lifetime, and the limits it must fit under.
+/// One lease's lifetime checked against node policy, before its lifecycle
+/// adapter has admitted it and so before the budget weight of the provider
+/// spec that judges it is known. Only [`Self::weighted_by`] turns it into a
+/// charge the budget can reserve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ExternalLeaseCharge {
+pub(crate) struct UnweightedLeaseCharge {
     pub(crate) lifetime_seconds: u32,
     pub(crate) max_concurrent_leases: u32,
     pub(crate) daily_lease_seconds: u64,
 }
 
-impl ExternalLeaseCharge {
-    /// The charge of one lease of `lifetime_seconds` under `budget`, refused
-    /// when the lease would outlive the budget's lifetime ceiling.
+impl UnweightedLeaseCharge {
+    /// One lease of `lifetime_seconds` under `budget`, refused when the lease
+    /// would outlive the budget's lifetime ceiling.
     pub(crate) fn under(
         budget: &ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget,
         lifetime_seconds: u32,
@@ -94,10 +101,59 @@ impl ExternalLeaseCharge {
             daily_lease_seconds: budget.daily_lease_seconds,
         })
     }
+
+    /// The charge of this lease at `budget_weight`, the weight the admitted
+    /// provider spec declares. A weight outside the contract's bound is
+    /// refused, never clamped.
+    pub(crate) fn weighted_by(self, budget_weight: u32) -> Result<ExternalLeaseCharge> {
+        let Self {
+            lifetime_seconds,
+            max_concurrent_leases,
+            daily_lease_seconds,
+        } = self;
+        let charge = ExternalLeaseCharge {
+            lifetime_seconds,
+            budget_weight,
+            max_concurrent_leases,
+            daily_lease_seconds,
+        };
+        charge.validate()?;
+        Ok(charge)
+    }
 }
 
-/// The node's lease use at `now_ms`: leases held, and lease-seconds reserved
-/// or used by the leases reserved in the last 24 hours.
+/// One lease's charge against the node budget: the lease's whole lifetime,
+/// the budget weight of the provider spec that admitted it, and the node
+/// policy limits it must fit under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExternalLeaseCharge {
+    pub(crate) lifetime_seconds: u32,
+    pub(crate) budget_weight: u32,
+    pub(crate) max_concurrent_leases: u32,
+    pub(crate) daily_lease_seconds: u64,
+}
+
+impl ExternalLeaseCharge {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            ryeos_external_execution_contract::valid_lease_budget_weight(self.budget_weight),
+            "lease refused: its provider spec's budget_weight {} is outside 1..={}",
+            self.budget_weight,
+            ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT
+        );
+        ensure!(self.lifetime_seconds > 0, "lease refused: its lifetime is zero");
+        Ok(())
+    }
+
+    /// The budget seconds the lease's whole lifetime reserves.
+    pub(crate) fn weighted_lifetime_seconds(&self) -> u64 {
+        u64::from(self.lifetime_seconds) * u64::from(self.budget_weight)
+    }
+}
+
+/// The node's lease use at `now_ms`: leases held, and the budget seconds
+/// reserved or used by the leases reserved in the last 24 hours, each
+/// lease-second counted at its lease's budget weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExternalLeaseUse {
     pub(crate) held: u64,
@@ -111,7 +167,7 @@ pub(super) fn lease_use(conn: &Connection, now_ms: i64) -> Result<ExternalLeaseU
         |row| row.get(0),
     )?;
     let day_seconds: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(COALESCE(charged_seconds, reserved_seconds)),0)
+        "SELECT COALESCE(SUM(COALESCE(charged_seconds, reserved_seconds) * budget_weight),0)
            FROM external_execution_lease_budget WHERE reserved_at_ms > ?1",
         [now_ms.saturating_sub(DAY_MS)],
         |row| row.get(0),
@@ -128,6 +184,7 @@ pub(super) fn require_room(
     now_ms: i64,
     charge: &ExternalLeaseCharge,
 ) -> Result<()> {
+    charge.validate()?;
     let used = lease_use(conn, now_ms)?;
     ensure!(
         used.held < u64::from(charge.max_concurrent_leases),
@@ -136,18 +193,29 @@ pub(super) fn require_room(
         used.held,
         charge.max_concurrent_leases
     );
+    let weighted = charge.weighted_lifetime_seconds();
+    ensure!(
+        weighted <= charge.daily_lease_seconds,
+        "lease refused: this lease's whole {}s lifetime at budget_weight {} ({weighted} budget \
+         seconds) exceeds the node's daily budget of {} budget seconds; it can never be \
+         admitted",
+        charge.lifetime_seconds,
+        charge.budget_weight,
+        charge.daily_lease_seconds
+    );
     let needed = used
         .day_seconds
-        .checked_add(u64::from(charge.lifetime_seconds))
+        .checked_add(weighted)
         .context("lease-second total overflow")?;
     ensure!(
         needed <= charge.daily_lease_seconds,
         "lease refused: the node's daily lease budget is {}s and leases reserved in the last \
-         24 hours already hold {}s, so this lease's whole {}s lifetime does not fit; none is \
-         queued",
+         24 hours already hold {}s, so this lease's whole {}s lifetime at its provider spec's \
+         budget_weight {} ({weighted}s) does not fit; none is queued",
         charge.daily_lease_seconds,
         used.day_seconds,
-        charge.lifetime_seconds
+        charge.lifetime_seconds,
+        charge.budget_weight
     );
     Ok(())
 }
@@ -167,8 +235,13 @@ pub(super) fn reserve(
         [now_ms.saturating_sub(DAY_MS)],
     )?;
     conn.execute(
-        "INSERT INTO external_execution_lease_budget VALUES(?1,?2,?3,NULL,NULL)",
-        params![placement, now_ms, i64::from(charge.lifetime_seconds)],
+        "INSERT INTO external_execution_lease_budget VALUES(?1,?2,?3,?4,NULL,NULL)",
+        params![
+            placement,
+            now_ms,
+            i64::from(charge.lifetime_seconds),
+            i64::from(charge.budget_weight)
+        ],
     )?;
     Ok(())
 }
@@ -286,6 +359,7 @@ mod tests {
     fn charge(max_concurrent_leases: u32, daily_lease_seconds: u64) -> ExternalLeaseCharge {
         ExternalLeaseCharge {
             lifetime_seconds: 3600,
+            budget_weight: 1,
             max_concurrent_leases,
             daily_lease_seconds,
         }
@@ -411,6 +485,186 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    fn budget(daily_lease_seconds: u64) -> ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+        ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+            max_concurrent_leases: 8,
+            max_lease_lifetime_seconds: 3600,
+            daily_lease_seconds,
+            turn_end_margin_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn a_weight_of_one_charges_exactly_the_unweighted_lifetime() {
+        let unweighted = UnweightedLeaseCharge::under(&budget(7200), 3600).unwrap();
+        let one = unweighted.weighted_by(1).unwrap();
+        assert_eq!(one, ExternalLeaseCharge { budget_weight: 1, ..charge(8, 7200) });
+        assert_eq!(one.weighted_lifetime_seconds(), 3600);
+
+        // The same leases, settlements and refusals as before weights
+        // existed: two whole lifetimes fill a 7200s day and a third is
+        // refused naming the same totals.
+        let (_dir, db) = open();
+        let now = 10 * DAY_MS;
+        for placement in ["T-a", "T-b", "T-c"] {
+            allocation(&db, placement);
+        }
+        lease(&db, "T-a", now, one).unwrap();
+        lease(&db, "T-b", now, one).unwrap();
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 2, day_seconds: 7200 });
+        let refusal = lease(&db, "T-c", now, one).unwrap_err().to_string();
+        assert!(
+            refusal.contains("daily lease budget is 7200s")
+                && refusal.contains("already hold 7200s")
+                && refusal.contains("budget_weight 1 (3600s) does not fit"),
+            "{refusal}"
+        );
+        settle(&db, "T-a", now + 90_000);
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 3690 });
+    }
+
+    #[test]
+    fn a_weighted_lease_consumes_its_weight_and_is_refused_at_the_boundary() {
+        // Weight 4 under a 4h day: one 1h lease reserves 4h of budget, so
+        // exactly one fits and a second is refused at the boundary.
+        let four = UnweightedLeaseCharge::under(&budget(4 * 3600), 3600)
+            .unwrap()
+            .weighted_by(4)
+            .unwrap();
+        assert_eq!(four.weighted_lifetime_seconds(), 4 * 3600);
+        let (_dir, db) = open();
+        let now = 10 * DAY_MS;
+        for placement in ["T-a", "T-b", "T-c"] {
+            allocation(&db, placement);
+        }
+        lease(&db, "T-a", now, four).unwrap();
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 4 * 3600 });
+        let refusal = lease(&db, "T-b", now, four).unwrap_err().to_string();
+        assert!(
+            refusal.contains(
+                "the node's daily lease budget is 14400s and leases reserved in the last 24 \
+                 hours already hold 14400s, so this lease's whole 3600s lifetime at its \
+                 provider spec's budget_weight 4 (14400s) does not fit; none is queued"
+            ),
+            "{refusal}"
+        );
+
+        // Settlement releases exactly what was reserved beyond the seconds
+        // used: 10s lasted at weight 4 stays charged as 40s, and the other
+        // 14360s return to the day.
+        settle(&db, "T-a", now + 10_000);
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 40 });
+        // A weight-1 lease of the remaining room fits exactly; one second
+        // more of weighted room does not.
+        let fill = ExternalLeaseCharge {
+            lifetime_seconds: 4 * 3600 - 40,
+            budget_weight: 1,
+            max_concurrent_leases: 8,
+            daily_lease_seconds: 4 * 3600,
+        };
+        let over = ExternalLeaseCharge {
+            lifetime_seconds: 4 * 3600 - 39,
+            ..fill
+        };
+        let refusal = lease(&db, "T-b", now, over).unwrap_err().to_string();
+        assert!(
+            refusal.contains("already hold 40s") && refusal.contains("none is queued"),
+            "{refusal}"
+        );
+        lease(&db, "T-b", now, fill).unwrap();
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 1, day_seconds: 4 * 3600 });
+        settle(&db, "T-b", now);
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 40 });
+        // A settled lease keeps its weight: the stored row is immutable.
+        let weight: i64 = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT budget_weight FROM external_execution_lease_budget
+                      WHERE placement_thread_id='T-a'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(weight, 4);
+    }
+
+    #[test]
+    fn a_lease_heavier_than_the_whole_day_is_refused_as_never_admissible() {
+        let (_dir, db) = open();
+        let now = 10 * DAY_MS;
+        allocation(&db, "T-a");
+        // Weight 3 on a 1h lease is 10800 budget seconds, more than the
+        // whole 7200s day even with nothing else held.
+        let heavy = UnweightedLeaseCharge::under(&budget(7200), 3600)
+            .unwrap()
+            .weighted_by(3)
+            .unwrap();
+        let refusal = lease(&db, "T-a", now, heavy).unwrap_err().to_string();
+        assert_eq!(
+            refusal,
+            "lease refused: this lease's whole 3600s lifetime at budget_weight 3 (10800 budget \
+             seconds) exceeds the node's daily budget of 7200 budget seconds; it can never be \
+             admitted"
+        );
+        assert!(!refusal.contains("already hold"), "{refusal}");
+        assert_eq!(used(&db, now), ExternalLeaseUse { held: 0, day_seconds: 0 });
+        // Exactly the whole day fits once, and the next is the day-is-full
+        // refusal, not the never-admissible one.
+        let whole_day = UnweightedLeaseCharge::under(&budget(7200), 3600)
+            .unwrap()
+            .weighted_by(2)
+            .unwrap();
+        lease(&db, "T-a", now, whole_day).unwrap();
+        allocation(&db, "T-b");
+        let refusal = lease(&db, "T-b", now, whole_day).unwrap_err().to_string();
+        assert!(
+            refusal.contains("already hold 7200s") && refusal.contains("none is queued")
+                && !refusal.contains("never be admitted"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_zero_or_out_of_bound_weight_is_refused_before_and_by_the_journal() {
+        let unweighted = UnweightedLeaseCharge::under(&budget(7200), 60).unwrap();
+        let max = ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT;
+        for weight in [0, max + 1, u32::MAX] {
+            let refusal = unweighted.weighted_by(weight).unwrap_err().to_string();
+            assert!(
+                refusal.contains(&format!(
+                    "lease refused: its provider spec's budget_weight {weight} is outside 1..={max}"
+                )),
+                "{refusal}"
+            );
+        }
+        unweighted.weighted_by(max).unwrap();
+
+        let (_dir, db) = open();
+        let now = 10 * DAY_MS;
+        allocation(&db, "T-a");
+        let zero = ExternalLeaseCharge { budget_weight: 0, ..charge(2, 7200) };
+        assert!(lease(&db, "T-a", now, zero).is_err());
+        // The journal holds the same bound as the contract.
+        for (weight, accepted) in [(0, false), (i64::from(max) + 1, false), (i64::from(max), true)] {
+            let inserted = db.conn.with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO external_execution_lease_budget VALUES('T-a',?1,1,?2,NULL,NULL)",
+                    params![now, weight],
+                )?)
+            });
+            assert_eq!(inserted.is_ok(), accepted, "weight {weight}");
+        }
+        assert!(db
+            .conn
+            .with_sql(|connection| Ok(connection.execute(
+                "UPDATE external_execution_lease_budget SET budget_weight=1",
+                [],
+            )?))
+            .is_err());
     }
 
     #[test]

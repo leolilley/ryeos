@@ -12,7 +12,7 @@ use anyhow::ensure;
 mod channel;
 pub use channel::ExternalDirectOutput;
 mod lease_budget;
-pub(crate) use lease_budget::{ExternalLeaseCharge, HeldExternalLease};
+pub(crate) use lease_budget::{ExternalLeaseCharge, HeldExternalLease, UnweightedLeaseCharge};
 pub(super) use lease_budget::JOURNAL_SQL as LEASE_BUDGET_SQL;
 pub(crate) mod connector;
 mod qualification_batch;

@@ -50,11 +50,15 @@ pub const MAX_EXTERNAL_LEASE_LIFETIME_SECONDS: u32 = 24 * 60 * 60;
 ///
 /// Every lease runs for its placement binding's execution timeout, which
 /// must not exceed `max_lease_lifetime_seconds`; that ceiling is a bound, not
-/// the lifetime itself. The lease reserves its whole lifetime against
-/// `daily_lease_seconds` before the provider is contacted. At most `max_concurrent_leases` leases are held at
-/// once. A held lease is released when its allocation settles, and only the
-/// seconds it actually lasted stay charged. The daily budget covers the
-/// leases reserved in the last 24 hours. A lease that does not fit is
+/// the lifetime itself. `daily_lease_seconds` is counted in budget seconds:
+/// one lease-second costs as many budget seconds as the `budget_weight` its
+/// admitting signed provider spec declares, so a costlier provider (a GPU
+/// lease, say) spends the same budget faster. The lease reserves its whole
+/// lifetime at that weight against `daily_lease_seconds` before the provider
+/// is contacted. At most `max_concurrent_leases` leases are held at once. A
+/// held lease is released when its allocation settles, and only the seconds
+/// it actually lasted, at its weight, stay charged. The daily budget covers
+/// the leases reserved in the last 24 hours. A lease that does not fit is
 /// refused, never queued.
 ///
 /// `turn_end_margin_seconds` is the lease time a turn must leave unused
@@ -86,14 +90,16 @@ impl ExternalLeaseBudget {
             );
         }
         let most = u64::from(self.max_concurrent_leases)
-            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS);
+            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS)
+            * u64::from(ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT);
         if self.daily_lease_seconds < u64::from(self.max_lease_lifetime_seconds)
             || self.daily_lease_seconds > most
         {
             bail!(
-                "node external lease budget daily_lease_seconds must hold at least one whole \
-                 lease lifetime and at most {most} seconds, what its concurrent leases could \
-                 use in a day"
+                "node external lease budget daily_lease_seconds is counted in budget seconds \
+                 (lease-seconds times the admitting provider spec's budget_weight) and must \
+                 hold at least one whole lease lifetime at weight 1 and at most {most} budget \
+                 seconds, what its concurrent leases could use in a day at the highest weight"
             );
         }
         if self.turn_end_margin_seconds == 0
@@ -462,7 +468,22 @@ mod tests {
                 .is_some()
         );
         assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60 - 1).unwrap().contains("daily"));
-        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 + 1).is_some());
+        // The ceiling is two concurrent day-long leases at the highest
+        // budget weight, in budget seconds.
+        let most = 2
+            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS)
+            * u64::from(ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT);
+        assert_eq!(most, 2 * 24 * 60 * 60 * 1000);
+        let over = refused(|b| {
+            b.daily_lease_seconds = 2 * 24 * 60 * 60 * 1000 + 1;
+        })
+        .unwrap();
+        assert!(
+            over.contains("budget seconds") && over.contains(&format!("at most {most}")),
+            "{over}"
+        );
+        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 * 1000).is_none());
+        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 + 1).is_none());
         assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60).is_none());
         assert!(refused(|b| b.turn_end_margin_seconds = 0).unwrap().contains("turn_end_margin"));
         assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60).is_some());

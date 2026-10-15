@@ -89,12 +89,13 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     /// provider contact: the backend's lifecycle adapter judges one lease
     /// request against its signed provider spec while holding no credential,
     /// network or activation authority. Returns the exact request bytes it
-    /// admitted; a refusal is an error carrying the adapter's plain reason.
+    /// admitted with the budget weight its signed provider spec declares; a
+    /// refusal is an error carrying the adapter's plain reason.
     fn admit_lease(
         &self,
         _inputs: &crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
         _deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<crate::external_lifecycle_adapter::lease_admission::AdmittedLease> {
         bail!(
             "lease admission refused: external placement backend `{}` admits no leases",
             self.backend_id()
@@ -7563,10 +7564,10 @@ fn admit_fresh_lease_then_read_credential(
 /// Stage-one lease admission for a fresh placed session: the binding's
 /// adapter judges the lease [`session_lease_request`] builds, offline. Returns
 /// the admitted request bytes, encoded for the reservation, and the lease's
-/// charge against the node budget, which the reservation takes in its own
-/// transaction. A session with no structured-session profile needs no lease.
-/// A session whose deadline the lease could not cover is refused before the
-/// adapter is asked.
+/// charge against the node budget at the budget weight of the provider spec
+/// that admitted it, which the reservation takes in its own transaction. A
+/// session with no structured-session profile needs no lease. A session whose
+/// deadline the lease could not cover is refused before the adapter is asked.
 fn admit_session_lease(
     state: &AppState,
     profile_contract: Option<&serde_json::Value>,
@@ -7604,12 +7605,13 @@ fn admit_session_lease(
         ))),
     )?;
     Ok(Some((
-        ExternalAllocationReservation::encode_admitted_adapter_request(&admitted)?,
+        ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
         charge,
     )))
 }
 
-/// The lease a placed session needs, if any, and its charge.
+/// The lease a placed session needs, if any, and its charge before the
+/// admitting provider spec's budget weight is known.
 ///
 /// Only a session whose admitted structured-session profile names `lease`
 /// or `guest` requirements needs a lease; any other is placed without one.
@@ -7626,7 +7628,7 @@ fn session_lease_request(
 ) -> Result<
     Option<(
         crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
-        crate::runtime_db::external_execution::ExternalLeaseCharge,
+        crate::runtime_db::external_execution::UnweightedLeaseCharge,
     )>,
 > {
     let Some(requirements) =
@@ -7644,7 +7646,7 @@ fn session_lease_request(
              execution policy declares no external lease budget"
         )
     })?;
-    let charge = crate::runtime_db::external_execution::ExternalLeaseCharge::under(
+    let charge = crate::runtime_db::external_execution::UnweightedLeaseCharge::under(
         budget,
         contract.timeout_seconds,
     )
@@ -7862,6 +7864,9 @@ fn supervisor_activation(
                     if let Err(cleanup) = guest_package.discard() {
                         return Err(error.context(format!(
                             "guest import refusal also failed package cleanup: {cleanup:#}"
+    let charge = charge
+        .weighted_by(admitted.budget_weight)
+        .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
                         )));
                     }
                     return Err(error);

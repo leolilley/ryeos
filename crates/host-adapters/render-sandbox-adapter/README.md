@@ -665,9 +665,17 @@ frames to it on an inherited descriptor.
   implemented operation kinds only (`lease.create_bound`,
   `lease.lifetime_bound`, `lease.network_policy`, `lease.terminate_observed`,
   and `guest.ready_authenticated` once a guest channel exists). It returns
-  `admitted` with `met_by`, the exact `network_policy` the create will request
-  and its `network_policy_evidence`, or `refused` with every unmet entry and a
-  plain reason. A lifetime above Render's 24 h limit is also refused.
+  `admitted` with `met_by`, the exact `network_policy` the create will request,
+  its `network_policy_evidence` and the spec's `budget_weight`, or `refused`
+  with every unmet entry and a plain reason. A lifetime above Render's 24 h
+  limit is also refused.
+- `budget_weight` is a required field of the signed provider spec: how many
+  node lease-budget seconds one second of a Render lease costs, an integer
+  from 1 to 1000. A spec without it, or with a value outside that range, is
+  refused when parsed; there is no default. The authored bundle spec declares
+  1. The controller never parses the spec: it reads the weight from the
+  admitted verdict, which names the spec's digest, and charges its node lease
+  budget the lease's lifetime times that weight.
 - Guest egress is data on the lease request: `guest_network_allow` lists the
   hosts the guest may reach over HTTPS. A remote Codex lease names exactly its
   controller's hostname, so the guest can dial one authenticated WebSocket

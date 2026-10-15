@@ -10,6 +10,7 @@
     "bootstrap_settings_schema_digest",
     "qualification_settings_schema_digest",
     "origin_profile",
+    "budget_weight",
     "network_policy",
     "routes",
     "operations"
@@ -30,6 +31,7 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "origin_profile": { "const": "render_api_v1" },
+    "budget_weight": { "type": "integer", "minimum": 1, "maximum": 1000 },
     "network_policy": {
       "oneOf": [
         {

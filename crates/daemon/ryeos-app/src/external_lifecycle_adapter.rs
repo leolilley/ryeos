@@ -1087,7 +1087,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self,
         inputs: &lease_admission::LeaseAdmissionInputs,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<lease_admission::AdmittedLease> {
         self.invoke_admit_lease(inputs, deadline)
     }
 
@@ -2138,7 +2138,7 @@ impl ExecutableExternalPlacementBackend {
         &self,
         inputs: &lease_admission::LeaseAdmissionInputs,
         deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<lease_admission::AdmittedLease> {
         let request = lease_admission::canonical_request(
             &self.declaration.id,
             &self.provider_spec.sha256,
@@ -2174,13 +2174,16 @@ impl ExecutableExternalPlacementBackend {
                 self.declaration.id, inputs.workload
             )
         })?;
-        lease_admission::require_admitted(
+        let budget_weight = lease_admission::require_admitted(
             &response.bytes,
             &request,
             &self.provider_spec.sha256,
             &self.declaration.id,
         )?;
-        Ok(request)
+        Ok(lease_admission::AdmittedLease {
+            request,
+            budget_weight,
+        })
     }
 
     fn common(

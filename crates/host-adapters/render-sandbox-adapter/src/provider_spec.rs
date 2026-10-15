@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::{
-    LifecycleCapability, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, from_json_slice_strict,
+    LifecycleCapability, MAX_LEASE_BUDGET_WEIGHT, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+    from_json_slice_strict, valid_lease_budget_weight,
 };
 pub(crate) use ryeos_remote_lease_core::{
     EgressPolicy, EgressRule, GUEST_READY_AUTHENTICATED, GuestChannelProfile, LEASE_CREATE_BOUND,
@@ -34,6 +35,10 @@ pub(crate) struct ProviderSpec {
     bootstrap_settings_schema_digest: String,
     qualification_settings_schema_digest: String,
     origin_profile: OriginProfile,
+    /// How many node lease-budget seconds one second of a Render lease
+    /// costs. Required: a spec that leaves it out is refused, never given a
+    /// default.
+    budget_weight: u32,
     network_policy: NetworkPolicyCapability,
     routes: Routes,
     operations: Operations,
@@ -413,6 +418,11 @@ impl ProviderSpec {
             "provider spec identity or profile is unsupported"
         );
         ensure!(
+            valid_lease_budget_weight(self.budget_weight),
+            "provider spec budget_weight {} is outside 1..={MAX_LEASE_BUDGET_WEIGHT}",
+            self.budget_weight
+        );
+        ensure!(
             route_matches(
                 &self.routes.sandbox_collection,
                 &[
@@ -488,6 +498,11 @@ impl ProviderSpec {
 
     pub(crate) fn network_policy_capability(&self) -> &NetworkPolicyCapability {
         &self.network_policy
+    }
+
+    /// The node lease-budget seconds one second of a Render lease costs.
+    pub(crate) fn budget_weight(&self) -> u32 {
+        self.budget_weight
     }
 
     fn validate_operations(&self) -> Result<()> {
@@ -1329,6 +1344,43 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_budget_weight_is_required_and_bounded() {
+        assert_eq!(
+            ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST)
+                .unwrap()
+                .budget_weight(),
+            1
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        let parse = |value: &serde_json::Value| {
+            ProviderSpec::parse(&serde_json::to_vec(value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+        };
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("budget_weight");
+        let refusal = format!("{:#}", parse(&missing).unwrap_err());
+        assert!(refusal.contains("budget_weight"), "{refusal}");
+        for weight in [0, MAX_LEASE_BUDGET_WEIGHT + 1] {
+            let mut out_of_bound = value.clone();
+            out_of_bound["budget_weight"] = serde_json::json!(weight);
+            let refusal = format!("{:#}", parse(&out_of_bound).unwrap_err());
+            assert!(
+                refusal.contains(&format!(
+                    "provider spec budget_weight {weight} is outside 1..={MAX_LEASE_BUDGET_WEIGHT}"
+                )),
+                "{refusal}"
+            );
+        }
+        for refused in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1")] {
+            let mut malformed = value.clone();
+            malformed["budget_weight"] = refused;
+            assert!(parse(&malformed).is_err());
+        }
+        let mut heavy = value;
+        heavy["budget_weight"] = serde_json::json!(MAX_LEASE_BUDGET_WEIGHT);
+        assert_eq!(parse(&heavy).unwrap().budget_weight(), MAX_LEASE_BUDGET_WEIGHT);
     }
 
     #[test]

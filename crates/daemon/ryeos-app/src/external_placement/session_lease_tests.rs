@@ -366,6 +366,7 @@ fn leased_session(
             &binding,
             &crate::runtime_db::external_execution::ExternalLeaseCharge {
                 lifetime_seconds: 60,
+                budget_weight: 1,
                 max_concurrent_leases: 2,
                 daily_lease_seconds: 8 * 60 * 60,
             },

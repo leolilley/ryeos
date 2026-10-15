@@ -83,6 +83,17 @@ pub const LIFECYCLE_REMAINING_TIMEOUT_MS_ENV: &str = "RYEOS_LIFECYCLE_REMAINING_
 pub const LEASE_ADMISSION_FD_ENV: &str = "RYEOS_LIFECYCLE_LEASE_ADMISSION_FD";
 /// Bound on the admitted request bytes the controller retains and returns.
 pub const MAX_LEASE_ADMISSION_BYTES: usize = 64 * 1024;
+/// Bound on the budget weight a signed lease provider spec declares: how many
+/// node lease-budget seconds one second of its lease costs. A weight of 1
+/// costs a lease-second as one budget second; a costlier provider (a GPU
+/// lease, say) declares a larger weight so the same node budget admits fewer
+/// of its seconds. Zero would make a lease free and is never admitted.
+pub const MAX_LEASE_BUDGET_WEIGHT: u32 = 1000;
+
+/// Whether `weight` is a budget weight a provider spec may declare.
+pub fn valid_lease_budget_weight(weight: u32) -> bool {
+    (1..=MAX_LEASE_BUDGET_WEIGHT).contains(&weight)
+}
 /// Inherited bidirectional byte-stream descriptor over which the controller
 /// relays one occurrence's channel frames to the adapter and the adapter's
 /// replies back, each one message framed by `length_prefixed`.

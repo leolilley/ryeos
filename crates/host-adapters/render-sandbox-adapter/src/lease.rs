@@ -5,7 +5,8 @@
 //! Render spec establishes for them is read here: the evidence provider id,
 //! Render's hard Sandbox lifetime, the guarantees derived from the spec's
 //! implemented operation kinds, the selected guest channel, the egress policy
-//! Render can create and what its echo proves, and the Sandbox id form.
+//! Render can create and what its echo proves, the Sandbox id form, and the
+//! budget weight the spec declares for one lease-second.
 
 use std::collections::BTreeSet;
 
@@ -27,6 +28,10 @@ impl LeaseProviderFacts for ProviderSpec {
 
     fn maximum_lease_seconds(&self) -> u32 {
         PROVIDER_MAXIMUM_LEASE_SECONDS
+    }
+
+    fn budget_weight(&self) -> u32 {
+        ProviderSpec::budget_weight(self)
     }
 
     fn attested_lease_guarantees(&self) -> BTreeSet<&'static str> {
@@ -277,11 +282,15 @@ mod tests {
             met_by,
             network_policy,
             network_policy_evidence,
+            budget_weight,
             ..
         } = admit_before_spend(&spec, &request, &"b".repeat(64))
         else {
             panic!("the signed spec declares allow-list creation of exact hostnames");
         };
+        // The signed Render spec charges one budget second per lease-second.
+        assert_eq!(budget_weight, 1);
+        assert_eq!(LeaseProviderFacts::budget_weight(&spec), 1);
         assert_eq!(
             met_by[LEASE_NETWORK_POLICY],
             RequirementMet {

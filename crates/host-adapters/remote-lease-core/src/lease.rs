@@ -75,8 +75,9 @@ use lillux::process_control::{CapabilityEvidence, CapabilityRequirement, ProofSo
 use lillux::time::MonotonicDeadline;
 pub use ryeos_external_execution_contract::LEASE_ADMISSION_FD_ENV;
 use ryeos_external_execution_contract::{
-    LIFECYCLE_GUEST_FRAMES_FD_ENV, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES, canonical_json,
-    length_prefixed,
+    LIFECYCLE_GUEST_FRAMES_FD_ENV, MAX_LEASE_BUDGET_WEIGHT,
+    MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES, canonical_json, length_prefixed,
+    valid_lease_budget_weight,
 };
 use ryeos_state::external_execution::{
     ChannelDirection, ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
@@ -102,6 +103,8 @@ const MAX_GUEST_FRAME_BYTES: usize = 64 * 1024;
 const MAX_REQUIREMENTS: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_TERMINATE_REASON_BYTES: usize = 2048;
+/// The refusal label of a spec whose budget weight is out of bound.
+const LEASE_BUDGET_WEIGHT: &str = "budget_weight";
 
 /// Stage-one input: one workload's requirement set, as carried by its signed
 /// worker or launch data.
@@ -202,6 +205,9 @@ pub enum LeaseAdmissionResponse {
         network_policy: EgressPolicy,
         /// The provider-attested `lease.network_policy` evidence for it.
         network_policy_evidence: CapabilityEvidence,
+        /// The node lease-budget seconds one second of this lease costs,
+        /// from the signed spec named by `provider_spec_sha256`.
+        budget_weight: u32,
     },
     Refused {
         schema: u32,
@@ -306,6 +312,18 @@ pub fn admit_before_spend(
     if let Some(refusal) = &egress_refusal {
         refuse(&mut refusals, LEASE_NETWORK_POLICY, refusal.clone());
     }
+    let budget_weight = spec.budget_weight();
+    if !valid_lease_budget_weight(budget_weight) {
+        refuse(
+            &mut refusals,
+            LEASE_BUDGET_WEIGHT,
+            format!(
+                "provider spec {} declares budget_weight {budget_weight}, outside \
+                 1..={MAX_LEASE_BUDGET_WEIGHT}",
+                spec.evidence_provider()
+            ),
+        );
+    }
     let maximum_lease_seconds = spec.maximum_lease_seconds();
     if request.maximum_lifetime_seconds > maximum_lease_seconds {
         refuse(
@@ -353,6 +371,7 @@ pub fn admit_before_spend(
             met_by,
             network_policy,
             network_policy_evidence,
+            budget_weight,
         };
     }
     let reason = refusals
@@ -1172,6 +1191,7 @@ mod tests {
         guest_channel: GuestChannelProfile,
         lease_id_prefix: &'static str,
         network_policy: NetworkPolicyCapability,
+        budget_weight: u32,
     }
 
     impl LeaseProviderFacts for TestFacts {
@@ -1181,6 +1201,10 @@ mod tests {
 
         fn maximum_lease_seconds(&self) -> u32 {
             24 * 60 * 60
+        }
+
+        fn budget_weight(&self) -> u32 {
+            self.budget_weight
         }
 
         fn attested_lease_guarantees(&self) -> BTreeSet<&'static str> {
@@ -1229,6 +1253,7 @@ mod tests {
                     host_syntax: EgressHostSyntax::ExactDnsName,
                 }),
             },
+            budget_weight: 1,
         }
     }
 
@@ -1812,6 +1837,89 @@ mod tests {
         assert!(format!("{error:#}").contains("no guest capability report"));
     }
 
+    /// Canonical bytes of one first Ready request, as the controller must
+    /// compose them: fields in declared order, the admitted request embedded
+    /// whole, an undeclared Ready clock skew omitted and `resume` null.
+    const LEASE_READY_REQUEST_FIXTURE: &[u8] = include_bytes!("../fixtures/lease-ready-request.json");
+
+    fn fixture_ready_request() -> LeaseReadyRequest {
+        let lease = lease();
+        let admission = LeaseAdmissionRequest {
+            schema: LEASE_SCHEMA,
+            adapter_id: "remote-lease-test".into(),
+            provider_spec_sha256: "a".repeat(64),
+            workload: "workload.remote".into(),
+            requires_before_spend: vec![LEASE_CREATE_BOUND.into(), LEASE_NETWORK_POLICY.into()],
+            requires_from_guest: vec![
+                "guest.exec_route_closed".into(),
+                CapabilityRequirement::Spec(CapabilityRequirementSpec {
+                    name: Some("network:egress_denied".into()),
+                    any_of: Vec::new(),
+                    accept: vec!["provider_attested".into()],
+                    providers: Vec::new(),
+                }),
+            ],
+            guest_network_allow: BTreeSet::from(["controller.example.com".to_owned()]),
+            maximum_lifetime_seconds: 4 * 60 * 60,
+            activation_deadline_seconds: 5 * 60,
+            ready_clock_skew_ms: None,
+        };
+        let admission_request_sha256 = lillux::sha256_hex(&canonical_json(&admission).unwrap());
+        LeaseReadyRequest {
+            schema: LEASE_SCHEMA,
+            adapter_id: "remote-lease-test".into(),
+            admission,
+            admission_request_sha256,
+            expectation: lease.expectation,
+            resume: None,
+        }
+    }
+
+    #[test]
+    fn golden_ready_request_is_canonical_byte_for_byte() {
+        let composed = canonical_json(&fixture_ready_request()).unwrap();
+        assert!(
+            composed == LEASE_READY_REQUEST_FIXTURE,
+            "composed Ready request differs from the golden fixture:\n{}",
+            String::from_utf8_lossy(&composed)
+        );
+        let parsed: LeaseReadyRequest = ryeos_external_execution_contract::from_json_slice_strict(
+            LEASE_READY_REQUEST_FIXTURE,
+            crate::operation::MAX_LEASE_READY_REQUEST_BYTES,
+        )
+        .unwrap();
+        assert_eq!(canonical_json(&parsed).unwrap(), LEASE_READY_REQUEST_FIXTURE);
+        parsed.validate(&relayed_facts()).unwrap();
+        assert!(parsed.resume.is_none());
+        assert_eq!(
+            parsed.admission_request_sha256,
+            lillux::sha256_hex(&canonical_json(&parsed.admission).unwrap())
+        );
+
+        let text = std::str::from_utf8(LEASE_READY_REQUEST_FIXTURE).unwrap();
+        assert!(text.ends_with(",\"resume\":null}"), "{text}");
+        assert!(!text.contains("ready_clock_skew_ms"), "{text}");
+        let field_at = |field: &str| text.find(&format!("\"{field}\":")).unwrap();
+        let order = [
+            "schema",
+            "adapter_id",
+            "admission",
+            "admission_request_sha256",
+            "expectation",
+            "resume",
+        ]
+        .map(field_at);
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+
+        // A maximal admission inside the envelope the fixture shows still
+        // fits the Ready bound.
+        let envelope =
+            LEASE_READY_REQUEST_FIXTURE.len() - canonical_json(&parsed.admission).unwrap().len();
+        assert!(
+            MAX_LEASE_REQUEST_BYTES + envelope <= crate::operation::MAX_LEASE_READY_REQUEST_BYTES
+        );
+    }
+
     #[test]
     fn ready_request_is_bound_to_the_admitted_request() {
         let lease = lease();
@@ -1853,6 +1961,46 @@ mod tests {
             format!("{error:#}").contains("invalid lease id"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn the_admitted_verdict_carries_the_specs_budget_weight_and_an_unbounded_one_is_refused() {
+        let mut request = admission(Vec::new(), Vec::new());
+        request.guest_network_allow = BTreeSet::from(["controller.example.com".to_owned()]);
+        for weight in [1, 7, MAX_LEASE_BUDGET_WEIGHT] {
+            let mut facts = relayed_facts();
+            facts.budget_weight = weight;
+            let LeaseAdmissionResponse::Admitted { budget_weight, .. } =
+                admit_before_spend(&facts, &request, &"b".repeat(64))
+            else {
+                panic!("weight {weight} is within its bound");
+            };
+            assert_eq!(budget_weight, weight);
+        }
+        for weight in [0, MAX_LEASE_BUDGET_WEIGHT + 1] {
+            let mut facts = relayed_facts();
+            facts.budget_weight = weight;
+            let LeaseAdmissionResponse::Refused { unmet, reason, .. } =
+                admit_before_spend(&facts, &request, &"b".repeat(64))
+            else {
+                panic!("weight {weight} is outside its bound");
+            };
+            assert!(unmet.contains_key(LEASE_BUDGET_WEIGHT), "{unmet:?}");
+            assert!(
+                reason.contains(&format!(
+                    "provider spec test_provider_v1 declares budget_weight {weight}, outside \
+                     1..={MAX_LEASE_BUDGET_WEIGHT}"
+                )),
+                "{reason}"
+            );
+        }
+        let text = serde_json::to_string(&admit_before_spend(
+            &relayed_facts(),
+            &request,
+            &"b".repeat(64),
+        ))
+        .unwrap();
+        assert!(text.contains("\"budget_weight\":1"), "{text}");
     }
 
     #[test]

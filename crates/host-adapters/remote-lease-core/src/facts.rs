@@ -48,6 +48,14 @@ pub trait LeaseProviderFacts {
     /// backed.
     fn maximum_lease_seconds(&self) -> u32;
 
+    /// How many node lease-budget seconds one second of this provider's
+    /// lease costs, as the signed spec declares it. Admission reports it on
+    /// the admitted verdict, bound to the spec's digest, so the controller
+    /// charges its node budget by the weight of the exact spec that judged
+    /// the lease. A spec whose weight is outside the contract's bound is
+    /// refused when it is parsed.
+    fn budget_weight(&self) -> u32;
+
     /// The guarantee names the signed spec attests, derived only from its
     /// implemented operation kinds and proof profiles.
     fn attested_lease_guarantees(&self) -> BTreeSet<&'static str>;

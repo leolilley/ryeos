@@ -7,9 +7,13 @@
 //! provider spec can meet those entries before it reserves or creates
 //! anything. The adapter owns the comparison; this module only assembles the
 //! adapter's request from typed controller inputs and reads back the
-//! verdict's identity fields and plain refusal reason. The admitted request
-//! bytes are then retained verbatim on the allocation and handed back to the
-//! adapter on every later lifecycle contact, so the controller never
+//! verdict's identity fields, plain refusal reason and, on an admitted
+//! verdict, the budget weight its signed provider spec declares. The
+//! controller never parses the provider spec itself: the adapter reads the
+//! captured spec, and its verdict names that spec's digest, so the weight the
+//! controller charges is the one the exact pinned spec signs. The admitted
+//! request bytes are then retained verbatim on the allocation and handed back
+//! to the adapter on every later lifecycle contact, so the controller never
 //! reinterprets them.
 
 use std::collections::BTreeSet;
@@ -105,15 +109,26 @@ pub(crate) fn canonical_request(
     Ok(bytes)
 }
 
+/// A lease the adapter admitted: the exact request bytes it judged, and the
+/// node lease-budget seconds one second of the lease costs under the signed
+/// provider spec that judged it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedLease {
+    pub(crate) request: Vec<u8>,
+    pub(crate) budget_weight: u32,
+}
+
 /// Accept the adapter's verdict on exactly `request`, or refuse with its
 /// plain reason. A verdict about another request or another provider spec is
-/// no verdict.
+/// no verdict. An admitted verdict must carry the budget weight of its
+/// provider spec within the contract's bound; one without it is refused, never
+/// given a default. Returns that weight.
 pub(crate) fn require_admitted(
     response: &[u8],
     request: &[u8],
     provider_spec_sha256: &str,
     adapter_id: &str,
-) -> Result<()> {
+) -> Result<u32> {
     let verdict: serde_json::Value = ryeos_external_execution_contract::from_json_slice_strict(
         response,
         ryeos_external_execution_contract::MAX_LIFECYCLE_RESPONSE_BYTES,
@@ -128,7 +143,31 @@ pub(crate) fn require_admitted(
         "lifecycle adapter `{adapter_id}` answered lease admission for a different request"
     );
     match field("verdict") {
-        Some("admitted") => Ok(()),
+        Some("admitted") => {
+            let weight = verdict
+                .get("budget_weight")
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| {
+                    format!(
+                        "lease refused: lifecycle adapter `{adapter_id}` admitted the lease \
+                         without the budget_weight of provider spec {provider_spec_sha256}, so \
+                         the node budget cannot charge it"
+                    )
+                })?;
+            match u32::try_from(weight) {
+                Ok(weight)
+                    if ryeos_external_execution_contract::valid_lease_budget_weight(weight) =>
+                {
+                    Ok(weight)
+                }
+                _ => bail!(
+                    "lease refused: lifecycle adapter `{adapter_id}` admitted the lease at \
+                     budget_weight {weight} from provider spec {provider_spec_sha256}, outside \
+                     1..={}",
+                    ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT
+                ),
+            }
+        }
         Some("refused") => bail!(
             "lease admission refused before any provider contact by lifecycle adapter \
              `{adapter_id}`: {}",
@@ -241,8 +280,15 @@ mod tests {
     #[test]
     fn an_admitted_verdict_must_name_the_exact_request_and_spec() {
         let request = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
-        let admitted = verdict(&request, "admitted", serde_json::json!({"met_by": {}}));
-        require_admitted(&admitted, &request, SPEC, "render-sandbox").unwrap();
+        let admitted = verdict(
+            &request,
+            "admitted",
+            serde_json::json!({"met_by": {}, "budget_weight": 1}),
+        );
+        assert_eq!(
+            require_admitted(&admitted, &request, SPEC, "render-sandbox").unwrap(),
+            1
+        );
 
         let other = canonical_request(
             "render-sandbox",
@@ -260,6 +306,61 @@ mod tests {
         assert!(require_admitted(b"not json", &request, SPEC, "render-sandbox").is_err());
         let unknown = verdict(&request, "maybe", serde_json::json!({}));
         assert!(require_admitted(&unknown, &request, SPEC, "render-sandbox").is_err());
+    }
+
+    #[test]
+    fn an_admitted_verdict_names_its_specs_budget_weight_within_bound() {
+        let request = canonical_request("render-sandbox", SPEC, &inputs()).unwrap();
+        let max = ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT;
+        for weight in [1, 50, max] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": {}, "budget_weight": weight}),
+            );
+            assert_eq!(
+                require_admitted(&admitted, &request, SPEC, "render-sandbox").unwrap(),
+                weight
+            );
+        }
+        let missing = verdict(&request, "admitted", serde_json::json!({"met_by": {}}));
+        let text = require_admitted(&missing, &request, SPEC, "render-sandbox")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains(&format!(
+                "lease refused: lifecycle adapter `render-sandbox` admitted the lease without \
+                 the budget_weight of provider spec {SPEC}"
+            )),
+            "{text}"
+        );
+        for refused in [
+            serde_json::json!(0),
+            serde_json::json!(max + 1),
+            serde_json::json!(u64::MAX),
+        ] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": {}, "budget_weight": refused}),
+            );
+            let text = require_admitted(&admitted, &request, SPEC, "render-sandbox")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                text.contains(&format!("admitted the lease at budget_weight {refused}"))
+                    && text.contains(&format!("outside 1..={max}")),
+                "{text}"
+            );
+        }
+        for malformed in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1")] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": {}, "budget_weight": malformed}),
+            );
+            assert!(require_admitted(&admitted, &request, SPEC, "render-sandbox").is_err());
+        }
     }
 
     #[test]

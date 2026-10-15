@@ -5,6 +5,7 @@
   "bootstrap_settings_schema_digest": "45ed0ff8f70a838227995f3807d9c0361d1718d7b6b1f0772e4ba6861933f779",
   "qualification_settings_schema_digest": "5d50565bccc9ef5986032ef3649e5499c6549c298bc8674a4e5043bf553cfc9c",
   "origin_profile": "render_api_v1",
+  "budget_weight": 1,
   "network_policy": {
     "creatable_types": ["deny-all", "allow-list"],
     "allow_list": {
