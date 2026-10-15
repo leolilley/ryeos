@@ -120,7 +120,7 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
         &identity.policy,
     )?;
     state_lock.ensure_protects_app_root(app_root)?;
-    owner.reissue(&identity, reason, command)
+    owner.reissue(&identity, lillux::process_control::ControllerAccount::current(), reason, command)
 }
 
 /// Every recorded re-issuance, oldest first. An unreadable line is an error,
@@ -223,8 +223,28 @@ impl StoppedCapacityAccount {
         Ok(Some((file, bytes)))
     }
 
-    fn reissue(&mut self, identity: &ReissueIdentity<'_>, reason: &str, command: &str) -> Result<ReissueReport> {
+    /// `actor` is the account this command runs as. It is settled before
+    /// anything is read or written: every path that changes state ends in an
+    /// evidence line naming it, so an account that cannot be recorded (root)
+    /// must refuse here rather than open an epoch whose evidence never lands.
+    fn reissue(
+        &mut self,
+        identity: &ReissueIdentity<'_>,
+        actor: std::result::Result<lillux::process_control::ControllerAccount, String>,
+        reason: &str,
+        command: &str,
+    ) -> Result<ReissueReport> {
+        let actor = actor.map_err(|error| {
+            anyhow::anyhow!(
+                "operator re-issuance refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
+            )
+        })?;
         ensure!(reason.chars().count() <= REASON_BOUND_CHARS, "re-issuance reason exceeds its bound");
+        // The log this run must end by extending is checked before the first
+        // write, so a refused log never leaves an epoch without its evidence.
+        if let Some(log) = self.state.open_pinned_regular(OsStr::new(REISSUE_EVIDENCE_LOG), false)? {
+            require_owned_evidence_log(&log)?;
+        }
         let policy = &identity.policy;
         self.anchor.load(policy, &self.issuance, self.budget.deadline, &|steps| self.budget.pay(steps))?;
         let current = *self.anchor.current()?;
@@ -262,7 +282,7 @@ impl StoppedCapacityAccount {
                 to_epoch: body.to_epoch,
                 settled_incarnation: current.settled_incarnation().as_ref().map(hex_digest),
                 recorded_at: lillux::time::iso8601_now(),
-                actor: lillux::process_control::ControllerAccount::current().map_err(anyhow::Error::msg)?,
+                actor,
                 command: command.to_owned(),
             };
             self.append_evidence_once(&evidence)?;
@@ -356,7 +376,7 @@ impl StoppedCapacityAccount {
             to_epoch,
             settled_incarnation: next.settled_incarnation().as_ref().map(hex_digest),
             recorded_at: lillux::time::iso8601_now(),
-            actor: lillux::process_control::ControllerAccount::current().map_err(anyhow::Error::msg)?,
+            actor,
             command: command.to_owned(),
         };
         append_evidence(&self.state, &evidence)?;
@@ -380,10 +400,23 @@ impl StoppedCapacityAccount {
     }
 }
 
+/// The evidence log is the node account's own record, held to the same rule as
+/// the re-issuance document: owned by the account running this command and
+/// writable by no group or other. A log another account owns or can write is
+/// refused, never read as evidence and never extended.
+fn require_owned_evidence_log(log: &lillux::PinnedRegularFile) -> Result<()> {
+    log.require_effective_user_owned().with_context(|| {
+        format!(
+            "re-issuance evidence log {REISSUE_EVIDENCE_LOG} is refused: it must be owned by the account running this command and not group/other writable"
+        )
+    })
+}
+
 fn read_evidence(directory: &PinnedDirectory) -> Result<Vec<CapacityReissueEvidence>> {
     let Some(log) = directory.open_pinned_regular(OsStr::new(REISSUE_EVIDENCE_LOG), false)? else {
         return Ok(Vec::new());
     };
+    require_owned_evidence_log(&log)?;
     let observation = log.observation()?;
     let raw = log.read_stable_bounded(&observation, REISSUE_EVIDENCE_LOG_BOUND as u64)?;
     raw.split(|byte| *byte == b'\n')
@@ -401,6 +434,7 @@ fn append_evidence(directory: &PinnedDirectory, evidence: &CapacityReissueEviden
     let existing = directory.open_pinned_regular(OsStr::new(REISSUE_EVIDENCE_LOG), false)?;
     let mut body = match &existing {
         Some(log) => {
+            require_owned_evidence_log(log)?;
             let observation = log.observation()?;
             log.read_stable_bounded(&observation, REISSUE_EVIDENCE_LOG_BOUND as u64)?
         }
@@ -528,7 +562,12 @@ mod controls {
         fn run(&self, fail_after: Option<Step>) -> Result<ReissueReport> {
             let mut owner = self.owner();
             owner.fail_after.set(fail_after);
-            owner.reissue(&self.identity(), "controls", "ryeos node capacity reissue")
+            owner.reissue(
+                &self.identity(),
+                lillux::process_control::ControllerAccount::current(),
+                "controls",
+                "ryeos node capacity reissue",
+            )
         }
 
         /// The current anchor and the raw account bytes, read fresh.
@@ -827,6 +866,64 @@ mod controls {
         let evidence = f.evidence();
         assert_eq!(evidence.len(), 24);
         assert_eq!(evidence.last().unwrap().to_epoch, 25);
+    }
+
+    #[test]
+    fn an_unrecordable_actor_refuses_before_any_write() {
+        // The refusal ControllerAccount::current() gives for root, supplied
+        // directly: the test process is not root.
+        let refused = || Err::<lillux::process_control::ControllerAccount, _>(
+            "controller account must not be root".to_owned());
+        let f = Fixture::new();
+        f.debit_dead_incarnation();
+        let (debit, debit_bytes) = f.current();
+        let mut owner = f.owner();
+        let error = owner.reissue(&f.identity(), refused(), "controls", "ryeos node capacity reissue").unwrap_err();
+        assert!(error.to_string().contains("refused before any write"), "{error:#}");
+        assert!(error.to_string().contains("must not be root"), "{error:#}");
+        assert!(!f.document_path().exists());
+        assert_eq!(f.current(), (debit, debit_bytes));
+        assert!(f.evidence().is_empty());
+
+        // A rerun owing only its evidence line is refused the same way, and
+        // still completes once run as a recordable account.
+        assert!(f.run(Some(Step::Account)).is_err());
+        let (opened, opened_bytes) = f.current();
+        let mut owner = f.owner();
+        let error = owner.reissue(&f.identity(), refused(), "controls", "ryeos node capacity reissue").unwrap_err();
+        assert!(error.to_string().contains("refused before any write"), "{error:#}");
+        assert_eq!(f.current(), (opened, opened_bytes));
+        assert!(f.evidence().is_empty());
+        assert!(f.run(None).unwrap().already_applied);
+        assert_eq!(f.evidence().len(), 1);
+    }
+
+    #[test]
+    fn an_evidence_log_writable_by_others_is_neither_read_nor_extended() {
+        let f = Fixture::new();
+        f.run(None).unwrap();
+        let log = f._temporary.path().join("state").join(REISSUE_EVIDENCE_LOG);
+        let recorded = std::fs::read(&log).unwrap();
+        lillux::set_open_regular_file_mode(&std::fs::File::open(&log).unwrap(), 0o666).unwrap();
+        let error = read_evidence(&f.state).unwrap_err();
+        assert!(error.to_string().contains("evidence log"), "{error:#}");
+        f.debit_dead_incarnation();
+        let (debit, debit_bytes) = f.current();
+        let document = std::fs::read(f.document_path()).unwrap();
+        let error = f.run(None).unwrap_err();
+        assert!(format!("{error:#}").contains("evidence log"), "{error:#}");
+        assert_eq!(std::fs::read(&log).unwrap(), recorded);
+        assert_eq!(f.current(), (debit, debit_bytes), "a refused log opens no epoch");
+        assert_eq!(std::fs::read(f.document_path()).unwrap(), document);
+        let entry = CapacityReissueEvidence {
+            document_digest: hex_digest(&[1; 32]),
+            from_epoch: 9, to_epoch: 10, settled_incarnation: None,
+            recorded_at: "2026-10-14T00:00:00Z".to_owned(),
+            actor: lillux::process_control::ControllerAccount::current().unwrap(),
+            command: "x".to_owned(),
+        };
+        assert!(format!("{:#}", append_evidence(&f.state, &entry).unwrap_err()).contains("evidence log"));
+        assert_eq!(std::fs::read(&log).unwrap(), recorded);
     }
 
     #[test]

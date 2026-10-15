@@ -35,9 +35,19 @@
 # node run as root could never have its inhibition cleared in place. tini
 # starts this script as root; the first thing it does is hand /data (a
 # platform volume, mounted root-owned) to the node account and re-execute
-# itself as that account. An operator shell that clears an inhibition must
-# run as the same account: `setpriv --reuid=10000 --regid=10000
-# --clear-groups ryeos node allow-restart --app-root /data/app`.
+# itself as that account with no capabilities and no_new_privs set. An
+# operator shell that clears an inhibition must run as the same account:
+# `setpriv --reuid=10000 --regid=10000 --clear-groups --no-new-privs
+# ryeos node allow-restart --app-root /data/app`.
+#
+# The one root step is the external host-runtime route: `ryeosd host-runtime`
+# is an administrator bootstrap that refuses to run as anything but root. As
+# root it opens the binding through a root-owned directory chain, validates
+# the administrator-prepared process-scope delegation, installs the node's
+# resource ceilings, places itself in the delegated controller cgroup, and
+# then drops to the binding's own account before it executes the daemon. The
+# daemon on that route therefore never runs as root either; this script only
+# hands that bootstrap the root it needs and runs nothing else as root there.
 
 set -euo pipefail
 
@@ -45,13 +55,72 @@ RESTART_INHIBITED_HOLD_SECONDS=30
 NODE_UID=10000
 NODE_GID=10000
 
+# Print the first entry under `app_root`, the app root itself excluded, whose
+# device number differs from `device`: the root of a mount nested inside the
+# app root. Prints nothing when every entry is on the app root's filesystem.
+first_entry_on_other_device() {
+  local app_root="$1"
+  local device="$2"
+  local record
+  while IFS= read -r -d '' record; do
+    if [[ "${record%% *}" != "$device" ]]; then
+      printf '%s\n' "${record#* }"
+      return 0
+    fi
+  done < <(find "$app_root" -xdev -mindepth 1 -printf '%D %p\0')
+}
+
+# Hand every entry under the app root that the node account does not already
+# own to it, as root, once per boot. The node account controls this tree, so
+# the walk trusts nothing in it: it stays on the app root's filesystem (a
+# nested mount is not the node's to take), never follows a symlink (a link is
+# re-owned as itself, never its target), and refuses a multiply linked file
+# the node account does not own instead of re-owning it, because such a file
+# may be a hard link the node account planted to a file outside its tree. A
+# directory cannot be hard linked, so its link count is not consulted. Every
+# entry is checked before any is changed, so a refusal changes nothing. No
+# node-account process runs during this walk, so the tree it checked is the
+# tree it changes. A walk that stays on one filesystem still reaches the root
+# directory of a mount nested under the app root, so any entry on another
+# device than the app root itself is refused rather than re-owned. The second
+# argument overrides the app root's device number and exists only so this
+# comparison can be exercised without creating a mount.
+hand_app_root_to_node_account() {
+  local app_root="$1"
+  local app_root_device="${2:-}"
+  local entry
+  local links
+
+  if [[ -L "$app_root" || ! -d "$app_root" ]]; then
+    echo "[entrypoint] refusing to start: $app_root must be a directory, not a symlink or other file" >&2
+    return 1
+  fi
+  if [[ -z "$app_root_device" ]]; then
+    app_root_device="$(stat -c %d -- "$app_root")"
+  fi
+  entry="$(first_entry_on_other_device "$app_root" "$app_root_device")"
+  if [[ -n "$entry" ]]; then
+    echo "[entrypoint] refusing to start: $entry is on another filesystem than the app root $app_root; a nested mount is never re-owned. An administrator must unmount it or move it outside the app root before the node can start." >&2
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    links="$(stat -c %h -- "$entry")"
+    echo "[entrypoint] refusing to start: $entry is not owned by the node account $NODE_UID:$NODE_GID and has $links hard links; a multiply linked file is never re-owned. An administrator must remove the extra link or set its owner before the node can start." >&2
+    return 1
+  done < <(find "$app_root" -xdev ! -type d \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) -links +1 -print0)
+  find "$app_root" -xdev \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) \
+    \( -type d -o -links 1 \) -exec chown -h "$NODE_UID:$NODE_GID" -- {} +
+}
+
 # Re-execute this script as the node account before any ryeos command. As
 # root: own /data and the app root for the node account (the platform mounts
 # the volume root-owned on every boot, so this is per boot, not per image),
-# then drop every privilege, supplementary groups included. Already the node
-# account: continue. Any other non-root account is the platform's choice and
-# is kept, but named. The external host-runtime route is administrator-owned
-# (the protected binding fixes its account) and is left as it starts.
+# then drop every privilege: supplementary groups, every capability from the
+# bounding and inheritable sets, and the ability to regain privilege through
+# a setuid or file-capability executable. Already the node account: continue.
+# Any other non-root account is the platform's choice and is kept, but named.
+# The external host-runtime route keeps root only for its administrator
+# bootstrap; see the header.
 run_as_node_account() {
   local uid
   uid="$(id -u)"
@@ -63,13 +132,19 @@ run_as_node_account() {
     return 0
   fi
   if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
+    echo "[entrypoint] external host-runtime binding: keeping root only for the ryeosd host-runtime bootstrap, which drops to the binding's account before the daemon runs"
     return 0
   fi
+  if [[ -L /data || ! -d /data ]]; then
+    echo "[entrypoint] refusing to start: /data must be a mounted directory, not a symlink or other file" >&2
+    return 1
+  fi
   mkdir -p /data/app
-  chown "$NODE_UID:$NODE_GID" /data
-  chown -R "$NODE_UID:$NODE_GID" /data/app
+  chown -h "$NODE_UID:$NODE_GID" /data
+  hand_app_root_to_node_account /data/app
   echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
   exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
+    --no-new-privs --bounding-set=-all --inh-caps=-all \
     -- "${BASH_SOURCE[0]}" "$@"
 }
 
@@ -248,8 +323,12 @@ main() {
 
   build_ryeos_daemon_args /data/app
   if [[ "${DAEMON_ARGS[0]}" == "host-runtime" ]]; then
+    if [[ "$(id -u)" != 0 ]]; then
+      echo "[entrypoint] refusing to start: RYEOS_HOST_RUNTIME_BINDING is set, but ryeosd host-runtime is an administrator bootstrap and this container started as uid $(id -u), not root" >&2
+      return 1
+    fi
     hold_while_restart_inhibited /data/app
-    echo "[entrypoint] starting with protected external host-runtime authority"
+    echo "[entrypoint] starting the root host-runtime bootstrap; the daemon itself runs as the binding's account"
     exec ryeosd "${DAEMON_ARGS[@]}"
   fi
 
