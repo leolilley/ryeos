@@ -3343,9 +3343,9 @@ fn recover_external_relay_bootstrap(
     let sealed = state.vault.external_relay_bootstrap(&access)?;
     let bootstrap = sealed.bootstrap();
     let signed_import = sealed.signed_import();
-    let signed_import_bytes = zeroize::Zeroizing::new(lillux::canonical_json(
-        &serde_json::to_value(signed_import)?,
-    )?);
+    let signed_import_bytes = zeroize::Zeroizing::new(
+        ryeos_external_execution_contract::canonical_json(signed_import)?,
+    );
     let owner_bytes: [u8; 32] = STANDARD
         .decode(&allocation.reservation.channel_owner_public_key)?
         .try_into()
@@ -3363,8 +3363,9 @@ fn recover_external_relay_bootstrap(
     let ticket = &signed_import.authorization.ticket;
     ensure!(
         bootstrap.digest()? == commitment.bootstrap_sha256
-            && lillux::sha256_hex(signed_import_bytes.as_bytes())
-                == commitment.signed_import_sha256
+            && ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
+                &signed_import_bytes,
+            ) == commitment.signed_import_sha256
             && bootstrap.placement_thread_id == allocation.reservation.placement_thread_id
             && bootstrap.occurrence_id == occurrence.occurrence_id
             && bootstrap.allocation_request_digest == allocation.reservation.request_digest
@@ -7576,9 +7577,9 @@ impl ExternalPlacementReconciliation {
                                 == intent.activation_request_digest,
                         "original signed guest import changed its relay bootstrap"
                     );
-                    let signed_import_bytes = zeroize::Zeroizing::new(lillux::canonical_json(
-                        &serde_json::to_value(signed)?,
-                    )?);
+                    let signed_import_bytes = zeroize::Zeroizing::new(
+                        ryeos_external_execution_contract::canonical_json(signed)?,
+                    );
                     let commitment = ExternalRelayBootstrapCommitment {
                         schema: 1,
                         placement_thread_id: current.reservation.placement_thread_id.clone(),
@@ -7587,7 +7588,10 @@ impl ExternalPlacementReconciliation {
                         activation_request_digest: intent.activation_request_digest.clone(),
                         guest_input_identity: intent.guest_input_identity.clone(),
                         bootstrap_sha256,
-                        signed_import_sha256: lillux::sha256_hex(signed_import_bytes.as_bytes()),
+                        signed_import_sha256:
+                            ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
+                                &signed_import_bytes,
+                            ),
                     };
                     commitment.validate_for(
                         &current.reservation,

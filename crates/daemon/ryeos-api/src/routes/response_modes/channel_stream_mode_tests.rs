@@ -245,18 +245,6 @@ impl ChannelStreamOwner for FixtureOwner {
             self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
             anyhow::bail!("external channel refused: the lease was refused: test");
         }
-        if self
-            .unavailable_exchanges
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |left| left.checked_sub(1),
-            )
-            .is_ok()
-        {
-            return Err(anyhow::anyhow!("the lifecycle adapter timed out")
-                .context(ryeos_app::external_placement::ExternalChannelExchangeUnavailable));
-        }
         if self.held.load(std::sync::atomic::Ordering::SeqCst)
             || (verified.frame().sequence == 1
                 && self
@@ -272,6 +260,18 @@ impl ChannelStreamOwner for FixtureOwner {
                 outbound_frames: Vec::new(),
                 urgent_revocation_frame: None,
             });
+        }
+        if self
+            .unavailable_exchanges
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(anyhow::anyhow!("the lifecycle adapter timed out")
+                .context(ryeos_app::external_placement::ExternalChannelExchangeUnavailable));
         }
         std::thread::sleep(self.exchange_delay);
         *self.exchanges.lock().unwrap() += 1;
@@ -1256,8 +1256,41 @@ async fn the_guests_lease_handshake_runs_against_the_real_stream_route() {
     // Only the report reached a verdict; the held Ready is not counted.
     assert_eq!(owner.exchanges(), 1);
 
-    // A transient no-verdict closes 1011 and the guest retries the same
-    // frame. The 1011 close itself is checked on a raw socket below.
+    // The guest's own connection sees a no-verdict on the report as the
+    // retryable 1011 close: its transport names that close, and only it, as
+    // "asked to try again" with the unavailable reason.
+    let owner = FixtureOwner::new(Fixture::new(), 1024 * 1024);
+    owner
+        .hold_first_frame
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    owner
+        .unavailable_exchanges
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let controller = serve(Arc::clone(&owner), ChannelStreamSlots::new(test_policy())).await;
+    let edge = tls_edge(controller).await;
+    let (ready, report) = lease_handshake_frames(&owner.fixture);
+    on_guest_thread(move || {
+        let mut stream = guest_stream(edge, OCCURRENCE);
+        let deadline =
+            || lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10));
+        stream.exchange_until(&ready, deadline()).unwrap();
+        match stream.exchange_until(&report, deadline()) {
+            Err(ExternalTransportStepFailure::AmbiguousTransport(error)) => {
+                let text = format!("{error:#}");
+                assert!(
+                    text.contains("asked to try again")
+                        && text.contains("external_channel_stream_exchange_unavailable"),
+                    "{text}"
+                );
+            }
+            other => panic!("a no-verdict report must close 1011 and be retryable: {other:?}"),
+        }
+        stream.exchange_until(&report, deadline()).unwrap();
+    })
+    .await;
+
+    // The whole handshake rides through no-verdicts on the report frame
+    // (the Ready is held, so the counter is spent on the report's retries).
     let owner = FixtureOwner::new(Fixture::new(), 1024 * 1024);
     owner
         .hold_first_frame
@@ -1328,7 +1361,13 @@ async fn the_guests_lease_handshake_runs_against_the_real_stream_route() {
         .unwrap_err()
     })
     .await;
-    assert!(format!("{refusal:#}").contains(OCCURRENCE_REFUSED), "{refusal:#}");
+    // The guest's transport names a 1008 close as a refusal by the controller
+    // (the fatal branch), carrying the occurrence-refused reason.
+    let text = format!("{refusal:#}");
+    assert!(
+        text.contains("refused by the controller") && text.contains(OCCURRENCE_REFUSED),
+        "{text}"
+    );
     // The refusal is verdict-final: the occurrence no longer upgrades.
     assert_eq!(
         refused_status(dial(controller, OCCURRENCE, true).await.err().unwrap()),

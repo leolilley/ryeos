@@ -35,6 +35,8 @@ pub fn ordered_lease_ready_inputs<'a>(
 mod tests {
     use super::*;
 
+    const GOLDEN_FIELD_ORDER_SHA256: &str = "6be0689c0b3c74dfa90e1ac9b4e4e7e2adcbdee53f006148767d2b734c09cf0c";
+
     #[test]
     fn golden_vector_pins_digest_and_order() {
         // sha256("abc"), a published test vector.
@@ -53,5 +55,84 @@ mod tests {
                 payload.as_str(),
             ]
         );
+    }
+
+    /// A fixed signed import: the digest the controller records and the guest
+    /// names is over this exact struct-field-order serialization, which is
+    /// not the key-sorted encoding.
+    #[test]
+    fn golden_signed_import_pins_the_field_order_derivation() {
+        use crate::guest_import_authorization::{
+            GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization,
+            SignedGuestImportAuthorization,
+        };
+        use crate::staging_package::{GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket};
+        use crate::{
+            EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection,
+            GuestBaseSnapshotInput, GuestWorkspaceView,
+        };
+
+        let digest = |byte: char| byte.to_string().repeat(64);
+        let signed = SignedGuestImportAuthorization {
+            authorization: GuestImportAuthorization {
+                schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
+                placement_thread_id: "T-golden".into(),
+                admitted_capsule_hash: digest('5'),
+                base_snapshot_hash: digest('a'),
+                execution_binding_hash: digest('d'),
+                allocation_request_digest: digest('e'),
+                occurrence_id: "occ-golden".into(),
+                activation_request_digest: digest('f'),
+                supervisor_runtime_hash: digest('6'),
+                guest_runtime_manifest_hash: digest('7'),
+                attachment_deadline_ms: 20_000,
+                admission_deadline_ms: 10_000,
+                nonce_sha256: digest('8'),
+                ticket: GuestImportTicket {
+                    schema: GUEST_IMPORT_TICKET_SCHEMA,
+                    binding_hash: digest('d'),
+                    allocation_request_digest: digest('e'),
+                    occurrence_id: "occ-golden".into(),
+                    activation_request_digest: digest('f'),
+                    guest_input_identity: digest('9'),
+                    payload_sha256: digest('0'),
+                    manifest_sha256: digest('1'),
+                    framed_bytes: 200,
+                    regular_bytes: 100,
+                    bootstrap_sha256: digest('2'),
+                    supervisor_sha256: digest('3'),
+                    launcher_sha256: digest('4'),
+                    maximum_regular_bytes: 1000,
+                    maximum_framed_bytes: 2000,
+                },
+                guest_inputs: ExternalGuestInputProjection {
+                    workspace_view: GuestWorkspaceView::FullSnapshot,
+                    schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+                    base_snapshot: GuestBaseSnapshotInput {
+                        descriptor: 56,
+                        snapshot_hash: digest('a'),
+                        closure_digest: digest('b'),
+                        object_count: 3,
+                        blob_count: 1,
+                        total_bytes: 1,
+                    },
+                    workspace_outputs: None,
+                    inputs: Vec::new(),
+                    executable_search: Vec::new(),
+                    environment: Default::default(),
+                },
+            },
+            signature_hex: "ab".repeat(64),
+        };
+        let field_order = crate::canonical_json(&signed).unwrap();
+        let key_sorted =
+            serde_json::to_vec(&serde_json::to_value(&signed).unwrap()).unwrap();
+        assert!(
+            field_order.starts_with(b"{\"authorization\":{\"schema\":"),
+            "the delivered form leads with struct field order"
+        );
+        assert_ne!(field_order, key_sorted);
+        assert_ne!(signed_import_sha256(&field_order), signed_import_sha256(&key_sorted));
+        assert_eq!(signed_import_sha256(&field_order), GOLDEN_FIELD_ORDER_SHA256);
     }
 }
