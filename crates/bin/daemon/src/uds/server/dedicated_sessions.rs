@@ -344,6 +344,15 @@ fn require_structured_session_route_effect_contract(
         route_set,
         allowed_effect_classes,
         recover_upstream_session,
+    )?;
+    // A start always binds a credential profile, so only the profile's
+    // requirements for that credential kind are judged against this node's
+    // signed capability report, with its controller requirements, before
+    // the credential is acquired or a worker launched.
+    ryeos_app::node_requirement_admission::admit_structured_session_start(
+        state,
+        &profile.contract,
+        Some(ryeos_app::node_requirement_admission::CREDENTIAL_PROFILE_KIND),
     )
 }
 

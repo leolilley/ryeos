@@ -1518,6 +1518,13 @@ impl InheritedDescriptorAuthority {
         crate::secure_fs::observe_open_file_identity(self.file())
     }
 
+    /// The kernel's current pathname for the open file, which follows renames
+    /// made after it was opened. Only Linux reports one.
+    #[cfg(unix)]
+    pub fn opened_path(&self) -> anyhow::Result<crate::secure_fs::OpenedPath> {
+        crate::secure_fs::observe_open_file_path(self.file())
+    }
+
     #[cfg(unix)]
     pub fn regular_file_observation(
         &self,
@@ -2599,6 +2606,10 @@ mod inherited_pipe_writer_tests {
 #[cfg(not(unix))]
 impl InheritedDescriptorAuthority {
     pub fn file_identity(&self) -> anyhow::Result<crate::secure_fs::OpenFileIdentity> {
+        anyhow::bail!("inherited descriptor inspection is unavailable on this platform")
+    }
+
+    pub fn opened_path(&self) -> anyhow::Result<crate::secure_fs::OpenedPath> {
         anyhow::bail!("inherited descriptor inspection is unavailable on this platform")
     }
 

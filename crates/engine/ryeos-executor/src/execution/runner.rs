@@ -8734,6 +8734,52 @@ pub async fn run_existing_admitted_root(
     .await
 }
 
+/// How a recovered direct tool's declared node guarantees stand against
+/// this node's current signed capability report.
+#[derive(Debug)]
+enum RecoveredToolAdmission {
+    Admitted,
+    /// The report could not be read at this moment and the row's bounded
+    /// retry window is still open: leave the row for the next recovery.
+    Deferred(anyhow::Error),
+    /// The tool declares a guarantee this node does not prove, its
+    /// `requires` is invalid, or the report stayed unreadable past the
+    /// row's retry window: the recovery is refused.
+    Refused(anyhow::Error),
+}
+
+/// Judge a recovered direct tool's `requires.node` list and declared
+/// credential kind's list with the same admission a fresh tool launch
+/// applies, bounding how long `row` may meet an unreadable report.
+fn admit_recovered_tool_node_requirements(
+    node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
+    row: &str,
+    item_ref: &str,
+    requires: Option<&Value>,
+) -> RecoveredToolAdmission {
+    use ryeos_app::node_requirement_admission::{
+        NodeRequirementRefused, admit_item_requirements, bound_unreadable_report_retries,
+        is_report_unreadable,
+    };
+    let Some(requires) = requires else {
+        return RecoveredToolAdmission::Admitted;
+    };
+    let requires = match ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires) {
+        Ok(requires) => requires,
+        Err(reason) => {
+            return RecoveredToolAdmission::Refused(anyhow::Error::new(NodeRequirementRefused(
+                format!("launch refused: {item_ref}: invalid `requires`: {reason}"),
+            )));
+        }
+    };
+    match bound_unreadable_report_retries(row, admit_item_requirements(node, item_ref, &requires))
+    {
+        Ok(()) => RecoveredToolAdmission::Admitted,
+        Err(error) if is_report_unreadable(&error) => RecoveredToolAdmission::Deferred(error),
+        Err(error) => RecoveredToolAdmission::Refused(error),
+    }
+}
+
 async fn run_existing_recovered_thread(
     state: AppState,
     thread_id: String,
@@ -8785,10 +8831,43 @@ async fn run_existing_recovered_thread(
             "attached_process_not_reconciled",
         ));
     }
+    // The recovered tool is judged against this node's current signed
+    // capability report before it is spawned again, as a fresh tool launch
+    // is. This runs before the guard tracks the row: a report that cannot be
+    // read just now leaves the row exactly as it was for the next recovery
+    // sweep, while a refusal finalizes it below.
+    let node_refusal = match admit_recovered_tool_node_requirements(
+        &state,
+        &thread_id,
+        &params.resolved.item_ref,
+        params.resolved.resolved_item.metadata.extra.get("requires"),
+    ) {
+        RecoveredToolAdmission::Admitted => None,
+        RecoveredToolAdmission::Deferred(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %format!("{error:#}"),
+                "direct recovery deferred: the node capability report could not be read"
+            );
+            return Ok(RecoveryLaunchOutcome::Skipped("node_report_unreadable"));
+        }
+        RecoveredToolAdmission::Refused(error) => Some(error),
+    };
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
     let resume_launch_owner = resume_claim.canonical_owner()?;
     guard.track_launch_owner(resume_launch_owner.clone());
+    if let Some(error) = node_refusal {
+        guard.fail_thread_with_error(
+            "node_requirement_refused",
+            json!({
+                "code": "node_requirement_refused",
+                "message": format!("{error:#}"),
+            }),
+        );
+        guard.cleanup();
+        return Err(ResumeError::Other(error));
+    }
 
     // The retained endpoint is authoritative before any controller workspace
     // materialization. External recovery must never enter the local spawn path.
@@ -9238,6 +9317,83 @@ mod tests {
     use super::*;
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    #[test]
+    fn a_recovered_tool_is_judged_on_this_nodes_report_before_it_is_spawned_again() {
+        use lillux::process_control::{HOST_PROVIDER, HostCapabilities, ProofSource};
+        use ryeos_app::node_requirement_admission::{
+            NodeCapabilityReportReader, NodeRequirementRefused,
+        };
+        let requires = json!({
+            "node": [{"name": "persistence:durable_state", "accept": ["measured", "trusted"]}],
+        });
+        let node = |read: fn() -> Result<HostCapabilities>| {
+            let extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(Arc::new(NodeCapabilityReportReader::new(read)));
+            extensions
+        };
+        let proving = node(|| {
+            let mut view = HostCapabilities::default();
+            view.provide("persistence:durable_state", ProofSource::Measured, HOST_PROVIDER, "fixture");
+            Ok(view)
+        });
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &proving,
+                "T-recovered-proven",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Admitted
+        ));
+        // A node that no longer proves the guarantee refuses the re-spawn,
+        // plainly, naming the unmet entry.
+        let lacking = node(|| Ok(HostCapabilities::default()));
+        let RecoveredToolAdmission::Refused(error) = admit_recovered_tool_node_requirements(
+            &lacking,
+            "T-recovered-lacking",
+            "tool:fixture/durable",
+            Some(&requires),
+        ) else {
+            panic!("a node without the guarantee admitted the recovered tool");
+        };
+        let text = &error.downcast_ref::<NodeRequirementRefused>().unwrap().0;
+        assert!(text.contains("requires.node persistence:durable_state"), "{text}");
+        // A report that does not stand is a refusal too.
+        let stale = node(|| anyhow::bail!("the recorded node capability report is stale"));
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &stale,
+                "T-recovered-stale",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Refused(_)
+        ));
+        // A report that cannot be read just now defers the row.
+        let unreadable = node(|| {
+            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "state directory busy").into())
+        });
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &unreadable,
+                "T-recovered-unreadable",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Deferred(_)
+        ));
+        // A tool that declares nothing is admitted without any report.
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &ryeos_app::extension_state::ExtensionState::new(),
+                "T-recovered-plain",
+                "tool:fixture/plain",
+                None,
+            ),
+            RecoveredToolAdmission::Admitted
+        ));
+    }
 
     #[test]
     fn fresh_root_without_exact_admission_is_refused() {

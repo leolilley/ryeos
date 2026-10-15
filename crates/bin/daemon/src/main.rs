@@ -3556,6 +3556,7 @@ async fn run(
                 ryeos_app::external_artifacts::resolve_external_execution_artifacts(
                     &engine.bundle_roots,
                     &engine.node_trust_store,
+                    &ryeos_app::private_artifact_home::root(&config.runtime_state_dir()),
                 )
             })?;
 
@@ -4081,6 +4082,13 @@ async fn run(
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    // Launch admission judges declared node guarantees
+                    // against the signed report this daemon recorded and
+                    // was admitted on, re-observing what is cheap to.
+                    ext.insert(Arc::new(node_capability_report_reader(
+                        config.app_root.clone(),
+                        format!("sha256:{}", node_policy_snapshot.generation_digest()),
+                    )));
                     let publication_policy = node_policy_snapshot
                         .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
                         .clone();
@@ -5083,29 +5091,30 @@ async fn dispatch_resume_intents(
                 continue;
             }
         };
-        #[allow(clippy::let_and_return)]
+        // Both launchers judge the item's declared node guarantees against
+        // this node's current signed capability report before re-spawning
+        // it: a refusal finalizes the row, and a report that cannot be read
+        // just now leaves it for the next sweep within a bounded window.
         let outcome = match intent.kind {
             reconcile::ResumeKind::AdmittedRoot => {
-                let result = ryeos_executor::execution::runner::run_existing_admitted_root(
+                ryeos_executor::execution::runner::run_existing_admitted_root(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await;
-                result
+                .await
             }
             reconcile::ResumeKind::NativeResume => {
-                let result = ryeos_executor::execution::runner::run_existing_detached(
+                ryeos_executor::execution::runner::run_existing_detached(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await;
-                result
+                .await
             }
             reconcile::ResumeKind::Continuation | reconcile::ResumeKind::OperatorContinuation => {
                 unreachable!("continuation kinds handled above")
@@ -6225,6 +6234,82 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
     }
 }
 
+/// The reader launch admission judges declared node guarantees with. Each
+/// read re-reads the recorded report and verifies its digest and this
+/// node's signature over it, then refuses it unless it still describes the
+/// running node:
+///
+/// - The host generation (boot id and container enclosure) is observed
+///   again at each read, so a report from before a host restart is refused.
+/// - The policy generation is the one this daemon composed at startup. It
+///   cannot change while the daemon runs, so comparing it refuses only a
+///   report another daemon generation wrote over this one's.
+/// - `credential:private_home` is re-observed at each read with the Lillux
+///   private-directory walk from the app root to the credential home root;
+///   a root that is no longer private to the node's account is reported
+///   missing with the walk's reason, whatever the startup report said.
+///
+/// Every other fact is the snapshot the node took when it started and is
+/// not observed again: durable state and the declared host lifetime, time,
+/// the provider environment's names, the process-scope and isolation
+/// grades, residency and the remaining host facts. A change to any of them
+/// is seen only after the node restarts and records a new report.
+///
+/// A missing report, one whose digest or signature does not verify, and
+/// one that is stale for this host or policy generation are refusals:
+/// nothing this daemon does while it runs makes them stand. Only a failure
+/// to read the report file, the node identity or the host generation is an
+/// unreadable report, which a later attempt may read.
+fn node_capability_report_reader(
+    app_root: std::path::PathBuf,
+    policy_generation: String,
+) -> ryeos_app::node_requirement_admission::NodeCapabilityReportReader {
+    ryeos_app::node_requirement_admission::NodeCapabilityReportReader::new(move || {
+        current_node_capability_view(&app_root, &policy_generation)
+    })
+}
+
+fn current_node_capability_view(
+    app_root: &std::path::Path,
+    policy_generation: &str,
+) -> Result<lillux::process_control::HostCapabilities> {
+    use ryeos_app::node_requirement_admission::{NodeReportUnreadable, NodeRequirementRefused};
+    let signed = ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(app_root)?
+        .ok_or_else(|| {
+            NodeRequirementRefused(
+                "launch refused: no verified node capability report is recorded".to_owned(),
+            )
+        })?;
+    let staleness = signed.staleness(Some(policy_generation)).map_err(|error| {
+        NodeReportUnreadable(format!("observe this host's generation: {error:#}"))
+    })?;
+    if let Some(reason) = staleness {
+        anyhow::bail!(NodeRequirementRefused(format!(
+            "launch refused: the recorded node capability report is stale: {reason}"
+        )));
+    }
+    let mut view = lillux::process_control::HostCapabilities {
+        provided: signed.report.provided,
+        missing: signed.report.missing,
+    };
+    let credential_home = ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME;
+    if view.provided.contains_key(credential_home) {
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+        let observed = lillux::process_control::PrivateDirectoryFacts::observe(
+            app_root,
+            &ryeos_app::private_artifact_home::root(&state_dir),
+        );
+        if let Err(reason) = lillux::process_control::decide_private_directory(&observed) {
+            view.provided.remove(credential_home);
+            view.refuse(
+                credential_home,
+                format!("credential home root is no longer private at admission: {reason}"),
+            );
+        }
+    }
+    Ok(view)
+}
+
 /// Prove one exact process group dead from its identity alone, killing it
 /// when it is still alive. Reads no database.
 fn kill_and_prove_group_dead(identity: &process::ExecutionProcessIdentity) -> bool {
@@ -7210,6 +7295,7 @@ async fn run_service_standalone(
         ryeos_app::external_artifacts::resolve_external_execution_artifacts(
             &engine.bundle_roots,
             &engine.node_trust_store,
+            &ryeos_app::private_artifact_home::root(&config.runtime_state_dir()),
         )
     })?;
 
@@ -8300,5 +8386,216 @@ mod render_composition_custody_tests {
         assert!(custody.abandoned());
         assert_eq!(custody.exit_reason(), "native_custody_abandoned");
         assert!(custody.to_string().contains("abandoned_owners=0 fork_exclusions_held=2"));
+    }
+}
+
+#[cfg(test)]
+mod node_capability_report_reader_tests {
+    use super::*;
+
+    use lillux::process_control::{HOST_PROVIDER, HostCapabilities, HostFacts, ProofSource};
+    use ryeos_app::extension_state::ExtensionState;
+    use ryeos_app::node_requirement_admission::{
+        CREDENTIAL_PROFILE_KIND, NodeRequirementRefused, admit_structured_session_start,
+    };
+    use ryeos_node::capability_report::{
+        CAPABILITY_REPORT_SCHEMA, CREDENTIAL_PRIVATE_HOME, NodeCapabilityReport, NodeComposition,
+        NodeExposure, ReportGeneration, SignedNodeCapabilityReport, match_floor,
+    };
+
+    const POLICY: &str = "sha256:fixture-policy";
+
+    /// Admit a structured-session start whose profile requires time of the
+    /// controller and a private credential home for the credential-profile
+    /// kind, on the node `extensions` composes.
+    fn admit_login(extensions: &ExtensionState) -> Result<()> {
+        admit_structured_session_start(
+            extensions,
+            &serde_json::json!({"requires": {
+                "workload_class": "fixture.login",
+                "controller": ["time"],
+                "credential_kinds": {"credential_profile": [
+                    {"name": CREDENTIAL_PRIVATE_HOME, "accept": ["measured", "provider_attested", "trusted"]},
+                ]},
+            }}),
+            Some(CREDENTIAL_PROFILE_KIND),
+        )
+    }
+
+    fn node_reading(app_root: &std::path::Path) -> ExtensionState {
+        let extensions = ExtensionState::new();
+        extensions.insert(Arc::new(node_capability_report_reader(
+            app_root.to_path_buf(),
+            POLICY.to_owned(),
+        )));
+        extensions
+    }
+
+    /// Record a report signed by a fresh node identity under `app_root`,
+    /// describing this host's current generation and `policy`.
+    fn record_report(app_root: &std::path::Path, policy: &str) {
+        let identity_dir = app_root.join(ryeos_engine::AI_DIR).join("node/identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        let identity = NodeIdentity::create(&identity_dir.join("node-key.pem")).unwrap();
+        identity
+            .write_public_identity(&identity_dir.join("public-identity.json"))
+            .unwrap();
+        let mut view = HostCapabilities::default();
+        view.provide("time", ProofSource::Measured, HOST_PROVIDER, "fixture");
+        view.provide(CREDENTIAL_PRIVATE_HOME, ProofSource::Trusted, HOST_PROVIDER, "fixture");
+        let (boot_id, cgroup_enclosure) =
+            lillux::process_control::current_host_generation().unwrap();
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+        let report = NodeCapabilityReport {
+            schema: CAPABILITY_REPORT_SCHEMA.to_owned(),
+            node_fingerprint: identity.fingerprint().to_owned(),
+            daemon_digest: "sha256:fixture".to_owned(),
+            generated_at: "fixture".to_owned(),
+            generation: ReportGeneration { boot_id, cgroup_enclosure },
+            subject: "node".to_owned(),
+            composition: NodeComposition {
+                profile: None,
+                host_class: "hosted".to_owned(),
+                bundles: Vec::new(),
+                compiled_features: Vec::new(),
+                policy_generation: policy.to_owned(),
+            },
+            exposure: NodeExposure::unattested(Vec::new()),
+            host: HostFacts::observe(0, std::path::Path::new("/")),
+            credential_home: lillux::process_control::PrivateDirectoryFacts::observe(
+                app_root,
+                &ryeos_app::private_artifact_home::root(&state_dir),
+            ),
+            floor: match_floor(&[], &view),
+            provided: view.provided,
+            missing: view.missing,
+            capacity: Default::default(),
+            established_residency: None,
+        };
+        report.sign(identity.signing_key()).unwrap().write(app_root).unwrap();
+    }
+
+    fn refusal(error: anyhow::Error) -> String {
+        format!("{error:#}")
+    }
+
+    #[test]
+    fn a_node_without_the_reader_or_a_report_refuses_declared_requirements() {
+        let missing_extension = refusal(
+            admit_login(&ExtensionState::new())
+                .unwrap_err(),
+        );
+        assert!(
+            missing_extension.contains("this node has no signed capability report"),
+            "{missing_extension}"
+        );
+        let app_root = tempfile::tempdir().unwrap();
+        let missing_report = refusal(
+            admit_login(&node_reading(app_root.path()))
+                .unwrap_err(),
+        );
+        assert!(
+            missing_report.contains("no verified node capability report is recorded"),
+            "{missing_report}"
+        );
+    }
+
+    #[test]
+    fn a_stale_report_is_refused() {
+        let older = tempfile::tempdir().unwrap();
+        let path = SignedNodeCapabilityReport::path(older.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "report": {"schema": "ryeos.node.capability-report/v5", "host": {"version": 5}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let text = refusal(
+            admit_login(&node_reading(older.path()))
+                .unwrap_err(),
+        );
+        assert!(text.contains("stale report"), "{text}");
+
+        let overwritten = tempfile::tempdir().unwrap();
+        record_report(overwritten.path(), "sha256:another-daemon-generation");
+        let text = refusal(
+            admit_login(&node_reading(overwritten.path()))
+                .unwrap_err(),
+        );
+        assert!(text.contains("the recorded node capability report is stale"), "{text}");
+        assert!(text.contains(&format!("node policy generation is now {POLICY}")), "{text}");
+    }
+
+    #[test]
+    fn the_credential_home_is_re_observed_at_admission() {
+        let app_root = tempfile::tempdir().unwrap();
+        record_report(app_root.path(), POLICY);
+        // The startup report proved the home; it is absent now.
+        let error =
+            admit_login(&node_reading(app_root.path()))
+                .unwrap_err();
+        let text = error
+            .downcast_ref::<NodeRequirementRefused>()
+            .unwrap_or_else(|| panic!("not a requirement refusal: {error:#}"))
+            .0
+            .clone();
+        assert!(
+            text.contains(&format!(
+                "requires.credential_kinds.credential_profile {CREDENTIAL_PRIVATE_HOME}: \
+                 credential home root is no longer private at admission"
+            )),
+            "{text}"
+        );
+        // Once the root is private to this account again, the report's
+        // proof stands.
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.path().to_path_buf()).state();
+        ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap();
+        admit_login(&node_reading(app_root.path()))
+            .unwrap();
+    }
+
+    fn is_refusal(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<NodeRequirementRefused>().is_some()
+            && !ryeos_app::node_requirement_admission::is_report_unreadable(error)
+    }
+
+    #[test]
+    fn a_report_that_cannot_stand_is_refused_and_only_unreadable_io_is_retryable() {
+        // No report recorded: a refusal, not a transient read failure.
+        let empty = tempfile::tempdir().unwrap();
+        let error = admit_login(&node_reading(empty.path())).unwrap_err();
+        assert!(is_refusal(&error), "{error:#}");
+
+        // A report from another policy generation: a refusal.
+        let overwritten = tempfile::tempdir().unwrap();
+        record_report(overwritten.path(), "sha256:another-daemon-generation");
+        let error = admit_login(&node_reading(overwritten.path())).unwrap_err();
+        assert!(is_refusal(&error), "{error:#}");
+
+        // A report whose content no longer matches its digest: a refusal.
+        let tampered = tempfile::tempdir().unwrap();
+        record_report(tampered.path(), POLICY);
+        let path = SignedNodeCapabilityReport::path(tampered.path());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["report"]["daemon_digest"] = serde_json::json!("sha256:tampered");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = admit_login(&node_reading(tampered.path())).unwrap_err();
+        assert!(is_refusal(&error), "{error:#}");
+        assert!(format!("{error:#}").contains("digest does not match"), "{error:#}");
+
+        // A report whose file cannot be read: the one transient failure.
+        let unreadable = tempfile::tempdir().unwrap();
+        let path = SignedNodeCapabilityReport::path(unreadable.path());
+        std::fs::create_dir_all(&path).unwrap();
+        let error = admit_login(&node_reading(unreadable.path())).unwrap_err();
+        assert!(error.downcast_ref::<NodeRequirementRefused>().is_none(), "{error:#}");
+        assert!(
+            ryeos_app::node_requirement_admission::is_report_unreadable(&error),
+            "{error:#}"
+        );
     }
 }

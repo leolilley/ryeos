@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T22:05:26Z:7b7bc81d6ff0cd469f14964f3f7535ab2e767e78f229cbadd5e37d1f18c092c5:5bwX1eJ5Nej3BV2tgeHtFNuzvdfhMNMJ1UXxkkMwXCjJCmiICCfbDK0ByWTaelKWkj4fShqKnZFMuTkYb/TpDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T10:03:17Z:c9b85f3f81bc9462ac6db9efa7f2dbcaaf1562909afdc6f7fb01c75799a4beda:XGByzZ2aqIxxCKbW8klWUqAaEhxfhvn7t1CjuNtpTrJZEV7kazV8M94QdxzNTMzgSEuj0NVEhhZaX6XmBO+tBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one short-lived RyeOS-owned Codex credential-enrollment execution on an explicitly trusted process-group node.
@@ -29,3 +29,18 @@ requires:
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
       - ryeos.runtime.dedicated_session.terminate
+  # Guarantees the node running this enrollment must prove in its capability
+  # report: the credential profile it writes must survive the node process
+  # with no provider deadline, inside a home private to the node's account.
+  # Durable state rests on the node's declared lifetime, so a trusted grade
+  # counts, as does a provider-attested one where a sandbox owns the storage.
+  # The enrollment binds a credential profile, the one credential kind it
+  # declares, so only that kind's guarantees are judged.
+  node:
+    - name: persistence:durable_state
+      accept: [measured, provider_attested, trusted]
+    - time
+  credential_kinds:
+    credential_profile:
+      - name: credential:private_home
+        accept: [measured, provider_attested, trusted]

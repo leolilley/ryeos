@@ -507,6 +507,7 @@ pub struct OpenFileIdentity {
     mode: u32,
     file_type: u32,
     owner: u32,
+    link_count: u64,
 }
 
 impl OpenFileIdentity {
@@ -548,6 +549,12 @@ impl OpenFileIdentity {
 
     pub fn owner(self) -> u32 {
         self.owner
+    }
+
+    /// How many directory entries name the file. Zero means the open file
+    /// is an orphaned inode that no path reaches any more.
+    pub fn link_count(self) -> u64 {
+        self.link_count
     }
 
     pub fn is_executable(self) -> bool {
@@ -757,6 +764,79 @@ pub fn observe_open_file_identity(file: &File) -> Result<OpenFileIdentity> {
             mode: metadata.mode(),
             file_type: metadata.mode() & libc::S_IFMT,
             owner: metadata.uid(),
+            link_count: metadata.nlink(),
+        })
+    }
+}
+
+/// The longest pathname [`observe_open_file_path`] accepts for an open file.
+/// Linux builds a descriptor's name, unlinked marker included, in a
+/// `PATH_MAX` (4096-byte) buffer and fails the read when it does not fit, so
+/// current kernels return at most 4095 bytes. The reader still checks the
+/// bound itself instead of relying on that kernel detail.
+pub const MAX_OPENED_PATH_BYTES: usize = 4096;
+
+/// The kernel's current pathname for an open file. It names where the open
+/// file is linked now, which follows renames made after the file was opened;
+/// it is information about the file's location, not an identity of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPath {
+    /// The pathname as the kernel reports it, with the kernel's unlinked
+    /// marker removed. A descriptor that names no filesystem object (a pipe,
+    /// a socket, an anonymous inode) reports a name that is not absolute.
+    pub path: PathBuf,
+    /// The kernel marks the name as unlinked: the open file is no longer
+    /// reachable under `path`. A file whose own name ends with the kernel's
+    /// marker is reported the same way.
+    pub unlinked: bool,
+}
+
+/// Read the kernel's current pathname for `file`, refusing a name longer
+/// than [`MAX_OPENED_PATH_BYTES`]. Only Linux reports one.
+pub fn observe_open_file_path(file: &File) -> Result<OpenedPath> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("reading an open file's current pathname is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        const UNLINKED_MARKER: &[u8] = b" (deleted)";
+        let link = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("name the open file's descriptor link")?;
+        // One byte past the bound tells a name of exactly the bound from a
+        // truncated longer one.
+        let mut buffer = vec![0_u8; MAX_OPENED_PATH_BYTES + 1];
+        // SAFETY: `link` is a NUL-terminated string that outlives the call,
+        // and `buffer` is a live, writable allocation of exactly the length
+        // passed; readlink writes at most that many bytes and no terminator.
+        let read = unsafe {
+            libc::readlink(
+                link.as_ptr(),
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+            )
+        };
+        let read = usize::try_from(read).map_err(|_| {
+            anyhow::Error::new(std::io::Error::last_os_error())
+                .context("read the open file's current pathname")
+        })?;
+        if read > MAX_OPENED_PATH_BYTES {
+            anyhow::bail!(
+                "the open file's current pathname is longer than {MAX_OPENED_PATH_BYTES} bytes"
+            );
+        }
+        buffer.truncate(read);
+        let (name, unlinked) = match buffer.strip_suffix(UNLINKED_MARKER) {
+            Some(name) => (name, true),
+            None => (buffer.as_slice(), false),
+        };
+        Ok(OpenedPath {
+            path: PathBuf::from(OsStr::from_bytes(name)),
+            unlinked,
         })
     }
 }
@@ -8844,6 +8924,45 @@ fn restore_quarantined_regular(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_names_the_open_file_where_it_is_linked_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().canonicalize().unwrap();
+        let original = tmp_path.join("auth.json");
+        std::fs::write(&original, b"credential").unwrap();
+        let file = File::open(&original).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: original.clone(), unlinked: false }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 1);
+
+        let renamed = tmp_path.join("elsewhere.json");
+        std::fs::rename(&original, &renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: renamed.clone(), unlinked: false }
+        );
+
+        std::fs::remove_file(&renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: renamed, unlinked: true }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_of_a_pipe_is_not_absolute() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let file = File::from(std::os::fd::OwnedFd::from(reader));
+        let opened = observe_open_file_path(&file).unwrap();
+        assert!(!opened.path.is_absolute(), "{}", opened.path.display());
+        assert!(!opened.unlinked);
+    }
 
     #[test]
     #[cfg(unix)]

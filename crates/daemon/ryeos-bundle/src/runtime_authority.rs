@@ -20,7 +20,7 @@
 //! Keeping minting, service authorization, and rejection on one definition is
 //! the point: they cannot drift.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use ryeos_runtime::authorizer::{canonical_cap, cap_matches, validate_scope_pattern};
@@ -329,6 +329,90 @@ pub fn manifest_backs_requested_cap(manifest_caps: &BTreeSet<String>, requested_
 pub struct RuntimeRequires {
     #[serde(default)]
     pub capabilities: RuntimeCapabilityRequirements,
+    /// Guarantees the node executing the item must prove in its signed
+    /// capability report, as capability floor entries: a bare name, or an
+    /// object naming one name or an `any_of` set with the grades and
+    /// providers it accepts. Names are open strings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node: Vec<lillux::process_control::CapabilityRequirement>,
+    /// The credential kind the item's launch binds, keyed by kind id, with
+    /// the guarantees the node must prove for that kind in the same entry
+    /// form. A workload states as data which credential kind it uses, so
+    /// admission judges that kind's list and never another kind's in its
+    /// place. An item launch carries no credential binding of its own to
+    /// select among several kinds, so an item declares at most one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_kinds: BTreeMap<String, Vec<lillux::process_control::CapabilityRequirement>>,
+}
+
+/// The most entries one `requires.node` list or one credential kind's list
+/// may hold, so admission judges a bounded list against the node report.
+pub const MAX_REQUIREMENT_ENTRIES: usize = 64;
+
+/// The most credential kinds one item may declare: its launch carries no
+/// credential binding that could select among several.
+pub const MAX_ITEM_CREDENTIAL_KINDS: usize = 1;
+
+/// Why a list of node or credential requirement entries is malformed, or
+/// `None`: the list is bounded, every entry must be well formed on its own,
+/// and the entries sorted and unique by label so one signed list has one
+/// spelling.
+pub fn requirement_entries_refusal(
+    list: &str,
+    entries: &[lillux::process_control::CapabilityRequirement],
+) -> Option<String> {
+    if entries.len() > MAX_REQUIREMENT_ENTRIES {
+        return Some(format!(
+            "requires.{list} holds {} entries, more than {MAX_REQUIREMENT_ENTRIES}",
+            entries.len()
+        ));
+    }
+    if let Some(reason) = entries.iter().find_map(|entry| entry.spec_refusal()) {
+        return Some(format!("requires.{list}: {reason}"));
+    }
+    let labels: Vec<String> = entries.iter().map(|entry| entry.label()).collect();
+    labels
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        .then(|| format!("requires.{list} entries must be sorted and unique"))
+}
+
+/// Why an item's `requires.credential_kinds` is malformed, or `None`: at
+/// most [`MAX_ITEM_CREDENTIAL_KINDS`] kinds, each id bounded and portable,
+/// each list non-empty and well formed.
+pub fn credential_kinds_refusal(
+    kinds: &BTreeMap<String, Vec<lillux::process_control::CapabilityRequirement>>,
+) -> Option<String> {
+    if kinds.len() > MAX_ITEM_CREDENTIAL_KINDS {
+        return Some(format!(
+            "requires.credential_kinds declares {} kinds; an item launch binds one credential \
+             kind, so it may declare at most {MAX_ITEM_CREDENTIAL_KINDS}",
+            kinds.len()
+        ));
+    }
+    for (kind, entries) in kinds {
+        if kind.is_empty()
+            || kind.len() > 256
+            || !kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Some(format!(
+                "requires.credential_kinds key `{kind}` is not a bounded, portable identifier"
+            ));
+        }
+        if entries.is_empty() {
+            return Some(format!(
+                "requires.credential_kinds.{kind} must name what the node proves for that kind"
+            ));
+        }
+        if let Some(reason) =
+            requirement_entries_refusal(&format!("credential_kinds.{kind}"), entries)
+        {
+            return Some(reason);
+        }
+    }
+    None
 }
 
 /// The `requires.capabilities` sub-tree, split by authority source:
@@ -519,10 +603,22 @@ pub fn requested_runtime_caps(
 /// Deeper, trust-store-dependent checks (manifest subset, bundle-id segment
 /// grammar) belong to the launch path, not here.
 pub fn parse_runtime_requires(value: &Value) -> Result<RuntimeCapabilityRequirements, String> {
+    parse_runtime_requires_block(value).map(|requires| requires.capabilities)
+}
+
+/// The whole validated `requires` block, for the launch admission that also
+/// matches its node and credential lists against the node's capability
+/// report.
+pub fn parse_runtime_requires_block(value: &Value) -> Result<RuntimeRequires, String> {
     let requires: RuntimeRequires = serde_json::from_value(value.clone())
         .map_err(|e| format!("malformed `requires` block: {e}"))?;
     validate_runtime_capability_requirements(&requires.capabilities)?;
-    Ok(requires.capabilities)
+    if let Some(reason) = requirement_entries_refusal("node", &requires.node)
+        .or_else(|| credential_kinds_refusal(&requires.credential_kinds))
+    {
+        return Err(reason);
+    }
+    Ok(requires)
 }
 
 /// Enforce the structural rules a type alone cannot: non-empty event
@@ -911,6 +1007,54 @@ mod tests {
                 "expected error for {value}"
             );
         }
+    }
+
+    #[test]
+    fn node_and_credential_requirements_are_validated_floor_entries() {
+        let value = json!({
+            "capabilities": { "declared": ["ryeos.execute.tool.echo"] },
+            "node": ["persistence:durable_state", "time"],
+            "credential_kinds": { "credential_profile": ["credential:private_home"] },
+        });
+        let reqs = parse_runtime_requires(&value).unwrap();
+        assert!(requested_runtime_caps(&reqs, "codex").is_empty());
+        let parsed = parse_runtime_requires_block(&value).unwrap();
+        assert_eq!(parsed.node.len(), 2);
+        assert_eq!(
+            parsed.credential_kinds["credential_profile"][0].label(),
+            "credential:private_home"
+        );
+        for (value, refusal) in [
+            (json!({ "node": ["time", "persistence:durable_state"] }), "sorted and unique"),
+            (json!({ "node": ["time", "time"] }), "sorted and unique"),
+            (
+                json!({ "credential_kinds": { "credential_profile": [{ "any_of": [] }] } }),
+                "neither name nor any_of",
+            ),
+            (
+                json!({ "credential_kinds": { "credential_profile": [{ "name": "x", "accept": ["peer_attested"] }] } }),
+                "peer_attested",
+            ),
+            (json!({ "credential_kinds": { "credential_profile": [] } }), "must name what"),
+            (json!({ "credential_kinds": { "credential profile": ["x"] } }), "portable identifier"),
+            (
+                json!({ "credential_kinds": { "credential_profile": ["x"], "provider_env": ["y"] } }),
+                "at most 1",
+            ),
+        ] {
+            let error = parse_runtime_requires(&value).unwrap_err();
+            assert!(error.contains(refusal), "{value}: {error}");
+        }
+        // The single-list spelling is not a credential kind: it is refused
+        // rather than read as an unnamed kind.
+        assert!(parse_runtime_requires(&json!({ "credential": ["x"] })).is_err());
+        assert!(parse_runtime_requires(&json!({ "node": [1] })).is_err());
+        let bounded: Vec<String> = (0..MAX_REQUIREMENT_ENTRIES).map(|index| format!("n{index:03}")).collect();
+        assert!(parse_runtime_requires(&json!({ "node": bounded })).is_ok());
+        let over: Vec<String> = (0..=MAX_REQUIREMENT_ENTRIES).map(|index| format!("n{index:03}")).collect();
+        let error = parse_runtime_requires(&json!({ "credential_kinds": { "credential_profile": over } }))
+            .unwrap_err();
+        assert!(error.contains("more than 64"), "{error}");
     }
 
     #[test]

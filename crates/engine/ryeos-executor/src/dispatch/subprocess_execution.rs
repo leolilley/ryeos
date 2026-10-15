@@ -834,6 +834,9 @@ async fn dispatch_tool_subprocess(
                     .into(),
             });
         }
+        // The wrapper spawns nothing itself, but a guarantee it declares is
+        // still judged here; the method target is admitted on its own launch.
+        admit_tool_node_requirements(state, &resolved.resolved_item, &resolved.item_ref)?;
         return Box::pin(dispatch_via_method_executor(
             &resolved,
             request,
@@ -892,6 +895,11 @@ async fn dispatch_tool_subprocess(
             });
         let source =
             validate_direct_source_closure(state, &engine, &resolved, source_project_root)?;
+        // Validation applies the same launch admission a real run applies
+        // before it spawns: the manifest-backed runtime caps and the node
+        // guarantees the tool declares. A tool this node cannot host is
+        // refused here rather than reported ready for admission.
+        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
         let admission_ready = source
             .as_ref()
             .is_none_or(|preview| preview.ready_for_admission);
@@ -908,6 +916,11 @@ async fn dispatch_tool_subprocess(
         }));
     }
 
+    // Admitted before the direct program is finalized or any process is
+    // spawned: a tool declaring a node guarantee this node does not prove
+    // leaves nothing behind.
+    let effective_caps = admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
+
     let parent_thread_id = request
         .parent_execution_context
         .as_ref()
@@ -922,8 +935,6 @@ async fn dispatch_tool_subprocess(
     .map_err(DispatchError::Internal)?;
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps =
-        derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);

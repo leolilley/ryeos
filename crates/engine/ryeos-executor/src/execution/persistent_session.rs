@@ -2233,6 +2233,13 @@ fn admit_session_capsule(
             bail!("signed session configuration inventory requires enforced read-only isolation");
         }
         validate_required_session_environment(&profile, environment)?;
+        // The controller guarantees the profile declares are judged against
+        // this node's signed capability report before the session capsule
+        // is admitted; its credential kind is judged when a start binds one.
+        ryeos_app::node_requirement_admission::admit_structured_session_controller(
+            state,
+            &profile.contract,
+        )?;
         Some(profile)
     } else {
         None

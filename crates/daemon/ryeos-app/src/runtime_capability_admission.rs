@@ -14,6 +14,9 @@ pub fn mint_runtime_capability_caps(
     let Some(requires_value) = requires_value else {
         return Ok(Vec::new());
     };
+    // Only the block's capabilities are runtime authority. Its `node` and
+    // `credential_kinds` lists are node guarantees, judged against the node's
+    // signed capability report by node-requirement admission at every launch.
     let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
         .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
     if reqs.manifest.runtime_authority.is_empty() {

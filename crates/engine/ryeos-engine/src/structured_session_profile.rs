@@ -181,6 +181,11 @@ pub fn compile(
             bail!("structured-session HTTP credential block must be present and nullable");
         }
     }
+    if let Some(requires) = object.get("requires") {
+        required.push("requires");
+        let remote = object.get("external_candidate").is_some_and(|candidate| !candidate.is_null());
+        validate_placement_requirements(requires, remote)?;
+    }
     if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
         bail!("structured-session profile has an unknown or missing top-level field");
     }
@@ -1481,6 +1486,123 @@ fn value_string<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Re
         .ok_or_else(|| anyhow!("structured-session `{key}` must be a string"))
 }
 
+/// The most entries one placement requirement list may hold.
+pub const MAX_PLACEMENT_REQUIREMENT_ENTRIES: usize = 64;
+/// The most credential kinds one profile may declare.
+pub const MAX_CREDENTIAL_KINDS: usize = 16;
+
+type Requirement = lillux::process_control::CapabilityRequirement;
+
+/// The placement requirements a structured-session profile declares as data.
+///
+/// `workload_class` is the id a refusal names. `controller` lists the
+/// guarantees the node running the workload's app server must prove in its
+/// capability report. `credential_kinds` names every credential kind the
+/// workload supports, each with the guarantees the node must prove for that
+/// kind: admission evaluates only the list of the kind the launch's
+/// credential binding names, and refuses a binding that names no kind or an
+/// undeclared one, so one kind never stands in for another. `lease` and
+/// `guest` list what a remote lease provider and its activated guest must
+/// attest, so only a profile with an external candidate may name them.
+/// They are parsed and validated here and judged at placement, not at
+/// session admission: the lease list goes to the lease adapter's admission
+/// before any provider contact, which refuses when the provider cannot
+/// attest it; the guest list is carried in the admitted lease request and is
+/// judged against the guest's own report once the guest channel delivers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementRequirements {
+    pub workload_class: String,
+    pub controller: Vec<Requirement>,
+    pub credential_kinds: BTreeMap<String, Vec<Requirement>>,
+    pub lease: Vec<Requirement>,
+    pub guest: Vec<Requirement>,
+}
+
+/// The placement requirements of an admission-compiled profile contract,
+/// or `None` when the profile declares none.
+pub fn placement_requirements(contract: &Value) -> Result<Option<PlacementRequirements>> {
+    let Some(requires) = contract.get("requires") else {
+        return Ok(None);
+    };
+    let remote = contract
+        .get("external_candidate")
+        .is_some_and(|candidate| !candidate.is_null());
+    parse_placement_requirements(requires, remote).map(Some)
+}
+
+fn validate_placement_requirements(requires: &Value, remote: bool) -> Result<()> {
+    parse_placement_requirements(requires, remote).map(|_| ())
+}
+
+fn parse_placement_requirements(requires: &Value, remote: bool) -> Result<PlacementRequirements> {
+    let object = requires
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session `requires` must be a mapping"))?;
+    require_keys(
+        object,
+        &["workload_class", "controller", "credential_kinds"],
+        &["lease", "guest"],
+    )?;
+    let workload_class = value_string(object, "workload_class")?;
+    validate_identifier(workload_class)?;
+    if !remote && (object.contains_key("lease") || object.contains_key("guest")) {
+        bail!("structured-session `requires.lease` and `requires.guest` need an external candidate");
+    }
+    let list = |key: &str| -> Result<Vec<Requirement>> {
+        match object.get(key) {
+            Some(value) => requirement_list(&format!("requires.{key}"), value),
+            None => Ok(Vec::new()),
+        }
+    };
+    let kinds = object
+        .get("credential_kinds")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("structured-session `requires.credential_kinds` must be a mapping"))?;
+    if kinds.is_empty() || kinds.len() > MAX_CREDENTIAL_KINDS {
+        bail!(
+            "structured-session `requires.credential_kinds` must declare between 1 and \
+             {MAX_CREDENTIAL_KINDS} credential kinds"
+        );
+    }
+    let mut credential_kinds = BTreeMap::new();
+    for (kind, value) in kinds {
+        validate_identifier(kind)?;
+        let entries = requirement_list(&format!("requires.credential_kinds.{kind}"), value)?;
+        if entries.is_empty() {
+            bail!(
+                "structured-session `requires.credential_kinds.{kind}` must name what the node \
+                 proves for that kind"
+            );
+        }
+        credential_kinds.insert(kind.clone(), entries);
+    }
+    Ok(PlacementRequirements {
+        workload_class: workload_class.to_owned(),
+        controller: list("controller")?,
+        credential_kinds,
+        lease: list("lease")?,
+        guest: list("guest")?,
+    })
+}
+
+/// One bounded list of capability floor entries, each well formed and the
+/// list sorted and unique by label.
+fn requirement_list(path: &str, value: &Value) -> Result<Vec<Requirement>> {
+    let entries: Vec<Requirement> = serde_json::from_value(value.clone())
+        .with_context(|| format!("structured-session `{path}` is not a list of entries"))?;
+    if entries.len() > MAX_PLACEMENT_REQUIREMENT_ENTRIES {
+        bail!("structured-session `{path}` count is outside its bound");
+    }
+    if let Some(reason) = entries.iter().find_map(|entry| entry.spec_refusal()) {
+        bail!("structured-session `{path}`: {reason}");
+    }
+    let labels: Vec<String> = entries.iter().map(|entry| entry.label()).collect();
+    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+        bail!("structured-session `{path}` entries must be sorted and unique");
+    }
+    Ok(entries)
+}
+
 fn require_keys(
     object: &serde_json::Map<String, Value>,
     required: &[&str],
@@ -2215,6 +2337,51 @@ mod tests {
         ] {
             compile(&files[name], &files).unwrap();
         }
+        // The remote authoring profile declares its placement requirements
+        // as data, with one requirement list per credential kind it supports.
+        let remote: Value = serde_json::from_slice(&files["external-authoring.profile.json"]).unwrap();
+        assert_eq!(remote["requires"]["workload_class"], "codex.authoring.remote");
+        let admitted = compile(&files["external-authoring.profile.json"], &files).unwrap();
+        let requirements = placement_requirements(&admitted.contract).unwrap().unwrap();
+        assert_eq!(
+            requirements.credential_kinds.keys().collect::<Vec<_>>(),
+            ["credential_profile"]
+        );
+        assert_eq!(
+            requirements.credential_kinds["credential_profile"][0].label(),
+            "credential:private_home"
+        );
+        let too_many: Vec<String> = (0..=MAX_PLACEMENT_REQUIREMENT_ENTRIES)
+            .map(|index| format!("n{index:03}"))
+            .collect();
+        for (pointer, value, refusal) in [
+            ("/requires/controller", json!(["time", "accounting"]), "sorted and unique"),
+            ("/requires/controller", json!(too_many), "outside its bound"),
+            ("/requires/credential_kinds", json!({}), "between 1 and"),
+            ("/requires/credential_kinds", json!({"credential_profile": []}), "must name what"),
+            ("/requires/credential_kinds", json!({"credential profile": ["time"]}), "identifier"),
+            (
+                "/requires/credential_kinds",
+                json!({"credential_profile": [{"any_of": []}]}),
+                "neither name nor any_of",
+            ),
+            ("/requires/guest", json!([{"name": "guest.exec_route_closed", "accept": ["peer_attested"]}]), "peer_attested"),
+            ("/requires/workload_class", json!("codex authoring"), "identifier"),
+        ] {
+            let mut invalid = remote.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            let error = compile(&serde_json::to_vec(&invalid).unwrap(), &files).unwrap_err();
+            assert!(format!("{error:#}").contains(refusal), "{pointer}: {error:#}");
+        }
+        for extra in ["extra", "credential"] {
+            let mut unknown = remote.clone();
+            unknown["requires"][extra] = json!([]);
+            assert!(compile(&serde_json::to_vec(&unknown).unwrap(), &files).is_err(), "{extra}");
+        }
+        let mut local: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();
+        local["requires"] = remote["requires"].clone();
+        let error = compile(&serde_json::to_vec(&local).unwrap(), &files).unwrap_err();
+        assert!(format!("{error:#}").contains("need an external candidate"), "{error:#}");
         // Early lifecycle authority must be correlated before the daemon ACK
         // can permit a child; final-response corroboration is too late.
         let profile: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();

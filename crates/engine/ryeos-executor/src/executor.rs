@@ -738,6 +738,10 @@ pub async fn execute_service_verified(
     pre_minted_thread_id: Option<&str>,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
+    // Every in-process entry point (generic dispatch, service routes, UI
+    // invocations, the local socket) runs through here, so the item is
+    // refused here before anything is recorded or the handler is reached.
+    crate::dispatch::refuse_in_process_node_requirements(&verified.resolved, service_ref)?;
     let (planning_fingerprint, planning_scopes) = match &ctx.plan_ctx.requested_by {
         ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
             (principal.fingerprint.as_str(), principal.scopes.as_slice())
