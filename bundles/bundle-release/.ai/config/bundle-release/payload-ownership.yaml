@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-10T04:33:51Z:474a41e53c9563b7d6737b838f46af357811825c111489241f55c3f38f5feb39:NNGdWWhPOZl5vQpJv+Qb/X/tUDNlK+coYuxK+TOzCV9Xm+zbwfP/WXbUlNK2h40KK4u7uxt3wLSrJMawSlXmCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T00:59:19Z:a9693cb0284751ef16a589801ca5aa3ddc3e4f8b84ca075d8eb4271287c98dc1:fj/tI6ddJSG8aqBGFpttnC/N7zhIm169Skr1cBIeBePq13T2Gt/Oxxu5t76RcTwwAHHRepCgPyQsPpJlqFRKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Exact publisher-authored ownership of native payloads by RyeOS bundle.
@@ -40,13 +40,13 @@ payload_ownership:
           cargo_package: ryeos-handler-bins
           build_class: release
         - binary: rye-parser-regex-kv
-          cargo_package: ryeos-handler-bins
+          cargo_package: ryeos-parser-bins
           build_class: release
         - binary: rye-parser-yaml-document
-          cargo_package: ryeos-handler-bins
+          cargo_package: ryeos-parser-bins
           build_class: release
         - binary: rye-parser-yaml-header-document
-          cargo_package: ryeos-handler-bins
+          cargo_package: ryeos-parser-bins
           build_class: release
         - binary: ryeos-core-tools
           cargo_package: ryeos-core-tools

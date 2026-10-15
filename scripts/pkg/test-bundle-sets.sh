@@ -106,6 +106,10 @@ done
 for set_name in core core-scheduling hosted-node bundle-source; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/core-handlers" ]]
 done
+# The parser package has no compositions: every set builds it with its defaults.
+for set_name in full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller release-authority release-artifacts; do
+  [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-parser-bins)" ]]
+done
 mapfile -t core < <(ryeos_bundle_set_names core)
 [[ "${core[*]}" == "core" ]]
 mapfile -t core_bins < <(ryeos_bundle_set_bin_managed_names core)

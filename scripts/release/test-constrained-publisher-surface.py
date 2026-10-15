@@ -14,7 +14,7 @@ POLICY = (
 ).read_text()
 NODE_POLICY = (
     ROOT
-    / "crates/daemon/ryeos-app/src/node_policy/sections/bundle_publication.rs"
+    / "crates/engine/ryeos-node-runtime/src/node_policy/sections/bundle_publication.rs"
 ).read_text()
 
 PATHS = (
@@ -24,6 +24,7 @@ PATHS = (
     "v1/bundle-generation/authorize",
     "v1/substrate-release/authorize",
     "v1/substrate-core/authorize-recipe",
+    "v1/substrate-build/authorize-recipe",
     "v1/bundle-catalog/authorize-successor",
 )
 
@@ -32,7 +33,7 @@ for path in PATHS:
     assert f'"/{path}"' in SERVER, f"server path missing: {path}"
     assert f"`POST /{path}`" in DOC, f"deployment contract missing: {path}"
 
-assert SERVER.count(".route(") == 7, "publisher surface gained an unreviewed route"
+assert SERVER.count(".route(") == len(PATHS), "publisher surface gained an unreviewed route"
 assert "DefaultBodyLimit::max(MAX_BODY_BYTES)" in SERVER
 assert "operation.validate()" in SERVER
 assert "ct_eq" in SERVER
@@ -50,7 +51,12 @@ assert "require_publisher_identity(" in COMMAND
 assert COMMAND.index("require_publisher_identity(") < COMMAND.index("TcpListener::bind")
 assert "loaded publisher signing key does not match" in COMMAND
 for source in (POLICY, NODE_POLICY):
-    assert "native != core_seed && native != substrate && core_seed != substrate" in source
+    # rustfmt may wrap the comparison chain; compare with whitespace collapsed.
+    flat = " ".join(source.split())
+    for left, right in (("portable", "native"), ("portable", "core_seed"),
+                        ("portable", "substrate"), ("native", "core_seed"),
+                        ("native", "substrate"), ("core_seed", "substrate")):
+        assert f"{left} != {right}" in flat, f"verifier pair not distinct: {left}/{right}"
     assert "pairwise-distinct verifiers" in source
 
-print("constrained publisher surface: 7/7 exact operations")
+print(f"constrained publisher surface: {len(PATHS)}/{len(PATHS)} exact operations")

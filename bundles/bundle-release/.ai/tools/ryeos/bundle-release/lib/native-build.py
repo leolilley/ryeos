@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-24T00:12:06Z:6eff4dac4e0f6f3e4150a83070460d670a4eddabbaf6b77ca39508de94cb2242:vFj4FAU0Dgjf61a16eK9Lw+X1Mbgezrs2t9z4An3k4ZuSPesCiyNFfARWk70CjF4JTKE8fgWMoXgQfaakaPZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T00:59:19Z:acef1319655098c489a6cee1c8517fb0eae1338671c194654d7faefc044d953c:9y7dgafpCoY1mSe6CgX/vv7nwkL8Qia7MEvHaEUluXRL/d4mzzghi17J5B+eRlsXoqiNluV/CKiR77QaULFGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build one exact non-core bundle selected by the ownership contract."""
 import hashlib, importlib.util, json, os, pathlib, re, resource, shutil, stat, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
@@ -7,9 +7,6 @@ sys.dont_write_bytecode = True
 def fail(message): raise ValueError(message)
 
 HANDLER_FEATURES_BY_BINARY = {
-    "rye-parser-yaml-document": ["basic-parsers"],
-    "rye-parser-yaml-header-document": ["basic-parsers"],
-    "rye-parser-regex-kv": ["basic-parsers"],
     "rye-composer-extends-chain": ["extends-composer"],
     "rye-composer-identity": ["core-handlers"],
     "ryeos-directive-launch-preparer": ["directive-handlers"],
@@ -34,8 +31,7 @@ def feature_selections(records):
         selected.setdefault(record["cargo_package"], set()).update(record["required_features"])
     result = []
     for package, features in sorted(selected.items()):
-        if features & {"graph-handlers", "directive-handlers"}: features -= {"core-handlers", "basic-parsers", "extends-composer"}
-        elif "core-handlers" in features: features.discard("basic-parsers")
+        if features & {"graph-handlers", "directive-handlers"}: features -= {"core-handlers", "extends-composer"}
         result.append({"cargo_package":package,"features":sorted(features)})
     return result
 

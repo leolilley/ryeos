@@ -17,6 +17,11 @@ NATIVE = ASSET / "native-build.py"
 CORE = ASSET / "core-seed-build.py"
 TRIPLE = "x86_64-unknown-linux-gnu"
 PACKAGE = "ryeos-handler-bins"
+PARSERS = "ryeos-parser-bins"
+
+
+def package_for(binary):
+    return PARSERS if binary.startswith("rye-parser-") else PACKAGE
 
 
 def ownership(bundle, binaries):
@@ -25,7 +30,7 @@ def ownership(bundle, binaries):
     return {"schema": "ryeos.bundle_payload_ownership.v1",
             "kind": "bundle_payload_ownership",
             "bundles": [{"bundle_name": bundle, "bundle_sets": ["standard"],
-                         "payloads": [{"binary": binary, "cargo_package": PACKAGE,
+                         "payloads": [{"binary": binary, "cargo_package": package_for(binary),
                                        "build_class": "release"}
                                       for binary in sorted(binaries)]}]}
 
@@ -41,7 +46,7 @@ def resolved(bundle, binaries):
 
 def required_features(binary):
     if binary.startswith("rye-parser-"):
-        return ["basic-parsers"]
+        return []
     if binary in {"rye-composer-identity", "ryeos-direct-execution-evidence", "ryeos-scoped-qualification-execution-evidence"}:
         return ["core-handlers"]
     if binary == "rye-composer-extends-chain":
@@ -53,24 +58,24 @@ def required_features(binary):
     raise ValueError(f"unknown fixture handler {binary!r}")
 
 
-def release_request(bundle, binaries, *, mutate=None, package=PACKAGE):
+def release_request(bundle, binaries, *, mutate=None):
     if isinstance(binaries, str):
         binaries = [binaries]
     resolution, contract = resolved(bundle, binaries)
     digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":"),
                                        ensure_ascii=True).encode()).hexdigest()
-    payloads = [{"bundle": bundle, "binary": binary, "cargo_package": package,
+    payloads = [{"bundle": bundle, "binary": binary, "cargo_package": package_for(binary),
                  "build_class": "release", "bundle_sets": ["standard"],
                  "required_features": required_features(binary)}
                 for binary in sorted(binaries)]
-    features = sorted({feature for payload in payloads
-                       for feature in payload["required_features"]})
-    features = set(features)
-    if features & {"graph-handlers", "directive-handlers"}:
-        features -= {"core-handlers", "basic-parsers", "extends-composer"}
-    elif "core-handlers" in features:
-        features.discard("basic-parsers")
-    features = sorted(features)
+    packages = sorted({payload["cargo_package"] for payload in payloads})
+    selections = []
+    for package in packages:
+        features = {feature for payload in payloads if payload["cargo_package"] == package
+                    for feature in payload["required_features"]}
+        if features & {"graph-handlers", "directive-handlers"}:
+            features -= {"core-handlers", "extends-composer"}
+        selections.append({"cargo_package": package, "features": sorted(features)})
     value = {"schema": "ryeos.bundle_release_input_plan.v2", "project_path": "/source",
              "bundle_name": bundle,
              "authored_manifest": {"name": bundle, "version": "1.0.0"},
@@ -78,9 +83,8 @@ def release_request(bundle, binaries, *, mutate=None, package=PACKAGE):
              "target": {"kind": "triple", "triple": TRIPLE}, "build_profile": "release",
              "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
              "payload_ownership_content_hash": digest, "payloads": payloads,
-             "cargo_packages": [PACKAGE],
-             "cargo_feature_selections": [{"cargo_package": PACKAGE,
-                                           "features": features}],
+             "cargo_packages": packages,
+             "cargo_feature_selections": selections,
              "build_classes": ["release"], "requires_binary_build": True,
              "clean_output_required": True, "ambient_target_reuse_allowed": False}
     if mutate:
@@ -153,13 +157,18 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
                     os.chdir(old)
                 self.assertEqual(cargo.call_count, 1)
                 argv = cargo.call_args.args[0]
-                self.assertIn("--no-default-features", argv)
-                self.assertEqual(argv[argv.index("--features") + 1], ",".join(required_features(binary)))
+                self.assertEqual(argv[argv.index("-p") + 1], package_for(binary))
+                if package_for(binary) == PARSERS:
+                    self.assertNotIn("--no-default-features", argv)
+                    self.assertNotIn("--features", argv)
+                else:
+                    self.assertIn("--no-default-features", argv)
+                    self.assertEqual(argv[argv.index("--features") + 1], ",".join(required_features(binary)))
                 self.assertEqual(argv[-2:], ["--bin", binary])
                 self.assertEqual(output["processes"][0]["argv"], argv)
                 self.assertTrue((root / "products/native-bundle/tree/.ai/bin" / TRIPLE / binary).is_file())
 
-    def test_core_seed_uses_core_handler_selection(self):
+    def test_core_seed_builds_parsers_apart_from_core_handlers(self):
         binaries = ["rye-parser-yaml-document", "ryeos-direct-execution-evidence"]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -170,12 +179,16 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
                 output, cargo = self.invoke(CORE, release_request("core", binaries))
             finally:
                 os.chdir(old)
-            argv = cargo.call_args.args[0]
-            self.assertIn("--no-default-features", argv)
-            self.assertEqual(argv[argv.index("--features") + 1], "core-handlers")
-            self.assertEqual(output["processes"][0]["argv"], argv)
-            self.assertEqual([argv[index + 1] for index, token in enumerate(argv[:-1])
-                              if token == "--bin"], sorted(binaries))
+            calls = [call.args[0] for call in cargo.call_args_list]
+            self.assertEqual([argv[argv.index("-p") + 1] for argv in calls], [PACKAGE, PARSERS])
+            handlers, parsers = calls
+            self.assertIn("--no-default-features", handlers)
+            self.assertEqual(handlers[handlers.index("--features") + 1], "core-handlers")
+            self.assertEqual(handlers[-2:], ["--bin", "ryeos-direct-execution-evidence"])
+            self.assertNotIn("--features", parsers)
+            self.assertNotIn("--no-default-features", parsers)
+            self.assertEqual(parsers[-2:], ["--bin", "rye-parser-yaml-document"])
+            self.assertEqual([process["argv"] for process in output["processes"]], calls)
 
     def test_independent_roots_survive_aggregate_selection(self):
         cases = [
@@ -200,20 +213,28 @@ class HandlerFeatureBuildContractTests(unittest.TestCase):
         mutations = (
             lambda value, payloads: value.update(cargo_feature_selections=[]),
             lambda value, payloads: value.update(cargo_feature_selections=[
-                {"cargo_package": PACKAGE, "features": ["basic-parsers", "core-handlers"]}]),
+                {"cargo_package": PACKAGE, "features": ["core-handlers", "extends-composer"]}]),
             lambda value, payloads: value.update(cargo_feature_selections=[
-                {"cargo_package": PACKAGE, "features": ["basic-parsers"]},
-                {"cargo_package": PACKAGE, "features": ["basic-parsers"]}]),
+                {"cargo_package": PACKAGE, "features": ["core-handlers"]},
+                {"cargo_package": PACKAGE, "features": ["core-handlers"]}]),
             lambda value, payloads: value.update(cargo_feature_selections=[
-                {"cargo_package": "ryeos-wrong-package", "features": ["basic-parsers"]}]),
+                {"cargo_package": "ryeos-wrong-package", "features": ["core-handlers"]}]),
             lambda value, payloads: value.update(cargo_feature_selections=[
-                {"cargo_package": PACKAGE, "features": ["basic-parsers", "unlisted"]}]),
-            lambda value, payloads: payloads[0].update(required_features=["core-handlers"]),
+                {"cargo_package": PACKAGE, "features": ["core-handlers", "unlisted"]}]),
+            lambda value, payloads: payloads[0].update(required_features=["graph-handlers"]),
         )
-        for script, bundle, binary in (
-                (NATIVE, "demo", "rye-parser-regex-kv"),
-                (CORE, "core", "rye-parser-yaml-document")):
-            for mutation in mutations:
+        parser_mutations = (
+            lambda value, payloads: value.update(cargo_feature_selections=[
+                {"cargo_package": PARSERS, "features": ["core-handlers"]}]),
+            lambda value, payloads: payloads[0].update(required_features=["core-handlers"]),
+            lambda value, payloads: payloads[0].update(cargo_package=PACKAGE),
+        )
+        for script, bundle, binary, cases in (
+                (NATIVE, "demo", "rye-composer-identity", mutations),
+                (CORE, "core", "ryeos-direct-execution-evidence", mutations),
+                (NATIVE, "demo", "rye-parser-regex-kv", parser_mutations),
+                (CORE, "core", "rye-parser-yaml-document", parser_mutations)):
+            for mutation in cases:
                 with self.subTest(script=script.name, mutation=mutation), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     setup_project(root, bundle, signed=bundle == "core")

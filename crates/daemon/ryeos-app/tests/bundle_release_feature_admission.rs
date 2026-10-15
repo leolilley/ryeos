@@ -2,30 +2,52 @@ use ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput;
 use serde_json::{Value, json};
 
 const HANDLERS: &str = "ryeos-handler-bins";
+const PARSERS: &str = "ryeos-parser-bins";
 const TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+fn package_for(binary: &str) -> &'static str {
+    if binary.starts_with("rye-parser-") {
+        PARSERS
+    } else {
+        HANDLERS
+    }
+}
 
 fn payload(bundle: &str, binary: &str, features: &[&str]) -> Value {
     json!({
         "bundle": bundle,
         "binary": binary,
-        "cargo_package": HANDLERS,
+        "cargo_package": package_for(binary),
         "build_class": "release",
         "bundle_sets": ["full"],
         "required_features": features,
     })
 }
 
-fn input(bundle: &str, payloads: Vec<Value>, features: &[&str]) -> Value {
-    let packages = if payloads.is_empty() {
-        vec![]
-    } else {
-        vec![HANDLERS]
-    };
-    let selections = if features.is_empty() {
-        vec![]
-    } else {
-        vec![json!({"cargo_package": HANDLERS, "features": features})]
-    };
+/// `handler_features` is the expected selection for the handler package; every
+/// other package in the payloads is selected with no features.
+fn input(bundle: &str, payloads: Vec<Value>, handler_features: &[&str]) -> Value {
+    let mut packages: Vec<&str> = payloads
+        .iter()
+        .map(|payload| match payload["cargo_package"].as_str() {
+            Some(HANDLERS) => HANDLERS,
+            Some(PARSERS) => PARSERS,
+            other => panic!("fixture payload has unexpected package {other:?}"),
+        })
+        .collect();
+    packages.sort_unstable();
+    packages.dedup();
+    let selections: Vec<Value> = packages
+        .iter()
+        .map(|package| {
+            let features: &[&str] = if *package == HANDLERS {
+                handler_features
+            } else {
+                &[]
+            };
+            json!({"cargo_package": package, "features": features})
+        })
+        .collect();
     json!({
         "schema": "ryeos.bundle_release_input_plan.v2",
         "project_path": "/source",
@@ -53,23 +75,18 @@ fn input(bundle: &str, payloads: Vec<Value>, features: &[&str]) -> Value {
 }
 
 #[test]
-fn parser_only_admission_selects_basic_parsers() {
+fn parser_only_admission_selects_the_parser_package_without_features() {
     let value = input(
         "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
+        vec![payload("web", "rye-parser-yaml-document", &[])],
+        &[],
     );
     let admitted = AdmittedReleaseInput::from_value(&value).expect("parser input is valid");
     assert_eq!(admitted.payloads.len(), 1);
-    assert_eq!(admitted.payloads[0].required_features, ["basic-parsers"]);
-    assert_eq!(
-        admitted.cargo_feature_selections[0].features,
-        ["basic-parsers"]
-    );
+    assert!(admitted.payloads[0].required_features.is_empty());
+    assert_eq!(admitted.cargo_feature_selections.len(), 1);
+    assert_eq!(admitted.cargo_feature_selections[0].cargo_package, PARSERS);
+    assert!(admitted.cargo_feature_selections[0].features.is_empty());
 }
 
 #[test]
@@ -90,11 +107,11 @@ fn core_and_mixed_admission_select_core_handlers() {
     );
 
     // This exact binary pair is also exercised through the Python Core builder
-    // contract test. Core handlers subsume the parser composition.
+    // contract test. The parser stays in its own package and selection.
     let mixed = input(
         "core",
         vec![
-            payload("core", "rye-parser-yaml-document", &["basic-parsers"]),
+            payload("core", "rye-parser-yaml-document", &[]),
             payload(
                 "core",
                 "ryeos-direct-execution-evidence",
@@ -106,10 +123,14 @@ fn core_and_mixed_admission_select_core_handlers() {
     assert!(AdmittedReleaseInput::from_value(&mixed).is_err());
     let admitted =
         AdmittedReleaseInput::from_core_seed_value(&mixed).expect("mixed Core seed input is valid");
+    assert_eq!(admitted.cargo_feature_selections.len(), 2);
+    assert_eq!(admitted.cargo_feature_selections[0].cargo_package, HANDLERS);
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["core-handlers"]
     );
+    assert_eq!(admitted.cargo_feature_selections[1].cargo_package, PARSERS);
+    assert!(admitted.cargo_feature_selections[1].features.is_empty());
 }
 
 #[test]
@@ -140,8 +161,8 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
     let value = input(
         "web",
         vec![
-            payload("web", "rye-composer-identity", &["core-handlers"]),
             payload("web", "rye-composer-extends-chain", &["extends-composer"]),
+            payload("web", "rye-composer-identity", &["core-handlers"]),
             payload(
                 "web",
                 "ryeos-directive-launch-preparer",
@@ -165,8 +186,8 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
     let core_extends = input(
         "web",
         vec![
-            payload("web", "rye-composer-identity", &["core-handlers"]),
             payload("web", "rye-composer-extends-chain", &["extends-composer"]),
+            payload("web", "rye-composer-identity", &["core-handlers"]),
         ],
         &["core-handlers", "extends-composer"],
     );
@@ -183,31 +204,20 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
 fn payload_and_aggregate_feature_tampering_are_rejected() {
     let valid = input(
         "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
+        vec![payload("web", "rye-parser-yaml-document", &[])],
+        &[],
     );
+    AdmittedReleaseInput::from_value(&valid).expect("parser input is valid");
 
     let mut tampered_payload = valid.clone();
     tampered_payload["payloads"][0]["required_features"] = json!(["core-handlers"]);
     assert!(AdmittedReleaseInput::from_value(&tampered_payload).is_err());
 
-    let mut tampered_aggregate = valid;
+    let mut tampered_aggregate = valid.clone();
     tampered_aggregate["cargo_feature_selections"][0]["features"] = json!(["core-handlers"]);
     assert!(AdmittedReleaseInput::from_value(&tampered_aggregate).is_err());
 
-    let mut wrong_package_selection = input(
-        "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
-    );
+    let mut wrong_package_selection = valid;
     wrong_package_selection["cargo_feature_selections"][0]["cargo_package"] =
         json!("ryeos-web-tools");
     assert!(AdmittedReleaseInput::from_value(&wrong_package_selection).is_err());
@@ -215,21 +225,29 @@ fn payload_and_aggregate_feature_tampering_are_rejected() {
 
 #[test]
 fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
-    let mut wrong_package = input(
+    // A parser claimed by the handler package has no handler composition.
+    let mut parser_in_handlers = input(
         "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
+        vec![payload("web", "rye-parser-yaml-document", &[])],
+        &[],
     );
-    wrong_package["payloads"][0]["cargo_package"] = json!("ryeos-web-tools");
-    wrong_package["cargo_packages"] = json!(["ryeos-web-tools"]);
-    wrong_package["cargo_feature_selections"] = json!([
-        {"cargo_package": "ryeos-web-tools", "features": ["basic-parsers"]}
-    ]);
-    assert!(AdmittedReleaseInput::from_value(&wrong_package).is_err());
+    parser_in_handlers["payloads"][0]["cargo_package"] = json!(HANDLERS);
+    parser_in_handlers["cargo_packages"] = json!([HANDLERS]);
+    parser_in_handlers["cargo_feature_selections"] =
+        json!([{"cargo_package": HANDLERS, "features": []}]);
+    assert!(AdmittedReleaseInput::from_value(&parser_in_handlers).is_err());
+
+    // A handler binary claimed by another package is rejected.
+    let mut handler_elsewhere = input(
+        "web",
+        vec![payload("web", "rye-composer-identity", &["core-handlers"])],
+        &["core-handlers"],
+    );
+    handler_elsewhere["payloads"][0]["cargo_package"] = json!(PARSERS);
+    handler_elsewhere["cargo_packages"] = json!([PARSERS]);
+    handler_elsewhere["cargo_feature_selections"] =
+        json!([{"cargo_package": PARSERS, "features": ["core-handlers"]}]);
+    assert!(AdmittedReleaseInput::from_value(&handler_elsewhere).is_err());
 
     let unknown_binary = input(
         "web",
@@ -240,15 +258,10 @@ fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
 
     let mut unknown_feature = input(
         "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
+        vec![payload("web", "rye-parser-yaml-document", &[])],
+        &[],
     );
-    unknown_feature["cargo_feature_selections"][0]["features"] =
-        json!(["basic-parsers", "unlisted"]);
+    unknown_feature["cargo_feature_selections"][0]["features"] = json!(["unlisted"]);
     assert!(AdmittedReleaseInput::from_value(&unknown_feature).is_err());
 }
 
@@ -256,18 +269,14 @@ fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
 fn duplicate_selections_stale_schema_and_unknown_fields_are_rejected() {
     let valid = input(
         "web",
-        vec![payload(
-            "web",
-            "rye-parser-yaml-document",
-            &["basic-parsers"],
-        )],
-        &["basic-parsers"],
+        vec![payload("web", "rye-parser-yaml-document", &[])],
+        &[],
     );
 
     let mut duplicate = valid.clone();
     duplicate["cargo_feature_selections"] = json!([
-        {"cargo_package": HANDLERS, "features": ["basic-parsers"]},
-        {"cargo_package": HANDLERS, "features": ["basic-parsers"]}
+        {"cargo_package": PARSERS, "features": []},
+        {"cargo_package": PARSERS, "features": []}
     ]);
     assert!(AdmittedReleaseInput::from_value(&duplicate).is_err());
 

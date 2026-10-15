@@ -18,6 +18,12 @@
       "core",
       "scheduling"
     ],
+    "f5r-controller": [
+      "core",
+      "standard",
+      "codex",
+      "render-sandbox"
+    ],
     "full": [
       "core",
       "central-auth",
@@ -83,6 +89,7 @@
     "core": "core",
     "core-scheduling": "core-scheduling",
     "development": "full",
+    "f5r-controller": "f5r-controller",
     "full": "full",
     "hosted-node": "hosted-node",
     "hosted-workflow": "hosted-workflow",

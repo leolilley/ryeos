@@ -28,6 +28,7 @@ members = [
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
     "crates/tools/handler-bins",
+    "crates/tools/parser-bins",
     "crates/tools/gpu-loader-owner-contract",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",

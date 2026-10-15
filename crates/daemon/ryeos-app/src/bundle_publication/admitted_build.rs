@@ -429,9 +429,6 @@ fn owned_payloads_for_bundle(
 
 fn required_features(package: &str, binary: &str) -> anyhow::Result<Vec<String>> {
     let feature = match binary {
-        "rye-parser-yaml-document" | "rye-parser-yaml-header-document" | "rye-parser-regex-kv" => {
-            Some("basic-parsers")
-        }
         "rye-composer-identity"
         | "ryeos-direct-execution-evidence"
         | "ryeos-scoped-qualification-execution-evidence" => Some("core-handlers"),
@@ -469,10 +466,7 @@ fn cargo_feature_selections(payloads: &[OwnedPayload]) -> Vec<CargoFeatureSelect
         .map(|(cargo_package, mut features)| {
             if features.contains("graph-handlers") || features.contains("directive-handlers") {
                 features.remove("core-handlers");
-                features.remove("basic-parsers");
                 features.remove("extends-composer");
-            } else if features.contains("core-handlers") {
-                features.remove("basic-parsers");
             }
             CargoFeatureSelection {
                 cargo_package,
@@ -776,29 +770,34 @@ mod input_contract_tests {
         let parser = OwnedPayload {
             bundle: "core".into(),
             binary: "rye-parser-yaml-document".into(),
-            cargo_package: "ryeos-handler-bins".into(),
+            cargo_package: "ryeos-parser-bins".into(),
             build_class: "release".into(),
             bundle_sets: vec!["full".into()],
-            required_features: vec!["basic-parsers".into()],
+            required_features: Vec::new(),
         };
         let full = OwnedPayload {
             binary: "ryeos-direct-execution-evidence".into(),
+            cargo_package: "ryeos-handler-bins".into(),
             required_features: vec!["core-handlers".into()],
             ..parser.clone()
         };
         assert_eq!(
-            cargo_feature_selections(std::slice::from_ref(&parser)),
-            vec![CargoFeatureSelection {
-                cargo_package: "ryeos-handler-bins".into(),
-                features: vec!["basic-parsers".into()],
-            }]
+            required_features("ryeos-parser-bins", "rye-parser-yaml-document").unwrap(),
+            Vec::<String>::new()
         );
+        assert!(required_features("ryeos-handler-bins", "rye-parser-yaml-document").is_err());
         assert_eq!(
             cargo_feature_selections(&[parser, full]),
-            vec![CargoFeatureSelection {
-                cargo_package: "ryeos-handler-bins".into(),
-                features: vec!["core-handlers".into()],
-            }]
+            vec![
+                CargoFeatureSelection {
+                    cargo_package: "ryeos-handler-bins".into(),
+                    features: vec!["core-handlers".into()],
+                },
+                CargoFeatureSelection {
+                    cargo_package: "ryeos-parser-bins".into(),
+                    features: Vec::new(),
+                },
+            ]
         );
         assert!(required_features("ryeos-handler-bins", "unlisted-handler").is_err());
     }

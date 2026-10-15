@@ -1,23 +1,21 @@
-use ryeos_handler_bins::{run_handler, yaml_header_document};
-use ryeos_handler_protocol::{HandlerRequest, HandlerResponse};
+use ryeos_handler_protocol::{HandlerRequest, HandlerResponse, run_handler};
+use ryeos_parser_bins::regex_kv;
 
 fn main() {
     std::process::exit(run_handler(|req| match req {
-        HandlerRequest::Parse(p) => {
-            match yaml_header_document::parse(&p.parser_config, &p.content) {
-                Ok(v) => HandlerResponse::ParseOk { value: v },
-                Err(e) => HandlerResponse::ParseErr {
-                    kind: e.kind,
-                    message: e.message,
-                },
-            }
-        }
+        HandlerRequest::Parse(p) => match regex_kv::parse(&p.parser_config, &p.content) {
+            Ok(v) => HandlerResponse::ParseOk { value: v },
+            Err(e) => HandlerResponse::ParseErr {
+                kind: e.kind,
+                message: e.message,
+            },
+        },
         HandlerRequest::EditSource(_) => HandlerResponse::EditSourceErr {
             kind: ryeos_handler_protocol::ParseErrKind::Schema,
-            message: "yaml header parser does not expose source editing".into(),
+            message: "regex parser does not expose source editing".into(),
         },
         HandlerRequest::ValidateParserConfig(v) => {
-            match yaml_header_document::validate_config(&v.parser_config) {
+            match regex_kv::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,
                 Err(msg) => HandlerResponse::ValidateErr { message: msg },
             }

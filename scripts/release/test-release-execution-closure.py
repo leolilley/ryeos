@@ -234,11 +234,18 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
         # Execute the real command-building loops without building or touching
         # products. A package can own multiple selected bins, and share other
         # bins with a different bundle; package-only Cargo selection is unsafe.
+        # Handler and parser packages build in separate calls so the parsers
+        # never share the handler feature graph.
         expected = [
-            {"cargo_package": "shared", "binary": "owned-b", "build_class": "release"},
-            {"cargo_package": "shared", "binary": "owned-a", "build_class": "release"},
-            {"cargo_package": "other", "binary": "other-owned", "build_class": "release"},
+            {"cargo_package": "ryeos-handler-bins", "binary": "ryeos-direct-execution-evidence", "build_class": "release"},
+            {"cargo_package": "ryeos-handler-bins", "binary": "rye-composer-identity", "build_class": "release"},
+            {"cargo_package": "ryeos-parser-bins", "binary": "rye-parser-yaml-document", "build_class": "release"},
             {"cargo_package": "worker", "binary": "worker-owned", "build_class": "static"},
+        ]
+        selected_features = [
+            {"cargo_package": "ryeos-handler-bins", "features": ["core-handlers"]},
+            {"cargo_package": "ryeos-parser-bins", "features": []},
+            {"cargo_package": "worker", "features": []},
         ]
         for path in BUILD_SOURCES:
             with self.subTest(path=path.name):
@@ -248,7 +255,8 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                          and node.target.id == "build_class"]
                 self.assertEqual(len(loops), 1)
                 calls = []
-                scope = dict(expected=expected, cargo="/declared/cargo", triple="host-triple",
+                scope = dict(expected=expected, selected_features=selected_features,
+                             cargo="/declared/cargo", triple="host-triple",
                              base_env={"RUSTFLAGS": "declared-flags"}, root=Path("/admitted"),
                              targets={kind: Path("/private") / kind for kind in ("release", "static")},
                              processes=[], subprocess=SimpleNamespace(
@@ -256,17 +264,26 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                 exec(compile(ast.Module(body=loops, type_ignores=[]), str(path), "exec"), scope)
                 self.assertEqual(len(calls), 3)
                 actual = {}
+                features = {}
                 for argv, kwargs in calls:
                     self.assertEqual(argv.count("-p"), 1)
                     package = argv[argv.index("-p") + 1]
                     actual[package] = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--bin"]
+                    features[package] = argv[argv.index("--features") + 1] if "--features" in argv else None
                     for flag in ("--locked", "--frozen", "--offline"):
                         self.assertIn(flag, argv)
                     self.assertTrue(kwargs["check"])
                     self.assertEqual(kwargs["cwd"], Path("/admitted"))
                     self.assertEqual("+crt-static" in kwargs["env"]["RUSTFLAGS"], package == "worker")
-                self.assertEqual(actual, {"shared": ["owned-a", "owned-b"],
-                                          "other": ["other-owned"], "worker": ["worker-owned"]})
+                self.assertEqual(actual, {
+                    "ryeos-handler-bins": ["rye-composer-identity", "ryeos-direct-execution-evidence"],
+                    "ryeos-parser-bins": ["rye-parser-yaml-document"],
+                    "worker": ["worker-owned"]})
+                self.assertEqual(features, {"ryeos-handler-bins": "core-handlers",
+                                            "ryeos-parser-bins": None, "worker": None})
+                parser_call = next(argv for argv, _ in calls if "ryeos-parser-bins" in argv)
+                self.assertNotIn("--no-default-features", parser_call)
+                self.assertNotIn("ryeos-handler-bins", parser_call)
                 self.assertEqual(len(scope["processes"]), 3)
 
     def test_release_source_authority_has_no_git_execution_dependency(self):

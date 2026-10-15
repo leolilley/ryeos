@@ -19,9 +19,6 @@ BUNDLE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MAX_BUNDLES = 256
 MAX_PAYLOADS = 256
 HANDLER_FEATURES_BY_BINARY = {
-    "rye-parser-yaml-document": ["basic-parsers"],
-    "rye-parser-yaml-header-document": ["basic-parsers"],
-    "rye-parser-regex-kv": ["basic-parsers"],
     "rye-composer-extends-chain": ["extends-composer"],
     "rye-composer-identity": ["core-handlers"],
     "ryeos-directive-launch-preparer": ["directive-handlers"],

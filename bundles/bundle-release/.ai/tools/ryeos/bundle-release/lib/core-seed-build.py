@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-24T01:03:11Z:1bf338ae808a2b552e7a1077eaedcc79ae3e6e12cb2ce7c87b0e358f947b3a0f:xcGYJa6wTkLkyfQz7Lr3QCc9QoPsuTMyOOm9JAaz8Pes2b1zx2Iim0DLXF6XeNKbAZeL4z7n4vG9vjd1Dsb8Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T00:59:19Z:e3285abc467b4f9f14c32a1113c183140f274213aed639c6965d26f2368828b8:WEGLCIVjaAWGqYRIzr7G7AB8FQ3LKmzYp28iSEnERpxXFqxqjlp6sl6SicJ6eoL+w/arWQ4Fli/BJ7VcV2cSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the exact initial Core bundle from an admitted pinned source generation."""
 import hashlib
 import importlib.util
@@ -22,9 +22,6 @@ def fail(message):
 
 
 HANDLER_FEATURES_BY_BINARY = {
-    "rye-parser-yaml-document": ["basic-parsers"],
-    "rye-parser-yaml-header-document": ["basic-parsers"],
-    "rye-parser-regex-kv": ["basic-parsers"],
     "rye-composer-extends-chain": ["extends-composer"],
     "rye-composer-identity": ["core-handlers"],
     "ryeos-directive-launch-preparer": ["directive-handlers"],
@@ -54,9 +51,7 @@ def feature_selections(records):
     result = []
     for package, features in sorted(selected.items()):
         if features & {"graph-handlers", "directive-handlers"}:
-            features -= {"core-handlers", "basic-parsers", "extends-composer"}
-        elif "core-handlers" in features:
-            features.discard("basic-parsers")
+            features -= {"core-handlers", "extends-composer"}
         result.append({"cargo_package": package, "features": sorted(features)})
     return result
 

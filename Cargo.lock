@@ -3395,6 +3395,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-parser-bins"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryeos-handler-protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "ryeos-project-capture"
 version = "0.1.0"
 dependencies = [
@@ -3584,7 +3595,6 @@ dependencies = [
  "lillux",
  "reqwest",
  "ryeos-engine",
- "ryeos-handler-bins",
  "ryeos-handler-protocol",
  "ryeos-runtime",
  "ryeos-state",

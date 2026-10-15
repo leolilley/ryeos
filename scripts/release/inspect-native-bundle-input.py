@@ -75,9 +75,7 @@ def main():
     for package, selected in sorted(features_by_package.items()):
         # Larger handler compositions include their smaller targets.
         if selected & {"graph-handlers", "directive-handlers"}:
-            selected -= {"core-handlers", "basic-parsers", "extends-composer"}
-        elif "core-handlers" in selected:
-            selected.discard("basic-parsers")
+            selected -= {"core-handlers", "extends-composer"}
         cargo_feature_selections.append({"cargo_package": package, "features": sorted(selected)})
     target = {"kind": "portable"} if args.target == "portable" else {
         "kind": "triple", "triple": args.target

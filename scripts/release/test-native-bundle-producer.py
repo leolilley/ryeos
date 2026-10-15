@@ -78,7 +78,7 @@ class NativeBundleProducerSurfaceTests(unittest.TestCase):
             self.assertIn("input_schema:", tool)
 
     def test_catalog_transport_does_not_require_publisher_private_custody(self):
-        policy = (ROOT / "crates/daemon/ryeos-app/src/node_policy/sections/bundle_publication.rs").read_text()
+        policy = (ROOT / "crates/engine/ryeos-node-runtime/src/node_policy/sections/bundle_publication.rs").read_text()
         catalog = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/catalog.rs").read_text()
         upload = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_catalog.rs").read_text()
         release = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
@@ -142,8 +142,15 @@ class NativeBundleProducerSurfaceTests(unittest.TestCase):
         isolation = profile[profile.index("  isolation:") : profile.index("  ingest_ignore:")]
         self.assertIn("      mode: enforce", isolation)
         self.assertIn("        implementation: linux-lillux", isolation)
-        self.assertIn("        nested_sandbox: true", isolation)
-        self.assertIn("        proc_filesystem: pid_namespace_nested", isolation)
+        # Nested-sandbox permission is derived, not authored: the host class
+        # floor requires isolation:namespaces outright and the proc ceiling is
+        # the nested pid namespace.
+        self.assertNotIn("nested_sandbox", isolation)
+        self.assertRegex(
+            isolation,
+            r"requires_capabilities: \[[^\]]*(?<![\w:-])isolation:namespaces(?![\w:-])[^\]]*\]",
+        )
+        self.assertIn("          proc_filesystem: pid_namespace_nested", isolation)
 
     def test_surface_has_no_legacy_or_generic_signing_escape(self):
         bodies = [GRAPH.read_text()]

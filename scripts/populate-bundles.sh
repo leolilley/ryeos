@@ -380,7 +380,7 @@ prepare_bundle_trees() {
 case "$BUNDLE_SET" in
   full|release-authority|release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
           ryeos-external-candidate-connector ryeos-codex-external-configuration \
           ryeos-external-guest-occurrence-owner \
@@ -392,17 +392,17 @@ case "$BUNDLE_SET" in
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
   standard|standard-central-auth|local-inference)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
   hosted-workflow|f5r-controller)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
           ryeos-external-guest-runtime-producer \
@@ -412,11 +412,11 @@ case "$BUNDLE_SET" in
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
   hosted-node)
-    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
+    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
           ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
   bundle-source|core|core-scheduling)
-    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
+    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
           ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
 esac

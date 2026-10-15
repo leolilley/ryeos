@@ -1,5 +1,7 @@
-use ryeos_handler_bins::{identity, run_handler};
-use ryeos_handler_protocol::{HandlerRequest, HandlerResponse, ResolutionStepNameWire};
+use ryeos_handler_bins::identity;
+use ryeos_handler_protocol::{
+    HandlerRequest, HandlerResponse, ResolutionStepNameWire, run_handler,
+};
 
 fn main() {
     std::process::exit(run_handler(|req| match req {

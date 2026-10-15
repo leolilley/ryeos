@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use ryeos_handler_bins::run_handler;
 use ryeos_handler_protocol::{
     ExecutableSearchPathEntryWire, ExternalEffectAuthorityDeclWire,
     ExternalEffectAuthorityResultWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
@@ -9,7 +8,7 @@ use ryeos_handler_protocol::{
     LaunchEnvironmentValueWire, LaunchExecutionDependencyRequestWire, LaunchPrepareError,
     LaunchPrepareErrorClass, LaunchPrepareResponse, LaunchPrepareSuccess, LaunchPreparedItemWire,
     RefBindingSourceWire, TrustClassWire, ValidateLaunchPreparerConfigRequest,
-    ValidateLaunchPreparerConfigResponse, ValidateLaunchPreparerConfigSuccess,
+    ValidateLaunchPreparerConfigResponse, ValidateLaunchPreparerConfigSuccess, run_handler,
 };
 use serde::Deserialize;
 
