@@ -32,6 +32,80 @@ pub struct NodeExecutionAdmissionPolicy {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub producer_resource_ceiling:
         Option<ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds>,
+    /// Node ceilings on the remote leases lifecycle adapters create for
+    /// placed workloads. Omission admits no lease at all and keeps the
+    /// policy identity of a node that places none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_lease_budget: Option<ExternalLeaseBudget>,
+}
+
+/// The most concurrent leases a node may declare. Providers bound a
+/// workspace well above this; a node policy asking for more is a typo, not a
+/// plan.
+pub const MAX_EXTERNAL_CONCURRENT_LEASES: u32 = 64;
+/// The longest lease a node may declare, one day.
+pub const MAX_EXTERNAL_LEASE_LIFETIME_SECONDS: u32 = 24 * 60 * 60;
+
+/// Spend ceilings for remote leases, held as node data.
+///
+/// Every lease runs for its placement binding's execution timeout, which
+/// must not exceed `max_lease_lifetime_seconds`; that ceiling is a bound, not
+/// the lifetime itself. The lease reserves its whole lifetime against
+/// `daily_lease_seconds` before the provider is contacted. At most `max_concurrent_leases` leases are held at
+/// once. A held lease is released when its allocation settles, and only the
+/// seconds it actually lasted stay charged. The daily budget covers the
+/// leases reserved in the last 24 hours. A lease that does not fit is
+/// refused, never queued.
+///
+/// `turn_end_margin_seconds` is the lease time a turn must leave unused
+/// after its own deadline, so the turn's result can be frozen, exported and
+/// imported before the provider ends the lease. A turn is started on a lease
+/// only when the lease outlives the turn's deadline by this margin; a lease
+/// that can no longer do so is terminated rather than kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalLeaseBudget {
+    pub max_concurrent_leases: u32,
+    pub max_lease_lifetime_seconds: u32,
+    pub daily_lease_seconds: u64,
+    pub turn_end_margin_seconds: u32,
+}
+
+impl ExternalLeaseBudget {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(1..=MAX_EXTERNAL_CONCURRENT_LEASES).contains(&self.max_concurrent_leases) {
+            bail!(
+                "node external lease budget max_concurrent_leases must be between 1 and \
+                 {MAX_EXTERNAL_CONCURRENT_LEASES}"
+            );
+        }
+        if !(1..=MAX_EXTERNAL_LEASE_LIFETIME_SECONDS).contains(&self.max_lease_lifetime_seconds) {
+            bail!(
+                "node external lease budget max_lease_lifetime_seconds must be between 1 and \
+                 {MAX_EXTERNAL_LEASE_LIFETIME_SECONDS}"
+            );
+        }
+        let most = u64::from(self.max_concurrent_leases)
+            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS);
+        if self.daily_lease_seconds < u64::from(self.max_lease_lifetime_seconds)
+            || self.daily_lease_seconds > most
+        {
+            bail!(
+                "node external lease budget daily_lease_seconds must hold at least one whole \
+                 lease lifetime and at most {most} seconds, what its concurrent leases could \
+                 use in a day"
+            );
+        }
+        if self.turn_end_margin_seconds == 0
+            || self.turn_end_margin_seconds >= self.max_lease_lifetime_seconds
+        {
+            bail!(
+                "node external lease budget turn_end_margin_seconds must be positive and \
+                 shorter than max_lease_lifetime_seconds, or no turn could ever start on a lease"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +190,9 @@ impl NodeExecutionAdmissionPolicy {
             ceiling
                 .validate()
                 .context("validate node producer ceiling")?;
+        }
+        if let Some(budget) = &self.external_lease_budget {
+            budget.validate()?;
         }
         Ok(())
     }
@@ -345,7 +422,51 @@ mod tests {
             workload_client: None,
             resource_authority: None,
             producer_resource_ceiling: None,
+            external_lease_budget: None,
         }
+    }
+
+    fn controller_lease_budget() -> ExternalLeaseBudget {
+        ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 10 * 60,
+        }
+    }
+
+    #[test]
+    fn lease_budget_is_optional_data_and_bounded() {
+        let policy = valid_policy();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("external_lease_budget").is_none());
+        let mut with_budget = valid_policy();
+        with_budget.external_lease_budget = Some(controller_lease_budget());
+        with_budget.validate().unwrap();
+        let parsed: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(serde_json::to_value(&with_budget).unwrap()).unwrap();
+        assert_eq!(parsed, with_budget);
+
+        let refused = |change: fn(&mut ExternalLeaseBudget)| {
+            let mut budget = controller_lease_budget();
+            change(&mut budget);
+            budget.validate().err().map(|error| error.to_string())
+        };
+        assert!(refused(|b| b.max_concurrent_leases = 0).unwrap().contains("max_concurrent"));
+        assert!(
+            refused(|b| b.max_concurrent_leases = MAX_EXTERNAL_CONCURRENT_LEASES + 1).is_some()
+        );
+        assert!(refused(|b| b.max_lease_lifetime_seconds = 0).unwrap().contains("lifetime"));
+        assert!(
+            refused(|b| b.max_lease_lifetime_seconds = MAX_EXTERNAL_LEASE_LIFETIME_SECONDS + 1)
+                .is_some()
+        );
+        assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60 - 1).unwrap().contains("daily"));
+        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 + 1).is_some());
+        assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60).is_none());
+        assert!(refused(|b| b.turn_end_margin_seconds = 0).unwrap().contains("turn_end_margin"));
+        assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60).is_some());
+        assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60 - 1).is_none());
     }
 
     #[test]
@@ -500,7 +621,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            13,
+            14,
             "update init-profile policy expectations"
         );
 
@@ -522,12 +643,26 @@ mod tests {
                 | "local-inference"
                 | "hosted-node"
                 | "hosted-workflow"
+                | "f5r-controller"
                 | "bundle-source"
                 | "core"
                 | "core-scheduling" => {
                     assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
                 }
                 _ => panic!("add an explicit producer-admission expectation for {profile}"),
+            }
+            // Only the remote-authoring controller creates leases, with the
+            // qualification ceiling: two concurrent leases of at most four
+            // hours, about eight lease-hours a day, and ten minutes of each
+            // lease kept free after a turn's deadline.
+            if profile == "f5r-controller" {
+                assert_eq!(
+                    policy.external_lease_budget,
+                    Some(controller_lease_budget()),
+                    "{profile}"
+                );
+            } else {
+                assert!(policy.external_lease_budget.is_none(), "{profile}");
             }
         }
     }

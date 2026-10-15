@@ -2119,6 +2119,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
                 true,
             )
@@ -2847,6 +2848,7 @@ mod tests {
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         append(conn, binding, &wire).unwrap();
@@ -3099,6 +3101,7 @@ mod tests {
             let observation = ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             };
             let ready = author_direct(
                 conn,
@@ -3608,6 +3611,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             {
@@ -3950,6 +3954,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             append(conn, &binding, &ready_wire).unwrap();
@@ -4340,6 +4345,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             conn.execute(
@@ -4389,6 +4395,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let corrupt_digest = "0".repeat(64);
@@ -4440,6 +4447,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let wire_bytes = i64::try_from(ready_wire.len()).unwrap();
@@ -4492,6 +4500,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let (release_wire, release_digest) = wire(

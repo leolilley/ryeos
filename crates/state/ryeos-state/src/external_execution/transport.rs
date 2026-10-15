@@ -26,6 +26,24 @@ pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 9;
 pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 10;
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
+/// Schema of the occurrence channel stream: one long-lived, bidirectional,
+/// message-framed connection per occurrence that carries the same exchange as
+/// the request/response route. Each inbound message is exactly one canonical
+/// `SignedExecutionFrame`; each outbound message is the canonical JSON of the
+/// `ExternalChannelExchangeResponse` that exchanging that frame returns. A
+/// guest's existing exchange driver therefore runs unchanged over the stream.
+pub const EXTERNAL_CHANNEL_STREAM_SCHEMA: u32 = 1;
+pub const EXTERNAL_CHANNEL_STREAM_CONTRACT: &str = "ryeos.external-channel.stream.v1";
+/// Bound on one inbound stream message: exactly one signed frame, so the
+/// frame bound of the request/response route. The stream carries what the
+/// exchange carries; a message is never split.
+pub const MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES: usize = super::MAX_FRAME_BYTES;
+/// Bound on one outbound stream message: one canonical exchange response,
+/// whose frames travel base64-encoded, so the route's response ceiling.
+/// This is only the transport ceiling: the request/response route applies
+/// the binding's negotiated `maximum_response_bytes` to each response, so a
+/// stream server must apply that same negotiated bound to each message too.
+pub const MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
 pub const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
 pub const MAX_TLS_ROOT_BUNDLE_BYTES: usize = 256 * 1024;
@@ -980,6 +998,49 @@ impl ExternalChannelExchangeResponse {
         }
         Ok(())
     }
+}
+
+/// The frame one inbound stream message carries, bounded but not yet
+/// authenticated: the caller verifies it against the occurrence binding
+/// exactly as the request/response exchange does.
+pub fn external_channel_stream_inbound_frame(message: &[u8]) -> Result<&[u8]> {
+    ensure!(
+        !message.is_empty() && message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES,
+        "external channel stream message is empty or exceeds its bound"
+    );
+    Ok(message)
+}
+
+/// Encode one exchange response as one outbound stream message.
+pub fn encode_external_channel_stream_response(
+    response: &ExternalChannelExchangeResponse,
+) -> Result<Vec<u8>> {
+    response.validate_shape()?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(response)?)?.into_bytes();
+    ensure!(
+        bytes.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES,
+        "external channel stream response exceeds its message bound"
+    );
+    Ok(bytes)
+}
+
+/// Decode one outbound stream message back into the exchange response it
+/// carries. Only the canonical encoding is accepted.
+pub fn decode_external_channel_stream_response(
+    message: &[u8],
+) -> Result<ExternalChannelExchangeResponse> {
+    ensure!(
+        !message.is_empty() && message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES,
+        "external channel stream message is empty or exceeds its bound"
+    );
+    let response: ExternalChannelExchangeResponse = serde_json::from_slice(message)
+        .context("decode external channel stream response")?;
+    response.validate_shape()?;
+    ensure!(
+        lillux::canonical_json(&serde_json::to_value(&response)?)?.as_bytes() == message,
+        "external channel stream response is not canonical"
+    );
+    Ok(response)
 }
 
 /// The controller signs the complete file-relay response, including transport
@@ -1945,5 +2006,67 @@ mod tests {
                 .validate_attached_binding(&changed_binding, &supervisor_public_key)
                 .is_err()
         );
+    }
+
+    fn stream_response(frame_bytes: usize) -> ExternalChannelExchangeResponse {
+        let frame = vec![b'f'; frame_bytes];
+        ExternalChannelExchangeResponse {
+            schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+            incoming_new: true,
+            incoming_sequence: 1,
+            incoming_frame_digest: "1".repeat(64),
+            acknowledgement_frame_digest: Some("2".repeat(64)),
+            outbound_frames: vec![
+                ExternalChannelResponseFrame::new(1, lillux::sha256_hex(&frame), &frame).unwrap(),
+            ],
+            urgent_revocation_frame: None,
+        }
+    }
+
+    #[test]
+    fn stream_inbound_message_is_one_bounded_nonempty_frame() {
+        let full = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES];
+        assert_eq!(
+            external_channel_stream_inbound_frame(&full).unwrap().len(),
+            MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES
+        );
+        assert_eq!(MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES, super::super::MAX_FRAME_BYTES);
+        assert!(external_channel_stream_inbound_frame(&[]).is_err());
+        let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES + 1];
+        assert!(external_channel_stream_inbound_frame(&over).is_err());
+    }
+
+    #[test]
+    fn stream_response_round_trips_canonically_within_its_message_bound() {
+        let response = stream_response(1024);
+        let message = encode_external_channel_stream_response(&response).unwrap();
+        let decoded = decode_external_channel_stream_response(&message).unwrap();
+        assert_eq!(
+            encode_external_channel_stream_response(&decoded).unwrap(),
+            message
+        );
+        assert_eq!(decoded.outbound_frames[0].decode_frame().unwrap().len(), 1024);
+
+        let pretty = serde_json::to_vec_pretty(&response).unwrap();
+        assert!(decode_external_channel_stream_response(&pretty).is_err());
+        let mut unknown = serde_json::to_value(&response).unwrap();
+        unknown["extra"] = serde_json::json!(true);
+        let unknown = lillux::canonical_json(&unknown).unwrap().into_bytes();
+        assert!(decode_external_channel_stream_response(&unknown).is_err());
+        assert!(decode_external_channel_stream_response(&[]).is_err());
+    }
+
+    #[test]
+    fn stream_carries_large_route_responses_and_refuses_beyond_its_bound() {
+        // A response far above the old per-message cap still fits in one
+        // stream message: the stream does not narrow the exchange.
+        let response = stream_response(256 * 1024);
+        response.validate_shape().unwrap();
+        let message = encode_external_channel_stream_response(&response).unwrap();
+        assert!(message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES);
+        let decoded = decode_external_channel_stream_response(&message).unwrap();
+        assert_eq!(encode_external_channel_stream_response(&decoded).unwrap(), message);
+        let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES + 1];
+        assert!(decode_external_channel_stream_response(&over).is_err());
     }
 }

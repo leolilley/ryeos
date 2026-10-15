@@ -1951,10 +1951,11 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 pub(crate) fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
+        external_execution::LEASE_BUDGET_SQL,
         external_execution::QUALIFICATION_LOCAL_START_SQL,
         external_execution::QUALIFICATION_GUEST_SCRATCH_SQL,
         external_execution::QUALIFICATION_FIXTURE_RECEIVER_SQL,
@@ -2560,7 +2561,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // The current operator schema epoch. Any other epoch is refused by ordinary
 // open and reset by the explicit execution-history reset; no stored row of an
 // earlier epoch gains authority through defaults or migration.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 126;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 127;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2874,6 +2875,41 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_lease_budget",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_seconds",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "released_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "charged_seconds",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -6257,6 +6293,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             },
         ],
         indexes: &[
+            sqlite_schema::IndexSpec {
+                name: "idx_external_execution_lease_budget_reserved",
+                table: "external_execution_lease_budget",
+                columns: &["reserved_at_ms"],
+                unique: false,
+            },
             sqlite_schema::IndexSpec {
                 name: "idx_external_execution_capacity",
                 table: "external_execution_allocation",

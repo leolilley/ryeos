@@ -16399,6 +16399,41 @@ impl StateStore {
         self.reserve_external_allocation_inner(reservation, binding, None)
     }
 
+    /// Reserve a placed session's allocation together with its admitted
+    /// lease's charge against the node lease budget, in one transaction and
+    /// before any provider contact. A replay of the exact reservation reserves
+    /// nothing again.
+    pub(crate) fn reserve_external_lease_allocation(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        lease: &runtime_db::external_execution::ExternalLeaseCharge,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_external_lease_allocation(reservation, binding, lease)
+    }
+
+    /// The lease a placed session still holds, if any.
+    pub(crate) fn held_external_lease(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::HeldExternalLease>> {
+        self.lock()?.runtime_db.held_external_lease(placement)
+    }
+
+    /// Placements holding a lease reserved for a worker of another daemon
+    /// incarnation than `current_generation`.
+    pub(crate) fn predecessor_external_lease_placements(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .predecessor_external_lease_placements(current_generation)
+    }
+
     /// First direct reservation consumes evidence from the sole full-capsule
     /// compiler. Retained JSON alone cannot produce this non-serializable token.
     pub(crate) fn reserve_external_direct_allocation(
@@ -26259,6 +26294,7 @@ mod tests {
             )
             .unwrap(),
             channel_bootstrap_capability_hash: "4".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,

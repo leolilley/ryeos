@@ -139,6 +139,7 @@ mod tests {
             workload_client: None,
             resource_authority: None,
             producer_resource_ceiling: None,
+            external_lease_budget: None,
         }
     }
 

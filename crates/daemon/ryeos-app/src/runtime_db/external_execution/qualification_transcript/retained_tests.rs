@@ -125,6 +125,7 @@ impl<'a> Fixture<'a> {
             channel_authority_generation: "c".repeat(64),
             channel_owner_public_key: binding.owner_public_key.clone(),
             channel_bootstrap_capability_hash: "d".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: binding.allocation_request_digest.clone(),
             max_active: 1,
             timeout_seconds: 60,
@@ -224,6 +225,7 @@ impl<'a> Fixture<'a> {
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: fixture.binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: fixture.binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         fixture.apply(&ready);

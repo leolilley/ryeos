@@ -85,6 +85,21 @@ impl RuntimeProbeInput {
 
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
+    /// Stage-one lease admission, offline and before any reservation or
+    /// provider contact: the backend's lifecycle adapter judges one lease
+    /// request against its signed provider spec while holding no credential,
+    /// network or activation authority. Returns the exact request bytes it
+    /// admitted; a refusal is an error carrying the adapter's plain reason.
+    fn admit_lease(
+        &self,
+        _inputs: &crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        bail!(
+            "lease admission refused: external placement backend `{}` admits no leases",
+            self.backend_id()
+        )
+    }
     /// Transport only. The private claimed contact follows a durable journal
     /// transition and the original sealed bootstrap is joined again below.
     fn relay_file_contact(
@@ -1492,14 +1507,7 @@ impl ExternalPlacementBackendRegistry {
         require_activation: bool,
         runtime_basis: RuntimeAdmissionBasis,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
-        let backend = self
-            .backends
-            .get(&(
-                contract.backend.clone(),
-                contract.backend_artifact_hash.clone(),
-            ))
-            .cloned()
-            .context("exact signed external placement backend generation is not installed")?;
+        let backend = self.installed(contract)?;
         ensure!(
             credential.backend() == contract.backend && credential.account() == contract.account,
             "protected placement credential has the wrong canonical account"
@@ -1539,6 +1547,23 @@ impl ExternalPlacementBackendRegistry {
             "external lifecycle adapter lacks required capabilities: {missing:?}"
         );
         Ok(backend)
+    }
+
+    /// The exact installed backend generation a binding names, found without
+    /// any credential. This qualifies nothing: it serves only the offline
+    /// steps that must precede the credential read, such as lease admission,
+    /// and full qualification still follows before any provider contact.
+    fn installed(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        self.backends
+            .get(&(
+                contract.backend.clone(),
+                contract.backend_artifact_hash.clone(),
+            ))
+            .cloned()
+            .context("exact signed external placement backend generation is not installed")
     }
 
     fn contact_gate(&self, placement: &str) -> Result<Arc<AtomicBool>> {
@@ -4239,6 +4264,97 @@ impl<'a> ExternalPlacementOwner<'a> {
         })
     }
 
+    /// Cleanup of a placed session's allocation works from its retained
+    /// reservation alone. The obligation outlives the session's worker and
+    /// launch claim: after a controller restart both are gone, and the lease
+    /// must still be terminated by its occurrence id.
+    fn prepare_retained_session_for_cleanup(
+        &self,
+        placement: &str,
+    ) -> Result<PreparedExternalPlacement> {
+        let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
+        controller_lifetime.ensure_protects_app_root(&self.state.config.app_root)?;
+        let record = self
+            .state
+            .state_store
+            .external_allocation(placement)?
+            .context("external session cleanup has no retained allocation")?;
+        ensure!(
+            matches!(
+                &record.reservation.owner,
+                ExternalAllocationOwner::DedicatedSession(_)
+            ),
+            "external session cleanup cannot recover another allocation owner"
+        );
+        let binding = self
+            .state
+            .state_store
+            .retained_external_binding(&record.reservation.binding_hash)?
+            .context("external session cleanup lost its retained binding")?;
+        let capsule = self
+            .state
+            .state_store
+            .admitted_persistent_session_capsule(&record.reservation.admitted_capsule_hash)?;
+        capsule.validate()?;
+        let program = capsule
+            .external_candidate
+            .as_ref()
+            .context("external session cleanup capsule has no admitted candidate program")?;
+        program.verify_runtime_authority(
+            capsule.retained_product_selections.as_ref(),
+            capsule
+                .retained_external_runtime_content_qualification
+                .as_ref(),
+        )?;
+        binding.check_program(program)?;
+        let program = AdmittedExternalExecutionProgram::StructuredSession(program.clone());
+        let contract = binding.backend_contract();
+        let credential = read_placement_credential(self.state, &binding.credential_access()?)?;
+        let backend = self.state.external_placement_backends.qualify_for_cleanup(
+            &contract,
+            &credential,
+            &program,
+        )?;
+        let authority_access =
+            ExternalChannelAuthorityAccess::new(&record.reservation.channel_authority_generation)?;
+        let channel_authority = authority_access.decode(
+            self.state
+                .vault
+                .external_channel_authority(&authority_access)
+                .context("read protected external cleanup channel authority")?,
+        )?;
+        ensure!(
+            channel_authority.owner_public_key() == record.reservation.channel_owner_public_key
+                && channel_authority.bootstrap_capability_hash()
+                    == record.reservation.channel_bootstrap_capability_hash,
+            "external session cleanup lost its exact channel authority"
+        );
+        let record = self
+            .state
+            .state_store
+            .reserve_external_allocation(&record.reservation, &binding)?;
+        Ok(PreparedExternalPlacement {
+            state_store: self.state.state_store.clone(),
+            vault: self.state.vault.clone(),
+            backend,
+            contract,
+            credential,
+            contact_gate: self
+                .state
+                .external_placement_backends
+                .contact_gate(placement)?,
+            controller_lifetime,
+            channel_authority,
+            program,
+            guest_inputs: None,
+            qualification_activation: None,
+            native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
+                Arc::clone(&self.state.node_policy),
+            ),
+            record,
+        })
+    }
+
     /// Reentry uses the original journal owner and program, never a replacement
     /// compiler claim or reconstructed descriptor inventory.
     fn prepare_retained_direct(&self, placement: &str) -> Result<PreparedExternalPlacement> {
@@ -4493,6 +4609,9 @@ impl<'a> ExternalPlacementOwner<'a> {
                 program: program.clone(),
             }
         };
+        // No adapter admission precedes this placement kind, so it retains no
+        // admitted adapter request; the request digest still names the field.
+        let admitted_adapter_request_base64: Option<String> = None;
         let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
             "domain":"ryeos.external-direct-placement-request.v1", "placement_thread_id":placement,
             "admitted_capsule_hash":capsule_hash, "base_snapshot_hash":snapshot_hash,
@@ -4500,6 +4619,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             "channel_authority_generation":authority_generation,
             "channel_owner_public_key":channel_authority.owner_public_key(),
             "channel_bootstrap_capability_hash":channel_authority.bootstrap_capability_hash(),
+            "admitted_adapter_request_base64":admitted_adapter_request_base64,
         }))?;
         let startup_budget = contract.direct_startup_budget_ms()?;
         let (started, contact_deadline, startup_deadline) = if let Some(prior) = &existing {
@@ -4530,6 +4650,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             channel_authority_generation: authority_generation,
             channel_owner_public_key: channel_authority.owner_public_key(),
             channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+            admitted_adapter_request_base64,
             request_digest,
             max_active: contract.max_active,
             timeout_seconds: u32::try_from(program.projection().timeout_seconds)?,
@@ -4581,18 +4702,6 @@ impl<'a> ExternalPlacementOwner<'a> {
     /// already-born dedicated session; no caller-authored allocation shape is
     /// accepted at this boundary.
     pub(crate) fn prepare(&self, placement: &str) -> Result<PreparedExternalPlacement> {
-        self.prepare_for_purpose(placement, false)
-    }
-
-    fn prepare_for_cleanup(&self, placement: &str) -> Result<PreparedExternalPlacement> {
-        self.prepare_for_purpose(placement, true)
-    }
-
-    fn prepare_for_purpose(
-        &self,
-        placement: &str,
-        cleanup_only: bool,
-    ) -> Result<PreparedExternalPlacement> {
         let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
         controller_lifetime
             .ensure_protects_app_root(&self.state.config.app_root)
@@ -4675,12 +4784,17 @@ impl<'a> ExternalPlacementOwner<'a> {
             "external placement workspace is not the exact session owner"
         );
         let existing = self.state.state_store.external_allocation(placement)?;
+        if let Some(existing) = &existing {
+            lease_lifecycle::refuse_ended_session_lease(
+                self.state,
+                existing,
+                &session.workspace_id,
+                worker_instance_id,
+                worker_boot_epoch,
+            )?;
+        }
 
         let (binding, contract, credential_access) = if let Some(existing) = &existing {
-            ensure!(
-                !existing.phase.is_settled(),
-                "settled external placement has no recovery authority"
-            );
             let binding = self
                 .state
                 .state_store
@@ -4706,13 +4820,10 @@ impl<'a> ExternalPlacementOwner<'a> {
             let access = installed.credential_access()?;
             (binding, contract, access)
         };
-        if !cleanup_only {
-            require_retained_session_runtime_qualification(self.state, &capsule, &binding)?;
-        }
-        if !cleanup_only
-            && existing
-                .as_ref()
-                .is_none_or(|record| record.phase == ExternalAllocationPhase::Reserved)
+        require_retained_session_runtime_qualification(self.state, &capsule, &binding)?;
+        if existing
+            .as_ref()
+            .is_none_or(|record| record.phase == ExternalAllocationPhase::Reserved)
         {
             require_current_runtime_qualification_for_start(
                 self.state,
@@ -4720,28 +4831,47 @@ impl<'a> ExternalPlacementOwner<'a> {
                 binding.digest(),
             )?;
         }
-        let credential = credential_access.decode(
-            self.state
-                .vault
-                .placement_credential(&credential_access)
-                .context("read protected external placement credential")?,
-        )?;
-        let admitted = AdmittedExternalExecutionProgram::StructuredSession(program.clone());
-        let backend = if cleanup_only {
-            ensure!(
-                existing.is_some(),
-                "external cleanup has no retained allocation"
-            );
-            self.state.external_placement_backends.qualify_for_cleanup(
-                &contract,
-                &credential,
-                &admitted,
-            )?
-        } else {
-            self.state
-                .external_placement_backends
-                .qualify(&contract, &credential, &admitted)?
+        // A recovered placement carries the lease request its first
+        // reservation admitted. A fresh one whose profile names lease or
+        // guest requirements is first measured against the lease it would
+        // get, its deadline plus the node's turn-end margin against now plus
+        // the lease lifetime, and then asks the binding's adapter, offline,
+        // before the placement credential is read: a refused lease leaves no
+        // vault read, reservation, channel authority or provider contact
+        // behind.
+        let (admitted_adapter_request_base64, lease_charge, credential) = match &existing {
+            Some(existing) => (
+                existing.reservation.admitted_adapter_request_base64.clone(),
+                None,
+                read_placement_credential(self.state, &credential_access)?,
+            ),
+            None => {
+                let (lease, credential) = admit_fresh_lease_then_read_credential(
+                    self.state,
+                    capsule
+                        .structured_session_profile
+                        .as_ref()
+                        .map(|profile| &profile.contract),
+                    capsule.lifecycle.ready_timeout_ms,
+                    || {
+                        crate::dedicated_session_service::ensure_hosted_contact_deadline(
+                            self.state, &session,
+                        )
+                    },
+                    &contract,
+                    &credential_access,
+                )?;
+                match lease {
+                    Some((admitted, charge)) => (Some(admitted), Some(charge), credential),
+                    None => (None, None, credential),
+                }
+            }
         };
+        let admitted = AdmittedExternalExecutionProgram::StructuredSession(program.clone());
+        let backend = self
+            .state
+            .external_placement_backends
+            .qualify(&contract, &credential, &admitted)?;
         if existing.is_none() {
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
             crate::external_supervisor_native::external_supervisor_journal_quota(
@@ -4797,6 +4927,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             "channel_authority_generation":authority_generation,
             "channel_owner_public_key":channel_owner_public_key,
             "channel_bootstrap_capability_hash":channel_bootstrap_capability_hash,
+            "admitted_adapter_request_base64":admitted_adapter_request_base64,
             "program":program,
             "backend_contract":contract,
         }))?;
@@ -4819,6 +4950,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 channel_authority_generation: authority_generation.clone(),
                 channel_owner_public_key: channel_owner_public_key.clone(),
                 channel_bootstrap_capability_hash: channel_bootstrap_capability_hash.clone(),
+                admitted_adapter_request_base64,
                 request_digest,
                 max_active: contract.max_active,
                 timeout_seconds: contract.timeout_seconds,
@@ -4851,6 +4983,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 channel_authority_generation: authority_generation,
                 channel_owner_public_key,
                 channel_bootstrap_capability_hash,
+                admitted_adapter_request_base64,
                 request_digest,
                 max_active: contract.max_active,
                 timeout_seconds: contract.timeout_seconds,
@@ -4861,10 +4994,17 @@ impl<'a> ExternalPlacementOwner<'a> {
                     .context("external placement startup deadline overflow")?,
             }
         };
-        let record = self
-            .state
-            .state_store
-            .reserve_external_allocation(&reservation, &binding)?;
+        let record = match &lease_charge {
+            Some(charge) => self.state.state_store.reserve_external_lease_allocation(
+                &reservation,
+                &binding,
+                charge,
+            )?,
+            None => self
+                .state
+                .state_store
+                .reserve_external_allocation(&reservation, &binding)?,
+        };
         Ok(PreparedExternalPlacement {
             state_store: self.state.state_store.clone(),
             vault: self.state.vault.clone(),
@@ -5241,6 +5381,9 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
     let access = ExternalChannelAuthorityAccess::new(&authority_generation)?;
     let channel_authority =
         access.decode(state.vault.ensure_external_channel_authority(&access)?)?;
+    // No adapter admission precedes this placement kind, so it retains no
+    // admitted adapter request; the request digest still names the field.
+    let admitted_adapter_request_base64: Option<String> = None;
     let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain": "ryeos.external-qualification-placement-request.v1",
         "placement_thread_id": &placement,
@@ -5253,6 +5396,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         "channel_authority_generation": &authority_generation,
         "channel_owner_public_key": channel_authority.owner_public_key(),
         "channel_bootstrap_capability_hash": channel_authority.bootstrap_capability_hash(),
+        "admitted_adapter_request_base64": &admitted_adapter_request_base64,
     }))?;
     let startup_budget_ms = qualification_startup_budget_ms(&contract)?;
     let now = i64::try_from(lillux::time::timestamp_millis())?;
@@ -5267,6 +5411,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
         channel_authority_generation: authority_generation,
         channel_owner_public_key: channel_authority.owner_public_key(),
         channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+        admitted_adapter_request_base64,
         request_digest,
         max_active: contract.max_active,
         timeout_seconds: contract.timeout_seconds,
@@ -6110,7 +6255,9 @@ pub fn advance_external_candidate_cleanup(
     }
     let owner = ExternalPlacementOwner::new(state);
     let prepared = match &current.reservation.owner {
-        ExternalAllocationOwner::DedicatedSession(_) => owner.prepare_for_cleanup(placement)?,
+        ExternalAllocationOwner::DedicatedSession(_) => {
+            owner.prepare_retained_session_for_cleanup(placement)?
+        }
         ExternalAllocationOwner::DirectThread { .. } => {
             owner.prepare_retained_direct_for_cleanup(placement)?
         }
@@ -7370,6 +7517,164 @@ impl ExternalPlacementReconciliation {
     }
 }
 
+/// Read and decode the binding's protected placement credential.
+fn read_placement_credential(
+    state: &AppState,
+    access: &crate::vault::placement::PlacementCredentialAccess,
+) -> Result<PlacementCredential> {
+    access.decode(
+        state
+            .vault
+            .placement_credential(access)
+            .context("read protected external placement credential")?,
+    )
+}
+
+/// A fresh placement's lease admission, then its placement credential, in
+/// that order. Admission runs through the exact installed backend generation
+/// the binding names and needs only the session's profile, its deadline, the
+/// binding and node policy, so a refused lease returns before the vault is
+/// touched. `session_deadline` is asked only when a lease is needed. The
+/// caller still fully qualifies the backend with the credential afterwards.
+fn admit_fresh_lease_then_read_credential(
+    state: &AppState,
+    profile_contract: Option<&serde_json::Value>,
+    ready_timeout_ms: u64,
+    session_deadline: impl FnOnce() -> Result<Option<i64>>,
+    contract: &ExternalPlacementBackendContract,
+    credential_access: &crate::vault::placement::PlacementCredentialAccess,
+) -> Result<(
+    Option<(String, crate::runtime_db::external_execution::ExternalLeaseCharge)>,
+    PlacementCredential,
+)> {
+    let installed = state.external_placement_backends.installed(contract)?;
+    let lease = admit_session_lease(
+        state,
+        profile_contract,
+        ready_timeout_ms,
+        session_deadline,
+        contract,
+        installed.as_ref(),
+    )?;
+    let credential = read_placement_credential(state, credential_access)?;
+    Ok((lease, credential))
+}
+
+/// Stage-one lease admission for a fresh placed session: the binding's
+/// adapter judges the lease [`session_lease_request`] builds, offline. Returns
+/// the admitted request bytes, encoded for the reservation, and the lease's
+/// charge against the node budget, which the reservation takes in its own
+/// transaction. A session with no structured-session profile needs no lease.
+/// A session whose deadline the lease could not cover is refused before the
+/// adapter is asked.
+fn admit_session_lease(
+    state: &AppState,
+    profile_contract: Option<&serde_json::Value>,
+    ready_timeout_ms: u64,
+    session_deadline: impl FnOnce() -> Result<Option<i64>>,
+    contract: &ExternalPlacementBackendContract,
+    backend: &dyn ExternalPlacementBackend,
+) -> Result<Option<(String, crate::runtime_db::external_execution::ExternalLeaseCharge)>> {
+    let Some(profile_contract) = profile_contract else {
+        return Ok(None);
+    };
+    let budget = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?
+        .external_lease_budget
+        .as_ref();
+    let Some((inputs, charge)) =
+        session_lease_request(profile_contract, ready_timeout_ms, contract, budget)?
+    else {
+        return Ok(None);
+    };
+    let margin_seconds = budget
+        .map(|budget| budget.turn_end_margin_seconds)
+        .context("lease refused: this node's execution policy declares no external lease budget")?;
+    lease_lifecycle::refuse_session_unfit_for_fresh_lease(
+        session_deadline()?,
+        charge.lifetime_seconds,
+        margin_seconds,
+        i64::try_from(lillux::time::timestamp_millis())?,
+    )?;
+    let admitted = backend.admit_lease(
+        &inputs,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(u64::from(
+            contract.contact_timeout_seconds,
+        ))),
+    )?;
+    Ok(Some((
+        ExternalAllocationReservation::encode_admitted_adapter_request(&admitted)?,
+        charge,
+    )))
+}
+
+/// The lease a placed session needs, if any, and its charge.
+///
+/// Only a session whose admitted structured-session profile names `lease`
+/// or `guest` requirements needs a lease; any other is placed without one.
+/// The request is built from signed data alone: the profile's workload class
+/// and requirement lists, the one host the guest may reach (the binding's
+/// HTTPS controller origin), the binding's execution timeout as the lease
+/// lifetime and the session's readiness budget as its activation deadline.
+/// The node's lease budget must exist and allow that lifetime.
+fn session_lease_request(
+    profile_contract: &serde_json::Value,
+    ready_timeout_ms: u64,
+    contract: &ExternalPlacementBackendContract,
+    budget: Option<&ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
+) -> Result<
+    Option<(
+        crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
+        crate::runtime_db::external_execution::ExternalLeaseCharge,
+    )>,
+> {
+    let Some(requirements) =
+        ryeos_engine::structured_session_profile::placement_requirements(profile_contract)?
+    else {
+        return Ok(None);
+    };
+    if requirements.lease.is_empty() && requirements.guest.is_empty() {
+        return Ok(None);
+    }
+    let workload = requirements.workload_class;
+    let budget = budget.with_context(|| {
+        format!(
+            "lease refused: workload `{workload}` needs a remote lease and this node's \
+             execution policy declares no external lease budget"
+        )
+    })?;
+    let charge = crate::runtime_db::external_execution::ExternalLeaseCharge::under(
+        budget,
+        contract.timeout_seconds,
+    )
+    .with_context(|| format!("lease refused for workload `{workload}`"))?;
+    let origin = &contract
+        .controller_transport
+        .http()
+        .with_context(|| {
+            format!(
+                "lease refused: workload `{workload}` needs a lease guest that reaches its \
+                 controller, and the binding names no HTTPS controller origin"
+            )
+        })?
+        .https_origin;
+    let controller_host =
+        crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs::controller_host_of(
+            origin,
+        )?;
+    let inputs = crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs {
+        workload,
+        requires_before_spend: requirements.lease,
+        requires_from_guest: requirements.guest,
+        controller_host,
+        maximum_lifetime_seconds: contract.timeout_seconds,
+        activation_deadline_seconds: u32::try_from(ready_timeout_ms.div_ceil(1_000))
+            .context("lease activation deadline exceeds its bound")?,
+    };
+    Ok(Some((inputs, charge)))
+}
+
 /// Refuse a fresh allocation that cannot possibly carry its two exact
 /// executable roots. The occurrence-bound bootstrap and complete inventory
 /// are still checked when the final package is prepared after allocation;
@@ -7401,6 +7706,15 @@ fn require_guest_package_artifact_floor_bytes(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod session_lease_tests;
+
+mod lease_lifecycle;
+pub use lease_lifecycle::{
+    terminate_predecessor_external_leases, PredecessorLeaseTermination, PREDECESSOR_LEASE_INTERRUPTION,
+};
+pub(crate) use lease_lifecycle::admit_turn_on_external_lease;
 
 #[cfg(test)]
 mod guest_package_artifact_floor_tests {
@@ -7996,6 +8310,7 @@ pub mod test_support {
             channel_authority_generation: "2".repeat(64),
             channel_owner_public_key: "3".repeat(64),
             channel_bootstrap_capability_hash: "4".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: "5".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -8421,6 +8736,7 @@ pub mod test_support {
             "channel_authority_generation":&authority_generation,
             "channel_owner_public_key":&channel_owner_public_key,
             "channel_bootstrap_capability_hash":&channel_bootstrap_capability_hash,
+            "admitted_adapter_request_base64":serde_json::Value::Null,
             "program":&program,
             "backend_contract":&contract,
         }))?;
@@ -8440,6 +8756,7 @@ pub mod test_support {
             channel_authority_generation: authority_generation,
             channel_owner_public_key: channel_owner_public_key.clone(),
             channel_bootstrap_capability_hash,
+            admitted_adapter_request_base64: None,
             request_digest,
             max_active: contract.max_active,
             timeout_seconds: contract.timeout_seconds,
@@ -9007,8 +9324,8 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FixtureBackend {
-        artifact: String,
+    pub(super) struct FixtureBackend {
+        pub(super) artifact: String,
     }
 
     fn all_lifecycle_capabilities() -> BTreeSet<LifecycleCapability> {
@@ -9488,6 +9805,7 @@ mod tests {
             channel_authority_generation: "3".repeat(64),
             channel_owner_public_key,
             channel_bootstrap_capability_hash,
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -9552,6 +9870,7 @@ mod tests {
             channel_authority_generation: "3".repeat(64),
             channel_owner_public_key: channel_authority.owner_public_key(),
             channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -12610,6 +12929,7 @@ mod tests {
                 payload: ryeos_state::external_execution::ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: channel.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: channel.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             },
             &channel,

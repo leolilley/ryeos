@@ -1114,7 +1114,7 @@ impl InstalledExternalExecutionBinding {
         })
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
     pub(crate) fn digest(&self) -> &str {

@@ -3583,6 +3583,7 @@ mod tests {
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         assert!(live.record_frame(&ready).unwrap());
@@ -4681,6 +4682,7 @@ mod tests {
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         assert_eq!(after.frame().sequence, 2);
@@ -4770,6 +4772,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             )
             .unwrap();

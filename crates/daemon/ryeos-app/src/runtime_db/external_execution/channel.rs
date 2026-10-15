@@ -4291,6 +4291,7 @@ Ok(())
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let exchange = db
@@ -4491,6 +4492,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         db.conn.with_sql(|connection| Ok(connection.execute_batch("CREATE TRIGGER test_refuse_owner_ack BEFORE INSERT ON external_execution_frame
@@ -4747,6 +4749,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         assert!(
@@ -7073,6 +7076,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         let first = db
@@ -7445,6 +7449,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         let first = db

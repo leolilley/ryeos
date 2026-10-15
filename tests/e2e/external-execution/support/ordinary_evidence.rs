@@ -152,6 +152,7 @@ pub fn verify(
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash,
                 base_snapshot_hash,
+                boot: None,
             } => {
                 ensure!(
                     supervisor_runtime_hash == &binding.supervisor_runtime_hash

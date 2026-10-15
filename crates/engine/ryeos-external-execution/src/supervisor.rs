@@ -156,6 +156,7 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         )
     }

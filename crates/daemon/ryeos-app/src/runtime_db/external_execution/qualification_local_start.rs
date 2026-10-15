@@ -1714,6 +1714,7 @@ mod tests {
             channel_authority_generation: "c".repeat(64),
             channel_owner_public_key: binding.owner_public_key.clone(),
             channel_bootstrap_capability_hash: "e".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: binding.allocation_request_digest.clone(),
             max_active: 1,
             timeout_seconds: 60,

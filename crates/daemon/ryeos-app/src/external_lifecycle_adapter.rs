@@ -1,5 +1,7 @@
 //! Closed executable runner for signed external occurrence lifecycle adapters.
 
+pub(crate) mod lease_admission;
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result, ensure};
@@ -41,7 +43,7 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LEASE_ADMISSION_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
     LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
@@ -472,6 +474,7 @@ impl ExecutableExternalPlacementBackend {
         guest_package: Option<&lillux::InheritedDescriptorAuthority>,
         signed_import: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization>,
         signed_assignment: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment>,
+        admitted_adapter_request: Option<&[u8]>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -660,6 +663,11 @@ impl ExecutableExternalPlacementBackend {
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
             ));
+            inherited.push(handle);
+        }
+        if let Some(bytes) = admitted_adapter_request {
+            let (handle, env) = sealed_admitted_adapter_request(bytes)?;
+            envs.push(env);
             inherited.push(handle);
         }
         drop(descriptors);
@@ -1073,6 +1081,14 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
     }
     fn backend_id(&self) -> &str {
         &self.declaration.id
+    }
+
+    fn admit_lease(
+        &self,
+        inputs: &lease_admission::LeaseAdmissionInputs,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        self.invoke_admit_lease(inputs, deadline)
     }
 
     fn artifact_hash(&self) -> &str {
@@ -2114,6 +2130,59 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
 }
 
 impl ExecutableExternalPlacementBackend {
+    /// Stage-one lease admission. The adapter receives the sealed request and
+    /// the captured signed provider spec, nothing else: no credential,
+    /// settings, network inputs or activation material, so its verdict can
+    /// cost no provider contact.
+    fn invoke_admit_lease(
+        &self,
+        inputs: &lease_admission::LeaseAdmissionInputs,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        let request = lease_admission::canonical_request(
+            &self.declaration.id,
+            &self.provider_spec.sha256,
+            inputs,
+        )?;
+        let request_handle = lillux::sealed_memfd(c"ryeos-lease-admission-request", &request)
+            .map_err(anyhow::Error::msg)?;
+        let envs = vec![
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                self.provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
+            ),
+        ];
+        let response = run_lifecycle_adapter(
+            &self.adapter,
+            LifecycleAdapterInvocation::AdmitLease,
+            &request_handle,
+            vec![self.provider_spec.authority.clone()],
+            envs,
+            deadline,
+        )
+        .with_context(|| {
+            format!(
+                "lease admission refused: lifecycle adapter `{}` gave no verdict on workload `{}`",
+                self.declaration.id, inputs.workload
+            )
+        })?;
+        lease_admission::require_admitted(
+            &response.bytes,
+            &request,
+            &self.provider_spec.sha256,
+            &self.declaration.id,
+        )?;
+        Ok(request)
+    }
+
     fn common(
         contract: &ExternalPlacementBackendContract,
         binding_hash: &str,
@@ -2160,8 +2229,18 @@ impl ExecutableExternalPlacementBackend {
                 reservation: reservation_wire,
             }
         };
+        let admitted_adapter_request = reservation.admitted_adapter_request()?;
         let response = self.invoke(
-            contract, credential, &request, None, None, None, None, None, deadline,
+            contract,
+            credential,
+            &request,
+            None,
+            None,
+            None,
+            None,
+            None,
+            admitted_adapter_request.as_deref(),
+            deadline,
         )?;
         let value = match response.value {
             LifecycleAdapterResponse::AllocationBound {
@@ -2323,6 +2402,7 @@ impl ExecutableExternalPlacementBackend {
             activation_authority
                 .map(ExternalSupervisorActivation::signed_assignment)
                 .transpose()?,
+            reservation.admitted_adapter_request()?.as_deref(),
             deadline,
         )?;
         let value = match response.value {
@@ -2386,10 +2466,20 @@ impl ExecutableExternalPlacementBackend {
         let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
             u64::from(contract.cleanup_timeout_seconds),
         ));
+        let admitted_adapter_request = reservation.admitted_adapter_request()?;
         // Late terminal evidence may settle cleanup, never start execution.
         match self
             .invoke(
-                contract, credential, &request, None, None, None, None, None, deadline,
+                contract,
+                credential,
+                &request,
+                None,
+                None,
+                None,
+                None,
+                None,
+                admitted_adapter_request.as_deref(),
+                deadline,
             )?
             .value
         {
@@ -2405,6 +2495,28 @@ impl ExecutableExternalPlacementBackend {
             _ => anyhow::bail!("lifecycle adapter returned a non-termination response"),
         }
     }
+}
+
+/// Seal the admitted adapter request a placement retains for one `operate`
+/// contact. Every `operate` contact for that placement (allocation,
+/// activation, termination and their reconciliations) receives the exact
+/// bytes the adapter admitted, so every provider contact for the placement
+/// works from the same admitted request; the controller never interprets them.
+fn sealed_admitted_adapter_request(
+    bytes: &[u8],
+) -> Result<(lillux::InheritedDescriptorAuthority, (String, String))> {
+    ensure!(
+        !bytes.is_empty()
+            && bytes.len() <= ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+        "admitted adapter request is empty or exceeds its bound"
+    );
+    let handle = lillux::sealed_memfd(c"ryeos-lifecycle-admitted-request", bytes)
+        .map_err(anyhow::Error::msg)?;
+    let descriptor = handle
+        .inherited_descriptor()
+        .map_err(anyhow::Error::msg)?
+        .to_string();
+    Ok((handle, (LEASE_ADMISSION_FD_ENV.into(), descriptor)))
 }
 
 fn decode_inspection_response(
@@ -2605,6 +2717,27 @@ mod tests {
             2,
             "decoder source must not escape closed boundary"
         );
+    }
+
+    #[test]
+    fn admitted_adapter_request_reaches_its_descriptor_exactly_and_bounded() {
+        let bytes = br#"{"admitted":"opaque"}"#;
+        let (handle, (name, descriptor)) = sealed_admitted_adapter_request(bytes).unwrap();
+        assert_eq!(name, LEASE_ADMISSION_FD_ENV);
+        assert_eq!(
+            descriptor,
+            handle.inherited_descriptor().unwrap().to_string()
+        );
+        let read = lillux::read_sealed_inherited_descriptor(
+            descriptor.parse().unwrap(),
+            ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+        )
+        .unwrap();
+        assert_eq!(read, bytes);
+
+        assert!(sealed_admitted_adapter_request(&[]).is_err());
+        let over = vec![b'x'; ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES + 1];
+        assert!(sealed_admitted_adapter_request(&over).is_err());
     }
 
     #[test]

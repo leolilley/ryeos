@@ -11,6 +11,9 @@ use anyhow::ensure;
 
 mod channel;
 pub use channel::ExternalDirectOutput;
+mod lease_budget;
+pub(crate) use lease_budget::{ExternalLeaseCharge, HeldExternalLease};
+pub(super) use lease_budget::JOURNAL_SQL as LEASE_BUDGET_SQL;
 pub(crate) mod connector;
 mod qualification_batch;
 mod qualification_command;
@@ -61,11 +64,16 @@ pub(crate) use relay_transfer::{
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
-pub const EXTERNAL_ALLOCATION_RESERVATION_SCHEMA: u32 = 5;
-// The bounded direct projection is operational authority retained inline, not
-// a new CAS root or caller-authored command. Metadata remains separately bounded.
+pub const EXTERNAL_ALLOCATION_RESERVATION_SCHEMA: u32 = 6;
+const MAX_ADMITTED_ADAPTER_REQUEST_BASE64_BYTES: usize =
+    ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES.div_ceil(3) * 4;
+// The bounded direct projection and admitted adapter request are operational
+// authority retained inline, not a new CAS root or caller-authored command.
+// Metadata remains separately bounded.
 const MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES: usize =
-    ryeos_state::external_execution::admission::MAX_EXTERNAL_DIRECT_PROGRAM_BYTES + 8192;
+    ryeos_state::external_execution::admission::MAX_EXTERNAL_DIRECT_PROGRAM_BYTES
+        + MAX_ADMITTED_ADAPTER_REQUEST_BASE64_BYTES
+        + 8192;
 pub(super) const GUARD_SQL: &str = r#"CREATE TABLE external_execution_guard (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
@@ -862,6 +870,12 @@ pub struct ExternalAllocationReservation {
     /// Digest of the one-use attachment capability delivered only to the
     /// protected supervisor bootstrap.
     pub channel_bootstrap_capability_hash: String,
+    /// Canonical base64 of the exact request bytes the lifecycle adapter
+    /// admitted for this placement before any spend. The daemon never
+    /// interprets them: it hands them back to the adapter on every `operate`
+    /// contact for this placement, and `request_digest` covers them. `None`
+    /// when no adapter admission preceded the reservation.
+    pub admitted_adapter_request_base64: Option<String>,
     pub request_digest: String,
     pub max_active: u16,
     pub timeout_seconds: u32,
@@ -962,12 +976,44 @@ impl ExternalAllocationReservation {
         ryeos_state::external_execution::validate_channel_public_key(
             &self.channel_owner_public_key,
         )?;
+        self.admitted_adapter_request()?;
         ensure!(
             lillux::canonical_json(&serde_json::to_value(self)?)?.len()
                 <= MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES,
             "external allocation reservation exceeds its serialized bound"
         );
         Ok(())
+    }
+
+    /// Encode admitted adapter request bytes for this record's field.
+    pub(crate) fn encode_admitted_adapter_request(bytes: &[u8]) -> Result<String> {
+        use base64::Engine as _;
+        ensure!(
+            !bytes.is_empty()
+                && bytes.len() <= ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+            "admitted adapter request is empty or exceeds its bound"
+        );
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// The exact admitted adapter request bytes this placement retains.
+    pub(crate) fn admitted_adapter_request(&self) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let Some(encoded) = self.admitted_adapter_request_base64.as_deref() else {
+            return Ok(None);
+        };
+        ensure!(
+            !encoded.is_empty() && encoded.len() <= MAX_ADMITTED_ADAPTER_REQUEST_BASE64_BYTES,
+            "admitted adapter request is empty or exceeds its encoded bound"
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| anyhow::anyhow!("admitted adapter request is invalid base64"))?;
+        ensure!(
+            Self::encode_admitted_adapter_request(&bytes)? == encoded,
+            "admitted adapter request is not canonical base64"
+        );
+        Ok(Some(bytes))
     }
 
     pub(crate) fn validate_startup_budget(&self, ready_timeout_ms: u64) -> Result<()> {
@@ -1812,6 +1858,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     if read_guard(conn)? != unsettled {
         bail!("external execution guard contradicts its allocation journal");
     }
+    lease_budget::validate_current(conn)?;
     let mut statement =
         conn.prepare("SELECT placement_thread_id FROM external_execution_allocation")?;
     let placements = statement
@@ -2205,7 +2252,35 @@ impl RuntimeDb {
         retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationRecord> {
-        self.reserve_external_allocation_with_proofs(reservation, retained_binding, proof, None)
+        self.reserve_external_allocation_with_proofs(
+            reservation,
+            retained_binding,
+            proof,
+            None,
+            None,
+        )
+    }
+
+    /// Reserve a session allocation whose lease the lifecycle adapter has
+    /// admitted, charging the lease against the node budget in the same
+    /// transaction, before any provider contact.
+    pub(crate) fn reserve_external_lease_allocation(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        lease: &ExternalLeaseCharge,
+    ) -> Result<ExternalAllocationRecord> {
+        ensure!(
+            matches!(&reservation.owner, ExternalAllocationOwner::DedicatedSession(_)),
+            "only a placed session reserves a lease"
+        );
+        self.reserve_external_allocation_with_proofs(
+            reservation,
+            retained_binding,
+            None,
+            None,
+            Some(lease),
+        )
     }
 
     /// The StateStore supplies a non-serializable proof of the exact accepted
@@ -2222,6 +2297,7 @@ impl RuntimeDb {
             retained_binding,
             None,
             Some(proof),
+            None,
         )
     }
 
@@ -2231,6 +2307,7 @@ impl RuntimeDb {
         retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
         direct_proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
         qualification_proof: Option<&crate::state_store::VerifiedExternalQualificationOwner>,
+        lease: Option<&ExternalLeaseCharge>,
     ) -> Result<ExternalAllocationRecord> {
         self.conn.with_sql(|conn| {
             reservation.validate()?;
@@ -2271,6 +2348,11 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(existing);
             }
+            ensure!(
+                lease.is_some() == reservation.admitted_adapter_request_base64.is_some(),
+                "a reservation carrying an admitted lease request must reserve node lease \
+                 budget, and only such a reservation may"
+            );
             require_new_owner(&tx, reservation, direct_proof, qualification_proof)?;
             if matches!(
                 &reservation.owner,
@@ -2288,6 +2370,9 @@ impl RuntimeDb {
                 || reservation.contact_deadline_ms.saturating_sub(now) > 300_000
             {
                 bail!("external allocation contact deadline has expired");
+            }
+            if let Some(lease) = lease {
+                lease_budget::require_room(&tx, now, lease)?;
             }
             let (count, prior_limit): (i64, Option<i64>) = tx.query_row(
                 "SELECT COUNT(*),MIN(json_extract(reservation_json,'$.max_active'))
@@ -2309,6 +2394,9 @@ impl RuntimeDb {
                     now
                 ],
             )?;
+            if let Some(lease) = lease {
+                lease_budget::reserve(&tx, &reservation.placement_thread_id, now, lease)?;
+            }
             let record =
                 read(&tx, &reservation.placement_thread_id)?.context("reserved allocation missing")?;
             tx.commit()?;
@@ -3103,6 +3191,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
             channel_bootstrap_capability_hash: "4".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -3140,7 +3229,7 @@ pub(crate) mod tests {
             reservation
         );
         let mut predecessor = reservation.clone();
-        predecessor.schema = 4;
+        predecessor.schema = 5;
         assert!(predecessor.validate().is_err());
         let mut oversized = serde_json::to_value(&reservation).unwrap();
         oversized["owner"]["program"]["projection"]["arguments"] =
@@ -3151,6 +3240,56 @@ pub(crate) mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn admitted_adapter_request_is_retained_exactly_bounded_and_canonical() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        let mut reservation = direct_owner_reservation(&db);
+        assert_eq!(reservation.admitted_adapter_request().unwrap(), None);
+
+        let largest = vec![b'r'; ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES];
+        reservation.admitted_adapter_request_base64 = Some(
+            ExternalAllocationReservation::encode_admitted_adapter_request(&largest).unwrap(),
+        );
+        reservation.validate().unwrap();
+        assert_eq!(
+            reservation.admitted_adapter_request().unwrap().as_deref(),
+            Some(largest.as_slice())
+        );
+        retain_direct_owner_fixture(&db, &reservation, "contact_pending");
+        drop(db);
+        let reopened = crate::runtime_db::test_native::TestRuntime::open(&path);
+        let retained = reopened
+            .external_allocation(&reservation.placement_thread_id)
+            .unwrap()
+            .unwrap()
+            .reservation;
+        assert_eq!(retained, reservation);
+        assert_eq!(
+            retained.admitted_adapter_request().unwrap().as_deref(),
+            Some(largest.as_slice())
+        );
+
+        let over = vec![b'r'; ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES + 1];
+        assert!(ExternalAllocationReservation::encode_admitted_adapter_request(&over).is_err());
+        assert!(ExternalAllocationReservation::encode_admitted_adapter_request(&[]).is_err());
+        let mut refused = reservation.clone();
+        for encoded in [
+            String::new(),
+            "not base64!".to_owned(),
+            // Nonzero trailing bits: decodable, but not the canonical encoding.
+            "YR==".to_owned(),
+            {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(&over)
+            },
+        ] {
+            refused.admitted_adapter_request_base64 = Some(encoded);
+            assert!(refused.validate().is_err());
+        }
     }
 
     /// Model a retained storage boundary, not production admission. New direct
@@ -3445,6 +3584,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
             channel_bootstrap_capability_hash: "4".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,

@@ -127,6 +127,7 @@ pub(crate) fn populate_fixture(
         workload_client: None,
         resource_authority: Some(resources.clone()),
         producer_resource_ceiling: None,
+        external_lease_budget: None,
     };
     policy.validate().unwrap();
     state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
