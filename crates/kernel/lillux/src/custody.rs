@@ -58,6 +58,22 @@ pub fn relinquish_in_foreign_process<T>(owner: T) {
     let _relinquished_foreign_copy = std::mem::ManuallyDrop::new(owner);
 }
 
+/// End the Rust lifetime of a value that lives in place inside storage the
+/// caller keeps owning, such as a mapped region, running its destructor once
+/// without freeing or unmapping the storage.
+///
+/// # Safety
+/// `slot` must be properly aligned, valid for reads and writes, and point to
+/// an initialized `T` that nothing else will use or drop afterwards. No live
+/// reference into `*slot` may exist. The storage under it is never freed by
+/// this call and must stay valid for its duration; the destructor may unwind,
+/// in which case the value is still considered dropped.
+pub unsafe fn drop_resident_in_place<T>(slot: std::ptr::NonNull<T>) {
+    // SAFETY: the caller guarantees `slot` is valid, initialized and never
+    // used again.
+    unsafe { slot.as_ptr().drop_in_place() }
+}
+
 /// Counts of owners this process retains because they were dropped without
 /// settlement. Any nonzero total means that custody stays held until exit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -354,6 +370,20 @@ mod tests {
         abandon(KIND, Observed(Arc::clone(&dropped)));
         assert_eq!(abandoned_custody().count(KIND), before + 1);
         assert!(!dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn resident_value_drops_in_place_once_without_freeing_storage() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut storage = std::mem::MaybeUninit::<Observed>::uninit();
+        storage.write(Observed(Arc::clone(&dropped)));
+        let slot = std::ptr::NonNull::from(&mut storage).cast::<Observed>();
+        assert!(!dropped.load(Ordering::Acquire));
+        // SAFETY: `slot` is aligned, initialized and never used again; the
+        // storage is a local that outlives the call.
+        unsafe { drop_resident_in_place(slot) };
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(Arc::strong_count(&dropped), 1);
     }
 
     #[test]

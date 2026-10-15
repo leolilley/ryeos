@@ -391,7 +391,7 @@ struct DaemonSelectedComposition {
     supervised_app_root: Option<std::path::PathBuf>,
     process_state_lock: Option<state_lock::StateLock>,
     #[cfg(target_os = "linux")]
-    native_operator_lock: Option<std::mem::ManuallyDrop<Arc<lillux::ExactExclusiveFileLock>>>,
+    native_operator_lock: Option<ryeos_node::native_capacity::OperatorLockCustody>,
     #[cfg(target_os = "linux")]
     native_operator_lock_registered: bool,
     lifecycle_exit: Option<LifecycleExitGuard>,
@@ -1302,7 +1302,7 @@ impl DaemonSelectedComposition {
                                 .context("actual no-Store daemon operator lock absent")?;
                             match primary.into_original_owner() {
                                 Ok(owner) => self.native_operator_lock =
-                                    Some(std::mem::ManuallyDrop::new(owner)),
+                                    Some(ryeos_node::native_capacity::OperatorLockCustody::new(owner)),
                                 Err((primary, error)) => {
                                     self.process_state_lock = Some(primary);
                                     return Err(error);
@@ -1455,7 +1455,8 @@ impl DaemonSelectedComposition {
                 let primary = self.process_state_lock.take()
                     .context("actual daemon operator lock absent")?;
                 match primary.into_original_owner() {
-                    Ok(owner) => self.native_operator_lock = Some(std::mem::ManuallyDrop::new(owner)),
+                    Ok(owner) => self.native_operator_lock =
+                        Some(ryeos_node::native_capacity::OperatorLockCustody::new(owner)),
                     Err((primary, error)) => {
                         self.process_state_lock = Some(primary);
                         return Err(error);
@@ -1497,7 +1498,13 @@ impl DaemonSelectedComposition {
             // The registry now retains the canonical lock owner and the
             // Store frame retains its original lease through settlement.
             if let Some(owner) = self.native_operator_lock.take() {
-                drop(std::mem::ManuallyDrop::into_inner(owner));
+                match owner.into_taken() {
+                    Ok(owner) => drop(owner),
+                    Err(owner) => {
+                        self.native_operator_lock = Some(owner);
+                        anyhow::bail!("operator lock custody is not held by this process");
+                    }
+                }
             }
             // Retire the actual budget facade only after the complete
             // native ACK and this Store graph's source/alias join. This is
@@ -3485,7 +3492,6 @@ async fn run(
     let root_admission_fence = composition.root.admission_fence();
     let native_admission_fence = Arc::clone(&composition.native_admission_fence);
     let daemon_result: (Result<()>, bool, bool) = {
-        #[allow(clippy::let_and_return)]
         let daemon_work = async {
             startup.phase(
                 ryeos_node::StartupPhase::Bootstrapping,
@@ -4669,13 +4675,12 @@ async fn run(
             #[cfg(not(feature = "scheduling"))]
             let scheduler_task = None;
 
-            let result = supervise_background_tasks(
+            supervise_background_tasks(
                 app_state.clone(),
                 ui_state_for_hints,
                 scheduler_task,
             )
-            .await;
-            result
+            .await
         };
         let mut daemon_work = Box::pin(daemon_work);
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -8413,13 +8418,14 @@ mod render_composition_custody_tests {
         let mut composition = DaemonSelectedComposition::bootstrap();
         assert!(!composition.has_unresolved_custody());
         let lock = lillux::ExactExclusiveFileLock::acquire(&root.path().join("operator.lock")).unwrap();
-        composition.native_operator_lock = Some(std::mem::ManuallyDrop::new(Arc::new(lock)));
+        composition.native_operator_lock = Some(
+            ryeos_node::native_capacity::OperatorLockCustody::new(Arc::new(lock)));
 
         assert!(composition.has_unresolved_custody());
 
         // Release the fixture owner so Drop takes the resolved path.
         let owner = composition.native_operator_lock.take().unwrap();
-        drop(std::mem::ManuallyDrop::into_inner(owner));
+        drop(owner.into_taken().ok().unwrap());
         assert!(!composition.has_unresolved_custody());
     }
 

@@ -759,6 +759,38 @@ fn retained_inputs(
         .context("original native admission inputs already moved into settled finalizer custody")
 }
 
+/// The consumed process operator lock awaiting registration with the settled
+/// finalizer. No end settles it: outside a refusal it always passes to the
+/// registry that retains it, so only `into_taken` releases it from custody
+/// and any other end retains it until the process exits.
+#[cfg(target_os = "linux")]
+pub struct OperatorLockCustody {
+    held: Held<Arc<lillux::ExactExclusiveFileLock>>,
+}
+
+#[cfg(target_os = "linux")]
+impl OperatorLockCustody {
+    const KIND: &'static str = "ryeos-node::native-operator-lock";
+
+    pub fn new(owner: Arc<lillux::ExactExclusiveFileLock>) -> Self {
+        Self { held: Held::until_taken(Self::KIND, owner) }
+    }
+
+    /// Move the lock out. A copy in another process is refused and comes back
+    /// still retained.
+    pub fn into_taken(self) -> std::result::Result<Arc<lillux::ExactExclusiveFileLock>, Self> {
+        self.held.take_whole().map_err(|held| Self { held })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::ops::Deref for OperatorLockCustody {
+    type Target = Arc<lillux::ExactExclusiveFileLock>;
+    fn deref(&self) -> &Self::Target {
+        &self.held
+    }
+}
+
 pub(super) trait SettledSourceRegistry {
     fn register_directory(
         &mut self,
@@ -1313,7 +1345,7 @@ impl SettledParts {
     #[cfg(target_os = "linux")]
     pub fn register_operator_lock_in_reservation(
         &mut self,
-        lock_owner: &mut Option<std::mem::ManuallyDrop<Arc<lillux::ExactExclusiveFileLock>>>,
+        lock_owner: &mut Option<OperatorLockCustody>,
     ) -> Result<()> {
         self.require_finalization_cleanup()?;
         ensure!(matches!(self.destination_phase, FinalizationDestinationPhase::Pending),
@@ -1340,9 +1372,15 @@ impl SettledParts {
 
         let retained = lock_owner.take()
             .context("actual no-Store operator lock owner absent")?;
-        let owner = unsafe { std::mem::ManuallyDrop::into_inner(retained) };
+        let owner = match retained.into_taken() {
+            Ok(owner) => owner,
+            Err(retained) => {
+                *lock_owner = Some(retained);
+                anyhow::bail!("no-Store operator lock custody is not held by this process")
+            }
+        };
         if let Err(error) = late.prepay(0, 8) {
-            *lock_owner = Some(std::mem::ManuallyDrop::new(owner));
+            *lock_owner = Some(OperatorLockCustody::new(owner));
             return Err(error);
         }
         let original = &mut *self.original;
@@ -1350,12 +1388,12 @@ impl SettledParts {
             Ok(slot) => match slot.as_mut() {
                 Some(registry) => registry,
                 None => {
-                    *lock_owner = Some(std::mem::ManuallyDrop::new(owner));
+                    *lock_owner = Some(OperatorLockCustody::new(owner));
                     anyhow::bail!("original settled physical registry absent")
                 }
             },
             Err(_) => {
-                *lock_owner = Some(std::mem::ManuallyDrop::new(owner));
+                *lock_owner = Some(OperatorLockCustody::new(owner));
                 anyhow::bail!("original settled physical registry poisoned")
             }
         };
@@ -1365,7 +1403,7 @@ impl SettledParts {
                 Ok(())
             }
             Err((owner, error)) => {
-                *lock_owner = Some(std::mem::ManuallyDrop::new(owner));
+                *lock_owner = Some(OperatorLockCustody::new(owner));
                 Err(error)
             }
         }

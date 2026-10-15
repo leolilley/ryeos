@@ -472,7 +472,8 @@ impl Binding {
         Ok(())
     }
     /// Borrow the SAME retained descriptor without dup/open/close. The private
-    /// ManuallyDrop view cannot escape the host operation's lifetime.
+    /// view cannot escape the host operation's lifetime and gives the
+    /// descriptor back unclosed when it ends.
     pub(super) fn with_retirement_role<T>(
         &self,
         role: usize,
@@ -490,9 +491,11 @@ impl Binding {
             if descriptor < 0 {
                 return inspect(None);
             }
-            let view =
-                std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(descriptor) });
-            inspect(Some(&view))
+            // SAFETY: the descriptor is the live retained role descriptor,
+            // valid for this call; the view hands it back unclosed on every
+            // exit, so ownership never leaves the native binding.
+            let view = BorrowedRoleView(Some(unsafe { std::fs::File::from_raw_fd(descriptor) }));
+            inspect(view.0.as_ref())
         }
         #[cfg(not(unix))]
         {
@@ -688,5 +691,19 @@ pub(super) fn close_original_finalizer_file(
         code,
         consumed: consumed != 0,
         observed_errno,
+    }
+}
+
+/// A `File` view of a descriptor the native binding keeps owning: its end
+/// releases the descriptor number without closing it.
+#[cfg(unix)]
+struct BorrowedRoleView(Option<std::fs::File>);
+#[cfg(unix)]
+impl Drop for BorrowedRoleView {
+    fn drop(&mut self) {
+        use std::os::fd::IntoRawFd;
+        if let Some(file) = self.0.take() {
+            let _ = file.into_raw_fd();
+        }
     }
 }

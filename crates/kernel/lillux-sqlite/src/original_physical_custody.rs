@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    mem::ManuallyDrop,
     sync::{Arc, OnceLock},
 };
 
@@ -128,22 +127,15 @@ struct Observation {
     source_identity: OriginalPhysicalSourceIdentity,
     operator_target_retired: OnceLock<()>,
 }
+/// Only operator-target retirement consumes the exclusive lock body. A slot
+/// dropped while still holding it keeps the lock and its registered
+/// descriptors retained, counted, until the process exits.
+const OPERATOR_LOCK_KIND: &str = "lillux-sqlite::physical-operator-lock";
 struct Slot {
     source: Option<Source>,
     #[cfg(target_os = "linux")]
-    operator_body: Option<ManuallyDrop<lillux::ExactExclusiveFileLock>>,
+    operator_body: Option<lillux::custody::Held<lillux::ExactExclusiveFileLock>>,
     observation: Arc<Observation>,
-}
-impl Drop for Slot {
-    fn drop(&mut self) {
-        // Only operator-target retirement consumes the exclusive lock body.
-        // A slot dropped while still holding it keeps the lock and its
-        // registered descriptors retained until the process exits.
-        #[cfg(target_os = "linux")]
-        if let Some(body) = self.operator_body.take() {
-            lillux::custody::abandon("lillux-sqlite::physical-operator-lock", ManuallyDrop::into_inner(body));
-        }
-    }
 }
 /// Opaque membership in one actual original inventory. Cloning membership
 /// shares observation, not a descriptor, a lock lease, or a new admission.
@@ -251,8 +243,53 @@ pub struct OriginalPhysicalRegistry {
     process: u32,
     identity: Arc<()>,
     maximum: usize,
+    inner: lillux::custody::Held<RegistrySlots>,
+}
+const REGISTRY_KIND: &str = "lillux-sqlite::physical-registry";
+/// The inventory's slots and its sealed flag. Constructible only in this
+/// module.
+struct RegistrySlots {
     sealed: bool,
-    slots: ManuallyDrop<Vec<Slot>>,
+    slots: Vec<Slot>,
+}
+/// Finite ordinary-descriptor phase of one inventory.
+fn non_account_descriptors_retired_in(parts: &RegistrySlots) -> bool {
+    parts.sealed
+        && !parts.slots.is_empty()
+        && parts.slots.iter().filter(|slot| !slot.observation.operator).all(|slot| {
+            slot.source.is_none()
+                && slot.observation.owner.get().is_some()
+                && slot.observation.receipt.get().is_some()
+        })
+}
+/// Every slot's descriptor is retired.
+fn descriptors_retired_in(parts: &RegistrySlots) -> bool {
+    parts.sealed
+        && !parts.slots.is_empty()
+        && parts.slots.iter().all(|slot| {
+            slot.source.is_none()
+                && (!slot.observation.operator || slot.observation.operator_target_retired.get().is_some())
+                && slot.observation.owner.get().is_some()
+                && slot.observation.receipt.get().is_some()
+        })
+}
+/// Whether no slot holds a source, an operator lock body or a prepared close
+/// owner: an unused or emptied inventory owns nothing.
+fn holds_no_custody_in(parts: &RegistrySlots) -> bool {
+    parts.slots.iter().all(|slot| {
+        #[cfg(target_os = "linux")]
+        if slot.operator_body.is_some() {
+            return false;
+        }
+        slot.source.is_none() && slot.observation.owner.get().is_none()
+    })
+}
+/// A registry whose every descriptor is retired, the predicate `retire`
+/// requires, or one that holds no source, lock body or close owner at all
+/// releases its slots normally. Otherwise its sources, close owners and
+/// operator locks stay retained, counted, until the process exits.
+fn registry_settled(parts: &RegistrySlots) -> bool {
+    descriptors_retired_in(parts) || holds_no_custody_in(parts)
 }
 
 /// Opaque identity captured from the actual pre-mapping registry. Cloning it
@@ -443,8 +480,11 @@ impl OriginalPhysicalRegistry {
             process: std::process::id(),
             identity: Arc::new(()),
             maximum,
-            sealed: false,
-            slots: ManuallyDrop::new(slots),
+            inner: lillux::custody::Held::new(
+                REGISTRY_KIND,
+                RegistrySlots { sealed: false, slots },
+                registry_settled,
+            ),
         })
     }
     fn require_process(&self) -> Result<()> {
@@ -470,7 +510,7 @@ impl OriginalPhysicalRegistry {
         additional_sources: usize,
     ) -> Result<OutsideWork> {
         self.require_process()?;
-        let future_slots = self.slots.len().checked_add(additional_sources)
+        let future_slots = self.inner.slots.len().checked_add(additional_sources)
             .context("original physical projected membership count overflow")?;
         ensure!(future_slots <= self.maximum,
             "projected original physical membership exceeds inventory capacity");
@@ -568,7 +608,7 @@ impl OriginalPhysicalRegistry {
     ) -> std::result::Result<OriginalPhysicalRegistration, (Source, anyhow::Error)> {
         let checked = (|| -> Result<()> {
             self.require_process()?;
-            ensure!(!self.sealed, "original physical registration sealed");
+            ensure!(!self.inner.sealed, "original physical registration sealed");
             // Charge the actual finite worst-case scan before searching. No
             // uncharged repeated alias census or replacement budget on refusal.
             let quote = Self::registration_quote(self.maximum, 1)?;
@@ -577,7 +617,7 @@ impl OriginalPhysicalRegistry {
         if let Err(error) = checked {
             return Err((source, error));
         }
-        if let Some(slot) = self.slots.iter().find(|slot| {
+        if let Some(slot) = self.inner.slots.iter().find(|slot| {
             slot.source
                 .as_ref()
                 .is_some_and(|actual| actual.same_owner(&source))
@@ -588,7 +628,7 @@ impl OriginalPhysicalRegistry {
                 observation: Arc::clone(&slot.observation),
             });
         }
-        if self.slots.len() >= self.maximum {
+        if self.inner.slots.len() >= self.maximum {
             return Err((
                 source,
                 anyhow::anyhow!("original physical inventory exhausted"),
@@ -609,14 +649,14 @@ impl OriginalPhysicalRegistry {
         let observation = Arc::new(Observation {
             process: self.process,
             registry: Arc::clone(&self.identity),
-            slot_index: self.slots.len(),
+            slot_index: self.inner.slots.len(),
             owner: OnceLock::new(),
             receipt: OnceLock::new(),
             operator,
             source_identity,
             operator_target_retired: OnceLock::new(),
         });
-        self.slots.push(Slot {
+        self.inner.get_mut().slots.push(Slot {
             source: Some(source),
             #[cfg(target_os = "linux")]
             operator_body: None,
@@ -630,15 +670,15 @@ impl OriginalPhysicalRegistry {
     pub unsafe fn seal_inventory(&mut self) -> Result<()> {
         self.require_process()?;
         ensure!(
-            !self.slots.is_empty(),
+            !self.inner.slots.is_empty(),
             "original physical inventory has no actual sources"
         );
-        self.sealed = true;
+        self.inner.get_mut().sealed = true;
         Ok(())
     }
     pub fn registrations(&self) -> Result<impl Iterator<Item = OriginalPhysicalRegistration> + '_> {
         self.require_process()?;
-        Ok(self.slots.iter().map(|slot| OriginalPhysicalRegistration {
+        Ok(self.inner.slots.iter().map(|slot| OriginalPhysicalRegistration {
             observation: Arc::clone(&slot.observation),
         }))
     }
@@ -692,9 +732,9 @@ impl OriginalPhysicalRegistry {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        ensure!(self.sealed, "original physical inventory still open");
+        ensure!(self.inner.sealed, "original physical inventory still open");
         let mut shared = None;
-        for slot in self.slots.iter_mut() {
+        for slot in self.inner.get_mut().slots.iter_mut() {
             if slot.observation.owner.get().is_some() {
                 continue;
             }
@@ -785,9 +825,9 @@ impl OriginalPhysicalRegistry {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_process()?;
-        ensure!(self.sealed, "original physical inventory still open");
+        ensure!(self.inner.sealed, "original physical inventory still open");
         ensure!(self.non_account_descriptors_retired(), "original non-operator descriptors remain open");
-        for slot in self.slots.iter_mut().filter(|slot| slot.observation.operator) {
+        for slot in self.inner.get_mut().slots.iter_mut().filter(|slot| slot.observation.operator) {
             if slot.observation.operator_target_retired.get().is_some() && slot.observation.owner.get().is_some() {
                 continue;
             }
@@ -800,7 +840,7 @@ impl OriginalPhysicalRegistry {
                 let source = slot.source.take().context("actual operator source absent")?;
                 match source {
                     Source::Operator(actual) => match Arc::try_unwrap(actual) {
-                        Ok(body) => slot.operator_body = Some(ManuallyDrop::new(body)),
+                        Ok(body) => slot.operator_body = Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body)),
                         Err(actual) => {
                             slot.source = Some(Source::Operator(actual));
                             anyhow::bail!("actual operator lock still shared outside complete inventory");
@@ -812,17 +852,24 @@ impl OriginalPhysicalRegistry {
                     }
                 }
             }
-            let body = slot.operator_body.as_mut().context("actual operator body absent")?;
+            let body = slot.operator_body.as_mut().context("actual operator body absent")?.get_mut();
             ensure!(body.try_retire_registered_target(original)?, "original registered lock close deferred");
             // Only the genuine kernel success path reaches this observation.
             if slot.observation.operator_target_retired.get().is_none() {
                 assert!(slot.observation.operator_target_retired.set(()).is_ok());
             }
-            let body = ManuallyDrop::into_inner(slot.operator_body.take().expect("actual operator body retained"));
+            let held = slot.operator_body.take().expect("actual operator body retained");
+            let body = match held.take_whole() {
+                Ok(body) => body,
+                Err(held) => {
+                    slot.operator_body = Some(held);
+                    anyhow::bail!("actual operator lock belongs to another process");
+                }
+            };
             let parent = match body.into_retired_target_parent() {
                 Ok(parent) => parent,
                 Err((body, error)) => {
-                    slot.operator_body = Some(ManuallyDrop::new(body));
+                    slot.operator_body = Some(lillux::custody::Held::until_taken(OPERATOR_LOCK_KIND, body));
                     return Err(error);
                 }
             };
@@ -852,7 +899,7 @@ impl OriginalPhysicalRegistry {
         directory: &Arc<lillux::PinnedDirectory>,
     ) -> Result<()> {
         self.require_membership(registration)?;
-        let slot = self.slots.iter().find(|slot|
+        let slot = self.inner.slots.iter().find(|slot|
             Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual original directory membership slot absent")?;
         ensure!(matches!(slot.source.as_ref(), Some(Source::Directory(actual))
@@ -870,7 +917,7 @@ impl OriginalPhysicalRegistry {
         owner: &Arc<RetainedOriginalFinalizerFile>,
     ) -> Result<()> {
         self.require_membership(registration)?;
-        let slot = self.slots.iter().find(|slot|
+        let slot = self.inner.slots.iter().find(|slot|
             Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual original control-record membership slot absent")?;
         let retained = match slot.source.as_ref() {
@@ -896,7 +943,7 @@ impl OriginalPhysicalRegistry {
         self.require_membership(registration)?;
         ensure!(registration.is_operator_lock()?, "membership is not the original operator lock");
         lock.require_original_process()?;
-        let slot = self.slots.iter().find(|slot|
+        let slot = self.inner.slots.iter().find(|slot|
             Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual operator lock membership slot absent")?;
         ensure!(matches!(slot.source.as_ref(), Some(Source::Operator(actual))
@@ -919,7 +966,7 @@ impl OriginalPhysicalRegistry {
         let quote = Self::operator_observation_quote(self.maximum, 1)?;
         original_prepay(prepay, quote.bytes, quote.steps)?;
         let mut operator = None;
-        for slot in self.slots.iter() {
+        for slot in self.inner.slots.iter() {
             if slot.observation.operator {
                 ensure!(operator.is_none(), "original inventory contains multiple operator locks");
                 ensure!(matches!(slot.source.as_ref(), Some(Source::Operator(actual))
@@ -949,7 +996,7 @@ impl OriginalPhysicalRegistry {
         ensure!(registration.is_operator_lock()?, "membership is not the original operator lock");
         let quote = Self::operator_observation_quote(self.maximum, 1)?;
         original_prepay(prepay, quote.bytes, quote.steps)?;
-        let slot = self.slots.iter().find(|slot|
+        let slot = self.inner.slots.iter().find(|slot|
             Arc::ptr_eq(&slot.observation, &registration.observation))
             .context("actual operator inventory slot absent")?;
         match slot.source.as_ref() {
@@ -995,13 +1042,13 @@ impl OriginalPhysicalRegistry {
         ) -> Result<Arc<OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_process()?;
-        ensure!(self.sealed, "original physical inventory still open");
+        ensure!(self.inner.sealed, "original physical inventory still open");
         if self.non_account_descriptors_retired() {
             return Ok(());
         }
-        let count = self.slots.len();
+        let count = self.inner.slots.len();
         for index in 0..count {
-            let observation = &self.slots[index].observation;
+            let observation = &self.inner.slots[index].observation;
             if observation.operator || observation.receipt.get().is_some() {
                 continue;
             }
@@ -1065,14 +1112,14 @@ impl OriginalPhysicalRegistry {
         ) -> Result<Arc<OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_process()?;
-        ensure!(self.sealed, "original physical inventory still open");
+        ensure!(self.inner.sealed, "original physical inventory still open");
         if self.descriptors_retired() {
             return Ok(());
         }
-        let count = self.slots.len();
+        let count = self.inner.slots.len();
         let mut found_operator = false;
         for index in 0..count {
-            let observation = &self.slots[index].observation;
+            let observation = &self.inner.slots[index].observation;
             if !observation.operator {
                 continue;
             }
@@ -1123,56 +1170,10 @@ impl OriginalPhysicalRegistry {
     /// remains in the SAME inventory and prevents full descriptor completion.
     /// This is not a native-disposal, account-settlement or lock-close receipt.
     pub fn non_account_descriptors_retired(&self) -> bool {
-        !crate::foreign_process(self.process)
-            && self.sealed
-            && !self.slots.is_empty()
-            && self.slots.iter().filter(|slot| !slot.observation.operator).all(|slot| {
-                slot.source.is_none()
-                    && slot.observation.owner.get().is_some()
-                    && slot.observation.receipt.get().is_some()
-            })
-    }
-    /// Whether no slot holds a source, an operator lock body or a prepared
-    /// close owner: an unused or emptied inventory owns nothing.
-    fn holds_no_custody(&self) -> bool {
-        self.slots.iter().all(|slot| {
-            #[cfg(target_os = "linux")]
-            if slot.operator_body.is_some() {
-                return false;
-            }
-            slot.source.is_none() && slot.observation.owner.get().is_none()
-        })
+        !self.inner.is_foreign() && non_account_descriptors_retired_in(&self.inner)
     }
     pub fn descriptors_retired(&self) -> bool {
-        !crate::foreign_process(self.process)
-            && self.sealed
-            && !self.slots.is_empty()
-            && self.slots.iter().all(|slot| {
-                slot.source.is_none()
-                    && (!slot.observation.operator || slot.observation.operator_target_retired.get().is_some())
-                    && slot.observation.owner.get().is_some()
-                    && slot.observation.receipt.get().is_some()
-            })
-    }
-}
-impl Drop for OriginalPhysicalRegistry {
-    fn drop(&mut self) {
-        // A registry whose every descriptor is retired, the predicate `retire`
-        // requires, or one that holds no source, lock body or close owner at
-        // all releases its slots normally. Otherwise its sources, close owners
-        // and operator locks stay retained until the process exits.
-        let slots = unsafe { ManuallyDrop::take(&mut self.slots) };
-        if crate::foreign_process(self.process) {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(slots);
-            return;
-        }
-        let settled = self.descriptors_retired() || self.holds_no_custody();
-        if settled {
-            drop(slots);
-        } else {
-            lillux::custody::abandon("lillux-sqlite::physical-registry", slots);
-        }
+        !self.inner.is_foreign() && descriptors_retired_in(&self.inner)
     }
 }
 
@@ -1359,7 +1360,7 @@ mod tests {
         assert!(Arc::ptr_eq(&control.observation, &alias.observation));
         assert_eq!(control.source_slot_in(&registry_identity).unwrap(), 0);
         assert_eq!(alias.source_slot_in(&registry_identity).unwrap(), 0);
-        assert_eq!(registry.slots.len(), 1);
+        assert_eq!(registry.inner.slots.len(), 1);
         let operator = match unsafe { registry.register_operator_lock(lock, &|_, _| Ok(())) } {
             Ok(member) => member,
             Err(_) => panic!("original fixture lock must register"),
@@ -1539,7 +1540,7 @@ mod tests {
         drop(account_owner);
         // Fixture RAII cleanup only. It is not a registered close receipt,
         // durable account settlement or production disposal qualification.
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
         assert!(account_backedge.upgrade().is_none());
         let _replacement = lillux::ExactExclusiveFileLock::acquire(&target).unwrap();
     }
@@ -1572,7 +1573,7 @@ mod tests {
         assert!(registry.require_directory_source(&binding, &independently_opened).is_err());
         assert!(!registry.descriptors_retired());
         // Fixture cleanup is not an original production close receipt.
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
 
     #[test]
@@ -1582,7 +1583,7 @@ mod tests {
         assert!(unsafe { registry.seal_inventory() }.is_err());
         assert!(!registry.descriptors_retired());
         // No host owner was ever registered. Dispose only fixture bookkeeping.
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
     #[test]
     fn prepayment_unwind_returns_the_exact_original_root_and_keeps_evidence() {
@@ -1608,7 +1609,7 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&returned, &witness));
         assert_eq!(Arc::strong_count(&returned), 2);
-        assert!(registry.slots.is_empty());
+        assert!(registry.inner.slots.is_empty());
         assert!(!registry.descriptors_retired());
         assert!(!evidence_dropped.load(Ordering::SeqCst));
         let refusal = error
@@ -1621,7 +1622,7 @@ mod tests {
         assert!(!evidence_dropped.load(Ordering::SeqCst));
         drop(original_payload);
         assert!(evidence_dropped.load(Ordering::SeqCst));
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
     #[test]
     fn alias_scan_budget_refusal_returns_original_before_registration() {
@@ -1651,9 +1652,9 @@ mod tests {
             Ok(_) => panic!("alias scan must not bypass original budget refusal"),
         };
         assert!(Arc::ptr_eq(&returned, &original));
-        assert_eq!(registry.slots.len(), 1);
+        assert_eq!(registry.inner.slots.len(), 1);
         assert!(!registry.descriptors_retired());
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
 
     #[test]
@@ -1679,7 +1680,7 @@ mod tests {
         assert!(registry.membership_work_bound(u64::MAX, 0).is_err());
         assert_eq!(OriginalPhysicalRegistry::membership_work_quote(2, 3).unwrap().steps,
             OriginalPhysicalRegistry::membership_work_quote(200, 3).unwrap().steps);
-        drop(std::mem::take(&mut *registry.slots));
+        drop(std::mem::take(&mut registry.inner.get_mut().slots));
     }
 
     #[test]

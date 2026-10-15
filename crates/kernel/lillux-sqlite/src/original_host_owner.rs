@@ -3,7 +3,7 @@
 //! The original outside controller retains actual mapping/account custody.
 pub mod backing;
 pub mod region;
-use std::{alloc::Layout, cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop,
+use std::{alloc::Layout, cell::UnsafeCell, marker::PhantomData,
     ptr::NonNull, sync::atomic::{AtomicU8, AtomicUsize, Ordering}};
 use crate::native::{NativeResidentState, OriginalNativeBudget};
 
@@ -102,30 +102,30 @@ pub struct OriginalNativeRegionOwner {
 }
 unsafe impl Send for OriginalNativeRegionOwner {}
 unsafe impl Sync for OriginalNativeRegionOwner {}
+const REGION_INITIALIZATION_FAILURE_KIND: &str = "lillux-sqlite::region-initialization-failure";
+/// The issued counter of a refused initialization. Constructible only in this
+/// module.
+struct RegionInitializationFailureParts { budget: OriginalNativeBudget }
+/// Only `into_budget` settles a refused initialization. The issued counter is
+/// the sole genuine budget; any other end retains it, counted, until the
+/// process exits rather than end outside its original controller. A copy in
+/// another process holds no issued counter and relinquishes it. A refusal for
+/// a caller-supplied `process` that is not this one never hands the budget
+/// back, and since only a forked copy can be relinquished, the budget is then
+/// retained and counted rather than dropped.
 pub struct OriginalNativeRegionInitializationFailure {
-    pub refusal: FixedHostRefusal, budget: ManuallyDrop<OriginalNativeBudget>, process: u32,
+    pub refusal: FixedHostRefusal,
+    process: u32,
+    inner: lillux::custody::Held<RegionInitializationFailureParts>,
 }
 impl OriginalNativeRegionInitializationFailure {
     pub fn into_budget(self) -> Result<OriginalNativeBudget, Self> {
         if crate::foreign_process(self.process) { return Err(self); }
-        // The refusal and process are copied facts; only the budget moves out,
-        // so this failure's own Drop must not run on the emptied slot.
-        let mut failure = ManuallyDrop::new(self);
-        Ok(unsafe { ManuallyDrop::take(&mut failure.budget) })
-    }
-}
-impl Drop for OriginalNativeRegionInitializationFailure {
-    fn drop(&mut self) {
-        // Only into_budget settles a refused initialization. The issued counter
-        // is the sole genuine budget; it stays retained until the process
-        // exits rather than end outside its original controller.
-        let budget = unsafe { ManuallyDrop::take(&mut self.budget) };
-        if crate::foreign_process(self.process) {
-            // A copy in another process holds no issued counter.
-            lillux::custody::relinquish_in_foreign_process(budget);
-            return;
+        let Self { refusal, process, inner } = self;
+        match inner.take_whole() {
+            Ok(parts) => Ok(parts.budget),
+            Err(inner) => Err(Self { refusal, process, inner }),
         }
-        lillux::custody::abandon("lillux-sqlite::region-initialization-failure", budget);
     }
 }
 impl OriginalNativeRegionOwner {
@@ -139,7 +139,8 @@ impl OriginalNativeRegionOwner {
     /// incarnation binding, never a decoded grant. No pointer escapes this API.
     pub unsafe fn initialize(storage: NonNull<u8>, bytes: usize, budget: OriginalNativeBudget,
         process: u32, generation: u64) -> Result<Self, OriginalNativeRegionInitializationFailure> {
-        let mut retained = ManuallyDrop::new(budget);
+        let mut retained = Some(lillux::custody::Held::until_taken(
+            REGION_INITIALIZATION_FAILURE_KIND, RegionInitializationFailureParts { budget }));
         let attempt = (|| {
             if crate::foreign_process(process) { return Err(FixedHostRefusal::Process); }
             if generation == 0 { return Err(FixedHostRefusal::Provenance); }
@@ -148,7 +149,12 @@ impl OriginalNativeRegionOwner {
                 || (storage.as_ptr() as usize).checked_add(bytes).is_none() { return Err(FixedHostRefusal::Layout); }
             let header = storage.cast::<RegionHeader>();
             let payload = unsafe { NonNull::new_unchecked(storage.as_ptr().add(quote.payload_offset).cast::<NativeResidentState>()) };
-            let state = NativeResidentState::new(unsafe { ManuallyDrop::take(&mut retained) });
+            let held = retained.take().expect("initialization budget held");
+            let budget = match held.take_whole() {
+                Ok(parts) => parts.budget,
+                Err(held) => { retained = Some(held); return Err(FixedHostRefusal::Process); }
+            };
+            let state = NativeResidentState::new(budget);
             unsafe {
                 payload.as_ptr().write(state);
                 header.as_ptr().write(RegionHeader { gate: AtomicU8::new(UNLOCKED), phase: AtomicU8::new(OPEN), process, generation,
@@ -157,7 +163,11 @@ impl OriginalNativeRegionOwner {
             }
             Ok(Self { header, payload, process, generation, bytes })
         })();
-        attempt.map_err(|refusal| OriginalNativeRegionInitializationFailure { refusal, budget: retained, process })
+        attempt.map_err(|refusal| OriginalNativeRegionInitializationFailure {
+            refusal,
+            process,
+            inner: retained.take().expect("initialization budget retained on refusal"),
+        })
     }
     pub fn handle(&self) -> Result<OriginalNativeRegionHandle, FixedHostRefusal> {
         let _guard = gate(self.header, self.process, self.generation)?;
@@ -196,50 +206,48 @@ impl OriginalNativeRegionOwner {
     /// same sealed region. Account/namespace/physical mapping remain with the
     /// original outside controller after this token is returned.
     pub fn seal(self) -> Result<OriginalNativeRegionReleaseExclusion, OriginalNativeRegionSealFailure> {
-        let retained = ManuallyDrop::new(self);
         let attempt = (|| {
-            let guard = gate(retained.header, retained.process, retained.generation)?;
-            let h = unsafe { retained.header.as_ref() }; let counts = unsafe { &*h.counts.get() };
+            let guard = gate(self.header, self.process, self.generation)?;
+            let h = unsafe { self.header.as_ref() }; let counts = unsafe { &*h.counts.get() };
             if h.phase.load(Ordering::Acquire) != CLOSING || counts.handles != 0 || counts.rust != 0 || counts.c != 0
                 || h.pending_handles.load(Ordering::Acquire) != 0 || h.pending_rust.load(Ordering::Acquire) != 0 || h.pending_c.load(Ordering::Acquire) != 0 {
                 return Err(FixedHostRefusal::ReferencesRemain);
             }
-            unsafe { retained.payload.as_ref() }.require_terminal_exclusion()?;
+            unsafe { self.payload.as_ref() }.require_terminal_exclusion()?;
             h.phase.store(SEALED, Ordering::Release);
             // Permanently disarm before any concrete disposal/unmap. No guard
             // destructor can dereference the mapping once outside release starts.
             guard.keep_locked();
-            Ok(OriginalNativeRegionReleaseExclusion { payload: retained.payload, process: retained.process,
-                generation: retained.generation, disposition: 0, base: retained.header.as_ptr() as usize, bytes: retained.bytes })
+            Ok(OriginalNativeRegionReleaseExclusion { payload: self.payload, process: self.process,
+                generation: self.generation, disposition: 0, base: self.header.as_ptr() as usize, bytes: self.bytes })
         })();
-        attempt.map_err(|refusal| OriginalNativeRegionSealFailure { refusal, owner: retained })
+        attempt.map_err(|refusal| OriginalNativeRegionSealFailure {
+            refusal,
+            inner: lillux::custody::Held::until_taken(REGION_SEAL_FAILURE_KIND, RegionSealFailureParts { owner: self }),
+        })
     }
 }
 #[derive(Debug, Clone, Copy)]
 pub struct OriginalNativeRegionCensus { pub closing: bool, pub handles: usize,
     pub rust_borrows: usize, pub c_borrows: usize, pub pending_retirements: usize }
-pub struct OriginalNativeRegionSealFailure { pub refusal: FixedHostRefusal, owner: ManuallyDrop<OriginalNativeRegionOwner> }
+const REGION_SEAL_FAILURE_KIND: &str = "lillux-sqlite::region-seal-failure";
+/// The controller token of a refused seal. Constructible only in this module.
+struct RegionSealFailureParts { owner: OriginalNativeRegionOwner }
+/// Only `into_owner` settles a refused seal. The sole physical-disposal
+/// controller token stays retained, counted, until the process exits, so the
+/// region can never be sealed or released through a lost owner. A copy in
+/// another process holds no controller token and relinquishes it.
+pub struct OriginalNativeRegionSealFailure {
+    pub refusal: FixedHostRefusal,
+    inner: lillux::custody::Held<RegionSealFailureParts>,
+}
 impl OriginalNativeRegionSealFailure {
     pub fn into_owner(self) -> Result<OriginalNativeRegionOwner, Self> {
-        if crate::foreign_process(self.owner.process) { return Err(self); }
-        // The refusal is a copied fact; only the owner moves out, so this
-        // failure's own Drop must not run on the emptied slot.
-        let mut failure = ManuallyDrop::new(self);
-        Ok(unsafe { ManuallyDrop::take(&mut failure.owner) })
-    }
-}
-impl Drop for OriginalNativeRegionSealFailure {
-    fn drop(&mut self) {
-        // Only into_owner settles a refused seal. The sole physical-disposal
-        // controller token stays retained until the process exits, so the
-        // region can never be sealed or released through a lost owner.
-        let owner = unsafe { ManuallyDrop::take(&mut self.owner) };
-        if crate::foreign_process(owner.process) {
-            // A copy in another process holds no controller token.
-            lillux::custody::relinquish_in_foreign_process(owner);
-            return;
+        let Self { refusal, inner } = self;
+        match inner.take_whole() {
+            Ok(parts) => Ok(parts.owner),
+            Err(inner) => Err(Self { refusal, inner }),
         }
-        lillux::custody::abandon("lillux-sqlite::region-seal-failure", owner);
     }
 }
 pub struct OriginalNativeRegionReleaseExclusion { payload: NonNull<NativeResidentState>, process: u32, generation: u64, disposition: u8, base: usize, bytes: usize }
@@ -265,7 +273,9 @@ impl OriginalNativeRegionReleaseExclusion {
         if self.disposition == 2 { return Ok(()); }
         if self.disposition == 1 { return Err(FixedHostRefusal::TerminalRequired); }
         self.disposition = 1;
-        unsafe { self.payload.as_ptr().drop_in_place(); }
+        // SAFETY: seal proved the region sealed with no loans, and `disposition`
+        // makes this run once; the mapping itself stays with its outside owner.
+        unsafe { lillux::custody::drop_resident_in_place(self.payload); }
         self.disposition = 2;
         Ok(())
     }
@@ -488,5 +498,30 @@ mod custody_drop_controls {
         let before = abandoned(KIND);
         drop(failure);
         assert_eq!(abandoned(KIND), before + 1);
+    }
+}
+
+#[cfg(test)]
+mod initialization_failure_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_for_another_process_never_returns_the_budget() {
+        let _serial = crate::test_host::serial_guard();
+        let kind = REGION_INITIALIZATION_FAILURE_KIND;
+        let count = || lillux::custody::abandoned_custody().count(kind);
+        // SAFETY: a refused initialization touches no storage; the foreign
+        // process is refused before the layout is read.
+        let budget = unsafe { OriginalNativeBudget::prepaid_by_original_issuer(1 << 20, 100, 1, 10) }
+            .expect("test budget");
+        let other = std::process::id().wrapping_add(1);
+        let failure = unsafe { OriginalNativeRegionOwner::initialize(NonNull::dangling(), 0, budget, other, 1) }
+            .err()
+            .expect("foreign process refused");
+        assert_eq!(failure.refusal, FixedHostRefusal::Process);
+        let before = count();
+        let failure = failure.into_budget().err().expect("budget stays held");
+        drop(failure);
+        assert_eq!(count(), before + 1);
     }
 }
