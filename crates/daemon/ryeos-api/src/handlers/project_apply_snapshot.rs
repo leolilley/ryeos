@@ -2471,7 +2471,8 @@ mod tests {
         // node Store, in the node's runtime directory, and settles into that
         // host's census once the service has closed it.
         let db = ryeos_app::test_support::with_store_host(|host| {
-            match ryeos_scheduler::test_native::open_at_on(host, &state.config.runtime_state_dir()) {
+            match ryeos_scheduler::test_native::open_at_on(host, &state.config.runtime_state_dir())
+            {
                 Ok(db) => Arc::new(db),
                 Err(failure) => {
                     let error = failure.to_string();
@@ -3348,5 +3349,243 @@ schedules:
         )
         .expect_err("project-managed schedules must retain project authority");
         assert!(format!("{err:#}").contains("must use a project-backed execution policy"));
+    }
+
+    /// Grants every deployment question and signs under the node's own
+    /// execution authority, so the fixture needs no authorized key.
+    #[cfg(feature = "scheduling")]
+    struct GrantedScheduleCaller {
+        identity: Arc<ryeos_node_runtime::identity::NodeIdentity>,
+    }
+
+    #[cfg(feature = "scheduling")]
+    impl ryeos_scheduler_contract::ProjectScheduleCaller for GrantedScheduleCaller {
+        fn require_registration(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn require_owner(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn require_capability(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn authenticated_execution_authority(
+            &self,
+            _: String,
+        ) -> Result<ryeos_scheduler_contract::ScheduleExecutionAuthority> {
+            Ok(ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
+                principal_id: self.identity.principal_id(),
+                effective_origin_site_id: self.identity.site_id(),
+            })
+        }
+    }
+
+    #[cfg(feature = "scheduling")]
+    fn stage_project_schedule(staging: &Path, project: &Path, schedule_id: &str) {
+        let declarations = staging.join(".ai/config/schedules");
+        std::fs::create_dir_all(&declarations).unwrap();
+        std::fs::write(
+            declarations.join("project.yaml"),
+            format!(
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: {schedule_id}
+    item_ref: graph:project/{schedule_id}
+    ref_bindings: {{}}
+    schedule_type: interval
+    expression: "60"
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    lateness_grace_secs: 60
+    enabled: true
+    capabilities:
+      - ryeos.execute.graph.project/{schedule_id}
+    execution_policy:
+      schema_version: 2
+      ownership: daemon_owned
+      recovery: restart_recoverable
+      response: accepted
+      target:
+        kind: here
+      environment:
+        kind: none
+      project:
+        kind: live_direct
+        access: read_write
+        child_policy:
+          kind: inherit
+    project_root: {project}
+    params: {{}}
+"#,
+                project = project.display(),
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A crash between journal publication and finalization leaves only the
+    /// authenticated journal as recovery authority. After the scheduler store
+    /// is reopened by a new service, the journal's images restore the exact
+    /// pre-apply sources and projection: the deleted schedule returns
+    /// byte-for-byte and the created one is removed.
+    #[cfg(feature = "scheduling")]
+    #[tokio::test]
+    async fn authenticated_journal_restores_real_schedule_images_after_reopen() {
+        use ryeos_scheduler_contract::ProjectScheduleDeployParticipant as _;
+
+        let root = TempDir::new().unwrap();
+        let app_root = root.path().join("app");
+        let runtime = app_root.join(ryeos_engine::AI_DIR).join("state");
+        let schedules_dir = app_root.join(ryeos_engine::AI_DIR).join("node/schedules");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&schedules_dir).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let project_directory = PinnedDirectory::open(&project).unwrap().unwrap();
+        let identity = Arc::new(
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity.key"))
+                .unwrap(),
+        );
+        let trust = Arc::new(ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: *identity.verifying_key(),
+                label: Some("project-apply-journal-test-node".to_owned()),
+            },
+        ]));
+        let host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
+        let open = |fresh: bool| {
+            let db = match host.open_at(&runtime) {
+                Ok(db) => Arc::new(db),
+                Err(failure) => {
+                    let error = failure.to_string();
+                    host.settle_refusal(failure);
+                    panic!("open test scheduler store: {error}");
+                }
+            };
+            // Only a newly created store has a fire projection to publish.
+            if fresh {
+                db.finish_fire_projection_rebuild().unwrap();
+            }
+            let service = Arc::new(
+                ryeos_scheduler_service::SchedulerService::new(
+                    app_root.clone(),
+                    Arc::new(PinnedDirectory::open(&runtime).unwrap().unwrap()),
+                    Arc::clone(&db),
+                    Arc::new(tokio::sync::RwLock::new(())),
+                    Arc::clone(&identity),
+                    Arc::clone(&trust),
+                )
+                .unwrap(),
+            );
+            (db, service)
+        };
+        let request = |label: &str, schedule_id: &str| {
+            let staging = root.path().join(format!("staging-{label}"));
+            stage_project_schedule(&staging, &project, schedule_id);
+            ryeos_scheduler_contract::ProjectScheduleDeployRequest {
+                staging_root: staging,
+                project_path: project.clone(),
+                project_key: ryeos_state::refs::deployed_project_key(project.to_str().unwrap()),
+                snapshot_hash: lillux::cas::sha256_hex(label.as_bytes()),
+                caller: Arc::new(GrantedScheduleCaller {
+                    identity: Arc::clone(&identity),
+                }),
+            }
+        };
+        let observe = |db: &ryeos_scheduler::SchedulerDb, schedule_id: &str| {
+            let bytes = match std::fs::read(schedules_dir.join(format!("{schedule_id}.yaml"))) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("read schedule source: {error}"),
+            };
+            let record = db
+                .get_spec(schedule_id)
+                .unwrap()
+                .map(|record| serde_json::to_value(record).unwrap());
+            (bytes, record)
+        };
+
+        let (db, service) = open(true);
+        let mut session = service.acquire_project_schedules().await.unwrap();
+        session.plan(request("deployed", "project-alpha")).unwrap();
+        session.prepare_recovery().await.unwrap();
+        session.prepare().unwrap();
+        session.finalize().unwrap();
+        drop(session);
+        let alpha_before = observe(&*db, "project-alpha");
+        assert!(alpha_before.0.is_some() && alpha_before.1.is_some());
+        assert_eq!(observe(&*db, "project-bravo"), (None, None));
+
+        // The interrupted apply: images captured, journal published, the
+        // schedule effects applied, and the process gone before finalization.
+        let transaction_id = "9b0d3f2a-6c41-4e57-8a1e-2f3c4d5e6f70";
+        let workspace = StagingDirectory::create(&project_directory, transaction_id).unwrap();
+        let key = [11_u8; 32];
+        let mut session = service.acquire_project_schedules().await.unwrap();
+        session
+            .plan(request("interrupted", "project-bravo"))
+            .unwrap();
+        session.prepare_recovery().await.unwrap();
+        write_apply_journal(
+            &workspace,
+            &key,
+            ApplyJournal {
+                kind: APPLY_JOURNAL_KIND.to_owned(),
+                schema: APPLY_JOURNAL_SCHEMA,
+                operation: test_operation(&project, transaction_id),
+                surfaces: ryeos_state::project_sync::materialized_project_ai_surfaces()
+                    .map(|surface| JournalSurface {
+                        relative: surface.root.to_owned(),
+                        prior_content: None,
+                        target_content: None,
+                    })
+                    .collect(),
+                schedule_before_images: session.before_images().unwrap().to_vec(),
+                auth_tag: String::new(),
+            },
+        )
+        .unwrap();
+        session.prepare().unwrap();
+        drop(session);
+        assert_eq!(observe(&*db, "project-alpha"), (None, None));
+        assert!(observe(&*db, "project-bravo").0.is_some());
+        service.close_after_shutdown_drain().unwrap();
+        drop(service);
+        host.settle_shared(db);
+
+        // Restart: only an authenticated journal may name recovery images.
+        assert!(read_apply_journal(&workspace, &[12_u8; 32]).is_err());
+        let journal = read_apply_journal(&workspace, &key).unwrap();
+        assert_eq!(
+            journal.schedule_before_images[0]
+                .signed_yaml
+                .as_deref()
+                .map(str::as_bytes),
+            alpha_before.0.as_deref(),
+            "the journal carries the exact signed source bytes"
+        );
+        let (db, service) = open(false);
+        let mut session = service.acquire_project_schedules().await.unwrap();
+        session
+            .prepare_restoration(&journal.schedule_before_images)
+            .await
+            .unwrap();
+        session.restore().unwrap();
+        drop(session);
+        assert_eq!(observe(&*db, "project-alpha"), alpha_before);
+        assert_eq!(observe(&*db, "project-bravo"), (None, None));
+        assert!(service.try_acquire_project_schedules().unwrap().is_some());
+        service.close_after_shutdown_drain().unwrap();
+        drop(service);
+        host.settle_shared(db);
+        workspace.cleanup().unwrap();
     }
 }
