@@ -3500,7 +3500,9 @@ fn read_admitted_direct_secrets(
     }
     ryeos_app::vault::authorize_secret_delivery(
         &state.secret_sources(),
-        &params.acting_principal,
+        ryeos_app::vault::SecretRecipient {
+            principal: &params.acting_principal,
+        },
         &names,
         params.provenance.project_authority(),
     )

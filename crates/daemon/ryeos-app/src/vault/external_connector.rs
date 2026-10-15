@@ -177,7 +177,9 @@ mod tests {
         assert!(
             authorize_secret_delivery(
                 &crate::vault::vault_only_sources(&vault),
-                "operator",
+                crate::vault::SecretRecipient {
+                    principal: "operator",
+                },
                 &[access.physical_key().to_owned()],
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(
                 ryeos_state::objects::EnvironmentAuthority::Vault {

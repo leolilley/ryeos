@@ -15,6 +15,10 @@ use ryeos_app::vault::ProviderEnvironment;
 use ryeos_engine::trust::TrustStore;
 use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentPolicy;
+#[cfg(test)]
+use ryeos_node_runtime::node_policy::sections::provider_environment::{
+    PROVIDER_ENVIRONMENT_POLICY_SCHEMA, ProviderEnvironmentName, ProviderEnvironmentRecipients,
+};
 
 /// Provider environment taken at startup, bound to the app root and the
 /// policy generation that declared its names. Its debug form carries names
@@ -73,7 +77,7 @@ pub unsafe fn take_at_startup(app_root: &Path) -> Result<StartupProviderEnvironm
         snapshot.require::<NodeExecutionAdmissionPolicy>()?,
     )?;
     // SAFETY: forwarded from this function's caller.
-    let values = unsafe { lillux::take_environment_values(&declaration.names) }
+    let values = unsafe { lillux::take_environment_values(&declaration.declared_names()) }
         .map_err(anyhow::Error::msg)
         .context("take declared provider environment values")?;
     let environment = ProviderEnvironment::captured(declaration.names.clone(), values)?;
@@ -92,7 +96,8 @@ pub fn validate_declaration(
     declaration: &ProviderEnvironmentPolicy,
     execution: &NodeExecutionAdmissionPolicy,
 ) -> Result<()> {
-    for name in &declaration.names {
+    for entry in &declaration.names {
+        let name = &entry.name;
         ryeos_app::env_contract::validate_secret_name(name)
             .with_context(|| format!("provider environment name `{name}` is refused"))?;
         if execution.host_env_passthrough.binary_search(name).is_ok() {
@@ -111,8 +116,17 @@ mod tests {
 
     fn declaration(names: &[&str]) -> ProviderEnvironmentPolicy {
         ProviderEnvironmentPolicy {
-            schema: 1,
-            names: names.iter().map(|name| (*name).to_owned()).collect(),
+            schema: PROVIDER_ENVIRONMENT_POLICY_SCHEMA,
+            names: names
+                .iter()
+                .map(|name| ProviderEnvironmentName {
+                    name: (*name).to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: vec!["fp:operator".to_owned()],
+                        capabilities: Vec::new(),
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -206,7 +220,18 @@ mod tests {
                 | "hosted-node" | "local-inference" | "standard" => &[],
                 _ => panic!("add an explicit provider-environment expectation for {profile_name}"),
             };
-            assert_eq!(provider.names, expected, "{profile_name}");
+            assert_eq!(provider.declared_names(), expected, "{profile_name}");
+            if matches!(profile_name.as_str(), "f5r-controller" | "hosted-workflow") {
+                // The hosted workflow delivers its key only to holders of
+                // the dedicated receive capability.
+                let recipients = &provider.names[0].recipients;
+                assert!(recipients.principals.is_empty(), "{profile_name}");
+                assert_eq!(
+                    recipients.capabilities,
+                    ["ryeos.receive.provider_env.openai_api_key"],
+                    "{profile_name}"
+                );
+            }
         }
     }
 }

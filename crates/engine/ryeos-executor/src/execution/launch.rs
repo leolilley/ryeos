@@ -5171,7 +5171,9 @@ async fn prepare_managed_launch_authority(
         .collect();
     let secret_env = ryeos_app::vault::authorize_secret_delivery(
         &params.state.secret_sources(),
-        params.acting_principal,
+        ryeos_app::vault::SecretRecipient {
+            principal: params.acting_principal,
+        },
         &secret_names,
         params.provenance.project_authority(),
     )

@@ -4734,7 +4734,9 @@ fn require_prepared_launch_secret_availability(
     names.dedup();
     ryeos_app::vault::check_secret_availability(
         &state.secret_sources(),
-        &ctx.principal_fingerprint,
+        ryeos_app::vault::SecretRecipient {
+            principal: &ctx.principal_fingerprint,
+        },
         &names,
         project_authority,
     )

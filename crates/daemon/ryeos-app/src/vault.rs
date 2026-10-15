@@ -28,7 +28,8 @@
 //! - Provider-delivered environment values are a separate source: only the
 //!   names the signed node policy declares, taken out of the daemon's
 //!   environment once at startup into [`ProviderEnvironment`]. Delivery reads
-//!   that snapshot, never the live process environment.
+//!   that snapshot, never the live process environment, and only for the
+//!   principal admission checked against each name's recipient ceiling.
 //!
 //! ## Backend (`SealedEnvelopeVault`)
 //!
@@ -81,6 +82,15 @@ pub use ryeos_vault::policy::{
 };
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
 pub use provider_env::ProviderEnvironment;
+
+/// The principal a delivery is made to. Capability scopes are not part of
+/// it: a provider-environment authority carries the scopes its admission
+/// judged, and delivery judges those, so no launch, child or callback can
+/// substitute its own narrowed or item-declared capabilities.
+#[derive(Clone, Copy, Debug)]
+pub struct SecretRecipient<'a> {
+    pub principal: &'a str,
+}
 
 /// Every secret source one delivery may read. Which one it actually reads is
 /// selected by the admitted environment authority, never by availability.
@@ -401,15 +411,15 @@ pub enum VaultReadError {
 /// store are zeroized before return; returned values zeroize on drop.
 pub fn authorize_secret_delivery(
     sources: &SecretSources<'_>,
-    principal: &str,
+    recipient: SecretRecipient<'_>,
     required_secrets: &[String],
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<ryeos_engine::contracts::DeliveredSecretEnv, VaultReadError> {
     let (present, missing) =
-        read_authorized_secret_values(sources, principal, required_secrets, project_authority)?;
+        read_authorized_secret_values(sources, recipient, required_secrets, project_authority)?;
     if !missing.is_empty() {
         return Err(VaultReadError::MissingSecrets {
-            principal: principal.to_string(),
+            principal: recipient.principal.to_string(),
             names: missing,
         });
     }
@@ -422,23 +432,23 @@ pub fn authorize_secret_delivery(
 /// [`authorize_secret_delivery`]. Values are read, zeroized and discarded.
 pub fn check_secret_availability(
     sources: &SecretSources<'_>,
-    principal: &str,
+    recipient: SecretRecipient<'_>,
     required_secrets: &[String],
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<(), VaultReadError> {
-    authorize_secret_delivery(sources, principal, required_secrets, project_authority).map(drop)
+    authorize_secret_delivery(sources, recipient, required_secrets, project_authority).map(drop)
 }
 
 /// Report, per requested name and in request order, whether the admitted
 /// environment authority would deliver it. Values are never returned.
 pub fn report_secret_presence(
     sources: &SecretSources<'_>,
-    principal: &str,
+    recipient: SecretRecipient<'_>,
     names: &[String],
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<Vec<(String, bool)>, VaultReadError> {
     let (present, _missing) =
-        read_authorized_secret_values(sources, principal, names, project_authority)?;
+        read_authorized_secret_values(sources, recipient, names, project_authority)?;
     Ok(names
         .iter()
         .map(|name| {
@@ -452,15 +462,15 @@ pub fn report_secret_presence(
 /// to a process. Delivering callers use [`authorize_secret_delivery`].
 pub fn read_required_secrets_with_authority(
     sources: &SecretSources<'_>,
-    principal: &str,
+    recipient: SecretRecipient<'_>,
     required_secrets: &[String],
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<HashMap<String, String>, VaultReadError> {
     let (present, missing) =
-        read_authorized_secret_values(sources, principal, required_secrets, project_authority)?;
+        read_authorized_secret_values(sources, recipient, required_secrets, project_authority)?;
     if !missing.is_empty() {
         return Err(VaultReadError::MissingSecrets {
-            principal: principal.to_string(),
+            principal: recipient.principal.to_string(),
             names: missing,
         });
     }
@@ -476,10 +486,11 @@ type AuthorizedSecretValues = (Vec<(String, zeroize::Zeroizing<String>)>, Vec<St
 /// admitted authority, plus the requested names it could not supply.
 fn read_authorized_secret_values(
     sources: &SecretSources<'_>,
-    principal: &str,
+    recipient: SecretRecipient<'_>,
     required_secrets: &[String],
     project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<AuthorizedSecretValues, VaultReadError> {
+    let principal = recipient.principal;
     let vault = sources.vault;
     if required_secrets.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -499,7 +510,10 @@ fn read_authorized_secret_values(
         | ryeos_state::objects::EnvironmentAuthority::Vault { name_authority, .. }
         | ryeos_state::objects::EnvironmentAuthority::Delegated { name_authority, .. }
         | ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
-            name_authority, ..
+            declared_names: _,
+            recipient_principal: _,
+            recipient_scopes: _,
+            name_authority,
         } => Some(name_authority),
     };
     let unauthorized: Vec<String> = required_secrets
@@ -516,9 +530,22 @@ fn read_authorized_secret_values(
         )));
     }
     if let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
-        declared_names, ..
+        declared_names,
+        recipient_principal,
+        recipient_scopes,
+        name_authority: _,
     } = authority
     {
+        // Admission checked the sealed names against exactly one principal.
+        // A launch under any other principal, such as a child acting for
+        // someone else under an inherited authority, receives none of them.
+        if principal != recipient_principal {
+            return Err(VaultReadError::AuthorityViolation(format!(
+                "provider-environment name(s) [{}] are not delivered to principal `{principal}`: \
+                 the admitted provider-environment authority was granted to principal `{recipient_principal}`",
+                required_secrets.join(", ")
+            )));
+        }
         let undeclared: Vec<String> = required_secrets
             .iter()
             .filter(|name| declared_names.binary_search(name).is_err())
@@ -528,6 +555,27 @@ fn read_authorized_secret_values(
             return Err(VaultReadError::AuthorityViolation(format!(
                 "declared secret name(s) are outside the admitted provider-environment declaration: [{}]",
                 undeclared.join(", ")
+            )));
+        }
+        // What is re-checked on every delivery: the node's recipient rules
+        // as they stand now (an operator edit followed by a restart takes
+        // effect here), judged against the principal and the scopes sealed
+        // at admission. What is not re-checked: the principal's scopes
+        // themselves. They are frozen into the authority at admission, so a
+        // grant revoked after admission does not withdraw a name from this
+        // lineage, and a launch, child or callback running with narrower
+        // capabilities still receives what its admission was granted.
+        let withdrawn = sources.provider_env.refused_recipient_names(
+            required_secrets,
+            principal,
+            recipient_scopes,
+        );
+        if !withdrawn.is_empty() {
+            return Err(VaultReadError::AuthorityViolation(format!(
+                "provider-environment name(s) [{}] are not delivered to principal `{principal}`: \
+                 the node's current recipient policy lists neither that principal nor a capability \
+                 its admission was granted",
+                withdrawn.join(", ")
             )));
         }
     }
@@ -623,9 +671,12 @@ fn read_authorized_secret_values(
         }
         // A name the live startup declaration lacks, or that had no value
         // at startup, is simply absent and reported missing by name.
-        ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment { .. } => {
-            sources.provider_env.read_declared(&requested)
-        }
+        ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+            declared_names: _,
+            recipient_principal: _,
+            recipient_scopes: _,
+            name_authority: _,
+        } => sources.provider_env.read_declared(&requested),
     };
     // Undeclared siblings never leave this function, not even as freed
     // heap bytes; survivors move into zeroizing ownership without a copy.
@@ -677,6 +728,125 @@ impl NodeVault for EmptyVault {
 
     fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
         Ok(false)
+    }
+}
+
+/// Test vault that counts every operation and refuses each one. A test that
+/// installs it can prove a path never touched protected material: any read,
+/// write or seal shows up in [`CountingRefusingVault::calls`].
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct CountingRefusingVault {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl CountingRefusingVault {
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn refuse<T>(&self, operation: &str) -> Result<T> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        bail!("vault refused {operation}: this test vault holds nothing")
+    }
+}
+
+#[cfg(test)]
+impl NodeVault for CountingRefusingVault {
+    fn retain_external_relay_bootstrap(
+        &self,
+        _access: &ExternalRelayBootstrapAccess,
+        _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        _signed_import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
+    ) -> Result<()> {
+        self.refuse("retain_external_relay_bootstrap")
+    }
+
+    fn external_relay_bootstrap(
+        &self,
+        _access: &ExternalRelayBootstrapAccess,
+    ) -> Result<ProtectedExternalRelayBootstrap> {
+        self.refuse("external_relay_bootstrap")
+    }
+
+    fn external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.refuse("external_connector_capability")
+    }
+
+    fn provision_external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+        _value: &str,
+    ) -> Result<()> {
+        self.refuse("provision_external_connector_capability")
+    }
+
+    fn ensure_external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.refuse("ensure_external_connector_capability")
+    }
+
+    fn external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.refuse("external_channel_authority")
+    }
+
+    fn provision_external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+        _value: &str,
+    ) -> Result<()> {
+        self.refuse("provision_external_channel_authority")
+    }
+
+    fn ensure_external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.refuse("ensure_external_channel_authority")
+    }
+
+    fn placement_credential(
+        &self,
+        _access: &PlacementCredentialAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.refuse("placement_credential")
+    }
+
+    fn provision_placement_credential(
+        &self,
+        _access: &PlacementCredentialAccess,
+        _value: &str,
+    ) -> Result<()> {
+        self.refuse("provision_placement_credential")
+    }
+
+    fn read_all_entries(
+        &self,
+        _principal: &str,
+        _token: read_all_token::CrateOnly,
+    ) -> Result<HashMap<String, String>> {
+        self.refuse("read_all_entries")
+    }
+
+    fn set_secret(&self, _principal: &str, _name: &str, _value: &str) -> Result<()> {
+        self.refuse("set_secret")
+    }
+
+    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+        self.refuse("list_keys")
+    }
+
+    fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
+        self.refuse("delete_secret")
     }
 }
 
@@ -1236,6 +1406,8 @@ pub(crate) fn vault_only_sources(vault: &dyn NodeVault) -> SecretSources<'_> {
 mod tests {
     use super::*;
 
+    const OP: SecretRecipient<'static> = SecretRecipient { principal: "op" };
+
 
 
 
@@ -1295,7 +1467,7 @@ mod tests {
         ]);
         let delivered = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             &names(&["OPENAI_API_KEY"]),
             &operator_authority(),
         )
@@ -1312,7 +1484,7 @@ mod tests {
         let vault = fixed_vault(&[("OPENAI_API_KEY", "sk-1")]);
         let delivered = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             &[],
             &operator_authority(),
         )
@@ -1326,7 +1498,7 @@ mod tests {
         let vault = fixed_vault(&[("A", "present")]);
         let error = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             &names(&["A", "B", "C"]),
             &operator_authority(),
         )
@@ -1349,7 +1521,7 @@ mod tests {
         );
         let error = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             &names(&["ALLOWED", "OTHER"]),
             &authority,
         )
@@ -1369,7 +1541,7 @@ mod tests {
         assert!(
             authorize_secret_delivery(
                 &vault_only_sources(&vault),
-                "op",
+                OP,
                 &names(&["TOKEN"]),
                 &foreign
             )
@@ -1386,7 +1558,7 @@ mod tests {
         assert!(
             authorize_secret_delivery(
                 &vault_only_sources(&vault),
-                "op",
+                OP,
                 &names(&["TOKEN"]),
                 &delegated
             )
@@ -1423,7 +1595,7 @@ mod tests {
         let vault = fixed_vault(&[]);
         let error = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             &names(&["TOKEN"]),
             &authority,
         )
@@ -1442,7 +1614,7 @@ mod tests {
         let vault = fixed_vault(&[]);
         let error = authorize_secret_delivery(
             &vault_only_sources(&vault),
-            "op",
+            OP,
             std::slice::from_ref(&name),
             &operator_authority(),
         )
@@ -1457,6 +1629,8 @@ mod tests {
         ryeos_state::objects::ExecutionProjectAuthority::projectless(
             ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
                 declared_names: names(declared),
+                recipient_principal: "op".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority,
             },
         )
@@ -1465,7 +1639,7 @@ mod tests {
 
     fn provider_environment(declared: &[&str], values: &[(&str, &str)]) -> ProviderEnvironment {
         ProviderEnvironment::captured(
-            names(declared),
+            provider_env::test_declaration(declared, &["op"]),
             values
                 .iter()
                 .map(|(name, value)| {
@@ -1489,13 +1663,13 @@ mod tests {
             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         );
         let delivered =
-            authorize_secret_delivery(&sources, "op", &names(&["OPENAI_API_KEY"]), &authority)
+            authorize_secret_delivery(&sources, OP, &names(&["OPENAI_API_KEY"]), &authority)
                 .unwrap();
         assert_eq!(delivered.get("OPENAI_API_KEY"), Some("sk-p"));
         assert!(!format!("{delivered:?}").contains("sk-p"));
         assert_eq!(reads(&vault), 0, "the provider source never reads the store");
         let presence =
-            report_secret_presence(&sources, "op", &names(&["OPENAI_API_KEY"]), &authority)
+            report_secret_presence(&sources, OP, &names(&["OPENAI_API_KEY"]), &authority)
                 .unwrap();
         assert_eq!(presence, vec![("OPENAI_API_KEY".to_string(), true)]);
     }
@@ -1513,14 +1687,14 @@ mod tests {
             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         );
         let error =
-            authorize_secret_delivery(&sources, "op", &names(&["A_KEY", "B_KEY"]), &authority)
+            authorize_secret_delivery(&sources, OP, &names(&["A_KEY", "B_KEY"]), &authority)
                 .unwrap_err();
         let VaultReadError::MissingSecrets { names: missing, .. } = &error else {
             panic!("expected missing secrets, got {error}");
         };
         assert_eq!(missing, &["B_KEY".to_string()]);
         assert!(!error.to_string().contains("value-a"));
-        let error = check_secret_availability(&sources, "op", &names(&["B_KEY"]), &authority)
+        let error = check_secret_availability(&sources, OP, &names(&["B_KEY"]), &authority)
             .unwrap_err();
         assert!(matches!(error, VaultReadError::MissingSecrets { .. }), "{error}");
     }
@@ -1543,7 +1717,7 @@ mod tests {
             },
         );
         let error =
-            authorize_secret_delivery(&sources, "op", &names(&["ALLOWED", "OTHER"]), &narrowed)
+            authorize_secret_delivery(&sources, OP, &names(&["ALLOWED", "OTHER"]), &narrowed)
                 .unwrap_err();
         assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
         assert!(error.to_string().contains("OTHER"));
@@ -1554,11 +1728,55 @@ mod tests {
             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         );
         let error =
-            authorize_secret_delivery(&sources, "op", &names(&["ALLOWED", "OTHER"]), &undeclared)
+            authorize_secret_delivery(&sources, OP, &names(&["ALLOWED", "OTHER"]), &undeclared)
                 .unwrap_err();
         assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
         assert!(!error.to_string().contains("o-value"));
         assert_eq!(reads(&vault), 0);
+    }
+
+    #[test]
+    fn provider_environment_is_delivered_only_to_the_admitted_principal() {
+        let vault = fixed_vault(&[]);
+        let environment =
+            provider_environment(&["OPENAI_API_KEY"], &[("OPENAI_API_KEY", "sk-parent")]);
+        let sources = SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+        };
+        // The authority admitted for `op` reaches a child launch acting for
+        // another principal unchanged; that launch receives nothing.
+        let inherited = provider_authority(
+            &["OPENAI_API_KEY"],
+            ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+        );
+        let error = authorize_secret_delivery(
+            &sources,
+            SecretRecipient { principal: "fp:child" },
+            &names(&["OPENAI_API_KEY"]),
+            &inherited,
+        )
+        .unwrap_err();
+        assert!(matches!(error, VaultReadError::AuthorityViolation(_)), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains("OPENAI_API_KEY") && message.contains("`fp:child`"),
+            "{message}"
+        );
+        assert!(!message.contains("sk-parent"), "{message}");
+        let error = report_secret_presence(
+            &sources,
+            SecretRecipient { principal: "fp:child" },
+            &names(&["OPENAI_API_KEY"]),
+            &inherited,
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains("sk-parent"));
+        // The admitted principal itself still receives the value.
+        let delivered =
+            authorize_secret_delivery(&sources, OP, &names(&["OPENAI_API_KEY"]), &inherited)
+                .unwrap();
+        assert_eq!(delivered.get("OPENAI_API_KEY"), Some("sk-parent"));
     }
 
     #[test]
@@ -1573,7 +1791,7 @@ mod tests {
             &["EARLY_KEY", "LATER_KEY"],
             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         );
-        let error = authorize_secret_delivery(&sources, "op", &names(&["LATER_KEY"]), &authority)
+        let error = authorize_secret_delivery(&sources, OP, &names(&["LATER_KEY"]), &authority)
             .unwrap_err();
         let VaultReadError::MissingSecrets { names: missing, .. } = &error else {
             panic!("expected missing secrets, got {error}");
@@ -1608,7 +1826,7 @@ mod tests {
             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         );
         let error =
-            authorize_secret_delivery(&sources, "op", std::slice::from_ref(&name), &authority)
+            authorize_secret_delivery(&sources, OP, std::slice::from_ref(&name), &authority)
                 .unwrap_err();
         assert!(matches!(error, VaultReadError::MissingSecrets { .. }), "{error}");
     }
@@ -2017,7 +2235,7 @@ mod tests {
 
         let err = authorize_secret_delivery(
             &vault_only_sources(&v),
-            "op",
+            OP,
             std::slice::from_ref(&name),
             &operator_authority(),
         )

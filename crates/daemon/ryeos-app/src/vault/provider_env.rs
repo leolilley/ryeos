@@ -1,17 +1,23 @@
 //! Provider-delivered environment values taken at daemon startup.
 //!
-//! The node's signed policy declares the names. Startup takes exactly those
-//! names out of the daemon's own environment, before any thread exists, and
-//! this snapshot is then the only place their values live. Values leave it
-//! only through authorized secret delivery; diagnostics see names only.
+//! The node's signed policy declares the names and, per name, who may
+//! receive it. Startup takes exactly those names out of the daemon's own
+//! environment, before any thread exists, and this snapshot is then the only
+//! place their values live. Values leave it only through authorized secret
+//! delivery; diagnostics see names only.
 
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
+use ryeos_node_runtime::node_policy::sections::provider_environment::{
+    ProviderEnvironmentName, ProviderEnvironmentRecipients,
+};
 use zeroize::Zeroizing;
 
-/// Declared provider-environment names and the values present at startup.
+/// Declared provider-environment names, their recipient ceilings, and the
+/// values present at startup.
 pub struct ProviderEnvironment {
+    declared: Vec<ProviderEnvironmentName>,
     declared_names: Vec<String>,
     values: BTreeMap<String, Zeroizing<String>>,
 }
@@ -20,24 +26,34 @@ impl ProviderEnvironment {
     /// A node that declares no provider-delivered names.
     pub const fn none() -> Self {
         Self {
+            declared: Vec::new(),
             declared_names: Vec::new(),
             values: BTreeMap::new(),
         }
     }
 
     /// Bind the values taken at startup to the declaration they were taken
-    /// under. Every value must belong to a declared name.
+    /// under. Every value must belong to a declared name, and every declared
+    /// name must carry a valid recipient ceiling.
     pub fn captured(
-        declared_names: Vec<String>,
+        declared: Vec<ProviderEnvironmentName>,
         values: Vec<(String, Zeroizing<String>)>,
     ) -> Result<Self> {
         let mut previous: Option<&str> = None;
-        for name in &declared_names {
-            if previous.is_some_and(|candidate| candidate >= name.as_str()) {
+        for entry in &declared {
+            if previous.is_some_and(|candidate| candidate >= entry.name.as_str()) {
                 bail!("provider-environment declaration must be sorted and unique");
             }
-            previous = Some(name);
+            previous = Some(&entry.name);
+            entry.recipients.validate().map_err(|error| {
+                anyhow::anyhow!(
+                    "provider-environment name `{}` recipients: {error:#}",
+                    entry.name
+                )
+            })?;
         }
+        let declared_names: Vec<String> =
+            declared.iter().map(|entry| entry.name.clone()).collect();
         let mut retained = BTreeMap::new();
         for (name, value) in values {
             if declared_names.binary_search(&name).is_err() {
@@ -48,6 +64,7 @@ impl ProviderEnvironment {
             }
         }
         Ok(Self {
+            declared,
             declared_names,
             values: retained,
         })
@@ -77,6 +94,64 @@ impl ProviderEnvironment {
             .collect()
     }
 
+    /// Admission of one requesting principal to the provider source.
+    ///
+    /// `requested` is the exact name set an execution policy fixes, or
+    /// `None` when the policy admits whatever the workload later declares,
+    /// in which case every declared name is in play. Requested names the
+    /// node does not declare are left to delivery, which reports them
+    /// outside the declaration. Every declared name in play must list the
+    /// principal or a capability the principal holds; otherwise admission
+    /// is refused naming the first such name and the principal. The
+    /// returned names, sorted, are what the admitted authority seals.
+    pub fn admit_recipient(
+        &self,
+        principal: &str,
+        capabilities: &[String],
+        requested: Option<&[String]>,
+    ) -> Result<Vec<String>> {
+        let mut admitted = Vec::new();
+        for entry in &self.declared {
+            if let Some(requested) = requested
+                && !requested.iter().any(|name| name == &entry.name)
+            {
+                continue;
+            }
+            if !recipient_allowed(&entry.recipients, principal, capabilities) {
+                bail!(
+                    "provider-environment name `{}` is not delivered to principal `{principal}`: \
+                     the node policy lists neither that principal nor a capability it holds",
+                    entry.name
+                );
+            }
+            admitted.push(entry.name.clone());
+        }
+        Ok(admitted)
+    }
+
+    /// Requested names the live declaration carries whose current recipient
+    /// rule does not admit `principal` holding `capabilities`, in request
+    /// order. Names the live declaration lacks are not judged here; delivery
+    /// reports them missing.
+    pub fn refused_recipient_names(
+        &self,
+        requested: &[String],
+        principal: &str,
+        capabilities: &[String],
+    ) -> Vec<String> {
+        requested
+            .iter()
+            .filter(|name| {
+                self.declared
+                    .binary_search_by(|entry| entry.name.as_str().cmp(name.as_str()))
+                    .is_ok_and(|index| {
+                        !recipient_allowed(&self.declared[index].recipients, principal, capabilities)
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Copy the values of the requested declared names that are present.
     /// The caller owns zeroizing every returned value.
     pub(super) fn read_declared(&self, requested: &[String]) -> HashMap<String, String> {
@@ -92,14 +167,55 @@ impl ProviderEnvironment {
     }
 }
 
+fn recipient_allowed(
+    recipients: &ProviderEnvironmentRecipients,
+    principal: &str,
+    capabilities: &[String],
+) -> bool {
+    if recipients
+        .principals
+        .iter()
+        .any(|candidate| candidate == principal)
+    {
+        return true;
+    }
+    !recipients.capabilities.is_empty()
+        && ryeos_runtime::authorizer::Authorizer::new()
+            .authorize(
+                capabilities,
+                &ryeos_runtime::authorizer::AuthorizationPolicy::Protected {
+                    all_of: vec![ryeos_runtime::authorizer::CapabilityClause {
+                        any_of: recipients.capabilities.clone(),
+                    }],
+                },
+            )
+            .is_ok()
+}
+
 impl std::fmt::Debug for ProviderEnvironment {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProviderEnvironment")
-            .field("declared_names", &self.declared_names)
+            .field("declared", &self.declared)
             .field("present_names", &self.values.keys().collect::<Vec<_>>())
             .finish()
     }
+}
+
+/// Test construction of a declaration whose every name lists `recipients`
+/// as recipient principals.
+#[cfg(test)]
+pub(crate) fn test_declaration(names: &[&str], recipients: &[&str]) -> Vec<ProviderEnvironmentName> {
+    names
+        .iter()
+        .map(|name| ProviderEnvironmentName {
+            name: (*name).to_owned(),
+            recipients: ProviderEnvironmentRecipients {
+                principals: recipients.iter().map(|value| (*value).to_owned()).collect(),
+                capabilities: Vec::new(),
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -108,12 +224,42 @@ mod tests {
 
     fn captured(declared: &[&str], values: &[(&str, &str)]) -> Result<ProviderEnvironment> {
         ProviderEnvironment::captured(
-            declared.iter().map(|name| (*name).to_owned()).collect(),
+            test_declaration(declared, &["fp:operator"]),
             values
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), Zeroizing::new((*value).to_owned())))
                 .collect(),
         )
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn capability_declaration() -> ProviderEnvironment {
+        ProviderEnvironment::captured(
+            vec![
+                ProviderEnvironmentName {
+                    name: "A_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: strings(&["fp:alice"]),
+                        capabilities: Vec::new(),
+                    },
+                },
+                ProviderEnvironmentName {
+                    name: "B_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: Vec::new(),
+                        capabilities: strings(&["ryeos.receive.provider_env.b_key"]),
+                    },
+                },
+            ],
+            vec![
+                ("A_KEY".to_owned(), Zeroizing::new("value-a".to_owned())),
+                ("B_KEY".to_owned(), Zeroizing::new("value-b".to_owned())),
+            ],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -128,11 +274,99 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_name_without_recipients_is_refused() {
+        let error = ProviderEnvironment::captured(test_declaration(&["A_KEY"], &[]), Vec::new())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("A_KEY"), "{error:#}");
+    }
+
+    #[test]
     fn reads_return_only_requested_declared_present_values() {
         let environment = captured(&["A_KEY", "B_KEY"], &[("A_KEY", "value-a")]).unwrap();
         let read = environment.read_declared(&["A_KEY".to_owned(), "C_KEY".to_owned()]);
         assert_eq!(read.len(), 1);
         assert_eq!(read.get("A_KEY").map(String::as_str), Some("value-a"));
         assert!(ProviderEnvironment::none().read_declared(&["A_KEY".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn admission_names_the_refused_name_and_principal_never_the_value() {
+        let environment = capability_declaration();
+        // Listed principal, exact request.
+        assert_eq!(
+            environment
+                .admit_recipient("fp:alice", &[], Some(&strings(&["A_KEY"])))
+                .unwrap(),
+            ["A_KEY"]
+        );
+        // Any other principal is refused for that name.
+        let error = environment
+            .admit_recipient("fp:mallory", &[], Some(&strings(&["A_KEY"])))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`A_KEY`") && error.contains("`fp:mallory`"), "{error}");
+        assert!(!error.contains("value-a") && !error.contains("value-b"), "{error}");
+        // A capability recipient admits holders of the exact capability or a
+        // granted wildcard covering it, and nobody else.
+        assert_eq!(
+            environment
+                .admit_recipient(
+                    "fp:bob",
+                    &strings(&["ryeos.receive.provider_env.b_key"]),
+                    Some(&strings(&["B_KEY"]))
+                )
+                .unwrap(),
+            ["B_KEY"]
+        );
+        assert_eq!(
+            environment
+                .admit_recipient(
+                    "fp:bob",
+                    &strings(&["ryeos.receive.provider_env.*"]),
+                    Some(&strings(&["B_KEY"]))
+                )
+                .unwrap(),
+            ["B_KEY"]
+        );
+        let error = environment
+            .admit_recipient(
+                "fp:bob",
+                &strings(&["ryeos.execute.tool.*"]),
+                Some(&strings(&["B_KEY"])),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`B_KEY`") && error.contains("`fp:bob`"), "{error}");
+        // A principal listed for one name is not a recipient of another.
+        let error = environment
+            .admit_recipient("fp:alice", &[], Some(&strings(&["A_KEY", "B_KEY"])))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`B_KEY`") && error.contains("`fp:alice`"), "{error}");
+        // An open declaration puts every declared name in play.
+        assert!(environment.admit_recipient("fp:alice", &[], None).is_err());
+        assert_eq!(
+            environment
+                .admit_recipient(
+                    "fp:alice",
+                    &strings(&["ryeos.receive.provider_env.b_key"]),
+                    None
+                )
+                .unwrap(),
+            ["A_KEY", "B_KEY"]
+        );
+        // Undeclared requested names are left to delivery.
+        assert!(
+            environment
+                .admit_recipient("fp:alice", &[], Some(&strings(&["OTHER_KEY"])))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            ProviderEnvironment::none()
+                .admit_recipient("fp:anyone", &[], None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

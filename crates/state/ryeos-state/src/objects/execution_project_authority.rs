@@ -233,11 +233,19 @@ pub enum EnvironmentAuthority {
         name_authority: EnvironmentNameAuthority,
     },
     /// Values the executing node took from its own environment at startup.
-    /// `declared_names` is the node's signed declaration observed at
-    /// admission; delivery also requires the name in the node's live
-    /// startup declaration.
+    /// `declared_names` are the names of the node's signed declaration that
+    /// admission found `recipient_principal` allowed to receive.
+    /// `recipient_scopes` are that principal's own capability scopes at
+    /// admission, canonical (sorted, unique); every delivery under this
+    /// authority, whether to the admitted launch, a child that inherits it,
+    /// or a provider-attempt callback, judges the node's current recipient
+    /// rules against exactly this set and never against a launch's narrowed
+    /// or item-declared capabilities. Delivery also requires the name in the
+    /// node's live startup declaration and refuses any other principal.
     ProviderEnvironment {
         declared_names: Vec<String>,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
         name_authority: EnvironmentNameAuthority,
     },
 }
@@ -285,9 +293,20 @@ impl EnvironmentAuthority {
             }
             Self::ProviderEnvironment {
                 declared_names,
+                recipient_principal,
+                recipient_scopes,
                 name_authority,
             } => {
                 validate_allowed_names(declared_names)?;
+                validate_trimmed_control_free(
+                    "provider environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "provider environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
         }
@@ -1212,11 +1231,15 @@ fn validate_allowed_names(names: &[String]) -> anyhow::Result<()> {
 }
 
 fn validate_capability_ceiling(capabilities: &[String]) -> anyhow::Result<()> {
+    validate_sorted_capabilities("capability ceiling", capabilities)
+}
+
+fn validate_sorted_capabilities(label: &str, capabilities: &[String]) -> anyhow::Result<()> {
     let mut previous: Option<&str> = None;
     for capability in capabilities {
-        validate_trimmed_control_free("capability ceiling entry", capability, false)?;
+        validate_trimmed_control_free(&format!("{label} entry"), capability, false)?;
         if previous.is_some_and(|value| value >= capability.as_str()) {
-            anyhow::bail!("capability ceiling must be strictly sorted and unique");
+            anyhow::bail!("{label} must be strictly sorted and unique");
         }
         previous = Some(capability);
     }
