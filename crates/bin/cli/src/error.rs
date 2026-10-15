@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 // ---------------------------------------------------------------------------
 // Config errors — config parsing failures (exit 78)
 // ---------------------------------------------------------------------------
@@ -15,35 +13,11 @@ pub enum CliConfigError {
 }
 
 // ---------------------------------------------------------------------------
-// Transport errors — network / signing failures
+// Transport errors — network / signing failures, owned by the shared client
+// transport
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, thiserror::Error)]
-pub enum CliTransportError {
-    #[error("daemon.json not found at {path}")]
-    DaemonJsonMissing { path: PathBuf },
-
-    #[error("daemon.json malformed: {detail}")]
-    DaemonJsonMalformed { detail: String },
-
-    #[error("daemon TCP unreachable at {bind}: {detail}")]
-    Unreachable { bind: String, detail: String },
-
-    #[error("daemon returned HTTP {status}: {body}")]
-    HttpError { status: u16, body: String },
-
-    #[error("response body decode failed: {detail}")]
-    BodyDecode { detail: String },
-
-    #[error("signing key not found at {path}")]
-    SigningKeyMissing { path: PathBuf },
-
-    #[error("signing key unloadable at {path}: {detail}")]
-    SigningKeyUnloadable { path: PathBuf, detail: String },
-
-    #[error("audience discovery failed for {url}: {detail}")]
-    AudienceDiscoveryFailed { url: String, detail: String },
-}
+pub use ryeos_client_transport::TransportError as CliTransportError;
 
 // ---------------------------------------------------------------------------
 // Dispatch errors — runtime failures during command execution

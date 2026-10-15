@@ -12,6 +12,7 @@ members = [
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
     "crates/clients/terminal",
+    "crates/clients/transport",
     "crates/clients/web",
     "crates/kinds/directive-definition",
     "crates/runtimes/directive",
@@ -102,6 +103,7 @@ ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
+ryeos-client-transport = { path = "crates/clients/transport" }
 ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
 ryeos-graph-definition = { path = "crates/kinds/graph-definition" }

@@ -1,14 +1,14 @@
 //! Daemon client — signed HTTP/SSE client for ryeosd.
 //!
-//! Reuses the transport layer from ryeos-cli: discovery, signing, and the
-//! shared TLS-capable (`reqwest`) signed client. Both the CLI and this client
-//! speak one transport, so an `https://` node negotiates TLS and neither
+//! Reuses the shared client transport: discovery, signing, and the
+//! TLS-capable (`reqwest`) signed client. The CLI and this client speak one
+//! transport, so an `https://` node negotiates TLS and neither
 //! audience discovery nor a signed request can move to another origin.
 
-use ryeos_cli::error::CliTransportError;
-use ryeos_cli::transport::discovery::discover_audience;
-use ryeos_cli::transport::http::{resolve_daemon_url, signed_client};
-use ryeos_cli::transport::signing::{SignHeaders, Signer};
+use ryeos_client_transport::TransportError;
+use ryeos_client_transport::discovery::discover_audience;
+use ryeos_client_transport::http::{resolve_daemon_url, signed_client};
+use ryeos_client_transport::signing::{SignHeaders, Signer};
 
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -26,10 +26,7 @@ pub enum ClientError {
     NoSystemDir,
 
     #[error("transport: {0}")]
-    Transport(#[from] ryeos_cli::error::CliTransportError),
-
-    #[error("dispatch: {0}")]
-    Dispatch(#[from] ryeos_cli::error::CliDispatchError),
+    Transport(#[from] TransportError),
 
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
@@ -157,7 +154,7 @@ impl DaemonClient {
             .and_then(serde_json::Value::as_str)
             != Some(ryeos_client_base::UI_BINDING_CONTRACT_REVISION)
         {
-            return Err(ClientError::Transport(CliTransportError::BodyDecode {
+            return Err(ClientError::Transport(TransportError::BodyDecode {
                 detail: format!(
                     "UI binding contract mismatch: daemon must advertise '{}'",
                     ryeos_client_base::UI_BINDING_CONTRACT_REVISION
@@ -232,7 +229,7 @@ impl DaemonClient {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 *self.ui_session_id.write().expect("session lock poisoned") = prior;
-                return Err(ClientError::Transport(CliTransportError::Unreachable {
+                return Err(ClientError::Transport(TransportError::Unreachable {
                     bind: url,
                     detail: "UI activation could not be observed before its recovery deadline"
                         .into(),
@@ -291,7 +288,7 @@ impl DaemonClient {
             };
             if tokio::time::Instant::now() >= deadline {
                 *self.ui_session_id.write().expect("session lock poisoned") = prior;
-                return Err(ClientError::Transport(CliTransportError::Unreachable {
+                return Err(ClientError::Transport(TransportError::Unreachable {
                     bind: url,
                     detail: unknown,
                 }));
@@ -336,21 +333,15 @@ impl DaemonClient {
             req = req.header("cookie", cookie);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CliTransportError::Unreachable {
-                bind: url.clone(),
-                detail: format!("request send: {e}"),
-            })?;
+        let resp = req.send().await.map_err(|e| TransportError::Unreachable {
+            bind: url.clone(),
+            detail: format!("request send: {e}"),
+        })?;
 
         let status = resp.status();
-        let body_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CliTransportError::BodyDecode {
-                detail: format!("read body: {e}"),
-            })?;
+        let body_bytes = resp.bytes().await.map_err(|e| TransportError::BodyDecode {
+            detail: format!("read body: {e}"),
+        })?;
 
         if !status.is_success() {
             return Err(ClientError::DaemonError {
@@ -388,21 +379,15 @@ impl DaemonClient {
             req = req.header("cookie", cookie);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CliTransportError::Unreachable {
-                bind: url.clone(),
-                detail: format!("request send: {e}"),
-            })?;
+        let resp = req.send().await.map_err(|e| TransportError::Unreachable {
+            bind: url.clone(),
+            detail: format!("request send: {e}"),
+        })?;
 
         let status = resp.status();
-        let body_bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CliTransportError::BodyDecode {
-                detail: format!("read body: {e}"),
-            })?;
+        let body_bytes = resp.bytes().await.map_err(|e| TransportError::BodyDecode {
+            detail: format!("read body: {e}"),
+        })?;
         if !status.is_success() {
             return Err(ClientError::DaemonError {
                 path: path.to_string(),
@@ -452,13 +437,10 @@ impl DaemonClient {
             req = req.header("cookie", cookie);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CliTransportError::Unreachable {
-                bind: url.clone(),
-                detail: format!("request send: {e}"),
-            })?;
+        let resp = req.send().await.map_err(|e| TransportError::Unreachable {
+            bind: url.clone(),
+            detail: format!("request send: {e}"),
+        })?;
 
         Ok(SseStream::new(resp))
     }

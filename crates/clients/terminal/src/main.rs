@@ -9,55 +9,38 @@ mod render_text;
 mod terminal;
 mod transport;
 
-use ryeos_cli::tty::{
-    Console, Diagnostic, Document, Hint, OperationKind, OperationProgress, Row, Section,
-};
-
-fn exit_with_error(console: &Console, message: impl Into<String>, hint: Option<&str>) -> ! {
-    let mut diagnostic = Diagnostic::error(message);
-    diagnostic.hint = hint.map(Hint::new);
-    let _ = console.error(&diagnostic);
+/// Pre-launch messages go to stderr before the alternate screen opens, in the
+/// same plain line form as the CLI's non-terminal diagnostics.
+fn exit_with_error(message: impl Into<String>, hint: Option<&str>) -> ! {
+    eprintln!("ryeos: {}", message.into());
+    if let Some(hint) = hint {
+        eprintln!("ryeos: hint: {hint}");
+    }
     std::process::exit(1);
 }
 
-fn emit_info(console: &Console, message: impl Into<String>) {
-    let _ = console.info(&Diagnostic::info(message));
+fn emit_info(message: impl Into<String>) {
+    eprintln!("ryeos: info: {}", message.into());
 }
 
-fn emit_warning(console: &Console, message: impl Into<String>) {
-    let _ = console.warning(&Diagnostic::warning(message));
+fn emit_warning(message: impl Into<String>) {
+    eprintln!("ryeos: warning: {}", message.into());
 }
 
-fn finish_progress(progress: &mut Option<OperationProgress>) {
-    if let Some(progress) = progress.take() {
-        let _ = progress.finish();
-    }
-}
+fn print_help() {
+    println!(
+        "ryeos-tui
 
-fn print_help(console: &Console) {
-    let mut document = Document::titled("ryeos-tui");
-    document
-        .sections
-        .push(Section::named("usage").row("ryeos-tui", "[OPTIONS] [PROJECT_PATH]"));
-    let mut options = Section::named("options");
-    options.rows = vec![
-        Row::key_value("--surface <REF>", "Open a surface by canonical ref"),
-        Row::key_value(
-            "--surface-file <PATH>",
-            "Load a surface spec from a local file (untrusted preview)",
-        ),
-        Row::key_value(
-            "--views-root <DIR>",
-            "Resolve view refs from local YAML under DIR first (with --surface-file)",
-        ),
-        Row::key_value(
-            "--project <PATH>",
-            "Project root for daemon-backed resolution",
-        ),
-        Row::key_value("--help", "Show this help"),
-    ];
-    document.sections.push(options);
-    let _ = console.document(&document);
+USAGE
+ryeos-tui: [OPTIONS] [PROJECT_PATH]
+
+OPTIONS
+--surface <REF>: Open a surface by canonical ref
+--surface-file <PATH>: Load a surface spec from a local file (untrusted preview)
+--views-root <DIR>: Resolve view refs from local YAML under DIR first (with --surface-file)
+--project <PATH>: Project root for daemon-backed resolution
+--help: Show this help"
+    );
 }
 
 /// Collect every `view:`-prefixed ref anywhere in a surface value so each
@@ -123,7 +106,6 @@ fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnost
 }
 
 fn main() {
-    let console = Console::detect(false);
     let args: Vec<String> = std::env::args().collect();
     let mut project_path = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -140,7 +122,7 @@ fn main() {
                 if i < args.len() {
                     project_path = args[i].clone();
                 } else {
-                    exit_with_error(&console, "--project requires a path argument", None);
+                    exit_with_error("--project requires a path argument", None);
                 }
             }
             "--surface-file" => {
@@ -148,7 +130,7 @@ fn main() {
                 if i < args.len() {
                     surface_file = Some(args[i].clone());
                 } else {
-                    exit_with_error(&console, "--surface-file requires a path argument", None);
+                    exit_with_error("--surface-file requires a path argument", None);
                 }
             }
             "--surface" => {
@@ -156,7 +138,7 @@ fn main() {
                 if i < args.len() {
                     surface_name = Some(args[i].clone());
                 } else {
-                    exit_with_error(&console, "--surface requires a name argument", None);
+                    exit_with_error("--surface requires a name argument", None);
                 }
             }
             "--views-root" => {
@@ -164,18 +146,18 @@ fn main() {
                 if i < args.len() {
                     views_root = Some(args[i].clone());
                 } else {
-                    exit_with_error(&console, "--views-root requires a directory argument", None);
+                    exit_with_error("--views-root requires a directory argument", None);
                 }
             }
             "--help" | "-h" => {
-                print_help(&console);
+                print_help();
                 std::process::exit(0);
             }
             p if !p.starts_with('-') => {
                 project_path = p.to_string();
             }
             _ => {
-                exit_with_error(&console, format!("unknown option: {}", args[i]), None);
+                exit_with_error(format!("unknown option: {}", args[i]), None);
             }
         }
         i += 1;
@@ -186,17 +168,12 @@ fn main() {
     // With neither, show an empty surface — never fabricate one or crash.
     if surface_name.is_none() && surface_file.is_none() {
         emit_info(
-            &console,
             "no surface specified (--surface / --surface-file, or client config); showing an empty surface",
         );
     }
 
     let rt = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
-        exit_with_error(
-            &console,
-            format!("failed to create terminal runtime: {error}"),
-            None,
-        )
+        exit_with_error(format!("failed to create terminal runtime: {error}"), None)
     });
 
     rt.block_on(async {
@@ -222,23 +199,10 @@ fn main() {
             match transport::daemon::DaemonClient::try_connect().await {
                 Ok(client) => {
                     let ref_str = surface_name.as_deref().unwrap();
-                    let mut progress = console
-                        .progress(OperationKind::Fetch, "opening UI session")
-                        .ok()
-                        .flatten();
-                    if let Some(progress) = progress.as_mut() {
-                        let _ = progress.update("opening UI session", Some(ref_str));
-                    }
                     if let Err(e) = client.mint_ui_session(ref_str, Some(&project_path)).await {
-                        finish_progress(&mut progress);
-                        exit_with_error(
-                            &console,
-                            format!("failed to initialize UI session: {e}"),
+                        exit_with_error(format!("failed to initialize UI session: {e}"),
                             None,
                         );
-                    }
-                    if let Some(progress) = progress.as_mut() {
-                        let _ = progress.update("reading admitted surface binding", Some(ref_str));
                     }
                     let resolved = client.current_ui_session().await.and_then(|session| {
                         let mut matches = session.binding_attachments.into_iter().filter(|attachment| {
@@ -256,7 +220,6 @@ fn main() {
                         }
                         Ok(attachment.effective_surface)
                     });
-                    finish_progress(&mut progress);
                     daemon_client = Some(client);
                     match resolved {
                         Ok(value) => {
@@ -274,9 +237,7 @@ fn main() {
                             ) {
                                 Ok(surface) => surface,
                                 Err(diag) => {
-                                    exit_with_error(
-                                        &console,
-                                        format!(
+                                    exit_with_error(format!(
                                             "invalid effective surface '{}': {}",
                                             ref_str,
                                             surface_diagnostic_message(&diag)
@@ -288,9 +249,7 @@ fn main() {
                         }
                         Err(e) => {
                             // Explicit surface request that fails — fail closed.
-                            exit_with_error(
-                                &console,
-                                format!("failed to resolve surface '{}': {}", ref_str, e),
+                            exit_with_error(format!("failed to resolve surface '{}': {}", ref_str, e),
                                 Some("use --surface-file <path> for local preview"),
                             );
                         }
@@ -298,9 +257,7 @@ fn main() {
                 }
                 Err(_) => {
                     let ref_str = surface_name.as_deref().unwrap();
-                    exit_with_error(
-                        &console,
-                        format!(
+                    exit_with_error(format!(
                             "failed to resolve surface '{}': daemon not available",
                             ref_str
                         ),
@@ -344,19 +301,10 @@ fn main() {
             }
             match transport::daemon::DaemonClient::try_connect().await {
                 Ok(client) => {
-                    let total_views = view_refs.len();
-                    let mut progress = console
-                        .progress(OperationKind::Fetch, "opening preview UI session")
-                        .ok()
-                        .flatten();
                     let session_surface_ref = loaded
                         .requested_ref()
                         .map(str::to_owned)
                         .unwrap_or_else(|| loaded.spec().name.clone());
-                    if let Some(progress) = progress.as_mut() {
-                        let _ = progress
-                            .update("opening preview UI session", Some(&session_surface_ref));
-                    }
                     match client
                         .mint_ui_session(&session_surface_ref, Some(&project_path))
                         .await
@@ -400,15 +348,7 @@ fn main() {
                                     serde_json::Map::new()
                                 }
                             };
-                            for (index, view_ref) in view_refs.into_iter().enumerate() {
-                                if let Some(progress) = progress.as_mut() {
-                                    let _ = progress.update_determinate(
-                                        "resolving preview views",
-                                        index,
-                                        total_views,
-                                        Some(&view_ref),
-                                    );
-                                }
+                            for view_ref in view_refs {
                                 match admitted_views.get(&view_ref).cloned() {
                                     Some(binding) => {
                                         views.insert(view_ref, binding);
@@ -418,24 +358,13 @@ fn main() {
                                     )),
                                 }
                             }
-                            if let Some(progress) = progress.as_mut() {
-                                let _ = progress.update_determinate(
-                                    "resolving preview views",
-                                    total_views,
-                                    total_views,
-                                    None,
-                                );
-                            }
                             daemon_client = Some(client);
                         }
                         Err(e) => diagnostics.push(format!("UI session unavailable: {e}")),
                     }
-                    finish_progress(&mut progress);
                 }
                 Err(_) => {
-                    emit_warning(
-                        &console,
-                        "no daemon — local preview renders only views the views-root carries",
+                    emit_warning("no daemon — local preview renders only views the views-root carries",
                     );
                 }
             }
@@ -457,7 +386,7 @@ fn main() {
                     diagnostics.push(format!("unsupported field '{field}': {message}"));
                 }
                 ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
-                    emit_info(&console, message);
+                    emit_info(message);
                 }
             }
         }
@@ -465,7 +394,7 @@ fn main() {
         let result = app::run(&project_path, loaded, diagnostics, daemon_client).await;
 
         if let Err(e) = result {
-            exit_with_error(&console, format!("terminal view set failed: {e}"), None);
+            exit_with_error(format!("terminal view set failed: {e}"), None);
         }
     });
 }

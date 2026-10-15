@@ -14,7 +14,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use clap::Parser;
-use ryeos_cli::transport::discovery::discover_audience;
+use ryeos_client_transport::discovery::discover_audience;
+use ryeos_client_transport::signing::operator_signing_key_path;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -179,11 +180,7 @@ async fn main() -> Result<()> {
     }
 
     // Open the browser at the daemon-returned launch URL.
-    let console = ryeos_cli::tty::Console::detect(false);
-    console.info(&ryeos_cli::tty::Diagnostic::info(format!(
-        "opening browser · {}",
-        mint_resp.launch_url
-    )))?;
+    eprintln!("ryeos: info: opening browser · {}", mint_resp.launch_url);
     open_browser(&mint_resp.launch_url)?;
 
     Ok(())
@@ -237,21 +234,13 @@ struct SignedHeaders {
 
 impl WebSigner {
     fn resolve(app_root: &std::path::Path) -> Result<Self> {
-        let operator_key = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem");
+        let operator_key = operator_signing_key_path(app_root);
 
         if operator_key.exists() {
             return Self::load_from(operator_key);
         }
 
-        bail!(
-            "no signing key found at <app_root>/{}/config/keys/signing/private_key.pem",
-            ryeos_engine::AI_DIR
-        )
+        bail!("no signing key found at {}", operator_key.display())
     }
 
     fn load_from(path: PathBuf) -> Result<Self> {

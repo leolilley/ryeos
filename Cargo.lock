@@ -2752,14 +2752,13 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures-util",
- "hex",
  "libc",
  "lillux",
  "rand 0.8.6",
- "reqwest",
  "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-client-transport",
  "ryeos-core-tools",
  "ryeos-directive-definition",
  "ryeos-engine",
@@ -2809,8 +2808,8 @@ dependencies = [
  "lillux",
  "notify",
  "reqwest",
- "ryeos-cli",
  "ryeos-client-base",
+ "ryeos-client-transport",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2819,6 +2818,19 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-width",
+]
+
+[[package]]
+name = "ryeos-client-transport"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "lillux",
+ "rand 0.8.6",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2835,9 +2847,8 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
- "ryeos-cli",
  "ryeos-client-base",
- "ryeos-engine",
+ "ryeos-client-transport",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
