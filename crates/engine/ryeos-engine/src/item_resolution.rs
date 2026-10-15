@@ -45,6 +45,64 @@ pub struct RegisteredBundleRoot {
     pub canonical_root: PathBuf,
 }
 
+/// How a derived resolution generation uses one named registered bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredBundleSelection {
+    /// Search only the named bundle; every other registered bundle is absent
+    /// from the derived generation.
+    ///
+    /// No selection that reorders the full registered list exists: a derived
+    /// generation in which one bundle's copies outrank the others would let
+    /// that bundle govern every later resolution of a run.
+    Only,
+}
+
+/// Why a named registered bundle could not be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredBundleSelectionRefusal {
+    /// No registered bundle carries the name.
+    NotRegistered,
+    /// More than one registered bundle carries the name.
+    RegisteredMoreThanOnce,
+}
+
+impl std::fmt::Display for RegisteredBundleSelectionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotRegistered => "no registered bundle has this name",
+            Self::RegisteredMoreThanOnce => "more than one registered bundle has this name",
+        })
+    }
+}
+
+/// Derive the registered bundle list for one named-bundle selection.
+///
+/// The name must identify exactly one registered bundle. Each entry keeps its
+/// typed identity and canonical root, so items resolved through the derived
+/// list carry the same source identity and trust as through the full list.
+pub fn select_registered_bundle(
+    registered: &[RegisteredBundleRoot],
+    name: &str,
+    selection: RegisteredBundleSelection,
+) -> Result<Vec<RegisteredBundleRoot>, EngineError> {
+    let mut named = registered.iter().filter(|bundle| bundle.name == name);
+    let refused = |refusal| EngineError::RegisteredBundleSelectionRefused {
+        name: name.to_owned(),
+        refusal,
+    };
+    let selected = named
+        .next()
+        .ok_or_else(|| refused(RegisteredBundleSelectionRefusal::NotRegistered))?;
+    if named.next().is_some() {
+        return Err(refused(
+            RegisteredBundleSelectionRefusal::RegisteredMoreThanOnce,
+        ));
+    }
+    match selection {
+        RegisteredBundleSelection::Only => Ok(vec![selected.clone()]),
+    }
+}
+
 /// A single labeled search root.
 #[derive(Debug, Clone)]
 pub struct ResolutionRoot {
@@ -907,6 +965,121 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn registered_pair() -> (PathBuf, PathBuf, Vec<RegisteredBundleRoot>) {
+        let early = tempdir().join("early");
+        let chosen = tempdir().join("chosen");
+        fs::create_dir_all(early.join(crate::AI_DIR)).unwrap();
+        fs::create_dir_all(chosen.join(crate::AI_DIR)).unwrap();
+        let registered = vec![
+            RegisteredBundleRoot {
+                name: "early".to_owned(),
+                canonical_root: early.clone(),
+            },
+            RegisteredBundleRoot {
+                name: "chosen".to_owned(),
+                canonical_root: chosen.clone(),
+            },
+        ];
+        (early, chosen, registered)
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_finds_the_named_bundle_item_over_an_earlier_bundle() {
+        let (early, chosen, registered) = registered_pair();
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
+        let ai = crate::AI_DIR;
+        write_item(&early.join(ai), "tools", "chosen/hook", ".py", "# early");
+        write_item(&chosen.join(ai), "tools", "chosen/hook", ".py", "# chosen");
+        let ref_ = CanonicalRef::parse("tool:chosen/hook").unwrap();
+
+        let all = ResolutionRoots::from_registered(None, &registered);
+        let unselected = resolve_item_full(&all, &schema, &ref_).unwrap();
+        assert!(unselected.winner_path.starts_with(&early));
+
+        for selection in [RegisteredBundleSelection::Only] {
+            let selected = select_registered_bundle(&registered, "chosen", selection).unwrap();
+            let roots = ResolutionRoots::from_registered(None, &selected);
+            let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+            assert!(result.winner_path.starts_with(&chosen), "{selection:?}");
+            assert_eq!(result.winner_space, ItemSpace::Bundle);
+            assert_eq!(
+                result.winner_root_identity,
+                ItemSourceRoot::Bundle {
+                    name: "chosen".to_owned()
+                }
+            );
+            assert_eq!(result.winner_ai_root, chosen.join(ai));
+        }
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_does_not_fall_back_to_another_bundle() {
+        let (early, _chosen, registered) = registered_pair();
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
+        write_item(
+            &early.join(crate::AI_DIR),
+            "tools",
+            "chosen/hook",
+            ".py",
+            "# early",
+        );
+        let ref_ = CanonicalRef::parse("tool:chosen/hook").unwrap();
+
+        let only =
+            select_registered_bundle(&registered, "chosen", RegisteredBundleSelection::Only)
+                .unwrap();
+        let roots = ResolutionRoots::from_registered(None, &only);
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &ref_),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(roots.authoritative_bundle("early").is_err());
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_selects_exactly_the_named_entry() {
+        let registered = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| RegisteredBundleRoot {
+                name: name.to_owned(),
+                canonical_root: PathBuf::from(format!("/bundles/{name}")),
+            })
+            .collect::<Vec<_>>();
+        let only =
+            select_registered_bundle(&registered, "b", RegisteredBundleSelection::Only).unwrap();
+        assert_eq!(only, vec![registered[1].clone()]);
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_refuses_an_unregistered_or_duplicated_name() {
+        let registered = vec![
+            RegisteredBundleRoot {
+                name: "twice".to_owned(),
+                canonical_root: PathBuf::from("/bundles/one"),
+            },
+            RegisteredBundleRoot {
+                name: "twice".to_owned(),
+                canonical_root: PathBuf::from("/bundles/two"),
+            },
+        ];
+        for selection in [RegisteredBundleSelection::Only] {
+            assert!(matches!(
+                select_registered_bundle(&registered, "absent", selection),
+                Err(EngineError::RegisteredBundleSelectionRefused {
+                    refusal: RegisteredBundleSelectionRefusal::NotRegistered,
+                    name: _,
+                })
+            ));
+            assert!(matches!(
+                select_registered_bundle(&registered, "twice", selection),
+                Err(EngineError::RegisteredBundleSelectionRefused {
+                    refusal: RegisteredBundleSelectionRefusal::RegisteredMoreThanOnce,
+                    name: _,
+                })
+            ));
+        }
     }
 
     #[test]

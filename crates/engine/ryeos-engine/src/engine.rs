@@ -1471,6 +1471,52 @@ impl Engine {
             .map(|bundle| bundle.canonical_root.as_path())
     }
 
+    /// Return the name of the registered bundle whose exact canonical content
+    /// root is `canonical_root`. Only an exact registered root matches; a
+    /// path nested inside a bundle, or a directory basename, names nothing.
+    pub fn registered_bundle_name_at(&self, canonical_root: &std::path::Path) -> Option<&str> {
+        let mut matches = self
+            .registered_bundle_roots
+            .iter()
+            .filter(|bundle| bundle.canonical_root == canonical_root);
+        let bundle = matches.next()?;
+        match matches.next() {
+            Some(_) => None,
+            None => Some(bundle.name.as_str()),
+        }
+    }
+
+    /// Derive an engine whose item resolution uses the named registered
+    /// bundle as `selection` describes, leaving every other input of this
+    /// engine unchanged. The derived engine reports its own generation
+    /// identity (the identity covers the ordered registered roots) and starts
+    /// with empty request caches, so nothing resolved under one bundle set is
+    /// served under another.
+    ///
+    /// The derived engine answers "which item does this bundle ship" for one
+    /// ref; it cannot carry a run, whose later resolutions need every
+    /// registered bundle. An attestation that records the restriction, so a
+    /// normal-order engine could admit and later revalidate the restricted
+    /// item, is not implemented.
+    pub fn with_registered_bundle_selection(
+        &self,
+        name: &str,
+        selection: crate::item_resolution::RegisteredBundleSelection,
+    ) -> Result<Self, EngineError> {
+        let registered = crate::item_resolution::select_registered_bundle(
+            &self.registered_bundle_roots,
+            name,
+            selection,
+        )?;
+        let mut derived = self.clone();
+        derived.registered_bundle_roots = registered;
+        derived.parser_overlay_cache =
+            std::sync::Arc::new(crate::parser_overlay_cache::ParserOverlayCache::default());
+        derived.immutable_request_snapshot_cache =
+            Arc::new(Mutex::new(ImmutableRequestSnapshotCache::default()));
+        Ok(derived)
+    }
+
     /// Resolve one exact publisher-owned Config from a retained project
     /// snapshot. This is deliberately separate from merged config resolution:
     /// release input ownership must not be changed by an overlay or a live
@@ -4748,6 +4794,128 @@ formats:
                 .contains("admitted exact trusted Bundle source"),
             "unexpected captured-source mismatch: {mismatch}"
         );
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_runs_the_named_bundle_item_as_trusted_bundle() {
+        let base = tempdir();
+        let early_root = base.join("early");
+        let chosen_root = base.join("chosen");
+        let kinds_dir = tempdir();
+        let trust_store = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
+        let handlers = crate::test_support::load_live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+
+        let write_tool = |root: &Path, note: &str| -> PathBuf {
+            let source = format!("# ryeos-tool:\n#   note: {note}\nprint('{note}')\n");
+            let signed = lillux::signature::sign_content(&source, &test_signing_key(), "#", None);
+            let path = root.join(AI_DIR).join("tools/chosen/hook.py");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, signed).unwrap();
+            path
+        };
+        let early_path = write_tool(&early_root, "early");
+        let chosen_path = write_tool(&chosen_root, "chosen");
+        fs::create_dir_all(early_root.join(AI_DIR).join("tools/only_early")).unwrap();
+        let early_only = lillux::signature::sign_content(
+            "# ryeos-tool:\n#   note: early only\nprint('early')\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        fs::write(
+            early_root.join(AI_DIR).join("tools/only_early/tool.py"),
+            early_only,
+        )
+        .unwrap();
+
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(trust_store)
+        .with_node_trust_store(test_trust_store())
+        .with_composers(composers)
+        .with_registered_bundle_roots(vec![
+            crate::item_resolution::RegisteredBundleRoot {
+                name: "early".to_owned(),
+                canonical_root: early_root,
+            },
+            crate::item_resolution::RegisteredBundleRoot {
+                name: "chosen".to_owned(),
+                canonical_root: chosen_root.clone(),
+            },
+        ]);
+        assert_eq!(engine.registered_bundle_name_at(&chosen_root), Some("chosen"));
+        assert_eq!(
+            engine.registered_bundle_name_at(&chosen_root.join(AI_DIR)),
+            None
+        );
+
+        let ctx = test_plan_context();
+        let hook = CanonicalRef::parse("tool:chosen/hook").unwrap();
+        assert_eq!(engine.resolve(&ctx, &hook).unwrap().source_path, early_path);
+
+        for selection in [crate::item_resolution::RegisteredBundleSelection::Only] {
+            let selected = engine
+                .with_registered_bundle_selection("chosen", selection)
+                .unwrap();
+            assert_ne!(
+                selected.request_engine_generation_identity(),
+                engine.request_engine_generation_identity(),
+                "{selection:?}"
+            );
+            let resolved = selected.resolve(&ctx, &hook).unwrap();
+            assert_eq!(resolved.source_path, chosen_path, "{selection:?}");
+            assert_eq!(resolved.source_space, ItemSpace::Bundle);
+            assert_eq!(
+                resolved.source_root,
+                crate::contracts::ItemSourceRoot::Bundle {
+                    name: "chosen".to_owned()
+                }
+            );
+            let verified = selected.verify(&ctx, resolved).unwrap();
+            assert_eq!(verified.trust_class, TrustClass::Trusted);
+            let resolution = selected
+                .effective_resolution_output(EffectiveItemRequest {
+                    item_ref: hook.clone(),
+                    expected_kind: Some("tool".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                })
+                .unwrap();
+            assert_eq!(
+                resolution.effective_trust_class,
+                crate::resolution::TrustClass::TrustedBundle,
+                "{selection:?}"
+            );
+        }
+
+        let only_early = CanonicalRef::parse("tool:only_early/tool").unwrap();
+        let only = engine
+            .with_registered_bundle_selection(
+                "chosen",
+                crate::item_resolution::RegisteredBundleSelection::Only,
+            )
+            .unwrap();
+        assert!(matches!(
+            only.resolve(&ctx, &only_early),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(engine.resolve(&ctx, &only_early).is_ok());
+        assert!(matches!(
+            engine.with_registered_bundle_selection(
+                "absent",
+                crate::item_resolution::RegisteredBundleSelection::Only,
+            ),
+            Err(EngineError::RegisteredBundleSelectionRefused {
+                refusal: crate::item_resolution::RegisteredBundleSelectionRefusal::NotRegistered,
+                name: _,
+            })
+        ));
     }
 
     #[test]
