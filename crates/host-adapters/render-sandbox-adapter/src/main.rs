@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod activation_contact;
+mod lease;
 mod provider_spec;
 mod proxy_route;
 mod relay_contact;
@@ -13,7 +14,7 @@ mod snapshot_production;
 mod snapshot_provider_spec;
 mod snapshot_qualification;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::thread::JoinHandle;
 
@@ -23,17 +24,20 @@ use chrono::DateTime;
 use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
+use ryeos_remote_lease_core::{
+    operation_deadline, read_sealed_env, request_deadline, write_response, write_response_bounded,
+};
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
     LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
     LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
-    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REMAINING_TIMEOUT_MS_ENV,
-    LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
-    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    LifecycleRuntimeProbeRequest, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
-    MAX_LIFECYCLE_RESPONSE_BYTES, canonical_json, from_json_slice_strict,
+    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
+    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleRuntimeProbeRequest,
+    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, canonical_json,
+    from_json_slice_strict,
 };
 use ryeos_http_transport::{
     ContactState, Deadlines, Header, HttpClient, HttpError, HttpRequest, HttpResponse, Limits,
@@ -47,13 +51,11 @@ use zeroize::Zeroizing;
 const ADAPTER_ID: &str = "render-sandbox-early-access";
 const ADAPTER_BUILD: &str = "ryeos-render-sandbox-lifecycle-adapter.0.1.0";
 const MAX_SETTINGS_BYTES: usize = 256 * 1024;
-const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_API_RESPONSE_BYTES: u64 = 256 * 1024;
 const MAX_ROOTS: usize = 8;
 const MAX_ROOT_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
-const MAX_OPERATION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_OWNER_EXECUTABLE: &str =
@@ -131,10 +133,28 @@ struct CreateSandboxBody {
     snapshot_id: Option<String>,
 }
 
+/// The `networkPolicy` of a Render create request. It names `type` only and
+/// never the deprecated `default` alias; `rules` is present exactly for
+/// `allow-list`.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct NetworkPolicy {
-    default: RenderNetworkPolicyDefault,
+    #[serde(rename = "type")]
+    policy_type: provider_spec::NetworkPolicyType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rules: Option<Vec<provider_spec::EgressRule>>,
+}
+
+impl NetworkPolicy {
+    fn requested(policy: &provider_spec::EgressPolicy) -> Self {
+        Self {
+            policy_type: policy.policy_type,
+            rules: match policy.policy_type {
+                provider_spec::NetworkPolicyType::DenyAll => None,
+                provider_spec::NetworkPolicyType::AllowList => Some(policy.rules.clone()),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -158,15 +178,65 @@ enum RenderSandboxPlan {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum RenderNetworkPolicyDefault {
+enum RenderNetworkPolicyType {
     AllowAll,
+    AllowList,
     DenyAll,
 }
 
+/// One echoed egress rule, kept as Render wrote it so a changed protocol is a
+/// mismatch rather than a parse coercion.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RenderEchoedEgressRule {
+    domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocol: Option<String>,
+}
+
+/// The `networkPolicy` Render echoes on create and on every read. `default`
+/// is a deprecated alias of `type`; `rules` is present for `allow-list`.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RenderNetworkPolicy {
-    default: RenderNetworkPolicyDefault,
+    #[serde(rename = "type")]
+    policy_type: RenderNetworkPolicyType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<RenderNetworkPolicyType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rules: Option<Vec<RenderEchoedEgressRule>>,
+}
+
+impl RenderNetworkPolicy {
+    /// Whether this echo is exactly `expected`. Workload: every Render
+    /// Sandbox this adapter binds or observes, above all a remote Codex lease
+    /// whose guest may reach only its controller. The echoed `type` must
+    /// equal the requested one, `default` when present must equal `type`, and
+    /// the echoed rules must equal the requested rules byte for byte as
+    /// canonical JSON, in the requested order. Any difference leaves the
+    /// Sandbox unbound or unobserved, never trusted.
+    fn matches(&self, expected: &provider_spec::EgressPolicy) -> bool {
+        let expected_type = match expected.policy_type {
+            provider_spec::NetworkPolicyType::DenyAll => RenderNetworkPolicyType::DenyAll,
+            provider_spec::NetworkPolicyType::AllowList => RenderNetworkPolicyType::AllowList,
+        };
+        if self.policy_type != expected_type
+            || self.default.is_some_and(|alias| alias != self.policy_type)
+        {
+            return false;
+        }
+        match (expected.policy_type, &self.rules) {
+            (provider_spec::NetworkPolicyType::DenyAll, None) => expected.rules.is_empty(),
+            (provider_spec::NetworkPolicyType::AllowList, Some(echoed)) => {
+                !expected.rules.is_empty()
+                    && match (canonical_json(echoed), canonical_json(&expected.rules)) {
+                        (Ok(echoed), Ok(expected)) => echoed == expected,
+                        _ => false,
+                    }
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Exact fields emitted by the pinned CLI's generated Sandbox model.
@@ -198,6 +268,7 @@ struct AllocationEvidence<'a> {
     snapshot_id: &'a str,
     guest_base_snapshot_hash: &'a str,
     sandbox_id: &'a str,
+    network_policy: &'a provider_spec::EgressPolicy,
     response_sha256: &'a str,
 }
 
@@ -278,6 +349,10 @@ fn run() -> Result<()> {
         Some("inspect") => inspect(&adapter),
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
+        Some("admit-lease") => ryeos_remote_lease_core::admit_lease(ADAPTER_ID, parse_lease_spec),
+        Some("await-lease-ready") => {
+            ryeos_remote_lease_core::await_lease_ready(ADAPTER_ID, parse_lease_spec)
+        }
         Some("relay-file") => relay_file::operate(),
         Some("produce-snapshot") => snapshot_production::operate(&adapter),
         Some("produce-snapshot-upload") => snapshot_production::operate_upload(&adapter),
@@ -353,6 +428,15 @@ fn verify_runtime_probe(adapter: &lillux::InheritedDescriptorAuthority) -> Resul
     validate_settings(&settings)?;
     let response = snapshot_qualification::interpret_authenticated_request(&request, &settings)?;
     write_response(&response)
+}
+
+/// Parse the captured provider spec a lease operation reads, under its
+/// captured digest and this adapter's settings schema.
+fn parse_lease_spec(provider_spec_bytes: &[u8], captured_sha256: &str) -> Result<ProviderSpec> {
+    let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+    let (provider_spec, _observed_sha256) =
+        parse_provider_spec_bytes(provider_spec_bytes, captured_sha256, &schema_digest)?;
+    Ok(provider_spec)
 }
 
 fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
@@ -491,6 +575,22 @@ fn operate() -> Result<()> {
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _provider_spec_sha256) =
         parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+    // A remote Codex lease's admitted request names its guest egress. It
+    // selects the exact policy the create requests and every read of the
+    // Sandbox must echo. A policy the signed spec cannot create fails closed
+    // here, before any credential or network input is read.
+    let lease_egress = match ryeos_remote_lease_core::read_lease_admission()? {
+        Some(admission) => {
+            ensure!(
+                admission.adapter_id == ADAPTER_ID
+                    && admission.provider_spec_sha256 == provider_spec_sha256,
+                "lease admission names a different adapter or provider spec"
+            );
+            admission.guest_network_allow
+        }
+        None => BTreeSet::new(),
+    };
+    let egress_policy = provider_spec.egress_policy(&lease_egress)?;
     // A disabled signed profile cannot turn an already claimed activation
     // into a silent pending observation. Reject before reading guest inputs,
     // network inputs, or credentials. Reconciliation remains observation-only
@@ -571,6 +671,7 @@ fn operate() -> Result<()> {
             reservation,
             &settings,
             &provider_spec,
+            &lease_egress,
             &network,
             deadline,
             &cancellation,
@@ -628,6 +729,7 @@ fn operate() -> Result<()> {
             termination,
             &settings,
             &provider_spec,
+            &egress_policy,
             &network,
             deadline,
             &cancellation,
@@ -642,6 +744,7 @@ fn operate() -> Result<()> {
             termination,
             &settings,
             &provider_spec,
+            &egress_policy,
             &network,
             deadline,
             &cancellation,
@@ -834,6 +937,7 @@ fn allocate(
     reservation: &ryeos_external_execution_contract::AllocationReservation,
     settings: &Settings,
     provider_spec: &ProviderSpec,
+    lease_egress: &BTreeSet<String>,
     network: &NetworkContext,
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
@@ -842,7 +946,7 @@ fn allocate(
         operation_id: common.operation_id.clone(),
         request_digest: reservation.request_digest.clone(),
     };
-    let projection = match project_allocation(provider_spec, settings, reservation) {
+    let projection = match project_allocation(provider_spec, settings, reservation, lease_egress) {
         Ok(value) => value,
         Err(_) => return pending(),
     };
@@ -874,11 +978,7 @@ fn allocate(
         },
         region: projection.region.clone(),
         timeout_seconds: projection.timeout_seconds,
-        network_policy: NetworkPolicy {
-            default: match projection.network_policy_default {
-                provider_spec::NetworkPolicyDefault::DenyAll => RenderNetworkPolicyDefault::DenyAll,
-            },
-        },
+        network_policy: NetworkPolicy::requested(&projection.network_policy),
         snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let Ok(body) = canonical_json(&body) else {
@@ -920,7 +1020,7 @@ fn allocate(
     };
     let response_sha256 = lillux::sha256_hex(&response_body);
     let evidence = AllocationEvidence {
-        schema: 2,
+        schema: 3,
         provider: "render-sandbox-early-access",
         operation_id: &common.operation_id,
         binding_hash: &common.binding_hash,
@@ -928,6 +1028,7 @@ fn allocate(
         snapshot_id: &projection.snapshot_id,
         guest_base_snapshot_hash: &reservation.base_snapshot_hash,
         sandbox_id: &sandbox.id,
+        network_policy: &projection.network_policy,
         response_sha256: &response_sha256,
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
@@ -948,6 +1049,7 @@ fn project_allocation(
     provider_spec: &ProviderSpec,
     settings: &Settings,
     reservation: &ryeos_external_execution_contract::AllocationReservation,
+    lease_egress: &BTreeSet<String>,
 ) -> Result<provider_spec::CreateProjection> {
     ensure!(
         provider_spec.allocation_requires_configured_runtime_snapshot(),
@@ -964,6 +1066,7 @@ fn project_allocation(
         &settings.region,
         &settings.snapshot_id,
         reservation.maximum_lifetime_seconds,
+        lease_egress,
     )
 }
 
@@ -1024,7 +1127,7 @@ fn create_response_matches(
     valid_sandbox_id(&sandbox.id)
         && DateTime::parse_from_rfc3339(&sandbox.created_at).is_ok()
         && sandbox.plan == expected_plan
-        && sandbox.network_policy.default == RenderNetworkPolicyDefault::DenyAll
+        && sandbox.network_policy.matches(&projection.network_policy)
         && sandbox.timeout_seconds == projection.timeout_seconds
         && sandbox.region == projection.region
 }
@@ -1033,6 +1136,7 @@ fn exact_terminal_timestamp<'a>(
     sandbox: &'a RenderSandbox,
     occurrence_id: &str,
     settings: &Settings,
+    expected_policy: &provider_spec::EgressPolicy,
 ) -> Option<&'a str> {
     let expected_plan = match settings.plan {
         RenderPlan::Starter => RenderSandboxPlan::Starter,
@@ -1044,7 +1148,7 @@ fn exact_terminal_timestamp<'a>(
         || DateTime::parse_from_rfc3339(&sandbox.created_at).is_err()
         || sandbox.plan != expected_plan
         || sandbox.region != settings.region
-        || sandbox.network_policy.default != RenderNetworkPolicyDefault::DenyAll
+        || !sandbox.network_policy.matches(expected_policy)
     {
         return None;
     }
@@ -1102,6 +1206,7 @@ fn terminate(
     termination: &ryeos_external_execution_contract::TerminationIntent,
     settings: &Settings,
     provider_spec: &ProviderSpec,
+    egress_policy: &provider_spec::EgressPolicy,
     network: &NetworkContext,
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
@@ -1156,6 +1261,7 @@ fn terminate(
         termination,
         settings,
         provider_spec,
+        egress_policy,
         provider_spec.termination_observation_route(),
         network,
         &credential,
@@ -1170,6 +1276,7 @@ fn observe_termination(
     termination: &ryeos_external_execution_contract::TerminationIntent,
     settings: &Settings,
     provider_spec: &ProviderSpec,
+    egress_policy: &provider_spec::EgressPolicy,
     network: &NetworkContext,
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
@@ -1190,6 +1297,7 @@ fn observe_termination(
         termination,
         settings,
         provider_spec,
+        egress_policy,
         provider_spec.reconciliation_route(),
         network,
         &credential,
@@ -1204,6 +1312,7 @@ fn observe_termination_with_network(
     termination: &ryeos_external_execution_contract::TerminationIntent,
     settings: &Settings,
     provider_spec: &ProviderSpec,
+    egress_policy: &provider_spec::EgressPolicy,
     route: Option<RouteName>,
     network: &NetworkContext,
     credential: &Zeroizing<String>,
@@ -1263,7 +1372,7 @@ fn observe_termination_with_network(
         Err(_) => return pending(),
     };
     let Some(terminated_at) =
-        exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id, settings)
+        exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id, settings, egress_policy)
     else {
         return pending();
     };
@@ -1397,16 +1506,7 @@ fn tls_roots(settings: &Settings) -> Result<Vec<Vec<u8>>> {
 }
 
 fn read_credential() -> Result<Zeroizing<String>> {
-    let bytes = read_sealed_env(LIFECYCLE_CREDENTIAL_FD_ENV, MAX_CREDENTIAL_BYTES)?;
-    let bytes = Zeroizing::new(bytes);
-    let credential = std::str::from_utf8(&bytes).context("Render credential is not UTF-8")?;
-    ensure!(
-        !credential.is_empty()
-            && credential.len() <= MAX_CREDENTIAL_BYTES
-            && !credential.bytes().any(|byte| byte.is_ascii_control()),
-        "Render credential format is invalid"
-    );
-    Ok(Zeroizing::new(credential.to_owned()))
+    ryeos_remote_lease_core::read_credential("Render")
 }
 
 fn send_api_request<S: RenderApiSettings>(
@@ -1564,32 +1664,6 @@ fn validate_api_url(
     Ok(())
 }
 
-fn request_deadline(deadline_ms: i64, enclosing: MonotonicDeadline) -> Result<MonotonicDeadline> {
-    let now_ms = lillux::time::timestamp_millis();
-    let remaining = deadline_ms.saturating_sub(now_ms);
-    ensure!(remaining > 0, "lifecycle contact deadline elapsed");
-    Ok(
-        enclosing.min(MonotonicDeadline::after(Duration::from_millis(
-            u64::try_from(remaining)?,
-        ))),
-    )
-}
-
-fn operation_deadline() -> Result<MonotonicDeadline> {
-    let raw = std::env::var(LIFECYCLE_REMAINING_TIMEOUT_MS_ENV)
-        .context("missing remaining lifecycle deadline")?;
-    let milliseconds: u64 = raw
-        .parse()
-        .context("invalid remaining lifecycle deadline")?;
-    ensure!(
-        (1..=MAX_OPERATION_TIMEOUT_MS).contains(&milliseconds),
-        "remaining lifecycle deadline is zero or exceeds its bound"
-    );
-    Ok(MonotonicDeadline::after(Duration::from_millis(
-        milliseconds,
-    )))
-}
-
 fn verify_artifact(
     authority: &lillux::InheritedDescriptorAuthority,
     expected_digest: &str,
@@ -1611,32 +1685,10 @@ fn verify_artifact(
     })
 }
 
-fn read_sealed_env(name: &str, maximum: usize) -> Result<Vec<u8>> {
-    // SAFETY: the trusted lifecycle runner installs each sealed descriptor
-    // exactly once before this single-threaded startup boundary.
-    unsafe { lillux::read_sealed_inherited_descriptor_from_env(name, maximum) }
-        .map_err(anyhow::Error::msg)
-}
-
-fn write_response<T: Serialize>(response: &T) -> Result<()> {
-    write_response_bounded(response, MAX_LIFECYCLE_RESPONSE_BYTES)
-}
-
-fn write_response_bounded<T: Serialize>(response: &T, maximum_bytes: usize) -> Result<()> {
-    let bytes = canonical_json(response)?;
-    ensure!(
-        !bytes.is_empty() && bytes.len() <= maximum_bytes,
-        "lifecycle response exceeds its byte bound"
-    );
-    std::io::stdout().write_all(&bytes)?;
-    std::io::stdout().write_all(b"\n")?;
-    std::io::stdout().flush()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod offline_fixture_tests {
     use super::*;
+
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1933,8 +1985,10 @@ mod offline_fixture_tests {
         };
         let mut second = first.clone();
         second.base_snapshot_hash = "b".repeat(64);
-        let first_projection = project_allocation(&spec, &settings, &first).unwrap();
-        let second_projection = project_allocation(&spec, &settings, &second).unwrap();
+        let first_projection =
+            project_allocation(&spec, &settings, &first, &BTreeSet::new()).unwrap();
+        let second_projection =
+            project_allocation(&spec, &settings, &second, &BTreeSet::new()).unwrap();
         assert_eq!(first_projection, second_projection);
         assert_eq!(first_projection.snapshot_id, settings.snapshot_id);
 
@@ -1943,7 +1997,7 @@ mod offline_fixture_tests {
                 let binding_hash = "e".repeat(64);
                 let response_sha256 = "f".repeat(64);
                 let evidence = AllocationEvidence {
-                    schema: 2,
+                    schema: 3,
                     provider: "render-sandbox-early-access",
                     operation_id: "operation-fixture",
                     binding_hash: &binding_hash,
@@ -1951,6 +2005,7 @@ mod offline_fixture_tests {
                     snapshot_id: &settings.snapshot_id,
                     guest_base_snapshot_hash: &reservation.base_snapshot_hash,
                     sandbox_id: "sbx-fixture",
+                    network_policy: &first_projection.network_policy,
                     response_sha256: &response_sha256,
                 };
                 lillux::sha256_hex(&canonical_json(&evidence).unwrap())
@@ -1978,7 +2033,7 @@ mod offline_fixture_tests {
             plan: PlanValue::Standard,
             region: "oregon".into(),
             timeout_seconds: 600,
-            network_policy_default: provider_spec::NetworkPolicyDefault::DenyAll,
+            network_policy: provider_spec::EgressPolicy::deny_all(),
             snapshot_id: "snp-fixture-001".into(),
         }
     }
@@ -1990,15 +2045,16 @@ mod offline_fixture_tests {
             plan: RenderPlan::Starter,
             region: "oregon".into(),
             timeout_seconds: 900,
-            network_policy: NetworkPolicy {
-                default: RenderNetworkPolicyDefault::DenyAll,
-            },
+            network_policy: NetworkPolicy::requested(&provider_spec::EgressPolicy::deny_all()),
             snapshot_id: None,
         };
         let encoded = canonical_json(&body).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert!(!value.as_object().unwrap().contains_key("snapshotId"));
-        assert_eq!(value["networkPolicy"]["default"], "deny-all");
+        assert_eq!(
+            value["networkPolicy"],
+            serde_json::json!({"type": "deny-all"})
+        );
     }
 
     #[test]
@@ -2056,32 +2112,253 @@ mod offline_fixture_tests {
             snapshot_id: "snp-fixture-001".into(),
             tls_roots_der_base64: vec!["AA==".into()],
         };
+        let deny_all = provider_spec::EgressPolicy::deny_all();
         assert_eq!(
-            exact_terminal_timestamp(&response, "sbx-fixture-001", &settings),
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &settings, &deny_all),
             Some("2026-09-24T00:01:00Z")
         );
         assert_eq!(
-            exact_terminal_timestamp(&response, "sbx-other", &settings),
+            exact_terminal_timestamp(&response, "sbx-other", &settings, &deny_all),
             None
         );
         let mut altered = settings.clone();
         altered.region = "different-region".into();
         assert_eq!(
-            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered),
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered, &deny_all),
             None
         );
         altered = settings.clone();
         altered.plan = RenderPlan::Pro;
         assert_eq!(
-            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered),
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered, &deny_all),
             None
         );
         let mut altered_response: serde_json::Value =
             serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json")).unwrap();
+        altered_response["networkPolicy"]["type"] = serde_json::json!("allow-all");
         altered_response["networkPolicy"]["default"] = serde_json::json!("allow-all");
         let altered_response: RenderSandbox = serde_json::from_value(altered_response).unwrap();
         assert_eq!(
-            exact_terminal_timestamp(&altered_response, "sbx-fixture-001", &settings),
+            exact_terminal_timestamp(&altered_response, "sbx-fixture-001", &settings, &deny_all),
+            None
+        );
+    }
+
+    fn controller_allow_list() -> provider_spec::EgressPolicy {
+        provider_spec::EgressPolicy {
+            policy_type: provider_spec::NetworkPolicyType::AllowList,
+            rules: vec![provider_spec::EgressRule {
+                domain: "controller.example.com".into(),
+                protocol: provider_spec::EgressProtocol::Https,
+            }],
+        }
+    }
+
+    fn allow_list_projection() -> provider_spec::CreateProjection {
+        provider_spec::CreateProjection {
+            network_policy: controller_allow_list(),
+            ..create_projection()
+        }
+    }
+
+    fn echoed_policy(value: serde_json::Value) -> RenderNetworkPolicy {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn create_request_bodies_name_type_and_never_the_deprecated_default() {
+        let projection = allow_list_projection();
+        let body = CreateSandboxBody {
+            owner_id: projection.owner_id.clone(),
+            plan: RenderPlan::Standard,
+            region: projection.region.clone(),
+            timeout_seconds: projection.timeout_seconds,
+            network_policy: NetworkPolicy::requested(&projection.network_policy),
+            snapshot_id: Some(projection.snapshot_id.clone()),
+        };
+        assert_eq!(
+            canonical_json(&body).unwrap(),
+            include_bytes!("../fixtures/create-request-allow-list.json")
+        );
+        let deny_all = CreateSandboxBody {
+            network_policy: NetworkPolicy::requested(&provider_spec::EgressPolicy::deny_all()),
+            ..body
+        };
+        let golden: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../fixtures/create-request.json")).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_slice(&canonical_json(&deny_all).unwrap()).unwrap();
+        assert_eq!(sent, golden);
+        assert_eq!(
+            sent["networkPolicy"],
+            serde_json::json!({"type": "deny-all"})
+        );
+    }
+
+    #[test]
+    fn allow_list_create_echo_binds_only_the_exact_requested_rules() {
+        let body = include_bytes!("../fixtures/create-response-allow-list.json");
+        let sandbox = accepted_create_response(201, body, &allow_list_projection())
+            .expect("the exact echoed allow-list binds");
+        assert_eq!(sandbox.id, "sbx-fixture-002");
+        // The same echo never binds a deny-all request, and a deny-all echo
+        // never binds an allow-list request.
+        assert!(accepted_create_response(201, body, &create_projection()).is_none());
+        assert!(
+            accepted_create_response(
+                201,
+                include_bytes!("../fixtures/create-response.json"),
+                &allow_list_projection()
+            )
+            .is_none()
+        );
+
+        let expected = controller_allow_list();
+        let rule = |domain: &str| serde_json::json!({"domain": domain, "protocol": "https"});
+        let exact = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [rule("controller.example.com")]
+        });
+        assert!(echoed_policy(exact.clone()).matches(&expected));
+        let mut without_alias = exact.clone();
+        without_alias.as_object_mut().unwrap().remove("default");
+        assert!(echoed_policy(without_alias).matches(&expected));
+
+        let mut two = expected.clone();
+        two.rules.push(provider_spec::EgressRule {
+            domain: "relay.example.com".into(),
+            protocol: provider_spec::EgressProtocol::Https,
+        });
+        assert!(
+            echoed_policy(serde_json::json!({
+                "type": "allow-list",
+                "rules": [rule("controller.example.com"), rule("relay.example.com")]
+            }))
+            .matches(&two)
+        );
+
+        for (case, echo, against) in [
+            (
+                "wrong type",
+                serde_json::json!({"type": "allow-all", "default": "allow-all"}),
+                &expected,
+            ),
+            (
+                "deny-all type",
+                serde_json::json!({"type": "deny-all"}),
+                &expected,
+            ),
+            (
+                "default disagrees with type",
+                serde_json::json!({"type": "allow-list", "default": "deny-all",
+                    "rules": [rule("controller.example.com")]}),
+                &expected,
+            ),
+            (
+                "missing rules",
+                serde_json::json!({"type": "allow-list"}),
+                &expected,
+            ),
+            (
+                "empty rules",
+                serde_json::json!({"type": "allow-list", "rules": []}),
+                &expected,
+            ),
+            (
+                "missing rule",
+                serde_json::json!({"type": "allow-list", "rules": [rule("controller.example.com")]}),
+                &two,
+            ),
+            (
+                "extra rule",
+                serde_json::json!({"type": "allow-list",
+                    "rules": [rule("controller.example.com"), rule("evil.example.net")]}),
+                &expected,
+            ),
+            (
+                "reordered rules",
+                serde_json::json!({"type": "allow-list",
+                    "rules": [rule("relay.example.com"), rule("controller.example.com")]}),
+                &two,
+            ),
+            (
+                "different host",
+                serde_json::json!({"type": "allow-list", "rules": [rule("api.controller.example.com")]}),
+                &expected,
+            ),
+            (
+                "protocol not https",
+                serde_json::json!({"type": "allow-list",
+                    "rules": [{"domain": "controller.example.com", "protocol": "http"}]}),
+                &expected,
+            ),
+            (
+                "protocol missing",
+                serde_json::json!({"type": "allow-list",
+                    "rules": [{"domain": "controller.example.com"}]}),
+                &expected,
+            ),
+        ] {
+            assert!(
+                !echoed_policy(echo).matches(against),
+                "{case} must not match"
+            );
+        }
+
+        // A deny-all echo must carry no rules, and its alias must agree.
+        let deny_all = provider_spec::EgressPolicy::deny_all();
+        assert!(echoed_policy(serde_json::json!({"type": "deny-all"})).matches(&deny_all));
+        assert!(
+            !echoed_policy(serde_json::json!({"type": "deny-all", "default": "allow-all"}))
+                .matches(&deny_all)
+        );
+        assert!(
+            !echoed_policy(serde_json::json!({"type": "deny-all",
+                "rules": [rule("controller.example.com")]}))
+            .matches(&deny_all)
+        );
+        // The deprecated alias alone is not an echo of `type`.
+        assert!(
+            serde_json::from_value::<RenderNetworkPolicy>(
+                serde_json::json!({"default": "deny-all"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_observation_requires_the_lease_policy_echo() {
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json")).unwrap();
+        value["networkPolicy"] = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "controller.example.com", "protocol": "https"}]
+        });
+        let terminated: RenderSandbox = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            exact_terminal_timestamp(
+                &terminated,
+                "sbx-fixture-001",
+                &settings,
+                &controller_allow_list()
+            ),
+            Some("2026-09-24T00:01:00Z")
+        );
+        assert_eq!(
+            exact_terminal_timestamp(
+                &terminated,
+                "sbx-fixture-001",
+                &settings,
+                &provider_spec::EgressPolicy::deny_all()
+            ),
             None
         );
     }

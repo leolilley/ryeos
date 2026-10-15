@@ -22,6 +22,7 @@ use super::{
     parse_provider_spec_bytes, read_sealed_env, request_deadline, validate_settings,
     write_response_bounded,
 };
+use ryeos_remote_lease_core::LEASE_ADMISSION_FD_ENV;
 use crate::relay_contact::{RenderRelayDownload, RenderRelayFileContact};
 
 fn validate_bootstrap(
@@ -80,6 +81,14 @@ pub(super) fn operate() -> Result<()> {
         "relay original bootstrap is noncanonical"
     );
     validate_bootstrap(&request, &bootstrap)?;
+    // The relay moves only mailbox files: its path is derived from the
+    // sealed bootstrap and upload bytes arrive on their own sealed
+    // descriptor, so a lease's admitted request grants it nothing.
+    ensure!(
+        std::env::var_os(LEASE_ADMISSION_FD_ENV).is_none(),
+        "relay file received a lease admission descriptor ({LEASE_ADMISSION_FD_ENV}) it never \
+         reads"
+    );
     let deadline = request_deadline(request.deadline_ms, enclosing_deadline)?;
     let provider_spec_bytes = read_sealed_env(
         LIFECYCLE_PROVIDER_SPEC_FD_ENV,

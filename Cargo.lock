@@ -3405,6 +3405,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-remote-lease-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution-contract",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "ryeos-render-sandbox-lifecycle-adapter"
 version = "0.1.0"
 dependencies = [
@@ -3416,6 +3430,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
+ "ryeos-remote-lease-core",
  "ryeos-state",
  "serde",
  "serde_json",

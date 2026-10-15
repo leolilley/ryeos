@@ -630,7 +630,9 @@ fn validate_snapshot_source(
         source.id == intent.source_occurrence_id
             && source.status == crate::RenderSandboxStatus::Running
             && source.terminated_at.is_none()
-            && source.network_policy.default == crate::RenderNetworkPolicyDefault::DenyAll
+            && source
+                .network_policy
+                .matches(&crate::provider_spec::EgressPolicy::deny_all())
             && source.region == settings.region
             && source.timeout_seconds > 0
             && DateTime::parse_from_rfc3339(&source.created_at).is_ok()
@@ -1405,7 +1407,9 @@ mod tests {
             created_at: intent.source_created_at.clone().unwrap(),
             id: intent.source_occurrence_id.clone(),
             network_policy: crate::RenderNetworkPolicy {
-                default: crate::RenderNetworkPolicyDefault::DenyAll,
+                policy_type: crate::RenderNetworkPolicyType::DenyAll,
+                default: Some(crate::RenderNetworkPolicyType::DenyAll),
+                rules: None,
             },
             plan: crate::RenderSandboxPlan::Standard,
             region: settings.region.clone(),

@@ -55,6 +55,7 @@ members = [
     "crates/tools/codex-runtime-verifier",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
+    "crates/host-adapters/remote-lease-core",
     "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
@@ -124,6 +125,7 @@ ryeos-gpu-loader-owner-contract = { path = "crates/tools/gpu-loader-owner-contra
 ryeos-structured-session = { path = "crates/tools/structured-session" }
 ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
 ryeos-lillux-oci-hook = { path = "crates/host-adapters/lillux-oci-hook" }
+ryeos-remote-lease-core = { path = "crates/host-adapters/remote-lease-core" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
