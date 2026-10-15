@@ -93,6 +93,8 @@ impl PublishedLifecycleArtifacts {
 
 #[derive(Debug)]
 pub struct ResolvedExternalExecutionArtifacts {
+    /// Content identity of the connector each provider declaration names.
+    pub(crate) provider_connector_hashes: BTreeMap<String, String>,
     pub connectors: ExternalCandidateConnectorRegistry,
     pub provider_configurations: ExternalProviderConfigurationRegistry,
     pub placement_backends: ExternalPlacementBackendRegistry,
@@ -684,6 +686,7 @@ pub fn resolve_external_execution_artifacts(
     let mut configurations = Vec::new();
     let mut lifecycle_adapters = Vec::new();
     let mut provider_owners = BTreeMap::new();
+    let mut provider_connector_hashes = BTreeMap::new();
     let mut lifecycle_owners = BTreeMap::new();
 
     for root in bundle_roots {
@@ -728,6 +731,8 @@ pub fn resolve_external_execution_artifacts(
                 &declaration.configuration_adapter,
                 "external provider configuration adapter",
             )?;
+            provider_connector_hashes
+                .insert(declaration.id.clone(), connector.identity.content_hash.clone());
             connectors.push(connector);
             configurations.push(InstalledExternalProviderConfiguration::new(
                 declaration.clone(),
@@ -837,6 +842,7 @@ pub fn resolve_external_execution_artifacts(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(ResolvedExternalExecutionArtifacts {
+        provider_connector_hashes,
         connectors: ExternalCandidateConnectorRegistry::from_captured(connectors)?,
         provider_configurations: ExternalProviderConfigurationRegistry::from_artifacts(
             configurations,

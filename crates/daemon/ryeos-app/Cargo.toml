@@ -27,6 +27,7 @@ once_cell = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rusqlite = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-bundle = { workspace = true }

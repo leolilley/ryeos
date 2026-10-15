@@ -1108,7 +1108,6 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self.adapter_hash
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64 {
         self.adapter_bytes
     }
@@ -1121,7 +1120,6 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         (&self.launcher_hash, self.launcher_bytes)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn settings_schema_digest(&self) -> &str {
         &self.declaration.settings_schema_digest
     }

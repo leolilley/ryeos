@@ -2683,6 +2683,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls",
  "ryeos-accounting",
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",

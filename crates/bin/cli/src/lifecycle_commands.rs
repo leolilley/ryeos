@@ -19,6 +19,8 @@
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
+//!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
+//!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -94,6 +96,16 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "capacity", "reissue"],
         summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "compose"],
+        summary: "Compose and sign a stopped node's external-execution binding from installed bundles",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "provision-credential"],
+        summary: "Store the placement credential for an installed binding, read from stdin",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -209,6 +221,18 @@ pub async fn try_dispatch(
         }
         ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
             run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution")) if argv.get(2).map(String::as_str) == Some("compose") => {
+            crate::lifecycle_external_compose::run_external_compose(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("provision-credential") =>
+        {
+            crate::lifecycle_external_credential::run_external_provision_credential(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {

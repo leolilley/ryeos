@@ -150,11 +150,9 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         None
     }
     fn artifact_hash(&self) -> &str;
-    #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64;
     fn supervisor_artifact(&self) -> (&str, u64);
     fn launcher_artifact(&self) -> (&str, u64);
-    #[cfg(any(test, feature = "test-support"))]
     fn settings_schema_digest(&self) -> &str;
     fn preflight_runtime_snapshot(
         &self,
@@ -682,6 +680,20 @@ impl ExternalCandidateConnectorRegistry {
         Ok(Self { artifacts })
     }
 
+    /// Exact artifact coordinate of the installed connector with this content
+    /// identity, for composing a signed placement binding.
+    pub(crate) fn coordinate_for_hash(&self, hash: &str) -> Result<(String, u64)> {
+        let mut matching = self.artifacts.keys().filter(|(candidate, _)| candidate == hash);
+        let coordinate = matching
+            .next()
+            .context("installed external candidate connector is absent")?;
+        ensure!(
+            matching.next().is_none(),
+            "installed external candidate connector identity is ambiguous"
+        );
+        Ok(coordinate.clone())
+    }
+
     pub(crate) fn qualify(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -792,6 +804,16 @@ impl ExternalProviderConfigurationRegistry {
             );
         }
         Ok(Self { artifacts: by_id })
+    }
+
+    /// Exact artifact coordinate of the installed configuration adapter for
+    /// one provider declaration, for composing a signed placement binding.
+    pub(crate) fn coordinate_for_provider(&self, provider_declaration_id: &str) -> Result<(String, u64)> {
+        let artifact = self
+            .artifacts
+            .get(provider_declaration_id)
+            .context("external provider declaration is not installed")?;
+        Ok((artifact.artifact_hash.clone(), artifact.artifact_bytes))
     }
 
     pub(crate) fn qualify(
@@ -1096,6 +1118,18 @@ impl Drop for ExternalSupervisorActivation {
     }
 }
 
+/// Installed artifact coordinates of one lifecycle adapter generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstalledLifecycleGeneration {
+    pub(crate) backend_artifact_hash: String,
+    pub(crate) backend_artifact_bytes: u64,
+    pub(crate) settings_schema_digest: String,
+    pub(crate) supervisor_artifact_hash: String,
+    pub(crate) supervisor_artifact_bytes: u64,
+    pub(crate) launcher_artifact_hash: String,
+    pub(crate) launcher_artifact_bytes: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct ExternalPlacementBackendRegistry {
     backends: BTreeMap<(String, String), Arc<dyn ExternalPlacementBackend>>,
@@ -1346,6 +1380,35 @@ impl ExternalPlacementBackendRegistry {
             ))
             .context("exact signed external placement backend generation is not installed")?;
         backend.verify_runtime_probe(contract, proof, source, binding_hash)
+    }
+
+    /// Exact installed artifact coordinates of the one lifecycle generation
+    /// registered under this backend id, for composing a signed placement
+    /// binding.
+    pub(crate) fn installed_generation(&self, backend_id: &str) -> Result<InstalledLifecycleGeneration> {
+        let mut matching = self
+            .backends
+            .iter()
+            .filter(|((id, _), _)| id == backend_id)
+            .map(|(_, backend)| backend);
+        let backend = matching
+            .next()
+            .with_context(|| format!("external lifecycle backend `{backend_id}` is not installed"))?;
+        ensure!(
+            matching.next().is_none(),
+            "external lifecycle backend `{backend_id}` has more than one installed generation"
+        );
+        let (supervisor_hash, supervisor_bytes) = backend.supervisor_artifact();
+        let (launcher_hash, launcher_bytes) = backend.launcher_artifact();
+        Ok(InstalledLifecycleGeneration {
+            backend_artifact_hash: backend.artifact_hash().to_owned(),
+            backend_artifact_bytes: backend.artifact_bytes(),
+            settings_schema_digest: backend.settings_schema_digest().to_owned(),
+            supervisor_artifact_hash: supervisor_hash.to_owned(),
+            supervisor_artifact_bytes: supervisor_bytes,
+            launcher_artifact_hash: launcher_hash.to_owned(),
+            launcher_artifact_bytes: launcher_bytes,
+        })
     }
 
     pub(crate) fn from_backends(backends: Vec<Arc<dyn ExternalPlacementBackend>>) -> Result<Self> {
