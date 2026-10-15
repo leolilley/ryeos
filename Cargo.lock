@@ -3397,6 +3397,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",
  "ryeos-engine",
+ "ryeos-external-execution-contract",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
  "ryeos-scheduler-contract",
