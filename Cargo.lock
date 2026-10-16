@@ -2739,6 +2739,7 @@ dependencies = [
  "rand 0.8.6",
  "ryeos-engine",
  "ryeos-external-execution-contract",
+ "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
  "serde",

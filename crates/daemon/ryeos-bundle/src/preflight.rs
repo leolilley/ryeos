@@ -1518,7 +1518,30 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.control_flags.len(), 10, "expected 10 control flags");
+        let flags: Vec<&str> = record
+            .control_flags
+            .iter()
+            .map(|f| f.flag.as_str())
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                "async",
+                "stream",
+                "no-stream",
+                "debug-raw",
+                "pin-project",
+                "current-head",
+                "project-snapshot",
+                "retain-child-results",
+                "no-operator-vault",
+                "method",
+                "args",
+                "state-root",
+                "ref-binding",
+                "product-selections",
+            ]
+        );
     }
 
     /// Command preflight must recognize the same sensitive-field metadata as
@@ -1712,9 +1735,13 @@ output_schema:
             let bin_path = self.ai_dir.join(&bin_rel);
             fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
 
+            // Handlers answer inside the mandatory versioned envelope.
             let response = serde_json::json!({
-                "result": "parse_ok",
-                "value": value,
+                "schema_version": ryeos_handler_protocol::HANDLER_PROTOCOL_SCHEMA_VERSION,
+                "response": {
+                    "result": "parse_ok",
+                    "value": value,
+                },
             })
             .to_string();
             let script = format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{response}'\n");
