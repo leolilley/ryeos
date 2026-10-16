@@ -24,6 +24,21 @@ pub struct CoreSeedBuildRequest {
 }
 
 impl CoreSeedBuildRequest {
+    /// Validate the request and require its release input to be exactly the
+    /// selection the signed payload ownership makes for Core. `validate`
+    /// alone is structural and does not attest the payload features.
+    pub fn validate_with_ownership(
+        &self,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        super::admitted_build::AdmittedReleaseInput::from_core_seed_value_with_ownership(
+            &self.release_input,
+            ownership,
+        )?;
+        Ok(())
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         super::recipe::validate_child_product_selections(&self.child_product_selections)?;
         anyhow::ensure!(

@@ -56,34 +56,14 @@ ryeos_bundle_set_names() {
 # Select native capabilities from the same explicit distribution
 # membership used for publication and installation. Cargo defaults remain empty;
 # focused node/CLI rebuilds must carry the selected distribution's features too.
+# The selection is derived from the signed payload-ownership item, which
+# declares each bundle's payload features and daemon-linked host features.
+RYEOS_BUNDLE_SETS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 ryeos_bundle_set_cargo_features() {
-  local set_name="$1" package="$2" members member
-  members="$(ryeos_bundle_set_names "$set_name")" || return 1
-  case "$package" in
-    ryeos-handler-bins)
-      while IFS= read -r member; do
-        if [[ "$member" == standard ]]; then
-          printf '%s/directive-handlers,%s/graph-handlers\n' "$package" "$package"
-          return 0
-        fi
-      done <<< "$members"
-      printf '%s/core-handlers\n' "$package"
-      ;;
-    ryeosd|ryeos-cli|ryeos-api)
-      local -a features=()
-      while IFS= read -r member; do
-        if [[ "$member" == scheduling ]]; then
-          features+=("$package/scheduling")
-        elif [[ "$member" == standard ]]; then
-          features+=("$package/model-provider-setup")
-        fi
-      done <<< "$members"
-      if (( ${#features[@]} > 0 )); then
-        local IFS=,
-        printf '%s\n' "${features[*]}"
-      fi
-      ;;
-  esac
+  local set_name="$1" package="$2"
+  python3 -I "$RYEOS_BUNDLE_SETS_ROOT/scripts/pkg/bundle-features.py" \
+    --set "$set_name" cargo-features "$package"
 }
 
 # Exact publisher-authored node init-profile inventory carried by the shared

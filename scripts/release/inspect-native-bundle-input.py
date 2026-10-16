@@ -55,7 +55,7 @@ def plan(repository_root, bundle, source_snapshot_hash, target, build_profile="r
     if not bundle_root.is_dir() or bundle_root.is_symlink():
         fail("bundle source root is missing or unsafe")
 
-    all_records, ownership_identity = _ownership.load(root, ownership_config)
+    all_records, ownership_identity, ownership = _ownership.load_ownership(root, ownership_config)
     records = [record for record in all_records if record["bundle"] == bundle]
     records.sort(key=lambda record: record["binary"])
     if records and target == "portable":
@@ -70,9 +70,11 @@ def plan(repository_root, bundle, source_snapshot_hash, target, build_profile="r
         selected.update(record["required_features"])
     cargo_feature_selections = []
     for package, selected in sorted(features_by_package.items()):
-        # Larger handler compositions include their smaller targets.
-        if selected & {"graph-handlers", "directive-handlers"}:
-            selected -= {"core-handlers", "extends-composer"}
+        # A feature implied by another selected feature of the package is dropped.
+        implied = set()
+        for feature in selected:
+            implied.update(ownership["feature_implications"].get(package, {}).get(feature, []))
+        selected -= implied
         cargo_feature_selections.append({"cargo_package": package, "features": sorted(selected)})
     target = {"kind": "portable"} if target == "portable" else {
         "kind": "triple", "triple": target

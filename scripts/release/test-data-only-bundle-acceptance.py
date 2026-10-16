@@ -256,6 +256,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
                     **verified["value"]["payload_ownership"],
                     "bundles": verified["value"]["payload_ownership"]["bundles"] + [{
                         "bundle_name": "zz-data-only", "bundle_sets": ["release-authority"],
+                        "host_features": [],
                         "payloads": [],
                     }],
                 },

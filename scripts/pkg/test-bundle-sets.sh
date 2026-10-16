@@ -297,6 +297,7 @@ mkdir -p \
 cp "$ROOT/scripts/populate-bundles.sh" "$scope_tmp/repo/scripts/populate-bundles.sh"
 cp "$ROOT/scripts/lib/ryeos-terminal.sh" "$scope_tmp/repo/scripts/lib/ryeos-terminal.sh"
 cp "$ROOT/scripts/pkg/bundle-sets.sh" "$scope_tmp/repo/scripts/pkg/bundle-sets.sh"
+cp "$ROOT/scripts/pkg/bundle-features.py" "$scope_tmp/repo/scripts/pkg/bundle-features.py"
 cp "$ROOT/scripts/release/bundle-payload-ownership.py" "$scope_tmp/repo/scripts/release/bundle-payload-ownership.py"
 cp "$ROOT/bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml" "$scope_tmp/repo/bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
 cp "$ROOT/bundles/.ai/PUBLISHER_TRUST.toml" "$scope_tmp/repo/bundles/.ai/PUBLISHER_TRUST.toml"

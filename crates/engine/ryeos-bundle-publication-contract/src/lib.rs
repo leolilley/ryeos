@@ -4,7 +4,7 @@
 //! policy, signature verification, and deployment authority remain with their
 //! contextual owners.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::bail;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -27,7 +27,7 @@ pub const BUNDLE_CATALOG_SNAPSHOT_SCHEMA: &str = "ryeos.bundle_catalog_snapshot.
 pub const BUNDLE_CATALOG_SNAPSHOT_KIND: &str = "bundle_catalog_snapshot";
 pub const BUNDLE_CATALOG_PUBLICATION_SCHEMA: &str = "ryeos.bundle_catalog_publication.v1";
 pub const BUNDLE_CATALOG_PUBLICATION_KIND: &str = "bundle_catalog_publication";
-pub const BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA: &str = "ryeos.bundle_payload_ownership.v1";
+pub const BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA: &str = "ryeos.bundle_payload_ownership.v2";
 pub const BUNDLE_PAYLOAD_OWNERSHIP_KIND: &str = "bundle_payload_ownership";
 
 /// Closed release and qualification identities shared by policy and producers.
@@ -74,6 +74,8 @@ pub struct BundlePayload {
     pub binary: String,
     pub cargo_package: String,
     pub build_class: PayloadBuildClass,
+    /// Cargo features this payload's package is built with, sorted and unique.
+    pub cargo_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,18 +83,40 @@ pub struct BundlePayload {
 pub struct BundlePayloadOwner {
     pub bundle_name: String,
     pub bundle_sets: Vec<String>,
+    /// Daemon-linked host features this bundle contributes, sorted and unique.
+    pub host_features: Vec<String>,
     pub payloads: Vec<BundlePayload>,
+}
+
+/// A payload-free bundle that still contributes daemon-linked host features.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostOnlyBundle {
+    pub bundle_name: String,
+    pub bundle_sets: Vec<String>,
+    pub host_features: Vec<String>,
 }
 
 /// Publisher-authored ownership of native build products.
 ///
 /// Bundle membership belongs to the bundle, rather than being repeated on
-/// every binary record. An absent bundle entry is explicitly data-only.
+/// every binary record. Bundles owning no payload are listed either as
+/// data-only or as host-only (contributing daemon-linked host features); the
+/// three bundle lists are pairwise disjoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundlePayloadOwnership {
     pub schema: String,
     pub kind: String,
+    /// Daemon-linked Cargo packages that receive every selected host feature.
+    pub host_packages: Vec<String>,
+    /// Payload Cargo packages built without their default features; each
+    /// builds with only its explicitly selected features.
+    pub no_default_features_packages: Vec<String>,
+    /// Per package, features implied by another feature of the same package.
+    pub feature_implications: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    pub data_only_bundles: Vec<String>,
+    pub host_only_bundles: Vec<HostOnlyBundle>,
     pub bundles: Vec<BundlePayloadOwner>,
 }
 
@@ -325,6 +349,42 @@ impl BundlePayloadOwnership {
         if self.bundles.len() > MAX_BUNDLES {
             bail!("bundle payload ownership exceeds bundle bound");
         }
+        name_list(&self.host_packages, "host package", true)?;
+        name_list(
+            &self.no_default_features_packages,
+            "no-default-features package",
+            true,
+        )?;
+        for (package, table) in &self.feature_implications {
+            name(package, "implication package")?;
+            for (feature, implied) in table {
+                name(feature, "implying feature")?;
+                name_list(implied, "implied feature", false)?;
+                if implied.contains(feature) {
+                    bail!("a feature may not imply itself");
+                }
+            }
+        }
+        name_list(&self.data_only_bundles, "data-only bundle", true)?;
+        if self.host_only_bundles.len() > MAX_BUNDLES {
+            bail!("bundle payload ownership exceeds bundle bound");
+        }
+        let mut previous_host_only = None;
+        let mut listed_bundles: BTreeSet<&str> =
+            self.data_only_bundles.iter().map(String::as_str).collect();
+        for host_only in &self.host_only_bundles {
+            name(&host_only.bundle_name, "bundle name")?;
+            strictly_after(
+                &mut previous_host_only,
+                &host_only.bundle_name,
+                "host-only bundles",
+            )?;
+            name_list(&host_only.bundle_sets, "bundle set name", false)?;
+            name_list(&host_only.host_features, "host feature", false)?;
+            if !listed_bundles.insert(host_only.bundle_name.as_str()) {
+                bail!("bundle lists must be pairwise disjoint");
+            }
+        }
         let mut previous_bundle = None;
         let mut owned_binaries = BTreeSet::new();
         let mut payload_count = 0usize;
@@ -338,14 +398,11 @@ impl BundlePayloadOwnership {
             if owner.payloads.is_empty() {
                 bail!("data-only bundles must be represented by absence, not an empty owner");
             }
-            let mut previous_set = None;
-            for set_name in &owner.bundle_sets {
-                name(set_name, "bundle set name")?;
-                strictly_after(&mut previous_set, set_name, "bundle-set membership")?;
+            if !listed_bundles.insert(owner.bundle_name.as_str()) {
+                bail!("bundle lists must be pairwise disjoint");
             }
-            if owner.bundle_sets.is_empty() {
-                bail!("native payload owner requires explicit bundle-set membership");
-            }
+            name_list(&owner.bundle_sets, "bundle set name", false)?;
+            name_list(&owner.host_features, "host feature", true)?;
             let mut previous_owned_binary = None;
             for payload in &owner.payloads {
                 name(&payload.binary, "binary name")?;
@@ -355,6 +412,7 @@ impl BundlePayloadOwnership {
                     &payload.binary,
                     "bundle payloads",
                 )?;
+                name_list(&payload.cargo_features, "cargo feature", true)?;
                 if !owned_binaries.insert(payload.binary.as_str()) {
                     bail!("a binary may have only one bundle owner");
                 }
@@ -365,6 +423,17 @@ impl BundlePayloadOwnership {
         }
         if payload_count > MAX_OWNED_PAYLOADS {
             bail!("bundle payload ownership exceeds payload bound");
+        }
+        let payload_packages: BTreeSet<&str> = self
+            .bundles
+            .iter()
+            .flat_map(|owner| owner.payloads.iter())
+            .map(|payload| payload.cargo_package.as_str())
+            .collect();
+        for package in &self.host_packages {
+            if payload_packages.contains(package.as_str()) {
+                bail!("a host package may not also own payloads");
+            }
         }
         ensure_encoded_bound(self)
     }
@@ -784,6 +853,21 @@ fn sorted_hashes(values: &[String], label: &str) -> anyhow::Result<()> {
     let mut previous = None;
     for value in values {
         hash64(value, label)?;
+        strictly_after(&mut previous, value, label)?;
+    }
+    Ok(())
+}
+
+fn name_list(values: &[String], label: &str, allow_empty: bool) -> anyhow::Result<()> {
+    if values.len() > MAX_BUNDLES {
+        bail!("{label} list exceeds its bound");
+    }
+    if values.is_empty() && !allow_empty {
+        bail!("{label} list must not be empty");
+    }
+    let mut previous = None;
+    for value in values {
+        name(value, label)?;
         strictly_after(&mut previous, value, label)?;
     }
     Ok(())

@@ -1,4 +1,5 @@
 use ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput;
+use ryeos_bundle_publication_contract::BundlePayloadOwnership;
 use serde_json::{Value, json};
 
 const HANDLERS: &str = "ryeos-handler-bins";
@@ -11,6 +12,44 @@ fn package_for(binary: &str) -> &'static str {
     } else {
         HANDLERS
     }
+}
+
+/// Signed ownership naming one bundle's payloads with their Cargo features.
+/// The implication table makes each graph or directive composition cover the
+/// core and extends compositions.
+fn ownership(bundle: &str, payloads: &[(&str, &[&str])]) -> BundlePayloadOwnership {
+    let payloads: Vec<Value> = payloads
+        .iter()
+        .map(|(binary, features)| {
+            json!({
+                "binary": binary,
+                "cargo_package": package_for(binary),
+                "build_class": "release",
+                "cargo_features": features,
+            })
+        })
+        .collect();
+    BundlePayloadOwnership::from_current_value(&json!({
+        "schema": "ryeos.bundle_payload_ownership.v2",
+        "kind": "bundle_payload_ownership",
+        "host_packages": [],
+        "no_default_features_packages": [HANDLERS],
+        "feature_implications": {
+            HANDLERS: {
+                "directive-handlers": ["core-handlers", "extends-composer"],
+                "graph-handlers": ["core-handlers", "extends-composer"],
+            }
+        },
+        "data_only_bundles": [],
+        "host_only_bundles": [],
+        "bundles": [{
+            "bundle_name": bundle,
+            "bundle_sets": ["full"],
+            "host_features": [],
+            "payloads": payloads,
+        }],
+    }))
+    .expect("ownership fixture is valid")
 }
 
 fn payload(bundle: &str, binary: &str, features: &[&str]) -> Value {
@@ -26,7 +65,12 @@ fn payload(bundle: &str, binary: &str, features: &[&str]) -> Value {
 
 /// `handler_features` is the expected selection for the handler package; every
 /// other package in the payloads is selected with no features.
-fn input(bundle: &str, payloads: Vec<Value>, handler_features: &[&str]) -> Value {
+fn input(
+    owner: &BundlePayloadOwnership,
+    bundle: &str,
+    payloads: Vec<Value>,
+    handler_features: &[&str],
+) -> Value {
     let mut packages: Vec<&str> = payloads
         .iter()
         .map(|payload| match payload["cargo_package"].as_str() {
@@ -63,7 +107,7 @@ fn input(bundle: &str, payloads: Vec<Value>, handler_features: &[&str]) -> Value
         "target": {"kind": "triple", "triple": TRIPLE},
         "build_profile": "release",
         "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
-        "payload_ownership_content_hash": "b".repeat(64),
+        "payload_ownership_content_hash": owner.content_hash().unwrap(),
         "payloads": payloads,
         "cargo_packages": packages,
         "cargo_feature_selections": selections,
@@ -76,12 +120,14 @@ fn input(bundle: &str, payloads: Vec<Value>, handler_features: &[&str]) -> Value
 
 #[test]
 fn parser_only_admission_selects_the_parser_package_without_features() {
+    let owner = ownership("web", &[("rye-parser-yaml-document", &[])]);
     let value = input(
+        &owner,
         "web",
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
-    let admitted = AdmittedReleaseInput::from_value(&value).expect("parser input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("parser input is valid");
     assert_eq!(admitted.payloads.len(), 1);
     assert!(admitted.payloads[0].required_features.is_empty());
     assert_eq!(admitted.cargo_feature_selections.len(), 1);
@@ -91,7 +137,9 @@ fn parser_only_admission_selects_the_parser_package_without_features() {
 
 #[test]
 fn core_and_mixed_admission_select_core_handlers() {
+    let owner = ownership("web", &[("ryeos-direct-execution-evidence", &["core-handlers"])]);
     let full = input(
+        &owner,
         "web",
         vec![payload(
             "web",
@@ -100,15 +148,22 @@ fn core_and_mixed_admission_select_core_handlers() {
         )],
         &["core-handlers"],
     );
-    let admitted = AdmittedReleaseInput::from_value(&full).expect("full input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&full, &owner).expect("full input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["core-handlers"]
     );
 
-    // This exact binary pair is also exercised through the Python Core builder
-    // contract test. The parser stays in its own package and selection.
+    // The parser stays in its own package and selection.
+    let owner = ownership(
+        "core",
+        &[
+            ("rye-parser-yaml-document", &[]),
+            ("ryeos-direct-execution-evidence", &["core-handlers"]),
+        ],
+    );
     let mixed = input(
+        &owner,
         "core",
         vec![
             payload("core", "rye-parser-yaml-document", &[]),
@@ -122,7 +177,11 @@ fn core_and_mixed_admission_select_core_handlers() {
     );
     assert!(AdmittedReleaseInput::from_value(&mixed).is_err());
     let admitted =
-        AdmittedReleaseInput::from_core_seed_value(&mixed).expect("mixed Core seed input is valid");
+        AdmittedReleaseInput::from_core_seed_value_with_ownership(&mixed, &owner).expect("mixed Core seed input is valid");
+    let mut forged = mixed.clone();
+    forged["payloads"][1]["required_features"] = json!(["graph-handlers"]);
+    forged["cargo_feature_selections"][0]["features"] = json!(["graph-handlers"]);
+    assert!(AdmittedReleaseInput::from_core_seed_value_with_ownership(&forged, &owner).is_err());
     assert_eq!(admitted.cargo_feature_selections.len(), 2);
     assert_eq!(admitted.cargo_feature_selections[0].cargo_package, HANDLERS);
     assert_eq!(
@@ -135,7 +194,15 @@ fn core_and_mixed_admission_select_core_handlers() {
 
 #[test]
 fn graph_admission_selects_only_the_graph_composition() {
+    let owner = ownership(
+        "web",
+        &[
+            ("rye-composer-identity", &["core-handlers"]),
+            ("ryeos-graph-launch-preparer", &["graph-handlers"]),
+        ],
+    );
     let value = input(
+        &owner,
         "web",
         vec![
             payload("web", "rye-composer-identity", &["core-handlers"]),
@@ -143,22 +210,32 @@ fn graph_admission_selects_only_the_graph_composition() {
         ],
         &["graph-handlers"],
     );
-    let admitted = AdmittedReleaseInput::from_value(&value).expect("workflow input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("workflow input is valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["graph-handlers"]
     );
     let mut widened_core = value.clone();
     widened_core["payloads"][0]["required_features"] = json!(["graph-handlers"]);
-    assert!(AdmittedReleaseInput::from_value(&widened_core).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&widened_core, &owner).is_err());
     let mut missing_workflow = value;
     missing_workflow["cargo_feature_selections"][0]["features"] = json!(["core-handlers"]);
-    assert!(AdmittedReleaseInput::from_value(&missing_workflow).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&missing_workflow, &owner).is_err());
 }
 
 #[test]
 fn independent_handler_roots_are_not_collapsed_into_each_other() {
+    let owner = ownership(
+        "web",
+        &[
+            ("rye-composer-extends-chain", &["extends-composer"]),
+            ("rye-composer-identity", &["core-handlers"]),
+            ("ryeos-directive-launch-preparer", &["directive-handlers"]),
+            ("ryeos-graph-launch-preparer", &["graph-handlers"]),
+        ],
+    );
     let value = input(
+        &owner,
         "web",
         vec![
             payload("web", "rye-composer-extends-chain", &["extends-composer"]),
@@ -172,8 +249,7 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
         ],
         &["directive-handlers", "graph-handlers"],
     );
-    let admitted =
-        AdmittedReleaseInput::from_value(&value).expect("both independent roots are valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&value, &owner).expect("both independent roots are valid");
     assert_eq!(
         admitted.cargo_feature_selections[0].features,
         ["directive-handlers", "graph-handlers"]
@@ -181,9 +257,17 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
     for incomplete in ["directive-handlers", "graph-handlers"] {
         let mut altered = value.clone();
         altered["cargo_feature_selections"][0]["features"] = json!([incomplete]);
-        assert!(AdmittedReleaseInput::from_value(&altered).is_err());
+        assert!(AdmittedReleaseInput::from_value_with_ownership(&altered, &owner).is_err());
     }
+    let owner = ownership(
+        "web",
+        &[
+            ("rye-composer-extends-chain", &["extends-composer"]),
+            ("rye-composer-identity", &["core-handlers"]),
+        ],
+    );
     let core_extends = input(
+        &owner,
         "web",
         vec![
             payload("web", "rye-composer-extends-chain", &["extends-composer"]),
@@ -191,31 +275,31 @@ fn independent_handler_roots_are_not_collapsed_into_each_other() {
         ],
         &["core-handlers", "extends-composer"],
     );
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&core_extends, &owner).unwrap();
     assert_eq!(
-        AdmittedReleaseInput::from_value(&core_extends)
-            .unwrap()
-            .cargo_feature_selections[0]
-            .features,
+        admitted.cargo_feature_selections[0].features,
         ["core-handlers", "extends-composer"]
     );
 }
 
 #[test]
 fn payload_and_aggregate_feature_tampering_are_rejected() {
+    let owner = ownership("web", &[("rye-parser-yaml-document", &[])]);
     let valid = input(
+        &owner,
         "web",
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
-    AdmittedReleaseInput::from_value(&valid).expect("parser input is valid");
+    let admitted = AdmittedReleaseInput::from_value_with_ownership(&valid, &owner).expect("parser input is valid");
 
     let mut tampered_payload = valid.clone();
     tampered_payload["payloads"][0]["required_features"] = json!(["core-handlers"]);
-    assert!(AdmittedReleaseInput::from_value(&tampered_payload).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&tampered_payload, &owner).is_err());
 
     let mut tampered_aggregate = valid.clone();
     tampered_aggregate["cargo_feature_selections"][0]["features"] = json!(["core-handlers"]);
-    assert!(AdmittedReleaseInput::from_value(&tampered_aggregate).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&tampered_aggregate, &owner).is_err());
 
     let mut wrong_package_selection = valid;
     wrong_package_selection["cargo_feature_selections"][0]["cargo_package"] =
@@ -225,8 +309,17 @@ fn payload_and_aggregate_feature_tampering_are_rejected() {
 
 #[test]
 fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
-    // A parser claimed by the handler package has no handler composition.
+    let owner = ownership(
+        "web",
+        &[
+            ("rye-composer-identity", &["core-handlers"]),
+            ("rye-parser-yaml-document", &[]),
+        ],
+    );
+
+    // A parser claimed by the handler package is not the owned selection.
     let mut parser_in_handlers = input(
+        &owner,
         "web",
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
@@ -235,10 +328,11 @@ fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
     parser_in_handlers["cargo_packages"] = json!([HANDLERS]);
     parser_in_handlers["cargo_feature_selections"] =
         json!([{"cargo_package": HANDLERS, "features": []}]);
-    assert!(AdmittedReleaseInput::from_value(&parser_in_handlers).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&parser_in_handlers, &owner).is_err());
 
     // A handler binary claimed by another package is rejected.
     let mut handler_elsewhere = input(
+        &owner,
         "web",
         vec![payload("web", "rye-composer-identity", &["core-handlers"])],
         &["core-handlers"],
@@ -247,27 +341,31 @@ fn wrong_package_unknown_binary_and_unknown_features_are_rejected() {
     handler_elsewhere["cargo_packages"] = json!([PARSERS]);
     handler_elsewhere["cargo_feature_selections"] =
         json!([{"cargo_package": PARSERS, "features": ["core-handlers"]}]);
-    assert!(AdmittedReleaseInput::from_value(&handler_elsewhere).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&handler_elsewhere, &owner).is_err());
 
     let unknown_binary = input(
+        &owner,
         "web",
         vec![payload("web", "ryeos-unlisted-handler", &[])],
         &[],
     );
-    assert!(AdmittedReleaseInput::from_value(&unknown_binary).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&unknown_binary, &owner).is_err());
 
     let mut unknown_feature = input(
+        &owner,
         "web",
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],
     );
     unknown_feature["cargo_feature_selections"][0]["features"] = json!(["unlisted"]);
-    assert!(AdmittedReleaseInput::from_value(&unknown_feature).is_err());
+    assert!(AdmittedReleaseInput::from_value_with_ownership(&unknown_feature, &owner).is_err());
 }
 
 #[test]
 fn duplicate_selections_stale_schema_and_unknown_fields_are_rejected() {
+    let owner = ownership("web", &[("rye-parser-yaml-document", &[])]);
     let valid = input(
+        &owner,
         "web",
         vec![payload("web", "rye-parser-yaml-document", &[])],
         &[],

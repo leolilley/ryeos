@@ -24,20 +24,31 @@ def package_for(binary):
     return PARSERS if binary.startswith("rye-parser-") else PACKAGE
 
 
+IMPLICATIONS = {PACKAGE: {"directive-handlers": ["core-handlers", "extends-composer"],
+                          "graph-handlers": ["core-handlers", "extends-composer"]}}
+
+
 def ownership(bundle, binaries):
     if isinstance(binaries, str):
         binaries = [binaries]
-    return {"schema": "ryeos.bundle_payload_ownership.v1",
+    return {"schema": "ryeos.bundle_payload_ownership.v2",
             "kind": "bundle_payload_ownership",
+            "host_packages": [],
+            "no_default_features_packages": [PACKAGE],
+            "feature_implications": IMPLICATIONS,
+            "data_only_bundles": [],
+            "host_only_bundles": [],
             "bundles": [{"bundle_name": bundle, "bundle_sets": ["standard"],
+                         "host_features": [],
                          "payloads": [{"binary": binary, "cargo_package": package_for(binary),
-                                       "build_class": "release"}
+                                       "build_class": "release",
+                                       "cargo_features": required_features(binary)}
                                       for binary in sorted(binaries)]}]}
 
 
 def resolved(bundle, binaries):
     contract = ownership(bundle, binaries)
-    return ({"value": {"category": "bundle-release", "version": "1.0.0",
+    return ({"value": {"category": "bundle-release", "version": "2.0.0",
                         "description": "fixture", "payload_ownership": contract},
              "source": {"bundle_name": "bundle-release",
                         "config_path": "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml",
@@ -73,8 +84,8 @@ def release_request(bundle, binaries, *, mutate=None):
     for package in packages:
         features = {feature for payload in payloads if payload["cargo_package"] == package
                     for feature in payload["required_features"]}
-        if features & {"graph-handlers", "directive-handlers"}:
-            features -= {"core-handlers", "extends-composer"}
+        for feature in set(features):
+            features -= set(IMPLICATIONS.get(package, {}).get(feature, []))
         selections.append({"cargo_package": package, "features": sorted(features)})
     value = {"schema": "ryeos.bundle_release_input_plan.v2", "project_path": "/source",
              "bundle_name": bundle,

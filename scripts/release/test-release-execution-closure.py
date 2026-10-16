@@ -266,6 +266,7 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                 self.assertEqual(len(loops), 1)
                 calls = []
                 scope = dict(expected=expected, selected_features=selected_features,
+                             no_default_features_packages=["ryeos-handler-bins"],
                              cargo="/declared/cargo", triple="host-triple",
                              base_env={"RUSTFLAGS": "declared-flags"}, root=Path("/admitted"),
                              targets={kind: Path("/private") / kind for kind in ("release", "static")},
