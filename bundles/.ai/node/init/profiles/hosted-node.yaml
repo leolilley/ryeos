@@ -1,8 +1,7 @@
-# ryeos:signed:2026-10-14T12:31:24Z:cfcfce6370839fde01078818f6bad977e7b8ee4546646cd74afb164ffe646591:uO4yDPjmn2nAu8vYGaOR1D1HzqBX9mJJQzRZua4hw004QfGCgN9ZiocI6gzk4Jn31lYbRIfT1/WG2LMys/vLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:14:22Z:6232b97dcfaecbe0cb3bd8f21e2034fc2958508aff3e045562760ab307aef724:190MPUyi2Mm2HAafw85HMrJfs2JhO+VyIV9cz1fRk2EWlbBzjQeGw1Dk24p8gIGiRnUs2sCNOkzImpzw+tytCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
-  - hosted-node
 policies:
   bundle_publication:
     schema: 2
@@ -126,7 +125,6 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
-      hosted-node: []
   execution:
     schema: 4
     max_live_fanout: 8

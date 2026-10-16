@@ -1,9 +1,9 @@
 # Central Auth Bundle
 
 `central-auth` provides small, reusable web-app auth primitives for RyeOS
-projects. It is intentionally separate from the hosted-node bundle:
+projects. It is intentionally separate from node admission:
 
-- hosted-node auth answers: which RyeOS key/node may call this daemon?
+- node admission answers: which RyeOS key/node may call this daemon?
 - central-auth answers: which human/browser session may access this app?
 
 The consuming web backend owns HTTP details such as cookies, CORS, CSRF,

@@ -108,7 +108,6 @@ const FULL_BUNDLE_INVENTORY: &[&str] = &[
     "central-auth",
     "codex",
     "core",
-    "hosted-node",
     "opencode",
     "render-sandbox",
     "ryeos-ui",

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T22:05:27Z:15531252828e6fcedd5d6a46c620b1b189e2741a3b44fe0c8379444892c39bb7:PpSSun3j9JVQD70BnI0Hi6oV2X6YRdMXuNq6zChmoBGeTVqF3mtpcr9M+1QDkqrmwDDYA2GXOy5KG/iBYzBFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T23:21:00Z:ca72356ed4cdf43157d1cc18f7d2bb232243c3469f24452ff64d32caaa6eaa5e:rbUX+13tvqwKxnwO/GBgSEv5mig0Hckop6ABNGnuA3r04seHfHBURLHORp/z8nBM3P15gdzORII/bLmB2nQJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -66,8 +66,8 @@ A configured remote operator must have the explicit
 `ryeos.execute.service.credential-profiles/list` capability and use the normal
 configured-operator forwarding route to inspect profiles on a remote node.
 
-1. Publish the `hosted-workflow` set containing `core`, `central-auth`,
-   `standard`, `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
+1. Publish the `hosted-workflow` set containing `core`, `scheduling`,
+   `standard`, and `codex`. Generic worker-execution runtime/preparer
    binaries belong to `core`; the generic knowledge kind belongs to
    `standard`; bridge/profile and all Codex-specific data belong to `codex`.
 2. Use the installed profile's complete node-owned policy generation. Only

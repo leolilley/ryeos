@@ -419,7 +419,6 @@ The repository currently includes bundles such as:
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
 | `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
-| `hosted-node`  | Admission services and schemas for a hosted remote target.                               |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
 
 ## State model

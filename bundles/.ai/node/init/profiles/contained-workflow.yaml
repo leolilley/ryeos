@@ -1,11 +1,9 @@
-# ryeos:signed:2026-10-14T12:31:24Z:1ab9c2f3fce6deac2186b0c8ce5ac8ad07c0749a10342e68e739442730373a7b:PH7Ra03VhnHBJr01xc6vasqXiLIgBi+bGTjron7USw2Xcnj4cntkna6keWfpHYV0ffUvvwx2BBQ5VllZBKdYCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:14:22Z:558e56a43ac37cc4cdb40de47f6dfe1c4f7bda62bf7db1085fb5da0cd6a06ef8:Oplm1es+cfxnUPjf1GQPnnyQjRVs0VLv69m3jpo14ZkBStecANRaZP6UaU9/2t2zt/STqkyRkbYisNqs7Ud1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
   - core
-  - hosted-node
   - opencode
-  - render-sandbox
   - scheduling
   - standard
 policies:
@@ -139,8 +137,6 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
-      hosted-node: []
-      render-sandbox: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       standard:

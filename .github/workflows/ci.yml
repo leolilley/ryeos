@@ -39,7 +39,6 @@ on:
         options:
           - full
           - standard
-          - hosted-node
           - hosted-workflow
 
 permissions:

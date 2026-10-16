@@ -55,9 +55,7 @@ COPY bundles/standard    /opt/ryeos/standard
 COPY bundles/web         /opt/ryeos/web
 COPY bundles/browser     /opt/ryeos/browser
 COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
-COPY bundles/hosted-node /opt/ryeos/hosted-node
 COPY bundles/codex       /opt/ryeos/codex
-COPY bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY bundles/opencode    /opt/ryeos/opencode
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

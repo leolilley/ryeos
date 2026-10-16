@@ -12,7 +12,6 @@ daemon_images=(
     Dockerfile
     Dockerfile.central-host
     Dockerfile.dev
-    Dockerfile.hosted-node
     Dockerfile.hosted-workflow
     Dockerfile.standard
 )
@@ -251,7 +250,6 @@ assert_runtime_bundle_inventory() {
 assert_runtime_bundle_inventory Dockerfile full
 assert_runtime_bundle_inventory Dockerfile.dev full
 assert_runtime_bundle_inventory Dockerfile.standard standard
-assert_runtime_bundle_inventory Dockerfile.hosted-node hosted-node
 assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.central-host central-host
 assert_runtime_bundle_inventory Dockerfile.release standard ryeos-standard
@@ -289,7 +287,6 @@ assert_runtime_init_profile() {
 assert_runtime_init_profile Dockerfile full
 assert_runtime_init_profile Dockerfile.dev full
 assert_runtime_init_profile Dockerfile.standard standard
-assert_runtime_init_profile Dockerfile.hosted-node hosted-node
 assert_runtime_init_profile Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_init_profile Dockerfile.central-host central-host
 assert_runtime_init_profile Dockerfile.release standard ryeos-standard

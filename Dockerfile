@@ -95,9 +95,7 @@ COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
-COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
-COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
 
 # Entrypoint runs ryeos init --non-interactive every boot (idempotent) then starts daemon.

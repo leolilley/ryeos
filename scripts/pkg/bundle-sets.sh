@@ -21,18 +21,17 @@
 # compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller release-authority
 }
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode ;;
+    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex opencode ;;
     central-host)    printf '%s\n' core central-auth scheduling standard web ;;
     standard)        printf '%s\n' core scheduling standard ;;
     standard-central-auth) printf '%s\n' core scheduling standard central-auth ;;
     local-inference) printf '%s\n' core scheduling standard local-inference ;;
-    hosted-node)     printf '%s\n' core hosted-node ;;
-    hosted-workflow) printf '%s\n' core scheduling standard hosted-node codex render-sandbox opencode ;;
+    hosted-workflow) printf '%s\n' core scheduling standard codex opencode ;;
     core)            printf '%s\n' core ;;
     core-scheduling) printf '%s\n' core scheduling ;;
     # Controller of remote Codex authoring leases. Standard supplies the
@@ -41,14 +40,14 @@ ryeos_bundle_set_names() {
     f5r-controller)  printf '%s\n' core standard codex render-sandbox ;;
     bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode bundle-release
+      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex opencode bundle-release
       ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -99,7 +98,9 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller) printf '%s\n' "$1" ;;
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller) printf '%s\n' "$1" ;;
+    # The hosted-node profile is the core set under hosted admission policy.
+    hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
     development) printf '%s\n' full ;;
     release-authority) printf '%s\n' release-authority ;;
@@ -203,7 +204,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-authority)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-authority)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -232,7 +233,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-artifacts)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-artifacts)
       return 0
       ;;
     *) return 1 ;;

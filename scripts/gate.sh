@@ -11,7 +11,7 @@
 #     ./scripts/gate.sh --refresh-bundles --no-tests
 #     ./scripts/gate.sh --refresh-bundles --crash-qualification-only
 #     ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
-#     ./scripts/gate.sh --bundle-set hosted-node --refresh-bundles
+#     ./scripts/gate.sh --bundle-set core --refresh-bundles
 #
 # CI/release jobs that need regenerated bundle binaries/manifests must pass
 # --refresh-bundles explicitly. Local UI/dev loops should not.

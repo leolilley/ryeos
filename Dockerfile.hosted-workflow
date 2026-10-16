@@ -4,12 +4,11 @@
 # workflow workloads.
 #
 # Bakes the exact hosted-workflow bundle set: core + scheduling + standard +
-# hosted-node + codex + render-sandbox + opencode. This is the remote
-# admission/execution substrate of the hosted-node image PLUS the
+# codex + opencode. This is the remote admission/execution substrate plus the
 # selected scheduling and Standard graph/directive/knowledge services,
 # kind schemas, and runtimes. Use this when a hosted node owns
-# schedules or runs graph/directive work; use ryeosd-hosted-node when
-# it should stay a lean control plane.
+# schedules or runs graph/directive work; use the core image when it should
+# stay a lean control plane.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -83,9 +82,7 @@ COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
-COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex
-COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode    /opt/ryeos/opencode
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

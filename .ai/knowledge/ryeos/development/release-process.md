@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T03:29:27Z:8b465749c7818ef6fee31e33e2396d062243ec81491c22d4bda25fd37ccce932:gUXtNg47yReSVwy7H30emAL/NYWdamkMXKpU4eZf2mgO0WVQHRtUnM+LDpPX+JjJXTjaQrsWzvcn/dL18vpBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T23:26:30Z:5066b40bacf252ec92d3785fa1e792297f5f816c4f335142393c379ae325463a:rLEDG5k9IyOzFKQG3ZLX/LqJa0xyHR325LYZX3crR5P7Bc7W6ijrDimj6jbsypXmytc8hcmrKDvVOO0f7y2oBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -587,9 +587,8 @@ Important caveats:
   release/E2E qualification uses `--populate --all`.
 - `--no-init` leaves initialized user state unchanged.
 - `--no-daemon-restart` leaves any daemon restart to you.
-- `--bundle-set hosted-node` intentionally installs only `core`,
-  `central-auth`, and `hosted-node`; do not use it for full local release
-  validation unless testing that lean layout.
+- `--bundle-set core` intentionally installs only the `core` bundle; do not
+  use it for full local release validation unless testing that lean layout.
 
 ## 11. Bundle signing implications
 

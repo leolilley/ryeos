@@ -2719,17 +2719,12 @@ mod tests {
     }
 
     #[test]
-    fn run_init_installs_the_exact_hosted_node_profile_without_standard() {
+    fn run_init_installs_the_hosted_node_profile_as_core_only() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         fs::create_dir_all(&source).unwrap();
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
-        copy_dir_recursive(
-            &workspace_root().join("bundles/hosted-node"),
-            &source.join("hosted-node"),
-        )
-        .expect("copy hosted-node bundle");
         copy_dir_recursive(
             &workspace_root().join("bundles/central-auth"),
             &source.join("central-auth"),
@@ -2759,15 +2754,13 @@ mod tests {
             skip_preflight: true,
         };
 
-        let report = run_init(&opts).expect("init core + hosted-node");
+        let report = run_init(&opts).expect("init hosted-node profile");
         assert_eq!(
             report.bundles_installed,
-            vec!["core".to_string(), "hosted-node".to_string()]
+            vec!["core".to_string()]
         );
         assert!(state.join(".ai/bundles/core/.ai").is_dir());
-        assert!(state.join(".ai/bundles/hosted-node/.ai").is_dir());
         assert!(state.join(".ai/node/bundles/core.yaml").exists());
-        assert!(state.join(".ai/node/bundles/hosted-node.yaml").exists());
         assert!(
             !state.join(".ai/bundles/standard").exists(),
             "hosted-node init proof must not install standard"
