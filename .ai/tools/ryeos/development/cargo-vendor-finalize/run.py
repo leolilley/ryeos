@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T03:29:27Z:7264d1468959c55c98074e1fe07e2d02e3b34234474bead28ee8cd01bc0f77b8:DbH9U0upUgu/sht9z/0tXVdYXArIooyXY0GZWLdLP7vqvdm76DImMF9B1uigVOnZUotZQYh4I2TP70ydFiSADg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:32:15Z:a9bddbf3cb46b304b0433117ac370630df9bc9a895295152dca7e17bb15c3f71:4KeKNMJ1PSGoxcxwqHTaMck4n/ZUOKl6KaPDTMka4YKIYenXBNppEN8m7UBV2EcQlZoZQLOWafFPfsWLCflXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/cargo-vendor-finalize
 #   version: "2.0.0"
@@ -15,8 +15,8 @@
 #     additionalProperties: false
 #   config_resolve:
 #     type: strict_signed_project_bundle
-#     bundle_name: standard
-#     config_path: bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml
+#     bundle_name: environment-qualification
+#     config_path: bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml
 #   external_content:
 #     - id: producer-python
 #       kind: tree
@@ -38,7 +38,7 @@ import tempfile
 
 LOCK = Path("Cargo.lock")
 OUTPUT = Path("products/cargo-vendor/Cargo.lock")
-INTENT_CONFIG = "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+INTENT_CONFIG = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
 HASH = re.compile(r"[0-9a-f]{64}")
 MAX_LOCK_BYTES = 4 * 1024 * 1024
 
@@ -60,7 +60,7 @@ def admitted_lock_expectation(params):
     source = resolved["source"]
     if (not isinstance(source, dict) or set(source) != {
             "bundle_name", "config_path", "signer_fingerprint"} or
-            source["bundle_name"] != "standard" or source["config_path"] != INTENT_CONFIG or
+            source["bundle_name"] != "environment-qualification" or source["config_path"] != INTENT_CONFIG or
             not isinstance(source["signer_fingerprint"], str) or
             not HASH.fullmatch(source["signer_fingerprint"])):
         raise ValueError("vendor lock intent came from an unexpected source")

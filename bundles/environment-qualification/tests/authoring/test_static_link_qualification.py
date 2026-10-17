@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T03:29:28Z:7c8c75a02b5e2a26663b640f921868ca11e10687d8cc5063df0a83af83dba9e1:rZQFl99oh218wD68h1oGbRYvzvlM54G3SXvxdcFWlexWtI0fhr09HC//ZX51X8Ob18/WungNTIkMRKVkrjfOCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:33:55Z:8a0d2cd99b78b450f69e4a7f4630e54addb9953a246f3ae1f374f1052e81e02e:FkQHTjiY58YHPLfJKeQ1VMhCIsK+iqi3nwPDL6zql7yLLvWKWnUMZiIbYJPWSiLqYN6cE5+/fmKInao2HX+DAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Independent static input closure verification, including fail-closed metadata."""
 import hashlib
 import copy
@@ -14,11 +14,11 @@ import yaml
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[4]
-TOOL = REPO / "bundles/standard/.ai/tools/ryeos/environments/qualification/static-link-inputs.py"
+TOOL = REPO / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/static-link-inputs.py"
 SPEC = importlib.util.spec_from_file_location("static_qualification", TOOL)
 Q = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(Q)
-POLICY = yaml.safe_load((REPO / "bundles/standard/.ai/config/ryeos/environments/qualification/static-link-inputs.yaml").read_text())["product_qualification_policy"]
+POLICY = yaml.safe_load((REPO / "bundles/environment-qualification/.ai/config/ryeos/environments/qualification/static-link-inputs.yaml").read_text())["product_qualification_policy"]
 PROFILE = POLICY["verifier_parameters"]
 FILES = Q.expected_files(PROFILE)
 DIRECTORIES = {str(parent) for name in FILES for parent in Path(name).parents if str(parent) != "."}

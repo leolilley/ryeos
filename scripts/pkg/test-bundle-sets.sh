@@ -139,10 +139,20 @@ assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 for forbidden in codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling standard web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
-[[ "${release_authority[*]}" == "core central-auth scheduling standard web browser ryeos-ui codex opencode bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling standard environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
+[[ "${release_authority[*]}" == "core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode bundle-release" ]]
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
+for set_name in full release-authority release-artifacts; do
+  mapfile -t members < <(ryeos_bundle_set_names "$set_name")
+  contains environment-qualification "${members[@]}"
+  mapfile -t managed < <(ryeos_bundle_set_bin_managed_names "$set_name")
+  assert_rejected contains environment-qualification "${managed[@]}"
+done
+for set_name in central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller; do
+  mapfile -t members < <(ryeos_bundle_set_names "$set_name")
+  assert_rejected contains environment-qualification "${members[@]}"
+done
 assert_rejected contains bundle-source "${release_authority[@]}"
 assert_rejected contains local-inference "${release_authority[@]}"
 render_specs="$ROOT/bundles/render-sandbox/specs"

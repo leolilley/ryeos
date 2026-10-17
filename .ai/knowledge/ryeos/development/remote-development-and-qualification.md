@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-30T04:06:09Z:85f1e5043778f220bbcc6b0d71af430d904b6e673a8cb06c7cc1a39365fad574:2YoFe+ATezXMIN5jW0MHyvH4kSGW8NjvkSC/m7yptGNUY9o8Y6aOrxG25MuQ3pM70CIjy3ZCdN8r0HsVCVuDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-16T09:33:55Z:ddb3ccdfc99b55b34175115ff7acefb7db509f9be2564ccaa903cd7b6137951d:tIn04hP9iVjBexp6aZjbI06RPzPYCO9iIbgBASrI1OR+gtz9sjPBMOF5ZSwU1teVdjsmLURm0eaIZ9Rmg7p5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -587,7 +587,7 @@ The signed policy owns the member set, including versioned archive names. Paths
 stay inside the supported flat `usr/lib/x86_64-linux-gnu/` archive/object
 namespace and `usr/share/doc/libc6/copyright`; modes, link refusal and aggregate
 bounds remain enforced. See the signed Config definitions under
-`bundles/standard/.ai/config/ryeos/environments/qualification/` for full examples.
+`bundles/environment-qualification/.ai/config/ryeos/environments/qualification/` for full examples.
 
 This migration replaces `development_platform_abi_v1` with
 `development_platform_profile_v2`; the fixed
@@ -625,7 +625,7 @@ qualification and downstream publication/activation.
 Cargo-vendor finalization selects its lock intent through the existing
 `strict_signed_project_bundle` resolver. The Tool has an empty caller schema;
 the resolver supplies `resolved_config` from
-`bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml`
+`bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml`
 inside the admitted project snapshot. It verifies that Config and the source
 Standard manifest against the node-trusted installed publisher. Installed
 Standard anchors publisher authority; its installed Config is not a fallback
@@ -640,7 +640,7 @@ Local CLI fixtures cannot authenticate their own supplied Config projection;
 Engine admission and later consumer acceptance retain those responsibilities.
 
 Static-link assembly uses the same resolver with
-`bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml`.
+`bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml`.
 Its independently signed digest selects the body of the project's existing
 static-link input contract. The producer reads that contract once through a
 bounded, stable, no-follow read, checks the digest and parses those same bytes.

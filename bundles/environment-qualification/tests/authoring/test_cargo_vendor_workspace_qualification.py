@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-22T10:08:57Z:99073f86769253cfa4060754fabca32725f73ffec0766f3652df4c0adbb509e5:Kiw47U2KjGdtLWZXDJoUvRW1cl4uZGkwc2F3dvOOa35lWRfGznJeX4Shq5QnLLPy/rSaYOp9X/xm9McpRrgxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:33:55Z:69ef04b73d78cdf531e6bdc2a855f2af07ff06f3991f729d2692ae275859be8f:fhDJugGa4j/Q6NmPb4TWriL5i8EETLQP591WVRANdD69v0ZY8o0dQ9zV7CKITHpRHfgv+g/Z9bU7zy7cUZ6DBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Regression coverage for qualifying the admitted workspace's vendor closure."""
 import importlib.util
 import json
@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-TOOL = Path(__file__).resolve().parents[4] / "bundles/standard/.ai/tools/ryeos/environments/qualification/cargo-vendor.py"
+TOOL = Path(__file__).resolve().parents[4] / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/cargo-vendor.py"
 SPEC = importlib.util.spec_from_file_location("vendor_workspace_qualification", TOOL)
 VENDOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VENDOR)

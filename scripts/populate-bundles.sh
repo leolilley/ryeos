@@ -13,8 +13,8 @@
 #   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
-#   full            core + central-auth + scheduling + standard + web + browser + ryeos-ui +
-#                   codex + opencode (default)
+#   full            core + central-auth + scheduling + standard + environment-qualification +
+#                   web + browser + ryeos-ui + codex + opencode (default)
 #   central-host    core + central-auth + scheduling + standard + web —
 #                   standard node plus the rye/web/search tool and app authentication
 #   standard        core + scheduling + standard — scheduler/graph/directive node
@@ -244,6 +244,7 @@ CODEX="$ROOT/bundles/codex"
 RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
+ENV_QUALIFICATION="$ROOT/bundles/environment-qualification"
 RELEASE_BUNDLE="$ROOT/bundles/bundle-release"
 BUNDLE_SOURCE="$ROOT/bundles/bundle-source"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
@@ -664,6 +665,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDL
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$STD" \
     --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+fi
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  ryeos_term_update "publishing environment-qualification bundle" "signed qualification policies"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$ENV_QUALIFICATION" \
+    --registry-root "$CORE" \
+    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 

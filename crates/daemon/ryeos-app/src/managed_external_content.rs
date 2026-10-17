@@ -1027,7 +1027,7 @@ mod tests {
             .nth(3)
             .expect("ryeos-app lives below the repository root");
         let activation_path = repository
-            .join("bundles/standard/.ai/config/development/ryeos/producer-python-activation.yaml");
+            .join("bundles/environment-qualification/.ai/config/development/ryeos/producer-python-activation.yaml");
         let activation_value: Value =
             serde_yaml::from_str(&lillux::signature::strip_signature_lines(
                 &std::fs::read_to_string(&activation_path).expect("read shipped activation"),
@@ -1049,7 +1049,7 @@ mod tests {
         );
 
         let consumer_path = repository.join(
-            "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
+            "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
         );
         let consumer = std::fs::read_to_string(consumer_path).expect("read shipped consumer");
         assert!(consumer.contains("#     - id: producer-python\n"));

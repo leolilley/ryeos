@@ -29,11 +29,11 @@ fn authored_qualification_profiles_pass_the_engine_caller_gate() {
     let root = repository();
     for name in ["development-platform", "static-link-inputs"] {
         let tool = python_tool(&root.join(format!(
-            "bundles/standard/.ai/tools/ryeos/environments/qualification/{name}.py"
+            "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/{name}.py"
         )));
         let policy_source: Value = serde_yaml::from_str(
             &std::fs::read_to_string(root.join(format!(
-                "bundles/standard/.ai/config/ryeos/environments/qualification/{name}.yaml"
+                "bundles/environment-qualification/.ai/config/ryeos/environments/qualification/{name}.yaml"
             )))
             .unwrap(),
         )
@@ -75,18 +75,18 @@ fn producer_intent_is_resolver_owned_and_not_a_caller_parameter() {
     for (tool_path, intent_path) in [
         (
             ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py",
-            "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml",
+            "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml",
         ),
         (
             ".ai/tools/ryeos/development/static-link-inputs/assemble.py",
-            "bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml",
+            "bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml",
         ),
     ] {
         let tool = python_tool(&root.join(tool_path));
         assert_eq!(
             tool["config_resolve"],
             json!({
-                "type":"strict_signed_project_bundle", "bundle_name":"standard", "config_path":intent_path
+                "type":"strict_signed_project_bundle", "bundle_name":"environment-qualification", "config_path":intent_path
             })
         );
         assert_eq!(

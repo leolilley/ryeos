@@ -1022,7 +1022,7 @@ fn native_environment_selections(
 fn calibration_source_bundle_roots(source_root: &Path) -> Vec<PathBuf> {
     vec![
         source_root.join("bundles/bundle-release"),
-        source_root.join("bundles/standard"),
+        source_root.join("bundles/environment-qualification"),
     ]
 }
 
@@ -4767,7 +4767,7 @@ mod tests {
             calibration_source_bundle_roots(&root),
             vec![
                 root.join("bundles/bundle-release"),
-                root.join("bundles/standard"),
+                root.join("bundles/environment-qualification"),
             ]
         );
     }

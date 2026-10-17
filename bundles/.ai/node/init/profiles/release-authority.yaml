@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-16T09:04:53Z:939daf28df5144951186bd6ff75a6ca835418b16737e7175c894512e7b31e790:61mqe03CUCa1HdOH4O8VVVpUiqNPMAHsBcQDkRuexD1rNcgVL/FJZL2DBaWU0fr1nAejBna5iIJOiMwtD1p4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-17T00:23:00Z:875595d7bf730fc4e192a9d71be7f74e7ef7edc6007cc1f9712edc6b30e212ee:g5LTU3d7cD+WMp5bR5CcimWUTqnjq8I+3xxhJXwzc3j1Q6IPZ+7qt6hzhziRTHUIhFCTGnjQRokaqTARwWVYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -6,6 +6,7 @@ exact_bundles:
   - central-auth
   - codex
   - core
+  - environment-qualification
   - opencode
   - ryeos-ui
   - scheduling
@@ -190,6 +191,7 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
+      environment-qualification: []
       ryeos-ui: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref

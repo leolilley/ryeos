@@ -14,16 +14,16 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[4]
-AUTHOR_PATH = ROOT / "bundles/standard/authoring/development-runtime/author_tree.py"
-SOURCE_AUTHOR_PATH = ROOT / "bundles/standard/authoring/development-runtime/author_source_tree.py"
+AUTHOR_PATH = ROOT / "bundles/environment-qualification/authoring/development-runtime/author_tree.py"
+SOURCE_AUTHOR_PATH = ROOT / "bundles/environment-qualification/authoring/development-runtime/author_source_tree.py"
 GNU_ACQUISITION = ROOT / ".ai/config/development/ryeos/gnu-python-acquisition.yaml"
 GNU_PRODUCTION = ROOT / ".ai/config/development/ryeos/gnu-python-production-inputs.yaml"
 SOURCE_ACQUISITION = ROOT / ".ai/config/development/ryeos/authoring-source-acquisition.yaml"
 AUTHORING_INPUTS = ROOT / ".ai/config/development/ryeos/authoring-environment-inputs.yaml"
-GNU_ACTIVATION = ROOT / "bundles/standard/.ai/config/development/ryeos/gnu-python-archives-activation.yaml"
-GNU_VERIFIER = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/gnu-python-archives.py"
-SOURCE_ACTIVATION = ROOT / "bundles/standard/.ai/config/development/ryeos/authoring-source-inputs-activation.yaml"
-SOURCE_VERIFIER = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/authoring-source-inputs.py"
+GNU_ACTIVATION = ROOT / "bundles/environment-qualification/.ai/config/development/ryeos/gnu-python-archives-activation.yaml"
+GNU_VERIFIER = ROOT / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/gnu-python-archives.py"
+SOURCE_ACTIVATION = ROOT / "bundles/environment-qualification/.ai/config/development/ryeos/authoring-source-inputs-activation.yaml"
+SOURCE_VERIFIER = ROOT / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/authoring-source-inputs.py"
 RELEASE_BASE = (
     "https://github.com/leolilley/ryeos/releases/download/"
     "ryeos-development-runtime-inputs-v1"

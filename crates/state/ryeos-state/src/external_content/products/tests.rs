@@ -53,14 +53,14 @@ fn authored_product_configs_decode_through_the_exact_state_contract() {
             "authoring-environment-products",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../.ai/config/development/ryeos/authoring-environment-products.yaml"
+                "/../../../bundles/environment-qualification/.ai/config/development/ryeos/authoring-environment-products.yaml"
             )),
         ),
         (
             "authoring-prepared-input-products",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../.ai/config/development/ryeos/authoring-prepared-input-products.yaml"
+                "/../../../bundles/environment-qualification/.ai/config/development/ryeos/authoring-prepared-input-products.yaml"
             )),
         ),
         (

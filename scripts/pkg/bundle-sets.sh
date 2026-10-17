@@ -26,7 +26,7 @@ ryeos_bundle_set_ids() {
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex opencode ;;
+    full)            printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode ;;
     central-host)    printf '%s\n' core central-auth scheduling standard web ;;
     standard)        printf '%s\n' core scheduling standard ;;
     standard-central-auth) printf '%s\n' core scheduling standard central-auth ;;
@@ -40,14 +40,14 @@ ryeos_bundle_set_names() {
     f5r-controller)  printf '%s\n' core standard codex render-sandbox ;;
     bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex opencode bundle-release
+      printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode bundle-release
       ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -199,7 +199,7 @@ ryeos_bundle_set_bin_managed_names() {
     # scheduling (service/command content) and central-auth (Python tool
     # support) own no compiled binaries; local-inference owns separately built
     # payloads.
-    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
+    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" || "$name" == "environment-qualification" ]] && continue
     printf '%s\n' "$name"
   done
 }

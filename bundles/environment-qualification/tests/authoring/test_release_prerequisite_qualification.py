@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T03:29:28Z:5166cbd268fc3f9e725f33f9a4595cd3e631feb579afc64582653beebb4bcc7c:o3GPDNc5GPkpNCxPq4LsMEnM2nBmy4Pp1wloPurrCB40IW5nohbpT0fR7IGZS0Hs2TEONOmMLLWC34ZvSPlNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:33:55Z:9f0d399548c9d277dcf58f3c45aadbd2dad091dbeb16c3e546f80981b453017d:W4o6sbiV8f9szONLzmqDHmFG0sdYos84sLlc6zVuo4c1ote8U7SyWQS/dwO+AyHXMnsR+mf3cS7pgXaQaem6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 from __future__ import annotations
 
 import hashlib
@@ -17,8 +17,8 @@ import yaml
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[4]
-TOOLS = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification"
-POLICIES = ROOT / "bundles/standard/.ai/config/ryeos/environments/qualification"
+TOOLS = ROOT / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification"
+POLICIES = ROOT / "bundles/environment-qualification/.ai/config/ryeos/environments/qualification"
 DEVELOPMENT = ROOT / ".ai/config/development/ryeos"
 PRODUCER = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
 # Synthetic realization identity for verifier contract tests. Live platform

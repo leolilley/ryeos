@@ -324,6 +324,7 @@
    "bundle-release",
    "bundle-source",
    "central-auth",
+   "environment-qualification",
    "local-inference",
    "opencode"
   ],

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-15T23:26:30Z:4e9238f962b4c59be0e365990eeea68862f95b09770b00a835429e28fdb7be05:fIXbYiJRo1DRi3Aw7CNc2l+xb1llSIuveN2Qij6qvfFMfqzMRRBuXGYqXm9I4gwihAOwsaUR2SFhQIoCxH6iAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-17T00:23:00Z:be6b227cb1215a0b6a84dde83af89063a1af4ea28319de8f4ed9b11e6417ca15:6sy6oaTFy3yRx79DbLCK/o0VscriHwYvQQT93ITSvNIarqpyU94nd0plRawL9k2/5I4aLifQ2nSjFGYOvbb0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Repository capture intent, composed with the target's signed node patterns.
 # Git ignores are not snapshot authority. Keep source and the public developer
 # signing fixture, but never send local artifacts or nested worktrees as source.
@@ -45,6 +45,9 @@ exclusions:
   - "/bundles/core/.ai/bin/"
   - "/bundles/core/.ai/objects/"
   - "/bundles/core/.ai/refs/"
+  - "/bundles/environment-qualification/.ai/bin/"
+  - "/bundles/environment-qualification/.ai/objects/"
+  - "/bundles/environment-qualification/.ai/refs/"
   - "/bundles/local-inference/.ai/bin/"
   - "/bundles/local-inference/.ai/objects/"
   - "/bundles/local-inference/.ai/refs/"
