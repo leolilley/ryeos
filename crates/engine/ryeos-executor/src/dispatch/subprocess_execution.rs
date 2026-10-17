@@ -20,7 +20,9 @@ pub(crate) enum DirectProtocolRoute {
 pub(crate) fn direct_protocol_route(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Option<DirectProtocolRoute> {
-    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+    use ryeos_engine::protocol_vocabulary::{
+        CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape,
+    };
     if protocol.descriptor.lifecycle.mode == LifecycleMode::Managed
         && protocol.descriptor.stdin.shape == StdinShape::Opaque
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
@@ -834,6 +836,9 @@ async fn dispatch_tool_subprocess(
                     .into(),
             });
         }
+        // The wrapper spawns nothing itself, but a guarantee it declares is
+        // still judged here; the method target is admitted on its own launch.
+        admit_tool_node_requirements(state, &resolved.resolved_item, &resolved.item_ref)?;
         return Box::pin(dispatch_via_method_executor(
             &resolved,
             request,
@@ -892,6 +897,11 @@ async fn dispatch_tool_subprocess(
             });
         let source =
             validate_direct_source_closure(state, &engine, &resolved, source_project_root)?;
+        // Validation applies the same launch admission a real run applies
+        // before it spawns: the manifest-backed runtime caps and the node
+        // guarantees the tool declares. A tool this node cannot host is
+        // refused here rather than reported ready for admission.
+        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
         let admission_ready = source
             .as_ref()
             .is_none_or(|preview| preview.ready_for_admission);
@@ -908,6 +918,12 @@ async fn dispatch_tool_subprocess(
         }));
     }
 
+    // Admitted before the direct program is finalized or any process is
+    // spawned: a tool declaring a node guarantee this node does not prove
+    // leaves nothing behind.
+    let effective_caps =
+        admit_tool_launch(state, &resolved.resolved_item, &resolved.item_ref, ctx)?;
+
     let parent_thread_id = request
         .parent_execution_context
         .as_ref()
@@ -922,8 +938,6 @@ async fn dispatch_tool_subprocess(
     .map_err(DispatchError::Internal)?;
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps =
-        derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -1142,7 +1156,10 @@ mod direct_continuation_producer_controls {
     fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             if path.is_dir() {
                 if name != "tests" && name != "target" && !name.starts_with('.') {
                     visit(&path, files);
@@ -1183,7 +1200,8 @@ mod direct_continuation_producer_controls {
             for name in ["DispatchRequest {", "DispatchLaunchOptions {"] {
                 for (index, _) in source.match_indices(name) {
                     let prefix = &source[..index];
-                    if prefix.ends_with("struct ") || prefix.ends_with("impl ")
+                    if prefix.ends_with("struct ")
+                        || prefix.ends_with("impl ")
                         || prefix.ends_with("for ")
                     {
                         continue;
@@ -1299,17 +1317,22 @@ mod direct_protocol_tests {
         protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
-        ))).unwrap();
+        )))
+        .unwrap();
         // Canonical label cannot determine the mechanics or grant readiness.
         protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
-        assert_eq!(direct_protocol_route(&protocol), Some(DirectProtocolRoute::QualificationOpaqueCallback));
+        assert_eq!(
+            direct_protocol_route(&protocol),
+            Some(DirectProtocolRoute::QualificationOpaqueCallback)
+        );
         assert!(uses_direct_subprocess_plan(&protocol));
         let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
         assert!(error.to_string().contains("selected route remains refused"));
         assert!(classify_managed_protocol(&protocol, "tool").is_err());
         protocol.descriptor.qualification_callback = None;
         assert_eq!(direct_protocol_route(&protocol), None);
-        protocol.descriptor.qualification_callback = Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
+        protocol.descriptor.qualification_callback =
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert_eq!(direct_protocol_route(&protocol), None);
     }
 
@@ -1319,7 +1342,8 @@ mod direct_protocol_tests {
         original.descriptor = serde_yaml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
-        ))).unwrap();
+        )))
+        .unwrap();
         let mut changed = original.clone();
         changed.descriptor.capabilities.allows_detached = true;
         assert_eq!(direct_protocol_route(&changed), None);
@@ -1327,11 +1351,16 @@ mod direct_protocol_tests {
         changed.descriptor.stdin.shape = StdinShape::LaunchEnvelope;
         assert_eq!(direct_protocol_route(&changed), None);
         let mut changed = original.clone();
-        changed.descriptor.stdout.shape = ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
+        changed.descriptor.stdout.shape =
+            ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
         assert_eq!(direct_protocol_route(&changed), None);
         let mut changed = original;
-        changed.descriptor.callback_channel = ryeos_engine::protocol_vocabulary::CallbackChannel::None;
-        assert_eq!(direct_protocol_route(&changed), Some(DirectProtocolRoute::Ordinary));
+        changed.descriptor.callback_channel =
+            ryeos_engine::protocol_vocabulary::CallbackChannel::None;
+        assert_eq!(
+            direct_protocol_route(&changed),
+            Some(DirectProtocolRoute::Ordinary)
+        );
         assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
     }
 

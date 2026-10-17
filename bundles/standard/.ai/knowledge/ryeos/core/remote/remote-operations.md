@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T20:28:16Z:c37a22836be9cca6011ce0a5f075e10c8099358e0265ce737393d833da4998d3:5p6EW4vCEdz5guev5TTFjEIH7Dpk1B9hTY91+LGue8qKBE88I8LPjeqgFydUnPKgTZoNH/8LuJKeev5yvozlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:14e6ac3136a75ac57cd6ff808ee984ed36a0560e6df8cf992c05749370d2a5c0:nFuYDjaDbcZ8cDYOwr2si/tNAn65TjalAefFwsUFB83yyINs/JYnzHx7apiGiEHF/2fLan7kWLv+BfN4KQcrAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -75,11 +75,14 @@ choose its authenticated origin.
 
 ### On the remote node
 
-1. **Bootstrap**: run `ryeos init --node-profile <distribution-profile>` so
+1. **Bootstrap**: run `ryeos init --node-profile <distribution-profile>
+   --host-class <class>` so
    the remote has node identity, vault key material, local operator
    authorization, the exact distribution bundles, and a complete signed node
-   policy generation. Packaged full nodes use `full`; images use the profile
-   mapped by their bundle-set packaging.
+   policy generation. Packaged full nodes use `full` with class `local`;
+   images use the profile mapped by their bundle-set packaging, with the class
+   the deployment sets in `RYEOS_INIT_HOST_CLASS` (`hosted` in a hosting
+   provider's container, `local` on a host the operator runs).
 
 2. **Authorize the caller node key**: either mint a one-time admission
    token on the target node, or directly authorize the caller node key.

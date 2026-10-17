@@ -435,6 +435,7 @@ mod tests {
                 channel_authority_generation: "3".repeat(64),
                 channel_owner_public_key: channel_authority.owner_public_key(),
                 channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+                admitted_adapter_request_base64: None,
                 request_digest: "e".repeat(64),
                 max_active: 1,
                 timeout_seconds: 60,
@@ -553,6 +554,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             crate::external_placement::exchange_external_supervisor_frame_and_wake_imports(

@@ -278,6 +278,7 @@ pub(super) fn fixture_signed_reservation(
         directory_identity: json(runtime),
         database_name: format!("{purpose}.sqlite3"),
         roles: std::array::from_fn(|_| None),
+        orphan_sidecars_recoverable: false,
     });
     let record = ClaimRecord {
         schema: CLAIM_SCHEMA,
@@ -2937,7 +2938,11 @@ impl OriginalQuotaClaim {
         if let Some(operation) = prior {
             operation.require_staged(runtime)?;
         }
-        let (sources, source_roots, source_pins) = capture_sources(runtime, owner.db_target()?)?;
+        let (sources, source_roots, source_pins) = capture_sources(
+            runtime,
+            owner.db_target()?,
+            prior.is_some_and(|operation| operation.scheduler_sources()[0].current.is_some()),
+        )?;
         let state_lease = owner.retain_state_lease()?;
         let operational_namespace = owner.retain_namespace()?;
         let (operational_source, operational_source_pins) =
@@ -5054,12 +5059,14 @@ mod clock_controls {
                     directory_identity: "{}".into(),
                     database_name: "runtime.sqlite3".into(),
                     roles: std::array::from_fn(|_| None),
+                    orphan_sidecars_recoverable: false,
                 },
                 InspectionSourcePlan {
                     purpose: "scheduler".into(),
                     directory_identity: "{}".into(),
                     database_name: "scheduler.sqlite3".into(),
                     roles: std::array::from_fn(|_| None),
+                    orphan_sidecars_recoverable: false,
                 },
             ],
         }

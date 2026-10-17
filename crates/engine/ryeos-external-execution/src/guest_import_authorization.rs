@@ -279,6 +279,25 @@ impl VerifiedGuestImportAuthorization {
         &self.identity_digest
     }
 
+    /// The inputs this guest verified, in the order the controller expects a
+    /// leased guest's Ready to name them. `signed_import_bytes` are the exact
+    /// bytes this verification accepted, and the package payload digest is the
+    /// ticket's: staging refuses an upload that differs from it.
+    pub fn ready_boot_inputs(&self, signed_import_bytes: &[u8]) -> Vec<String> {
+        let import_sha256 =
+            ryeos_external_execution_contract::lease_ready_inputs::signed_import_sha256(
+                signed_import_bytes,
+            );
+        ryeos_external_execution_contract::lease_ready_inputs::ordered_lease_ready_inputs(
+            &self.authorization.activation_request_digest,
+            &import_sha256,
+            &self.authorization.ticket.payload_sha256,
+        )
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
     pub fn require_fresh_admission(&self) -> Result<()> {
         self.require_fresh_admission_at(lillux::time::timestamp_millis())
     }

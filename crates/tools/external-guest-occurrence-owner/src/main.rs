@@ -151,6 +151,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     ));
     let source = lillux::sandbox::enter_linux_private_source_filesystem(limits)
         .map_err(anyhow::Error::msg)?;
+    let ready_boot_inputs = admitted.ready_boot_inputs(&import_bytes);
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
         &upload,
@@ -159,6 +160,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
         assignment_bytes,
         source,
         lifetime,
+        Some(ready_boot_inputs),
     )?;
     held.mount_preparation_receipt()?;
     let cancelling = Arc::new(AtomicBool::new(false));

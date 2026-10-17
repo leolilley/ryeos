@@ -49,7 +49,7 @@ impl NativeHostRegion {
             physical_release: None }
     }
     pub fn require_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inherited native host region controller refused");
+        ensure!(!crate::foreign_process(self.process), "inherited native host region controller refused");
         Ok(())
     }
     pub fn bytes(&self) -> u64 { self.layout.bytes() as u64 }

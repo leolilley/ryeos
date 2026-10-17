@@ -3,8 +3,8 @@
 //! error (404) with the installed-bundle list — not an opaque
 //! `internal: not found` 500.
 //!
-//! Downstream motivation: a lean hosted-node image (core + hosted-node
-//! policy, no scheduling bundle) receiving `ryeos remote run <node>
+//! Downstream motivation: a lean hosted-node image (core only, no
+//! scheduling bundle) receiving `ryeos remote run <node>
 //! service:scheduler/register` must tell the operator *why* the service
 //! is missing and what is actually installed.
 

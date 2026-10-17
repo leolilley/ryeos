@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:61b15f88832ad6e82c201dc1bb07b04bc1f6575f8445906b36c37da737ed7c00:0pTMHCR/H7MGlB5d5nWcS+KbjUiiq+lA2lH3+HcSSD5lG3p3CmfZo4FgQHhgBD7U2qgOo+wCnb/56Gt1OI0PBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:b2f1d84a453d300cd65f258ed319173f2ef065f7b5bb21701d9cf4753716f03c:Ol1984zVyS/kKNroXo52b6ttW/9jqn/yfp8nuxCPd+sFGH7rWtcFheTl+FkapoaSqLJycE9Vtq94ZqhViAsKDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -16,16 +16,16 @@ description: >
 ```bash
 # Install package, then initialize packaged bundles from /usr/share/ryeos
 yay -S ryeos
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ryeos start
 ryeos node status
 ```
 
-For packaged installs, `ryeos init --node-profile full` is the required
+For packaged installs, `ryeos init --node-profile full --host-class local` is the required
 setup command. It
 uses `/usr/share/ryeos` as the default bundle source. Package install
 hooks validate `/usr/share/ryeos/*/.ai` and print `Initialize with:
-ryeos init --node-profile full`.
+ryeos init --node-profile full --host-class local`.
 
 ## Lifecycle surface
 
@@ -44,7 +44,8 @@ selected complete policy generation, writes its read-only derived sync view,
 and commits a signed whole-init fence over registrations and policy generation
 before startup may proceed. The prior fence is durably invalidated before the
 first mutation. Every distribution explicitly selects one complete
-publisher-signed source-root init profile with `--node-profile <name>`.
+publisher-signed source-root init profile with `--node-profile <name>` and
+one of its declared host classes with `--host-class <class>`.
 Selection verifies the profile's exact bundle inventory, then materializes the
 complete generation beneath `.ai/node/policies/` under the node's own signer.
 Bundle presence never selects policy implicitly, and fresh init refuses an
@@ -80,7 +81,7 @@ invalid names are skipped; bundle names are not hardcoded.
 cargo build
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem \
   --owner "RyeOS Development" --bundle-set full --all
-ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ryeos start
 ```
 

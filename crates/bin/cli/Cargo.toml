@@ -22,10 +22,8 @@ clap        = { workspace = true }
 crossterm   = { workspace = true }
 dirs        = { workspace = true }
 futures-util = { workspace = true }
-hex         = { workspace = true }
 libc        = { workspace = true }
 rand        = { workspace = true }
-reqwest     = { workspace = true, features = ["rustls-tls"] }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
@@ -39,6 +37,7 @@ uuid        = { workspace = true }
 zeroize     = { workspace = true }
 
 lillux         = { workspace = true }
+ryeos-client-transport = { workspace = true }
 ryeos-app      = { workspace = true }
 ryeos-api      = { workspace = true }
 ryeos-bundle   = { workspace = true }

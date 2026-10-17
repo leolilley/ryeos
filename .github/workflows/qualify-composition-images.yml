@@ -1,0 +1,149 @@
+name: Build composition image candidates
+
+# Builds the composition images (core, core-scheduling, standard,
+# f5r-controller) from the checked-out commit, signed with the development
+# publisher key, and pushes candidate tags to GHCR. Candidates are deployed by
+# the digests printed below, never by tag. Nothing here promotes an image to an
+# official release: the development publication refuses the official owner.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Candidate SemVer with a prerelease, for example 0.1.0-composition.1"
+        required: true
+        type: string
+      tag_suffix:
+        description: "Optional suffix appended to the candidate tag"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ryeos-composition-candidates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve candidate coordinates
+        id: candidate
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          TAG_SUFFIX: ${{ inputs.tag_suffix }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          VERSION="$(scripts/release/resolve-version.sh workflow_dispatch '' "$REQUESTED_VERSION")"
+          [[ "$VERSION" == *-* ]] || {
+            echo "candidate version must carry a prerelease identifier" >&2
+            exit 1
+          }
+          [[ -z "$TAG_SUFFIX" || "$TAG_SUFFIX" =~ ^[0-9A-Za-z][0-9A-Za-z.-]{0,40}$ ]] || {
+            echo "tag suffix must be a short tag-safe string" >&2
+            exit 1
+          }
+          SOURCE_SHA="$(git rev-parse --verify HEAD)"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
+          BUILD_DATE="$(date --utc --date="@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
+          TAG="candidate-${SOURCE_SHA}${TAG_SUFFIX:+-$TAG_SUFFIX}"
+          PREFIX="ghcr.io/${OWNER,,}/ryeos"
+          {
+            echo "version=$VERSION"
+            echo "sha=$SOURCE_SHA"
+            echo "epoch=$SOURCE_DATE_EPOCH"
+            echo "build_date=$BUILD_DATE"
+            echo "tag=$TAG"
+            echo "prefix=$PREFIX"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assert development publisher key
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_DEV_PUBLISHER_KEY }}
+        run: |
+          test -n "$PUBLISHER_KEY"
+          # The key file lives under the runner's per-job temporary directory,
+          # private to this account, and is removed when the step ends.
+          umask 077
+          KEY_FILE="$(mktemp -p "$RUNNER_TEMP" publisher-key.XXXXXX)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$PUBLISHER_KEY" > "$KEY_FILE"
+          EXPECTED="$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text())["fingerprint"])')"
+          ACTUAL="$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null \
+            | tail -c 32 | sha256sum | cut -d' ' -f1)"
+          [[ "$ACTUAL" == "$EXPECTED" ]] || {
+            echo "RYEOS_DEV_PUBLISHER_KEY does not match the development publisher trust document" >&2
+            exit 1
+          }
+          [[ "$ACTUAL" != "$(scripts/release/official-publisher-fingerprint.sh)" ]]
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push composition candidates
+        id: bake
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_DEV_PUBLISHER_KEY }}
+        with:
+          source: .
+          files: ./docker-bake.composition.hcl
+          targets: composition
+          # The bake file names no output; pushing candidates is this
+          # workflow's explicit choice.
+          push: true
+          vars: |
+            PUBLICATION_STAGE=development-publication
+            PUBLISHER_OWNER=RyeOS Development
+            VERSION=${{ steps.candidate.outputs.version }}
+            SOURCE_DATE_EPOCH=${{ steps.candidate.outputs.epoch }}
+            VCS_REF=${{ steps.candidate.outputs.sha }}
+            BUILD_DATE=${{ steps.candidate.outputs.build_date }}
+            IMAGE_PREFIX=${{ steps.candidate.outputs.prefix }}
+            IMAGE_TAG=${{ steps.candidate.outputs.tag }}
+
+      - name: Print candidate digests
+        env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
+          PREFIX: ${{ steps.candidate.outputs.prefix }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          SOURCE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          {
+            echo "### Composition candidates"
+            echo
+            echo "Source: \`$SOURCE_SHA\` (development publisher; not an official release)"
+            echo
+            echo "| image | digest reference |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for target in core core-scheduling standard f5r-controller; do
+            DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+            [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "no pushed digest for $target" >&2
+              exit 1
+            }
+            IMAGE="${PREFIX}-${target}"
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
+            echo "${IMAGE}:${TAG} -> ${IMAGE}@${DIGEST}"
+            echo "| ${target} | \`${IMAGE}@${DIGEST}\` |" >> "$GITHUB_STEP_SUMMARY"
+          done

@@ -11,13 +11,16 @@ default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service"]
 model-provider-setup = ["dep:ryeos-directive-definition"]
 handoff-test-support = ["ryeos-app/test-support"]
+# Exact process-kill qualification for project apply-snapshot durable
+# boundaries. The cut selector does not exist in production builds.
+crash-qualification-test-support = ["ryeos-app/crash-qualification-test-support"]
 
 [dependencies]
 ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-stream = { workspace = true }
-axum = { workspace = true, features = ["default"] }
+axum = { workspace = true, features = ["default", "ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -64,10 +67,17 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync
 uuid = { workspace = true }
 zeroize = { workspace = true }
 tokio-stream = { workspace = true }
+tungstenite = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+futures-util = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ryeos-external-candidate-supervisor = { path = "../../tools/external-candidate-supervisor", features = ["test-support"] }
+ryeos-external-execution = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { workspace = true }
 ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-graph-definition = { workspace = true }
 rusqlite = { workspace = true }

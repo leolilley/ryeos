@@ -9,9 +9,9 @@ use ryeos_state::{objects::Attestation, signer::Signer};
 use serde::{Deserialize, Serialize};
 use ryeos_node_runtime::calibration_policy::{CalibrationProductSelection, CalibrationEnvironmentSelection, CalibrationEnvironmentProduct, CalibrationEnvironmentKind, CalibrationTerminal, CalibrationEnvironmentUse, CalibrationEnvironmentEvidence, validate_calibration_hash};
 
-pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v2";
-pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v2";
-pub const AUTHORITY_CALIBRATION_POLICY: &str = "ryeos.bundle_publication_authority_calibration.v2";
+pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v3";
+pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v3";
+pub const AUTHORITY_CALIBRATION_POLICY: &str = "ryeos.bundle_publication_authority_calibration.v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +101,11 @@ pub struct AuthorityCalibrationEvidence {
     pub node_signer_fingerprint: String,
     pub substrate_image_digest: String,
     pub substrate_protocol: u32,
+    /// Init profile and host class the measuring node's signed substrate
+    /// identity binds. The same image measured under another composition or
+    /// on another kind of host is a different measurement.
+    pub node_profile: String,
+    pub host_class: String,
     pub portable: AuthorityCalibrationLane,
     pub native: AuthorityCalibrationLane,
     pub core_seed: AuthorityCalibrationLane,
@@ -129,6 +134,11 @@ impl AuthorityCalibrationEvidence {
         validate_calibration_hash("calibration substrate image", image)?;
         if self.substrate_protocol == 0 {
             bail!("calibration substrate protocol must be nonzero");
+        }
+        ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
+            .context("calibration node profile")?;
+        if !ryeos_engine::isolation::valid_host_class_name(&self.host_class) {
+            bail!("calibration host class `{}` is not a canonical name", self.host_class);
         }
         self.portable.validate("portable")?;
         self.native.validate("native")?;
@@ -458,6 +468,8 @@ mod tests {
             node_signer_fingerprint: fingerprint.clone(),
             substrate_image_digest: format!("sha256:{}", hash('e')),
             substrate_protocol: 1,
+            node_profile: "release-authority".to_owned(),
+            host_class: "local".to_owned(),
             portable: lane.clone(),
             native: AuthorityCalibrationLane {
                 qualification_attestation_hash: hash('8'),
@@ -511,13 +523,21 @@ mod tests {
         collapsed.native = collapsed.portable.clone();
         assert!(collapsed.validate().is_err());
         let mut legacy = serde_json::to_value(&evidence).unwrap();
-        legacy["schema"] = serde_json::json!("ryeos.bundle_publication_authority_calibration.v1");
+        legacy["schema"] = serde_json::json!("ryeos.bundle_publication_authority_calibration.v2");
         assert!(
             serde_json::from_value::<AuthorityCalibrationEvidence>(legacy)
                 .unwrap()
                 .validate()
                 .is_err()
         );
+        for unbound in ["node_profile", "host_class"] {
+            let mut incomplete = serde_json::to_value(&evidence).unwrap();
+            incomplete.as_object_mut().unwrap().remove(unbound);
+            assert!(serde_json::from_value::<AuthorityCalibrationEvidence>(incomplete).is_err());
+        }
+        let mut noncanonical = evidence.clone();
+        noncanonical.host_class = "Local".to_owned();
+        assert!(noncanonical.validate().is_err());
         let mut incomplete = serde_json::to_value(&evidence).unwrap();
         incomplete.as_object_mut().unwrap().remove("portable");
         assert!(serde_json::from_value::<AuthorityCalibrationEvidence>(incomplete).is_err());

@@ -64,7 +64,7 @@ class GatePackageSelection(unittest.TestCase):
                 self.assertNotIn("--workspace", args)
 
     def test_reduced_daemon_keeps_scheduler_absent(self):
-        args = self.invoke("--bundle-set", "hosted-node", "-p", "ryeosd")
+        args = self.invoke("--bundle-set", "core", "-p", "ryeosd")
         self.assertNotIn("--workspace", args)
         self.assertNotIn("--features", args)
 

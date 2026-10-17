@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:56Z:fe212aa20694a385acb933ed580b54d8f9abfbde607314101f07fe1d0a84485a:VVv3oc90Zqo4vPAMCxzlzbFwye++GHI3ogtuU15MRtLOmxcsaRqsjfICN1wsSzz8IOvHK257DkmMnU9SlrSPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T10:03:17Z:a0ac3c8a4999bebc61a017ec231e5b1ef1034b765fd56f29daaa491f44ae59eb:EtbxKTYrUricSTK0F+pyb4l1gbs1YkNf3GRuqDapIDmp467fropBgtvdfPOqOtgO5FcSqx/uvDVI1S7DJ9ehAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one short-lived RyeOS-owned Codex credential-enrollment execution.
@@ -29,3 +29,18 @@ requires:
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
       - ryeos.runtime.dedicated_session.terminate
+  # Guarantees the node running this enrollment must prove in its capability
+  # report: the credential profile it writes must survive the node process
+  # with no provider deadline, inside a home private to the node's account.
+  # Durable state rests on the node's declared lifetime, so a trusted grade
+  # counts, as does a provider-attested one where a sandbox owns the storage.
+  # The enrollment binds a credential profile, the one credential kind it
+  # declares, so only that kind's guarantees are judged.
+  node:
+    - name: persistence:durable_state
+      accept: [measured, provider_attested, trusted]
+    - time
+  credential_kinds:
+    credential_profile:
+      - name: credential:private_home
+        accept: [measured, provider_attested, trusted]

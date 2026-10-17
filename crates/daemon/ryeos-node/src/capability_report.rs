@@ -13,17 +13,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use lillux::process_control::{
-    CapabilityEvidence, CapabilityRequirement, HostCapabilities, HostFacts, ProofSource,
-    ResidencyProof, SCOPE_LIMITS, is_scope_capability, satisfies,
+    CapabilityEvidence, CapabilityRequirement, HOST_PROVIDER, HostCapabilities, HostFacts,
+    PERSISTENCE_DURABLE_STATE, PrivateDirectoryFacts, ProofSource, ResidencyProof, SCOPE_LIMITS,
+    decide_private_directory, is_scope_capability, satisfies,
 };
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v4";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v7";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 /// Provider id of the environment the hosting provider delivers to the node
 /// process at startup.
 pub const PROVIDER_ENV_PROVIDER: &str = "provider_env";
+/// The node holds a credential home private to its own account on durable
+/// state: the root every credential profile home lives under is a directory
+/// owned by the node's account, mode 0700, reached from the app root
+/// through directories no other account can replace, all on the app root's
+/// mount, and the app root meets `persistence:durable_state`. A workload
+/// that enrolls or uses a credential profile names it when its credential
+/// must survive the node process with no deadline the host provider imposes.
+pub const CREDENTIAL_PRIVATE_HOME: &str = "credential:private_home";
 const REPORT_FILE: &str = "node-capability-report.json";
 const MAX_REPORT_BYTES: u64 = 1024 * 1024;
 
@@ -42,6 +51,10 @@ pub struct ReportGeneration {
 pub struct NodeComposition {
     /// Initialization profile, when the node recorded one.
     pub profile: Option<String>,
+    /// Host class the node's signed substrate identity binds: the kind of
+    /// host the deployment declared at initialization, whose floor `floor`
+    /// reports against.
+    pub host_class: String,
     pub bundles: Vec<String>,
     /// Every optional feature compiled into this daemon binary.
     pub compiled_features: Vec<String>,
@@ -134,6 +147,9 @@ pub struct NodeCapabilityReport {
     pub composition: NodeComposition,
     pub exposure: NodeExposure,
     pub host: HostFacts,
+    /// The root every credential profile home lives under, and every
+    /// directory from the app root down to it, as observed.
+    pub credential_home: PrivateDirectoryFacts,
     pub provided: BTreeMap<String, CapabilityEvidence>,
     pub missing: BTreeMap<String, String>,
     /// Budgets a placement could reserve against, by open name.
@@ -188,13 +204,23 @@ impl NodeCapabilityReport {
             .map_err(anyhow::Error::msg)
             .context("read the host generation for the node capability report")?;
         let resident_bytes = resident_region_bytes()?;
-        let host = HostFacts::observe(resident_bytes, inputs.app_root);
+        let mut host = HostFacts::observe(resident_bytes, inputs.app_root);
         if host.boot_id != boot_id || host.container_enclosure != cgroup_enclosure {
             bail!("host generation changed while the node capability report was observed");
         }
+        host.declared_lifetime = inputs.isolation.host_lifetime_bound.clone();
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(inputs.app_root.to_path_buf()).state();
+        let established = ryeos_app::private_artifact_home::ensure_root(&state_dir)
+            .err()
+            .map(|error| format!("{error:#}"));
+        let credential_home = PrivateDirectoryFacts::observe(
+            inputs.app_root,
+            &ryeos_app::private_artifact_home::root(&state_dir),
+        );
         let mut view = host.capabilities();
         add_scope_capabilities(&mut view, inputs.isolation, inputs.host_runtime_provider, host.gvisor());
         add_provider_environment(&mut view, inputs.provider_environment);
+        add_credential_home(&mut view, &credential_home, established.as_deref());
         let mut capacity = BTreeMap::new();
         if let Some(limit) = &host.cgroup.memory_max
             && let Ok(bytes) = limit.value.parse::<u64>()
@@ -207,6 +233,19 @@ impl NodeCapabilityReport {
             capacity.insert("enclosure_pids_max".to_owned(), tasks);
         }
         let floor = match_floor(&inputs.isolation.requires_capabilities, &view);
+        // Profile and host class come from the identity the signed init
+        // completion vouches for, never from the running policy alone, and
+        // the running isolation policy must be that class's.
+        let identity = crate::init::load_verified_substrate_identity(inputs.app_root)
+            .context("verify the substrate identity for the node capability report")?;
+        let host_class = identity.bound_host_class()?.to_owned();
+        if inputs.isolation.host_class != host_class {
+            bail!(
+                "the running isolation policy is for host class `{}`, but this node was \
+                 initialized under host class `{host_class}`; a node's host class does not change",
+                inputs.isolation.host_class
+            );
+        }
         Ok(Self {
             schema: CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: inputs.node_fingerprint.to_owned(),
@@ -215,15 +254,15 @@ impl NodeCapabilityReport {
             generation: ReportGeneration { boot_id, cgroup_enclosure },
             subject: "node".to_owned(),
             composition: NodeComposition {
-                profile: crate::init::load_verified_substrate_identity(inputs.app_root)
-                    .ok()
-                    .and_then(|identity| identity.node_profile),
+                profile: identity.node_profile,
+                host_class,
                 bundles: inputs.bundles,
                 compiled_features: inputs.compiled_features,
                 policy_generation: inputs.policy_generation,
             },
             exposure: NodeExposure::unattested(inputs.listeners),
             host,
+            credential_home,
             provided: view.provided,
             missing: view.missing,
             capacity,
@@ -564,6 +603,47 @@ fn add_provider_environment(
     view.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, PROVIDER_ENV_PROVIDER, basis);
 }
 
+/// Grade the credential home this node holds, from what it observes. It
+/// needs the credential home root, walked from the app root, to be private
+/// to the node's account, and the app root to hold durable state. Its grade
+/// is the durable-state proof's, which is never above trusted because the
+/// absence of a host lifetime is declared rather than measured.
+fn add_credential_home(
+    view: &mut HostCapabilities,
+    home: &PrivateDirectoryFacts,
+    establish_refusal: Option<&str>,
+) {
+    let private = decide_private_directory(home).map_err(|reason| match establish_refusal {
+        Some(refusal) => format!("{reason}; the node could not establish it: {refusal}"),
+        None => reason,
+    });
+    let durable = view.provided.get(PERSISTENCE_DURABLE_STATE).cloned().ok_or_else(|| {
+        view.missing
+            .get(PERSISTENCE_DURABLE_STATE)
+            .cloned()
+            .unwrap_or_else(|| "durable state is undecided".to_owned())
+    });
+    match (private, durable) {
+        // The durable-state entry carries its own basis; naming it here
+        // keeps this basis within the view's text bound.
+        (Ok(basis), Ok(evidence)) => view.provide(
+            CREDENTIAL_PRIVATE_HOME,
+            evidence.source.clone(),
+            HOST_PROVIDER,
+            format!(
+                "credential home root {basis}; {PERSISTENCE_DURABLE_STATE} is held ({} by {})",
+                evidence.source.as_str(),
+                evidence.provider
+            ),
+        ),
+        (Err(reason), _) => view.refuse(CREDENTIAL_PRIVATE_HOME, format!("credential home root: {reason}")),
+        (Ok(_), Err(reason)) => view.refuse(
+            CREDENTIAL_PRIVATE_HOME,
+            format!("{PERSISTENCE_DURABLE_STATE} is not held: {reason}"),
+        ),
+    }
+}
+
 /// A name is met only by the exact named capability, at a grade the entry
 /// accepts, from a provider it accepts. A weaker grade is a different name
 /// and never stands in for a stronger one unless the floor entry names it
@@ -646,7 +726,10 @@ fn refusal_text(
 mod tests {
     use super::*;
 
-    use lillux::process_control::{CapabilityRequirementSpec, HOST_PROVIDER};
+    use lillux::process_control::{
+        CapabilityRequirementSpec, DirectoryStepFacts, HOST_PROVIDER, MAX_CAPABILITY_ENTRIES,
+        MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_TEXT_BYTES,
+    };
 
     fn view(provided: &[&str], missing: &[(&str, &str)]) -> HostCapabilities {
         let mut view = HostCapabilities::default();
@@ -695,18 +778,160 @@ mod tests {
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: None,
+                host_class: "hosted".to_owned(),
                 bundles: Vec::new(),
                 compiled_features: Vec::new(),
                 policy_generation: "fixture".to_owned(),
             },
             exposure: NodeExposure::unattested(vec!["127.0.0.1:7400".to_owned()]),
             host: HostFacts::observe(0, Path::new("/")),
+            credential_home: private_home(0o700, 40),
             floor: match_floor(&requires, &provided),
             provided: provided.provided,
             missing: provided.missing,
             capacity: BTreeMap::new(),
             established_residency: None,
         }
+    }
+
+    fn private_home(mode: u32, mount: u64) -> PrivateDirectoryFacts {
+        let step = |path: &str, mode: u32, mount: u64| DirectoryStepFacts {
+            path: path.to_owned(),
+            owner_uid: 1000,
+            mode,
+            mount_id: mount,
+        };
+        PrivateDirectoryFacts {
+            path: "/data/app/.ai/state/private-artifact-homes".to_owned(),
+            anchor: "/data/app".to_owned(),
+            process_uid: Some(1000),
+            chain: vec![
+                step("/data/app", 0o755, 40),
+                step("/data/app/.ai", 0o755, 40),
+                step("/data/app/.ai/state", 0o755, 40),
+                step("/data/app/.ai/state/private-artifact-homes", mode, mount),
+            ],
+            walk_refusal: None,
+        }
+    }
+
+    /// Durable state as a node with a durable volume and no declared host
+    /// lifetime reports it.
+    fn durable(view: &mut HostCapabilities) {
+        view.provide(
+            PERSISTENCE_DURABLE_STATE,
+            ProofSource::Trusted,
+            HOST_PROVIDER,
+            "ext4 at /data, durable by mount; no hard lifetime is declared",
+        );
+    }
+
+    #[test]
+    fn the_credential_home_follows_the_home_root_and_durable_state() {
+        // A durable node with a private root holds the home at the durable
+        // state's grade, naming that entry rather than repeating it.
+        let mut controller = view(&["time"], &[]);
+        durable(&mut controller);
+        add_credential_home(&mut controller, &private_home(0o700, 40), None);
+        let home = &controller.provided[CREDENTIAL_PRIVATE_HOME];
+        assert_eq!((&home.source, home.provider.as_str()), (&ProofSource::Trusted, HOST_PROVIDER));
+        assert!(home.basis.contains("mode 0700") && home.basis.contains("from /data/app down"), "{}", home.basis);
+        assert!(home.basis.ends_with("persistence:durable_state is held (trusted by host)"), "{}", home.basis);
+        // A disposable host: durable state is refused, so the home is not held.
+        let bounded_reason = "no persistent disk; 24 h hard lifetime (fixture)";
+        let mut bounded = view(&["time"], &[(PERSISTENCE_DURABLE_STATE, bounded_reason)]);
+        add_credential_home(&mut bounded, &private_home(0o700, 40), None);
+        assert_eq!(
+            bounded.missing[CREDENTIAL_PRIVATE_HOME],
+            format!("{PERSISTENCE_DURABLE_STATE} is not held: {bounded_reason}")
+        );
+        // A root another account can read is refused with the observed mode,
+        // and a failure to establish the root is named.
+        let mut open = view(&["time"], &[]);
+        durable(&mut open);
+        add_credential_home(&mut open, &private_home(0o755, 40), Some("read-only file system"));
+        let reason = &open.missing[CREDENTIAL_PRIVATE_HOME];
+        assert!(reason.contains("mode 0755") && reason.contains("could not establish it: read-only"), "{reason}");
+        // A bind mount at the root is refused.
+        let mut elsewhere = view(&["time"], &[]);
+        durable(&mut elsewhere);
+        add_credential_home(&mut elsewhere, &private_home(0o700, 41), None);
+        assert!(elsewhere.missing[CREDENTIAL_PRIVATE_HOME].contains("not the mount 40 of /data/app"));
+        // A login floor that accepts the trusted durable state admits the
+        // controller and refuses the disposable host; a bare-name floor,
+        // which accepts only a measured proof, admits neither.
+        let accepting = |name: &str| entry(name, &["measured", "trusted"], &[]);
+        let login = vec![accepting(CREDENTIAL_PRIVATE_HOME), accepting(PERSISTENCE_DURABLE_STATE), "time".into()];
+        let admitted = match_floor(&login, &controller);
+        assert!(admitted.admitted, "{admitted:?}");
+        assert_eq!(admitted.met_by[CREDENTIAL_PRIVATE_HOME].provider, HOST_PROVIDER);
+        let refused = match_floor(&login, &bounded);
+        assert_eq!(refused.unmet[PERSISTENCE_DURABLE_STATE], bounded_reason);
+        let bare = match_floor(&floor(&[PERSISTENCE_DURABLE_STATE]), &controller);
+        assert!(bare.unmet[PERSISTENCE_DURABLE_STATE].contains("only trusted-proven"), "{bare:?}");
+        // A remote authoring floor may accept the provider environment instead.
+        let either = CapabilityRequirement::Spec(CapabilityRequirementSpec {
+            name: None,
+            any_of: vec![CREDENTIAL_PRIVATE_HOME.to_owned(), SECRETS_PROVIDER_ENV.to_owned()],
+            accept: vec!["measured".to_owned(), "provider_attested".to_owned()],
+            providers: Vec::new(),
+        });
+        let mut keyed = bounded.clone();
+        keyed.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, PROVIDER_ENV_PROVIDER, "OPENAI_API_KEY");
+        let admitted = match_floor(std::slice::from_ref(&either), &keyed);
+        assert_eq!(admitted.met_by[&either.label()].name, SECRETS_PROVIDER_ENV);
+        assert!(!match_floor(std::slice::from_ref(&either), &bounded).admitted);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_credential_home_root_is_established_private_before_it_is_graded() {
+        let app_root = tempfile::tempdir().unwrap();
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.path().to_path_buf()).state();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // Whatever the umask, no directory on the walk is group-writable.
+        for directory in state_dir.ancestors().take_while(|directory| directory.starts_with(app_root.path())) {
+            lillux::PinnedDirectory::open(directory).unwrap().unwrap().set_mode(0o755).unwrap();
+        }
+        let root = ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap();
+        let facts = PrivateDirectoryFacts::observe(app_root.path(), &root);
+        assert_eq!(facts.walk_refusal, None, "{facts:?}");
+        assert_eq!(facts.chain.last().map(|step| step.mode), Some(0o700), "{facts:?}");
+        let mut view = view(&["time"], &[]);
+        durable(&mut view);
+        add_credential_home(&mut view, &facts, None);
+        assert!(view.provided.contains_key(CREDENTIAL_PRIVATE_HOME), "{view:?}");
+        // Establishing it again is idempotent.
+        assert_eq!(ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap(), root);
+    }
+
+    #[test]
+    fn every_name_the_node_reports_fits_the_view_bounds() {
+        // The host decides its own names; the node adds the per-scope names,
+        // the scope limit, the provider environment and the credential home.
+        let host = HostFacts::observe(0, Path::new("/"));
+        let mut view = host.capabilities();
+        let mut names: std::collections::BTreeSet<String> =
+            view.provided.keys().chain(view.missing.keys()).cloned().collect();
+        for capability in lillux::ProcessScopeCapability::ALL {
+            names.insert(capability.capability_name().to_owned());
+        }
+        names.extend([SCOPE_LIMITS, SECRETS_PROVIDER_ENV, CREDENTIAL_PRIVATE_HOME].map(str::to_owned));
+        assert!(names.len() <= MAX_CAPABILITY_ENTRIES, "{} names: {names:?}", names.len());
+        assert!(names.iter().all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES), "{names:?}");
+        // A credential home basis on a long app root path is kept within the
+        // text bound, cut visibly rather than refused.
+        durable(&mut view);
+        let mut deep = private_home(0o700, 40);
+        let long = format!("/{}", "a".repeat(400));
+        for step in &mut deep.chain {
+            step.path = step.path.replacen("/data/app", &long, 1);
+        }
+        deep.path = deep.chain.last().unwrap().path.clone();
+        deep.anchor = long;
+        add_credential_home(&mut view, &deep, None);
+        let basis = &view.provided[CREDENTIAL_PRIVATE_HOME].basis;
+        assert!(basis.len() <= MAX_CAPABILITY_TEXT_BYTES && basis.ends_with(" [cut]"), "{basis}");
     }
 
     #[test]
@@ -965,7 +1190,11 @@ mod tests {
         assert_eq!(value["daemon_digest"], "sha256:fixture");
         assert!(value["composition"].get("native_services").is_none());
         assert_eq!(value["composition"]["compiled_features"], serde_json::json!([]));
+        assert_eq!(value["composition"]["host_class"], "hosted");
         let signed = fixture.clone().sign(&signing_key).unwrap();
+        let mut reclassed = fixture.clone();
+        reclassed.composition.host_class = "local".to_owned();
+        assert_ne!(reclassed.digest().unwrap(), signed.digest, "the digest covers the host class");
         let mut renamed = fixture;
         renamed.daemon_digest = "sha256:other".to_owned();
         assert_ne!(renamed.digest().unwrap(), signed.digest, "the digest covers the daemon image");
@@ -976,7 +1205,18 @@ mod tests {
         values: &[(&str, &str)],
     ) -> ryeos_app::vault::ProviderEnvironment {
         ryeos_app::vault::ProviderEnvironment::captured(
-            declared.iter().map(|name| (*name).to_owned()).collect(),
+            declared
+                .iter()
+                .map(|name| {
+                    ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName {
+                        name: (*name).to_owned(),
+                        recipients: ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentRecipients {
+                            principals: vec!["fp:operator".to_owned()],
+                            capabilities: Vec::new(),
+                        },
+                    }
+                })
+                .collect(),
             values
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), zeroize::Zeroizing::new((*value).to_owned())))
@@ -1025,13 +1265,13 @@ mod tests {
         });
         assert_eq!(stale_format(&current), None);
         let older_schema = serde_json::json!({
-            "report": {"schema": "ryeos.node.capability-report/v3", "host": {"version": 4}}
+            "report": {"schema": "ryeos.node.capability-report/v6", "host": {"version": 5}}
         });
-        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v3"));
+        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v6"));
         let older_host = serde_json::json!({
-            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 4}}
+            "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 5}}
         });
-        assert!(stale_format(&older_host).unwrap().contains("host facts version is 4"));
+        assert!(stale_format(&older_host).unwrap().contains("host facts version is 5"));
         assert!(stale_format(&serde_json::json!({})).unwrap().contains("absent"));
 
         let app_root = tempfile::tempdir().unwrap();

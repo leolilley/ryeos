@@ -283,6 +283,10 @@ struct StructuredSessionProfile {
     configuration_absence: ryeos_state::objects::ConfigurationAbsence,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
+    /// Placement requirements the admission compiler already checked. The
+    /// bridge runs after placement was admitted, so it carries them unread.
+    #[serde(default, rename = "requires")]
+    _requires: Option<Value>,
     initialization: Vec<InitializationStep>,
     recovery: Option<RecoveryRule>,
     route_sets: BTreeMap<String, Vec<String>>,

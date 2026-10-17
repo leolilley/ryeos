@@ -1,5 +1,5 @@
 {
-  "networkPolicy": { "default": "deny-all" },
+  "networkPolicy": { "type": "deny-all" },
   "ownerId": "owner-fixture",
   "plan": "standard",
   "region": "oregon",

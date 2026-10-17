@@ -1,11 +1,9 @@
-# ryeos:signed:2026-10-13T23:52:06Z:7e9903f0ce00a2d0d97ada050b9bc27dee60eeebae0a16fd097434d58a79e586:FjxqtLTttd4YO8HBpplCgVKnyltf1ilWSjE2MWUDJ3mzL1D4HV5h88LaQfjByISmcQdmZ2ptFt6Dt72B1Y1+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:14:22Z:c4d4a85fe75002764bbc729d0016820c1bce27c57784e196ca422901f7d3513f:KxEfnLk9zPMCJMOmki36RVh+p8NED818wf+MZM1Si6wxcZBEn1MJo3hirKLt8fZK4Txfhz3vAM2CXqOwihfFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
   - core
-  - hosted-node
   - opencode
-  - render-sandbox
   - scheduling
   - standard
 policies:
@@ -139,8 +137,6 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
-      hosted-node: []
-      render-sandbox: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       standard:
@@ -255,33 +251,42 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
-      # class also accepts a resident region proven only by the absence of
-      # swap at startup (residency:swap_absent), which a later swapon ends.
-      # Schedules, vault secrets, the node identity and the restart-inhibit
-      # record live under the app root, so this class requires
-      # storage:durable_root and init refuses an ephemeral root before any
-      # identity exists. If that refusal meets an always-restart policy, it
-      # relies on the platform's own backoff, since no record survives on an
-      # ephemeral root to pace it.
-      requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, storage:durable_root, {name: termination:process_group, accept: [trusted]}, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        hosted:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          # Hosted containers commonly have no swap and no CAP_IPC_LOCK, so this
+          # class also accepts a resident region proven only by the absence of
+          # swap at startup (residency:swap_absent), which a later swapon ends.
+          # Schedules, vault secrets, the node identity and the restart-inhibit
+          # record live under the app root, so this class requires
+          # storage:durable_root and init refuses an ephemeral root before any
+          # identity exists. If that refusal meets an always-restart policy, it
+          # relies on the platform's own backoff, since no record survives on an
+          # ephemeral root to pace it.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, storage:durable_root, {name: termination:process_group, accept: [trusted]}, time]
+          process_scopes:
+            mode: unconfigured
+          # Transitional trusted/disposable authoring lane. This admits direct
+          # process-group cleanup but makes no hard-containment claim.
+          trusted_process_group_sessions: true
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        mode: unconfigured
-      # Transitional trusted/disposable authoring lane. This admits direct
-      # process-group cleanup but makes no hard-containment claim.
-      trusted_process_group_sessions: true
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -373,9 +378,16 @@ policies:
   # environment at startup and delivers only through authorized secret
   # delivery. Model commands in the recipient can read a delivered value.
   provider_environment:
-    schema: 1
+    schema: 2
     names:
-      - OPENAI_API_KEY
+      - name: OPENAI_API_KEY
+        recipients:
+          principals: []
+          # Grant this exact capability to the receiving principal; a
+          # wildcard grant such as `*` or `ryeos.receive.*` does not satisfy
+          # a recipient capability.
+          capabilities:
+            - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:
     schema: 1
     max_live_binding_attachments_per_session: 16

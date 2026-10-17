@@ -21,30 +21,33 @@
 # compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller release-authority
 }
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode ;;
+    full)            printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode ;;
     central-host)    printf '%s\n' core central-auth scheduling standard web ;;
     standard)        printf '%s\n' core scheduling standard ;;
     standard-central-auth) printf '%s\n' core scheduling standard central-auth ;;
     local-inference) printf '%s\n' core scheduling standard local-inference ;;
-    hosted-node)     printf '%s\n' core hosted-node ;;
-    hosted-workflow) printf '%s\n' core scheduling standard hosted-node codex render-sandbox opencode ;;
+    hosted-workflow) printf '%s\n' core scheduling standard codex opencode ;;
     core)            printf '%s\n' core ;;
     core-scheduling) printf '%s\n' core scheduling ;;
+    # Controller of remote Codex authoring leases. Standard supplies the
+    # graph and knowledge kinds codex and render-sandbox require; the
+    # controller runs no schedules, so scheduling is absent.
+    f5r-controller)  printf '%s\n' core standard codex render-sandbox ;;
     bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode bundle-release
+      printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode bundle-release
       ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth scheduling standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling standard environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -53,41 +56,21 @@ ryeos_bundle_set_names() {
 # Select native capabilities from the same explicit distribution
 # membership used for publication and installation. Cargo defaults remain empty;
 # focused node/CLI rebuilds must carry the selected distribution's features too.
+# The selection is derived from the signed payload-ownership item, which
+# declares each bundle's payload features and daemon-linked host features.
+RYEOS_BUNDLE_SETS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 ryeos_bundle_set_cargo_features() {
-  local set_name="$1" package="$2" members member
-  members="$(ryeos_bundle_set_names "$set_name")" || return 1
-  case "$package" in
-    ryeos-handler-bins)
-      while IFS= read -r member; do
-        if [[ "$member" == standard ]]; then
-          printf '%s/directive-handlers,%s/graph-handlers\n' "$package" "$package"
-          return 0
-        fi
-      done <<< "$members"
-      printf '%s/core-handlers\n' "$package"
-      ;;
-    ryeosd|ryeos-cli|ryeos-api)
-      local -a features=()
-      while IFS= read -r member; do
-        if [[ "$member" == scheduling ]]; then
-          features+=("$package/scheduling")
-        elif [[ "$member" == standard ]]; then
-          features+=("$package/model-provider-setup")
-        fi
-      done <<< "$members"
-      if (( ${#features[@]} > 0 )); then
-        local IFS=,
-        printf '%s\n' "${features[*]}"
-      fi
-      ;;
-  esac
+  local set_name="$1" package="$2"
+  python3 -I "$RYEOS_BUNDLE_SETS_ROOT/scripts/pkg/bundle-features.py" \
+    --set "$set_name" cargo-features "$package"
 }
 
 # Exact publisher-authored node init-profile inventory carried by the shared
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling contained-workflow development release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller contained-workflow development release-authority
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -95,7 +78,9 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling) printf '%s\n' "$1" ;;
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller) printf '%s\n' "$1" ;;
+    # The hosted-node profile is the core set under hosted admission policy.
+    hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
     development) printf '%s\n' full ;;
     release-authority) printf '%s\n' release-authority ;;
@@ -199,7 +184,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|release-authority)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-authority)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -214,7 +199,7 @@ ryeos_bundle_set_bin_managed_names() {
     # scheduling (service/command content) and central-auth (Python tool
     # support) own no compiled binaries; local-inference owns separately built
     # payloads.
-    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
+    [[ "$name" == "scheduling" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" || "$name" == "environment-qualification" ]] && continue
     printf '%s\n' "$name"
   done
 }
@@ -228,7 +213,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|standard-central-auth|local-inference|hosted-node|hosted-workflow|bundle-source|core|core-scheduling|release-artifacts)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-artifacts)
       return 0
       ;;
     *) return 1 ;;

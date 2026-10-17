@@ -65,7 +65,7 @@ package() {
     install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
 
     # ── Official signed bundle data ──────────────────────────
-    # `ryeos init --node-profile full` uses /usr/share/ryeos as its default
+    # `ryeos init --node-profile full --host-class local` uses /usr/share/ryeos as its default
     # source and verifies this material against its hardcoded official publisher
     # key. Fresh init deliberately refuses an absent init profile.
     mkdir -p "$pkgdir/usr/share/ryeos"

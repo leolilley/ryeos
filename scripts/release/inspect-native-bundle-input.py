@@ -30,40 +30,37 @@ def fail(message):
     raise ValueError(message)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository-root", type=Path, required=True)
-    parser.add_argument("--bundle", required=True)
-    parser.add_argument("--source-snapshot-hash", required=True)
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--build-profile", choices=["release"], default="release")
-    parser.add_argument("--predecessor-generation-hash")
-    parser.add_argument("--ownership-config", type=Path)
-    args = parser.parse_args()
+def plan(repository_root, bundle, source_snapshot_hash, target, build_profile="release",
+         predecessor_generation_hash=None, ownership_config=None, allow_core=False):
+    """Return the read-only input plan for one bundle generation.
 
-    root = args.repository_root.resolve(strict=True)
-    if not NAME.fullmatch(args.bundle):
+    A caller that only needs payload ownership may pass no snapshot hash.
+    Core is refused for bundle-only publication unless the caller is
+    computing a closure over it (`allow_core`).
+    """
+    root = repository_root.resolve(strict=True)
+    if not NAME.fullmatch(bundle):
         fail("bundle name is not canonical")
-    if args.bundle == "core":
+    if bundle == "core" and not allow_core:
         fail("core is substrate-owned and cannot use bundle-only publication")
-    if not HASH.fullmatch(args.source_snapshot_hash):
+    if source_snapshot_hash is not None and not HASH.fullmatch(source_snapshot_hash):
         fail("source snapshot hash must be a lowercase SHA-256 identity")
-    if args.predecessor_generation_hash is not None and not HASH.fullmatch(
-        args.predecessor_generation_hash
+    if predecessor_generation_hash is not None and not HASH.fullmatch(
+        predecessor_generation_hash
     ):
         fail("predecessor generation hash must be a lowercase SHA-256 identity")
-    if args.target != "portable" and not TRIPLE.fullmatch(args.target):
+    if target != "portable" and not TRIPLE.fullmatch(target):
         fail("target must be 'portable' or an exact target triple")
-    bundle_root = root / "bundles" / args.bundle
+    bundle_root = root / "bundles" / bundle
     if not bundle_root.is_dir() or bundle_root.is_symlink():
         fail("bundle source root is missing or unsafe")
 
-    all_records, ownership_identity = _ownership.load(root, args.ownership_config)
-    records = [record for record in all_records if record["bundle"] == args.bundle]
+    all_records, ownership_identity, ownership = _ownership.load_ownership(root, ownership_config)
+    records = [record for record in all_records if record["bundle"] == bundle]
     records.sort(key=lambda record: record["binary"])
-    if records and args.target == "portable":
+    if records and target == "portable":
         fail("a bundle with native payload ownership requires an exact target triple")
-    if not records and args.target != "portable":
+    if not records and target != "portable":
         fail("a data-only bundle requires the portable target")
     packages = sorted({record["cargo_package"] for record in records})
     build_classes = sorted({record["build_class"] for record in records})
@@ -73,19 +70,19 @@ def main():
         selected.update(record["required_features"])
     cargo_feature_selections = []
     for package, selected in sorted(features_by_package.items()):
-        # Larger handler compositions include their smaller targets.
-        if selected & {"graph-handlers", "directive-handlers"}:
-            selected -= {"core-handlers", "basic-parsers", "extends-composer"}
-        elif "core-handlers" in selected:
-            selected.discard("basic-parsers")
+        # A feature implied by another selected feature of the package is dropped.
+        implied = set()
+        for feature in selected:
+            implied.update(ownership["feature_implications"].get(package, {}).get(feature, []))
+        selected -= implied
         cargo_feature_selections.append({"cargo_package": package, "features": sorted(selected)})
-    target = {"kind": "portable"} if args.target == "portable" else {
-        "kind": "triple", "triple": args.target
+    target = {"kind": "portable"} if target == "portable" else {
+        "kind": "triple", "triple": target
     }
     # Offline preview only: authenticated inspection uses RyeOS's typed source
     # manifest generator and rechecks its exact result before build dispatch.
     authored_manifest = yaml.safe_load((bundle_root / ".ai/manifest.source.yaml").read_text())
-    if authored_manifest.get("name") != args.bundle:
+    if authored_manifest.get("name") != bundle:
         fail("manifest source names another bundle")
     for key, default in (("description", ""), ("requires_kinds", []), ("uses_kinds", [])):
         authored_manifest.setdefault(key, default)
@@ -97,12 +94,12 @@ def main():
     output = {
         "schema": "ryeos.bundle_release_input_plan.v2",
         "project_path": str(root),
-        "bundle_name": args.bundle,
+        "bundle_name": bundle,
         "authored_manifest": authored_manifest,
-        "source_snapshot_hash": args.source_snapshot_hash,
-        "predecessor_generation_hash": args.predecessor_generation_hash,
+        "source_snapshot_hash": source_snapshot_hash,
+        "predecessor_generation_hash": predecessor_generation_hash,
         "target": target,
-        "build_profile": args.build_profile,
+        "build_profile": build_profile,
         "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
         "payload_ownership_content_hash": ownership_identity,
         "payloads": records,
@@ -113,6 +110,22 @@ def main():
         "clean_output_required": True,
         "ambient_target_reuse_allowed": False,
     }
+    return output
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repository-root", type=Path, required=True)
+    parser.add_argument("--bundle", required=True)
+    parser.add_argument("--source-snapshot-hash", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--build-profile", choices=["release"], default="release")
+    parser.add_argument("--predecessor-generation-hash")
+    parser.add_argument("--ownership-config", type=Path)
+    args = parser.parse_args()
+
+    output = plan(args.repository_root, args.bundle, args.source_snapshot_hash, args.target,
+                  args.build_profile, args.predecessor_generation_hash, args.ownership_config)
     json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0

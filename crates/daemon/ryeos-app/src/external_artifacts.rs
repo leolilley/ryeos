@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
@@ -93,6 +93,8 @@ impl PublishedLifecycleArtifacts {
 
 #[derive(Debug)]
 pub struct ResolvedExternalExecutionArtifacts {
+    /// Content identity of the connector each provider declaration names.
+    pub(crate) provider_connector_hashes: BTreeMap<String, String>,
     pub connectors: ExternalCandidateConnectorRegistry,
     pub provider_configurations: ExternalProviderConfigurationRegistry,
     pub placement_backends: ExternalPlacementBackendRegistry,
@@ -452,6 +454,7 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
 pub(crate) fn recover_retained_lifecycle_backend(
     cas: &lillux::CasStore,
     root_hash: &str,
+    credential_home_root: PathBuf,
 ) -> Result<crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend> {
     let source = verify_retained_lifecycle_closure(cas, root_hash)?;
     let signed_manifest = cas
@@ -556,7 +559,10 @@ pub(crate) fn recover_retained_lifecycle_backend(
         provider_spec,
         snapshot_production_spec,
     };
-    crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend::new(artifacts)
+    crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend::new(
+        artifacts,
+        credential_home_root,
+    )
 }
 
 /// Recovery-only facade. It intentionally exposes no fresh allocation,
@@ -578,7 +584,11 @@ impl RecoveredBootstrapLifecycle {
             .context("bootstrap recovery lost retained lifecycle artifact root")?;
         let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
-        let backend = recover_retained_lifecycle_backend(&authority.cas_store()?, root)?;
+        let backend = recover_retained_lifecycle_backend(
+            &authority.cas_store()?,
+            root,
+            crate::private_artifact_home::root(&state.config.runtime_state_dir()),
+        )?;
         authority.ensure_guard(&guard)?;
         backend.preflight_bootstrap_recovery(binding, credential, &record.intent)?;
         let current = state
@@ -664,15 +674,19 @@ impl RecoveredBootstrapLifecycle {
     }
 }
 
+/// `credential_home_root` is the root of the node's credential-profile
+/// homes, which no lifecycle adapter upload may draw a file from.
 pub fn resolve_external_execution_artifacts(
     bundle_roots: &[PathBuf],
     node_trust_store: &ryeos_engine::trust::TrustStore,
+    credential_home_root: &Path,
 ) -> Result<ResolvedExternalExecutionArtifacts> {
     let target = lillux::platform::current_binary_target()?;
     let mut connectors = Vec::new();
     let mut configurations = Vec::new();
     let mut lifecycle_adapters = Vec::new();
     let mut provider_owners = BTreeMap::new();
+    let mut provider_connector_hashes = BTreeMap::new();
     let mut lifecycle_owners = BTreeMap::new();
 
     for root in bundle_roots {
@@ -717,6 +731,8 @@ pub fn resolve_external_execution_artifacts(
                 &declaration.configuration_adapter,
                 "external provider configuration adapter",
             )?;
+            provider_connector_hashes
+                .insert(declaration.id.clone(), connector.identity.content_hash.clone());
             connectors.push(connector);
             configurations.push(InstalledExternalProviderConfiguration::new(
                 declaration.clone(),
@@ -820,11 +836,13 @@ pub fn resolve_external_execution_artifacts(
             Ok(Arc::new(
                 crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend::new(
                     artifacts,
+                    credential_home_root.to_path_buf(),
                 )?,
             ) as Arc<dyn ExternalPlacementBackend>)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(ResolvedExternalExecutionArtifacts {
+        provider_connector_hashes,
         connectors: ExternalCandidateConnectorRegistry::from_captured(connectors)?,
         provider_configurations: ExternalProviderConfigurationRegistry::from_artifacts(
             configurations,

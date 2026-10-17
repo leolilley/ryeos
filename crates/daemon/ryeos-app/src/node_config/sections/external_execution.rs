@@ -16,6 +16,9 @@ use crate::node_config::{
     SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
 };
 
+pub mod compose;
+pub mod provision;
+
 pub const SECTION_NAME: &str = "external_execution";
 pub struct ExternalExecutionSection;
 
@@ -919,77 +922,54 @@ impl RetainedExternalExecutionBinding {
         connector_artifact_bytes: u64,
         settings: Value,
     ) -> Result<Self> {
-        program.validate()?;
-        controller_transport.validate()?;
         let provider_network_inputs = controller_transport.network_inputs.clone();
-        ensure!(
-            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                &controller_tls_root_certificates_der_base64,
-            )? == controller_transport.tls_root_bundle_digest,
-            "composed fixture TLS roots changed their transport identity"
-        );
-        let document = BindingDocument {
-            kind: "node".into(),
-            schema: 17,
-            protocol: program.requirement.protocol.clone(),
-            workload: ExternalWorkloadBinding::StructuredSession(
-                ExternalStructuredSessionBinding {
-                    provider_declaration_id: program.requirement.provider_declaration_id.clone(),
-                    provider_configuration_destination: program
-                        .requirement
-                        .provider_configuration_destination
-                        .clone(),
-                    runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-                    runtime_selection_identity: program.selection_identity_digest.clone(),
-                    configuration_adapter_artifact_hash,
-                    configuration_adapter_artifact_bytes,
-                    connector_protocol: program.requirement.connector_protocol.clone(),
-                    connector_artifact_hash,
-                    connector_artifact_bytes,
-                },
-            ),
+        let document = compose::compose_binding_document(compose::ComposeInputs {
+            program,
+            controller_transport: controller_transport.into(),
+            provider_network_inputs,
+            tls_roots_der_base64: controller_tls_root_certificates_der_base64,
             backend,
             account: "account".into(),
-            capacity_group: "candidate-workers".into(),
+            capacity_group: compose::DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
-            settings_digest: adapter_settings_digest(&settings)?,
-            settings_schema_digest,
             settings,
-            backend_artifact_hash,
-            backend_artifact_bytes,
-            supervisor_artifact_hash,
-            supervisor_artifact_bytes,
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
-            runtime_content_qualification: None,
-            launcher_artifact_hash,
-            launcher_artifact_bytes,
-            network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
-            storage_policy: "ephemeral_private_candidate_v1".into(),
-            cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            provider_network_inputs,
-            controller_transport: controller_transport.into(),
-            controller_tls_root_certificates_der_base64,
-            max_active: 1,
-            timeout_seconds: 60,
-            // The composed native fixture transfers the exact guest runtime
-            // through descriptor authority during the one bounded activation
-            // contact. Use the contract's maximum contact window so a large
-            // admitted runtime is not measured against the smaller unit-
-            // fixture default.
-            contact_timeout_seconds: 60,
-            observation_timeout_seconds: 60,
-            cleanup_timeout_seconds: 120,
-            max_workspace_bytes: 16 * 1024 * 1024,
-            max_export_bytes: 8 * 1024 * 1024,
-            max_transfer_bytes: 16 * 1024 * 1024,
-            // Debug-built supervisor and launcher fixtures are captured in
-            // full, alongside both distinct admitted runtime destinations.
-            // Bound their aggregate package without changing production policy.
-            max_guest_package_regular_bytes: 768 * 1024 * 1024,
-            max_guest_package_framed_bytes: 1024 * 1024 * 1024,
-        };
-        document.validate()?;
+            artifacts: compose::BundleArtifactFacts {
+                backend_artifact_hash,
+                backend_artifact_bytes,
+                settings_schema_digest,
+                supervisor_artifact_hash,
+                supervisor_artifact_bytes,
+                launcher_artifact_hash,
+                launcher_artifact_bytes,
+                configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes,
+                connector_artifact_hash,
+                connector_artifact_bytes,
+            },
+            limits: compose::ComposeLimits {
+                max_active: 1,
+                timeout_seconds: 60,
+                // The composed native fixture transfers the exact guest
+                // runtime through descriptor authority during the one
+                // bounded activation contact. Use the contract's maximum
+                // contact window so a large admitted runtime is not measured
+                // against the smaller unit-fixture default.
+                contact_timeout_seconds: 60,
+                observation_timeout_seconds: 60,
+                cleanup_timeout_seconds: 120,
+                max_workspace_bytes: 16 * 1024 * 1024,
+                max_export_bytes: 8 * 1024 * 1024,
+                max_transfer_bytes: 16 * 1024 * 1024,
+                // Debug-built supervisor and launcher fixtures are captured
+                // in full, alongside both distinct admitted runtime
+                // destinations. Bound their aggregate package without
+                // changing production policy.
+                max_guest_package_regular_bytes: 768 * 1024 * 1024,
+                max_guest_package_framed_bytes: 1024 * 1024 * 1024,
+            },
+        })?;
         let id = "composed-test".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
         let signer_verifying_key = key.verifying_key().to_bytes();
@@ -1114,7 +1094,7 @@ impl InstalledExternalExecutionBinding {
         })
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
     pub(crate) fn digest(&self) -> &str {

@@ -1008,33 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_reads_hosted_node_generated_manifest() {
-        let root = workspace_root().join("bundles/hosted-node");
-        let mf = parse_manifest(&workspace_root().join("bundles/hosted-node"), "hosted-node")
-            .expect("parse hosted-node manifest");
-        assert_eq!(mf.name, "hosted-node");
-        assert_eq!(mf.version, "0.1.0");
-        assert!(mf.provides_kinds.is_empty());
-        assert_eq!(mf.requires_kinds, vec!["node".to_string()]);
-        assert!(
-            mf.uses_kinds.is_empty(),
-            "hosted-node runtime bundle must stay core-only; docs belong outside .ai/"
-        );
-        assert!(
-            !root.join(".ai/config").exists(),
-            "hosted-node bundle must not contribute system configuration"
-        );
-        assert!(
-            !root.join(".ai/node/policies").exists(),
-            "node policy generations are node-owned state, not bundle content"
-        );
-        assert!(
-            !root.join(".ai/knowledge").exists(),
-            "hosted-node docs must stay outside .ai to avoid a standard/knowledge dependency"
-        );
-    }
-
-    #[test]
     fn parse_manifest_fails_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("no-manifest");
@@ -1062,20 +1035,6 @@ mod tests {
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
             "core + standard should satisfy all dependencies"
-        );
-    }
-
-    #[test]
-    fn validate_dependencies_core_and_hosted_node_without_standard_ok() {
-        let root = workspace_root();
-        let bundles = vec![
-            ("core".to_string(), root.join("bundles/core")),
-            ("hosted-node".to_string(), root.join("bundles/hosted-node")),
-        ];
-
-        assert!(
-            validate_manifest_dependencies(&bundles).is_ok(),
-            "hosted-node must install with core only, without standard"
         );
     }
 

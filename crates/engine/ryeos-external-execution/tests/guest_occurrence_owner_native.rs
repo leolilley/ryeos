@@ -144,6 +144,7 @@ fn supervisor_bootstrap(
             cleanup_millis: 120_000,
             cleanup_steps: 3_000_000,
         },
+        report_capabilities: false,
     }
     .canonical_bytes()
 }
@@ -566,6 +567,7 @@ fn run(
             &signed_assignment,
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            None,
         )?
     };
     let receipt = held.mount_preparation_receipt()?;

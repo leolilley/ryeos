@@ -775,6 +775,39 @@ mod tests {
     }
 
     #[test]
+    fn shipped_ryeos_ui_provides_client_surface_and_view_over_core() {
+        let bundles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .join("bundles");
+
+        // ryeos-ui uses directive, graph and knowledge; include whichever
+        // shipped bundles provide them.
+        let mut inputs = vec![
+            input("ryeos-ui", bundles.join("ryeos-ui")),
+            input("core", bundles.join("core")),
+        ];
+        for name in ["standard", "directive", "graph", "knowledge"] {
+            if bundles.join(name).is_dir() {
+                inputs.push(input(name, bundles.join(name)));
+            }
+        }
+        let plan = build_plan(BundlePlanMode::InitSourceSet, &inputs, &[]).unwrap();
+
+        for kind in ["client", "surface", "view"] {
+            assert_eq!(
+                plan.provider_map.get(kind).map(String::as_str),
+                Some("ryeos-ui")
+            );
+        }
+        let order = &plan.install_order;
+        let position = |name: &str| order.iter().position(|n| n == name).unwrap();
+        assert!(position("core") < position("ryeos-ui"));
+        assert!(plan.bundles["ryeos-ui"].dependency_closure.contains("core"));
+    }
+
+    #[test]
     fn exact_reconcile_requires_a_complete_nonempty_selection() {
         let err = build_plan(BundlePlanMode::ReconcileExactSet, &[], &[]).unwrap_err();
         assert!(err.to_string().contains("complete nonempty candidate set"));

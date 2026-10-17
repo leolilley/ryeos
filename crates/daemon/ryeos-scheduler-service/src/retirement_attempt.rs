@@ -120,6 +120,8 @@ impl<'a> RetirementAttempt<'a> {
         use SchedulerRetirementPhase as Phase;
         use SchedulerRetirementRole as Role;
 
+        #[cfg(feature = "crash-qualification-test-support")]
+        crate::retirement_journal::install_native_removal_cut();
         match self.step {
             Step::Captured(index) => {
                 let role = Role::ALL[index];

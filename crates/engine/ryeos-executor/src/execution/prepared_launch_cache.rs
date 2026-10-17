@@ -563,7 +563,9 @@ mod tests {
 
     #[test]
     fn completed_fill_is_a_ready_hit() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let key = key(1, "ready");
         let Lookup::Build(fill) = cache.begin(key.clone()) else {
             panic!("cold lookup must build");
@@ -574,7 +576,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_lookup_waits_for_single_flight_result() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let key = key(1, "single-flight");
         let Lookup::Build(fill) = cache.begin(key.clone()) else {
             panic!("leader must build");
@@ -588,7 +592,9 @@ mod tests {
 
     #[tokio::test]
     async fn oversize_leader_result_is_shared_with_waiters_but_not_cached() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let key = key(1, "oversize-single-flight");
         let Lookup::Build(fill) = cache.begin(key.clone()) else {
             panic!("leader must build");
@@ -611,7 +617,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_lookup_receives_the_exact_leader_failure_without_caching_it() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let key = key(1, "failure");
         let Lookup::Build(fill) = cache.begin(key.clone()) else {
             panic!("leader must build");
@@ -627,7 +635,9 @@ mod tests {
 
     #[test]
     fn lru_capacity_evicts_oldest_entry() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         for index in 0..=MAX_ENTRIES {
             let key = key(1, &format!("entry-{index}"));
             let Lookup::Build(fill) = cache.begin(key) else {
@@ -644,7 +654,9 @@ mod tests {
 
     #[test]
     fn byte_budget_evicts_the_least_recently_used_entry() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let first = key(1, "first");
         let second = key(1, "second");
         let third = key(1, "third");
@@ -668,7 +680,9 @@ mod tests {
 
     #[test]
     fn idle_entry_and_oversize_value_are_not_served() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let idle = key(1, "idle");
         let Lookup::Build(fill) = cache.begin(idle.clone()) else {
             panic!("cold lookup must build");
@@ -694,7 +708,9 @@ mod tests {
 
     #[test]
     fn same_fingerprint_new_epoch_retires_in_flight_fill() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let mut older = key(1, "same");
         older.generation = "same-fingerprint".to_owned();
         let mut newer = older.clone();
@@ -713,7 +729,9 @@ mod tests {
 
     #[test]
     fn failed_fill_is_not_cached() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let key = key(1, "key");
         let Lookup::Build(fill) = cache.begin(key.clone()) else {
             panic!("first lookup must build");
@@ -724,7 +742,9 @@ mod tests {
 
     #[test]
     fn pending_keys_are_bounded() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let mut fills = Vec::new();
         for index in 0..MAX_PENDING {
             let Lookup::Build(fill) = cache.begin(key(1, &format!("key-{index}"))) else {
@@ -739,7 +759,9 @@ mod tests {
 
     #[test]
     fn generation_advance_retires_prior_entries() {
-        let cache = Box::leak(Box::new(PreparedLaunchCache::default()));
+        static FRESH: std::sync::LazyLock<PreparedLaunchCache> =
+            std::sync::LazyLock::new(PreparedLaunchCache::default);
+        let cache = &*FRESH;
         let first = key(1, "same");
         let Lookup::Build(fill) = cache.begin(first.clone()) else {
             panic!("first lookup must build");

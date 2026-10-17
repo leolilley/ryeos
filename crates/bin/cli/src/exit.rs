@@ -10,7 +10,7 @@ impl CliError {
         match self {
             CliError::Config(_) => EX_CONFIG,
             CliError::Dispatch(d) => d.exit_code(),
-            CliError::Transport(t) => t.exit_code(),
+            CliError::Transport(t) => transport_exit_code(t),
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Local { .. } => 1,
             CliError::Reported { .. } => 1,
@@ -22,23 +22,23 @@ impl CliError {
 impl CliDispatchError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            CliDispatchError::Transport(t) => t.exit_code(),
+            CliDispatchError::Transport(t) => transport_exit_code(t),
             CliDispatchError::Config(_) => EX_CONFIG,
         }
     }
 }
 
-impl CliTransportError {
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            CliTransportError::DaemonJsonMissing { .. } => EX_TEMPFAIL,
-            CliTransportError::DaemonJsonMalformed { .. } => EX_CONFIG,
-            CliTransportError::Unreachable { .. } => EX_TEMPFAIL,
-            CliTransportError::HttpError { .. } => 1,
-            CliTransportError::BodyDecode { .. } => EX_SOFTWARE,
-            CliTransportError::SigningKeyMissing { .. } => EX_TEMPFAIL,
-            CliTransportError::SigningKeyUnloadable { .. } => EX_CONFIG,
-            CliTransportError::AudienceDiscoveryFailed { .. } => EX_TEMPFAIL,
-        }
+/// Exit code for a transport failure. The transport error type belongs to the
+/// shared client transport; its process exit policy stays with the CLI.
+pub fn transport_exit_code(error: &CliTransportError) -> i32 {
+    match error {
+        CliTransportError::DaemonJsonMissing { .. } => EX_TEMPFAIL,
+        CliTransportError::DaemonJsonMalformed { .. } => EX_CONFIG,
+        CliTransportError::Unreachable { .. } => EX_TEMPFAIL,
+        CliTransportError::HttpError { .. } => 1,
+        CliTransportError::BodyDecode { .. } => EX_SOFTWARE,
+        CliTransportError::SigningKeyMissing { .. } => EX_TEMPFAIL,
+        CliTransportError::SigningKeyUnloadable { .. } => EX_CONFIG,
+        CliTransportError::AudienceDiscoveryFailed { .. } => EX_TEMPFAIL,
     }
 }

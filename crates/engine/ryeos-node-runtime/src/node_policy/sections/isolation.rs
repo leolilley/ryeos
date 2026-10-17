@@ -1,8 +1,13 @@
 //! Node-owned subprocess isolation policy.
 //!
 //! The section adds only the node-policy envelope. Isolation semantics
-//! and their validation remain owned by `ryeos-engine`'s existing
-//! [`ryeos_engine::isolation::IsolationPolicy`] contract.
+//! and their validation remain owned by `ryeos-engine`'s
+//! [`ryeos_engine::isolation::IsolationPolicyDocument`] contract.
+//!
+//! A publisher profile may declare several host classes in this section;
+//! initialization narrows it to the one class the deployment names, and a
+//! node's own policy generation declares exactly that one. The section
+//! compiles only a single-class body into the runtime policy.
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
@@ -16,20 +21,51 @@ pub const POLICY_SCHEMA: u32 = 1;
 /// Wire envelope around the engine-owned semantic isolation contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IsolationPolicyDocument {
+struct IsolationPolicyEnvelope {
     schema: u32,
-    policy: ryeos_engine::isolation::IsolationPolicy,
+    policy: ryeos_engine::isolation::IsolationPolicyDocument,
 }
 
-impl IsolationPolicyDocument {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != POLICY_SCHEMA {
+impl IsolationPolicyEnvelope {
+    fn parse(body: &Value) -> anyhow::Result<Self> {
+        let envelope: Self =
+            serde_json::from_value(body.clone()).context("parse node isolation policy")?;
+        if envelope.schema != POLICY_SCHEMA {
             bail!("node isolation policy schema is not current");
         }
-        ryeos_engine::isolation::IsolationRuntime::validate_policy(&self.policy)
+        ryeos_engine::isolation::IsolationRuntime::validate_policy_document(&envelope.policy)
             .map_err(anyhow::Error::from)
-            .context("validate node isolation policy")
+            .context("validate node isolation policy")?;
+        Ok(envelope)
     }
+}
+
+/// Host classes an isolation section body declares, after validating it.
+pub fn declared_host_classes(body: &Value) -> anyhow::Result<Vec<String>> {
+    Ok(IsolationPolicyEnvelope::parse(body)?.policy.host_class_names())
+}
+
+/// The isolation section body narrowed to the one named host class. A
+/// class the body does not declare is refused.
+pub fn select_host_class(body: &Value, host_class: &str) -> anyhow::Result<Value> {
+    let envelope = IsolationPolicyEnvelope::parse(body)?;
+    let narrowed = IsolationPolicyEnvelope {
+        schema: envelope.schema,
+        policy: envelope
+            .policy
+            .narrowed(host_class)
+            .map_err(anyhow::Error::msg)?,
+    };
+    serde_json::to_value(narrowed).context("serialize the selected node isolation policy")
+}
+
+/// The single-class section body whose compiled policy is `policy`.
+pub fn section_body(policy: ryeos_engine::isolation::IsolationPolicy) -> anyhow::Result<Value> {
+    serde_json::to_value(IsolationPolicyEnvelope {
+        schema: POLICY_SCHEMA,
+        policy: ryeos_engine::isolation::IsolationPolicyDocument::from_selected_policy(policy),
+    })
+    .context("serialize node isolation policy")
 }
 
 pub struct IsolationPolicySection;
@@ -48,10 +84,13 @@ impl NodePolicySection for IsolationPolicySection {
         _context: &NodePolicyContext,
         body: &Value,
     ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
-        let document: IsolationPolicyDocument =
-            serde_json::from_value(body.clone()).context("parse node isolation policy")?;
-        document.validate()?;
-        Ok(Arc::new(document.policy))
+        let envelope = IsolationPolicyEnvelope::parse(body)?;
+        let policy = envelope
+            .policy
+            .into_selected_policy()
+            .map_err(anyhow::Error::msg)
+            .context("compile node isolation policy")?;
+        Ok(Arc::new(policy))
     }
 }
 
@@ -68,11 +107,13 @@ mod tests {
     }
 
     fn disabled_policy_value() -> Value {
-        serde_json::to_value(IsolationPolicyDocument {
-            schema: POLICY_SCHEMA,
-            policy: ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring(),
-        })
-        .unwrap()
+        section_body(ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring()).unwrap()
+    }
+
+    /// The single class of a section body built by `disabled_policy_value`.
+    fn class(body: &mut Value) -> &mut Value {
+        &mut body["policy"]["host_classes"]
+            [ryeos_engine::isolation::AUTHORING_HOST_CLASS]
     }
 
     #[test]
@@ -107,7 +148,7 @@ mod tests {
         assert!(section.parse(&context(), &unknown_nested).is_err());
 
         let mut missing_trusted_lane = disabled_policy_value();
-        missing_trusted_lane["policy"]
+        class(&mut missing_trusted_lane)
             .as_object_mut()
             .unwrap()
             .remove("trusted_process_group_sessions");
@@ -151,7 +192,7 @@ mod tests {
         );
 
         let mut removed_key = disabled_policy_value();
-        removed_key["policy"]["process_scopes"] = serde_json::json!({
+        class(&mut removed_key)["process_scopes"] = serde_json::json!({
             "mode": "required", "control_timeout_ms": 1000, "nested_sandbox": true,
         });
         let error = section
@@ -169,7 +210,7 @@ mod tests {
     fn floor_entries_carry_accepted_grades_and_providers_through_the_section() {
         let section = IsolationPolicySection;
         let mut declared = disabled_policy_value();
-        declared["policy"]["requires_capabilities"] = serde_json::json!([
+        class(&mut declared)["requires_capabilities"] = serde_json::json!([
             {"any_of": ["accounting", "residency:swap_absent"]},
             "storage:durable_root",
             {"name": "termination:process_group", "accept": ["trusted"]},
@@ -186,12 +227,12 @@ mod tests {
         assert!(policy.requires_capabilities[1].accepted_grades().is_empty());
 
         let mut refused_grade = declared.clone();
-        refused_grade["policy"]["requires_capabilities"][3]["accept"] =
+        class(&mut refused_grade)["requires_capabilities"][3]["accept"] =
             serde_json::json!(["peer_attested"]);
         assert!(section.parse(&context(), &refused_grade).is_err());
 
         let mut unknown_key = declared;
-        unknown_key["policy"]["requires_capabilities"][3]["grade"] = Value::from("measured");
+        class(&mut unknown_key)["requires_capabilities"][3]["grade"] = Value::from("measured");
         assert!(section.parse(&context(), &unknown_key).is_err());
     }
 
@@ -199,8 +240,8 @@ mod tests {
     fn delegates_semantic_validation_to_the_engine_contract() {
         let section = IsolationPolicySection;
         let mut invalid = disabled_policy_value();
-        invalid["policy"]["mode"] = Value::String("enforce".to_owned());
-        invalid["policy"]["backend"] = Value::Null;
+        class(&mut invalid)["mode"] = Value::String("enforce".to_owned());
+        class(&mut invalid)["backend"] = Value::Null;
 
         let error = section
             .parse(&context(), &invalid)
@@ -214,6 +255,42 @@ mod tests {
             error.contains("enforced isolation requires an explicit backend selection"),
             "got: {error}"
         );
+    }
+
+    #[test]
+    fn a_profile_body_declares_several_classes_and_init_selects_one() {
+        let section = IsolationPolicySection;
+        let mut profile = disabled_policy_value();
+        let local = class(&mut profile).clone();
+        let mut hosted = local.clone();
+        hosted["requires_capabilities"] = serde_json::json!([
+            {"any_of": ["accounting", "residency:swap_absent"]},
+            {"name": "termination:enclosure_trusted_init", "accept": ["measured", "trusted"]},
+            "time",
+        ]);
+        profile["policy"]["host_classes"] = serde_json::json!({
+            "hosted": hosted,
+            "local": local,
+        });
+        assert_eq!(declared_host_classes(&profile).unwrap(), ["hosted", "local"]);
+
+        // A node runs under one class: the unselected body does not compile.
+        let error = format!("{:#}", section.parse(&context(), &profile).err().unwrap());
+        assert!(error.contains("exactly one host class"), "{error}");
+        assert!(error.contains("hosted, local"), "{error}");
+
+        let selected = select_host_class(&profile, "hosted").unwrap();
+        assert_eq!(declared_host_classes(&selected).unwrap(), ["hosted"]);
+        let parsed = section.parse(&context(), &selected).unwrap();
+        let policy = parsed
+            .as_any()
+            .downcast_ref::<ryeos_engine::isolation::IsolationPolicy>()
+            .unwrap();
+        assert_eq!(policy.host_class, "hosted");
+        assert_eq!(policy.requires_capabilities.len(), 3);
+
+        let refused = format!("{:#}", select_host_class(&profile, "edge").unwrap_err());
+        assert!(refused.contains("`edge` is not declared"), "{refused}");
     }
 }
 use std::sync::Arc;

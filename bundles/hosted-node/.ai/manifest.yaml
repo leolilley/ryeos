@@ -1,8 +1,0 @@
-# ryeos:signed:2026-07-03T09:54:36Z:ee6a76e61704bd17de1577e76dac4a51ed6f378c9fdc4cd33a8a9c731aa2f17f:AREQFebfH+/BYWRl+4MUD/aATT3nRrXq2MH+sIyn8JErxjuOO04Qo059QFkzJUtPrmT79aJKk9sn3eYm6YzDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-name: hosted-node
-version: 0.1.0
-description: Hosted RyeOS node operator policy for decentralized admission and public remote exposure
-provides_kinds: []
-requires_kinds:
-- node
-uses_kinds: []

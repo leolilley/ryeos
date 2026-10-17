@@ -71,6 +71,18 @@ impl ChannelPhase {
             // predecessor chain, without restoring readiness/Release authority.
             // The wire contract permits Ready only at supervisor sequence one.
             Ready { .. } if matches!(self, Self::Stopping | Self::Stopped) => self,
+            // The guest's capability report is its second frame, directly after
+            // a Ready naming the same boot; that exact position is checked on
+            // append. A cancellation can cross the Ready in flight, exactly as
+            // for Ready above, so a stopping channel still retains the report
+            // to keep the guest's chain whole. The owner that asked for it
+            // consumed it when it admitted the guest; the journal keeps it only
+            // so the next frame chains to it, and it moves no phase.
+            CapabilityReport { .. }
+                if matches!(self, Self::Ready | Self::Stopping | Self::Stopped) =>
+            {
+                self
+            }
             Release if self == Self::Ready && before_execution_deadline => Self::Running,
             // This signed projection follows the native guest row. It may be
             // retained after a racing cancellation, but never restores input

@@ -21,6 +21,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
+mod stdio;
+pub use stdio::run_handler;
+
 pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
 pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 6;
 

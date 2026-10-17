@@ -1,0 +1,13 @@
+{
+  "createdAt": "2026-10-14T00:00:00Z",
+  "id": "sbx-fixture-002",
+  "networkPolicy": {
+    "default": "allow-list",
+    "rules": [{ "domain": "controller.example.com", "protocol": "https" }],
+    "type": "allow-list"
+  },
+  "plan": "standard",
+  "region": "oregon",
+  "status": "creating",
+  "timeoutSeconds": 600
+}

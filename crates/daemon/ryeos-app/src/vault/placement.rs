@@ -99,19 +99,34 @@ impl PlacementCredentialAccess {
         self.decode_document(value).map(|_| ())
     }
 
+    /// Canonical schema-1 protected document for this coordinate. The encoded
+    /// form zeroizes on drop and the intermediate copies of the secret are
+    /// zeroized before returning.
+    pub(crate) fn encode_secret(&self, secret: &Zeroizing<String>) -> Zeroizing<String> {
+        use zeroize::Zeroize as _;
+
+        let mut document = PlacementCredentialDocument {
+            schema: 1,
+            backend: self.backend.clone(),
+            account: self.account.clone(),
+            generation: self.generation.clone(),
+            secret: secret.as_str().to_owned(),
+        };
+        // A document of plain strings and one integer always serializes.
+        let mut value = serde_json::to_value(&document).expect("placement document serializes");
+        document.secret.zeroize();
+        let encoded = lillux::canonical_json(&value).expect("placement document is canonical");
+        if let Some(serde_json::Value::String(copy)) = value.get_mut("secret") {
+            copy.zeroize();
+        }
+        Zeroizing::new(encoded)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_value(&self, secret: &str) -> String {
-        lillux::canonical_json(
-            &serde_json::to_value(PlacementCredentialDocument {
-                schema: 1,
-                backend: self.backend.clone(),
-                account: self.account.clone(),
-                generation: self.generation.clone(),
-                secret: secret.to_owned(),
-            })
-            .unwrap(),
-        )
-        .unwrap()
+        self.encode_secret(&Zeroizing::new(secret.to_owned()))
+            .as_str()
+            .to_owned()
     }
 }
 
@@ -194,7 +209,9 @@ mod tests {
         assert!(
             authorize_secret_delivery(
                 &crate::vault::vault_only_sources(&vault),
-                "operator",
+                crate::vault::SecretRecipient {
+                    principal: "operator",
+                },
                 &[name.to_owned()],
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(
                 ryeos_state::objects::EnvironmentAuthority::Vault {

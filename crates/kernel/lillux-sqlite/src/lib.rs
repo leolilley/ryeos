@@ -5,8 +5,6 @@
 pub const SQLITE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("sqlite");
 
 mod binding;
-#[cfg(test)]
-mod custody_drop_gate;
 mod native;
 pub mod offline_host;
 pub mod original_host_owner;
@@ -19,6 +17,17 @@ use lillux::PinnedDirectory;
 pub use native::*;
 use rusqlite::{Connection, OpenFlags};
 use std::{ffi::OsStr, sync::Arc};
+
+/// Whether the running process is a copy of the process recorded as an
+/// owner's issuer. The child of a protected fork is recognized by lillux's
+/// fork barrier, which holds even when a nested PID namespace hands the child
+/// the same pid its parent had; the pid comparison additionally refuses a copy
+/// made by a fork lillux did not supervise. Reads one atomic and makes one
+/// `getpid` call: no allocation and no lock, so a destructor may consult it
+/// before touching anything copied.
+pub(crate) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
 
 /// Read bounded evidence from an exact no-follow child without disturbing
 /// any descriptor tracked by this process's SQLite backend. The native gate
@@ -157,15 +166,23 @@ impl SqliteInspectionProductionPermit {
     pub unsafe fn issued_from_region(kind: SqliteInspectionProductionKind,
         control: Arc<dyn SqliteInspectionProductionControl>, core: OriginalNativeProducerControl)
         -> std::result::Result<Self, SqliteInspectionProductionPublicationFailure> {
-        let retained = std::mem::ManuallyDrop::new(Self { kind, control: ProductionControlOwner::Region { control, core },
-            completed: std::sync::atomic::AtomicBool::new(false) });
-        let result = match &retained.control {
+        let retained = lillux::custody::Held::until_taken(
+            PRODUCTION_PUBLICATION_FAILURE_KIND,
+            ProductionPublicationFailureParts {
+                permit: Self { kind, control: ProductionControlOwner::Region { control, core },
+                    completed: std::sync::atomic::AtomicBool::new(false) },
+            });
+        let result = match &retained.permit.control {
             ProductionControlOwner::Region { core, .. } => core.require_kind(kind).and_then(|()| core.published()),
             _ => unreachable!("constructed concrete region control"),
         };
         match result {
-            Ok(()) => { let mut retained = retained; Ok(unsafe { std::mem::ManuallyDrop::take(&mut retained) }) }
-            Err(refusal) => Err(SqliteInspectionProductionPublicationFailure { refusal, permit: retained }),
+            Ok(()) => match retained.take_whole() {
+                Ok(parts) => Ok(parts.permit),
+                Err(inner) => Err(SqliteInspectionProductionPublicationFailure {
+                    refusal: original_host_owner::FixedHostRefusal::Process, inner }),
+            },
+            Err(refusal) => Err(SqliteInspectionProductionPublicationFailure { refusal, inner: retained }),
         }
     }
     fn require_original_region(&self, region: &original_host_owner::OriginalNativeRegionHandle) -> Result<()> {
@@ -263,38 +280,51 @@ impl SqliteInspectionProductionPermit {
         self.complete()
     }
 }
+const PRODUCTION_PUBLICATION_FAILURE_KIND: &str = "lillux-sqlite::production-publication-failure";
+/// The permit of a refused publication. Constructible only in this module.
+struct ProductionPublicationFailureParts { permit: SqliteInspectionProductionPermit }
+/// A control that does nothing, left in a permit whose real control moved out.
+struct SpentProductionControl;
+impl SqliteInspectionProductionControl for SpentProductionControl {
+    fn checkpoint(&self) -> Result<()> { Ok(()) }
+    fn complete(&self) -> Result<()> { Ok(()) }
+    fn abandoned(&self) {}
+}
+/// Only `into_parts` settles a publication refusal. Until then the permit
+/// holds its resident producer cell and region handle; releasing them at an
+/// unsupervised end would bypass the supervised recovery, so any other end
+/// retains the whole permit, counted, until the process exits.
 pub struct SqliteInspectionProductionPublicationFailure {
     pub refusal: original_host_owner::FixedHostRefusal,
-    permit: std::mem::ManuallyDrop<SqliteInspectionProductionPermit>,
+    inner: lillux::custody::Held<ProductionPublicationFailureParts>,
 }
 impl SqliteInspectionProductionPublicationFailure {
     /// Retains the exact publication failure and all actual handles on every
     /// refusal. After success the outside caller must consume into_parts and
     /// retire the returned callback/core wrappers before attempting final seal.
     pub fn retire_uninstalled_factory_issuer(&self) -> Result<()> {
-        self.permit.retire_uninstalled_factory_issuer()
+        self.inner.permit.retire_uninstalled_factory_issuer()
     }
     pub fn into_parts(self) -> std::result::Result<(SqliteInspectionProductionKind, Arc<dyn SqliteInspectionProductionControl>, OriginalNativeProducerControl), Self> {
-        let ProductionControlOwner::Region { core, .. } = &self.permit.control else { return Err(self); };
+        let ProductionControlOwner::Region { core, .. } = &self.inner.permit.control else { return Err(self); };
         if core.observation().is_err() { return Err(self); }
-        // The refusal is a copied fact; only the permit moves out, so this
-        // failure's own Drop must not run on the emptied slot.
-        let mut failure = std::mem::ManuallyDrop::new(self);
-        let permit = unsafe { std::mem::ManuallyDrop::take(&mut failure.permit) };
-        let permit = std::mem::ManuallyDrop::new(permit);
-        let control = unsafe { std::ptr::read(&permit.control) };
+        let Self { refusal, inner } = self;
+        let mut permit = match inner.take_whole() {
+            Ok(parts) => parts.permit,
+            Err(inner) => return Err(Self { refusal, inner }),
+        };
+        // The control moves out; the emptied permit is marked completed so its
+        // own end neither reports an abandoned interval nor retires the
+        // reference the caller now holds.
+        // Invariant: `SqliteInspectionProductionPermit::drop` is a no-op for a
+        // `Shared` control whose permit is `completed`, so the placeholder
+        // left behind here can never call the spent control or touch a region.
+        let kind = permit.kind;
+        permit.completed.store(true, std::sync::atomic::Ordering::Release);
+        let control = std::mem::replace(
+            &mut permit.control, ProductionControlOwner::Shared(Arc::new(SpentProductionControl)));
         let ProductionControlOwner::Region { control, core } = control else { unreachable!("same retained region control") };
-        Ok((permit.kind, control, core))
-    }
-}
-impl Drop for SqliteInspectionProductionPublicationFailure {
-    fn drop(&mut self) {
-        // Only into_parts settles a publication refusal. Until then the permit
-        // holds its resident producer cell and region handle; releasing them
-        // here would bypass the supervised recovery, so the whole permit stays
-        // retained until the process exits.
-        let permit = unsafe { std::mem::ManuallyDrop::take(&mut self.permit) };
-        lillux::custody::abandon("lillux-sqlite::production-publication-failure", permit);
+        Ok((kind, control, core))
     }
 }
 impl Drop for SqliteInspectionProductionPermit {
@@ -425,10 +455,27 @@ pub trait SqliteInspectionCopyWork: Send + Sync {
 
 /// One original output descriptor. Arc aliases refer to this owner, never File.
 pub struct RetainedSqliteDestinationRole {
+    identity: std::sync::OnceLock<(u64, u64)>,
+    inner: lillux::custody::Held<DestinationRoleParts>,
+}
+/// The role's coordinate and descriptor state. Constructible only in this
+/// module.
+struct DestinationRoleParts {
     root: lillux::PinnedDirectoryIdentity,
     name: std::ffi::OsString,
-    identity: std::sync::OnceLock<(u64, u64)>,
     state: std::sync::Mutex<DestinationRoleState>,
+}
+/// Unsupervised last-drop is preservation, never alias-close evidence. A role
+/// whose descriptor is not open (retired, consumed or pending a raw close)
+/// settles and is dropped; an unverified numeric descriptor is never closed.
+/// A busy lock is unsettled, and a poisoned one is read through.
+fn destination_role_settled(parts: &DestinationRoleParts) -> bool {
+    use std::sync::TryLockError;
+    match parts.state.try_lock() {
+        Ok(state) => !matches!(*state, DestinationRoleState::Open(_)),
+        Err(TryLockError::Poisoned(poisoned)) => !matches!(*poisoned.into_inner(), DestinationRoleState::Open(_)),
+        Err(TryLockError::WouldBlock) => false,
+    }
 }
 enum DestinationRoleState {
     Open(std::fs::File),
@@ -449,14 +496,19 @@ impl RetainedSqliteDestinationRole {
         name: std::ffi::OsString,
     ) -> Self {
         Self {
-            root,
-            name,
             identity: std::sync::OnceLock::new(),
-            state: std::sync::Mutex::new(DestinationRoleState::Open(file)),
+            inner: lillux::custody::Held::new(
+                AbandonedSqliteOwnerKind::DestinationRole.custody_kind(),
+                DestinationRoleParts {
+                    root, name,
+                    state: std::sync::Mutex::new(DestinationRoleState::Open(file)),
+                },
+                destination_role_settled,
+            ),
         }
     }
     fn state(&self) -> Result<std::sync::MutexGuard<'_, DestinationRoleState>> {
-        self.state
+        self.inner.state
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original output state busy or poisoned"))
     }
@@ -469,7 +521,7 @@ impl RetainedSqliteDestinationRole {
     }
     pub fn require_original(&self, root: &PinnedDirectory, name: &OsStr) -> Result<()> {
         ensure!(
-            root.identity()? == self.root && self.name == name,
+            root.identity()? == self.inner.root && *self.inner.name == *name,
             "output selects another original root or role"
         );
         Ok(())
@@ -558,10 +610,10 @@ impl RetainedSqliteDestinationRole {
             quarantine_name: quarantine.to_os_string(),
         };
         authority.require_role(self).map_err(fail)?;
-        ensure_role_cleanup_names(&self.name, source, quarantine).map_err(fail)?;
+        ensure_role_cleanup_names(&self.inner.name, source, quarantine).map_err(fail)?;
         (|| -> Result<()> {
             ensure!(
-                root.identity()? == self.root,
+                root.identity()? == self.inner.root,
                 "planned removal selects foreign root"
             );
             Ok(())
@@ -666,21 +718,6 @@ impl RetainedSqliteDestinationRole {
             let _ = (device, inode);
             anyhow::bail!("original output retirement unavailable")
         }
-    }
-}
-impl Drop for RetainedSqliteDestinationRole {
-    fn drop(&mut self) {
-        // Unsupervised last-drop is preservation, never alias-close evidence.
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poison) => poison.into_inner(),
-        };
-        if let DestinationRoleState::Open(file) =
-            std::mem::replace(state, DestinationRoleState::Retired)
-        {
-            retain_abandoned_sqlite_owner(AbandonedSqliteOwnerKind::DestinationRole, file);
-        }
-        // PendingRaw is also preserved. No close of an unverified numeric FD.
     }
 }
 /// What kind of SQLite owner was retained without supervised close.
@@ -834,7 +871,7 @@ impl SqliteInspectionBodyAuthority {
             "cleanup selects nonoriginal role owner"
         );
         ensure!(
-            role.root == self.root.identity()?,
+            role.inner.root == self.root.identity()?,
             "cleanup selects foreign original inode root"
         );
         Ok(())
@@ -869,27 +906,59 @@ enum OriginalWitnessRemovalPhase {
 }
 struct OriginalWitnessRemovalState {
     quarantine: Option<std::ffi::OsString>,
-    parent: std::mem::ManuallyDrop<Option<Arc<PinnedDirectory>>>,
+    parent: Option<Arc<PinnedDirectory>>,
     deadline: Option<lillux::time::MonotonicDeadline>,
     phase: OriginalWitnessRemovalPhase,
     parent_transferred: bool,
     work: Option<std::sync::Weak<dyn OriginalWitnessCleanupWork>>,
 }
-impl Drop for OriginalWitnessRemovalState {
-    fn drop(&mut self) {
-        // Only the transfer after durable removal and witness retirement ends
-        // the retained cleanup parent. Without it the parent directory stays
-        // held until the process exits.
-        if let Some(parent) = unsafe { std::mem::ManuallyDrop::take(&mut self.parent) } {
-            lillux::custody::abandon("lillux-sqlite::witness-removal-parent", parent);
-        }
-    }
+const WITNESS_REMOVAL_KIND: &str = "lillux-sqlite::witness-removal-parent";
+/// A cleanup parent still present at the end belongs to a removal that never
+/// settled: the owning witness releases it first once the original is durably
+/// removed and its descriptor retired. An unsettled parent directory stays
+/// held, counted, until the process exits, together with the rest of the
+/// removal state. A copy in another process relinquishes the whole state, its
+/// name and work handle included, without allocating or running a destructor.
+fn witness_removal_settled(state: &OriginalWitnessRemovalState) -> bool {
+    state.parent.is_none()
+}
+fn held_removal_state(state: OriginalWitnessRemovalState) -> lillux::custody::Held<OriginalWitnessRemovalState> {
+    lillux::custody::Held::new(WITNESS_REMOVAL_KIND, state, witness_removal_settled)
 }
 /// Transfers the actual publisher File; no File/FD/dup borrow can escape.
 pub struct RetainedOriginalWitnessFile {
     process: u32,
     original: RetainedSqliteDestinationRole,
-    removal: std::sync::Mutex<Option<OriginalWitnessRemovalState>>,
+    removal: std::sync::Mutex<Option<lillux::custody::Held<OriginalWitnessRemovalState>>>,
+}
+impl Drop for RetainedOriginalWitnessFile {
+    fn drop(&mut self) {
+        // Settled exactly when the original is durably removed and its
+        // descriptor retired: the cleanup parent has no remaining use and is
+        // released here. Any other removal leaves the parent in place, so the
+        // removal state's own end retains it. A copy in another process
+        // touches nothing; its removal state relinquishes itself.
+        if crate::foreign_process(self.process) {
+            return;
+        }
+        let retired = destination_role_retired(&self.original.inner);
+        let removal = self.removal.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(removal) = removal {
+            if retired && removal.phase == OriginalWitnessRemovalPhase::RemovedDurable {
+                drop(removal.get_mut().parent.take());
+            }
+        }
+    }
+}
+/// Whether the role's descriptor is retired. A busy lock reads as not retired,
+/// and a poisoned one is read through.
+fn destination_role_retired(parts: &DestinationRoleParts) -> bool {
+    use std::sync::TryLockError;
+    match parts.state.try_lock() {
+        Ok(state) => matches!(*state, DestinationRoleState::Retired),
+        Err(TryLockError::Poisoned(poisoned)) => matches!(*poisoned.into_inner(), DestinationRoleState::Retired),
+        Err(TryLockError::WouldBlock) => false,
+    }
 }
 impl std::fmt::Debug for RetainedOriginalWitnessFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -906,18 +975,18 @@ impl RetainedOriginalWitnessFile {
         Self {
             process: std::process::id(),
             original: RetainedSqliteDestinationRole::created(file, parent, name),
-            removal: std::sync::Mutex::new(Some(OriginalWitnessRemovalState {
-                parent: std::mem::ManuallyDrop::new(None),
+            removal: std::sync::Mutex::new(Some(held_removal_state(OriginalWitnessRemovalState {
+                parent: None,
                 quarantine: None,
                 deadline: None,
                 phase: OriginalWitnessRemovalPhase::Original,
                 parent_transferred: false,
                 work: None,
-            })),
+            }))),
         }
     }
     fn require_original_process(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original witness owner");
+        ensure!(!crate::foreign_process(self.process), "foreign original witness owner");
         Ok(())
     }
     pub fn identity_original(&self) -> Result<lillux::OpenFileIdentity> {
@@ -966,7 +1035,7 @@ impl RetainedOriginalWitnessFile {
         let state = std::cell::RefCell::new(&mut original);
         let result = original_physical_custody::retain_callback_refusal(&|| {
             let mut state = state.borrow_mut();
-            let original = &mut **state;
+            let original = (**state).get_mut();
             ensure!(!original.parent_transferred, "original witness preparation parent already transferred");
             if let Some(prior) = &original.work {
                 ensure!(std::sync::Weak::ptr_eq(prior, &Arc::downgrade(&work)),
@@ -977,22 +1046,22 @@ impl RetainedOriginalWitnessFile {
             work.checkpoint()?;
             work.require_namespace(parent)?;
             self.require_original_process()?;
-            self.original.require_original(parent, &self.original.name)?;
+            self.original.require_original(parent, &self.original.inner.name)?;
             ensure!(original.phase == OriginalWitnessRemovalPhase::Original,
                 "original witness preparation follows namespace effects");
             if original.parent.is_none() {
                 let bytes = std::mem::size_of::<PinnedDirectory>()
                     .checked_add(2 * std::mem::size_of::<usize>())
-                    .and_then(|n| self.original.name.len().checked_mul(2)
+                    .and_then(|n| self.original.inner.name.len().checked_mul(2)
                         .and_then(|names| names.checked_add(16)).and_then(|names| n.checked_add(names)))
                     .context("original witness parent storage overflow")?;
                 work.prepay_original_removal_parent(u64::try_from(bytes)?, 2)?;
                 self.require_original_process()?;
-                *original.parent = Some(Arc::new(parent.try_clone()?));
+                original.parent = Some(Arc::new(parent.try_clone()?));
             }
             if original.quarantine.is_none() {
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
-                quarantine.push(&self.original.name);
+                quarantine.push(&*self.original.inner.name);
                 original.quarantine = Some(quarantine);
             }
             Ok(())
@@ -1020,7 +1089,7 @@ impl RetainedOriginalWitnessFile {
         let progress = std::cell::RefCell::new(&mut original);
         let result = original_physical_custody::retain_callback_refusal(&|| {
             let mut original = progress.borrow_mut();
-            let original = &mut **original;
+            let original = (**original).get_mut();
             ensure!(!original.parent_transferred, "original witness removal parent already transferred");
             if let Some(prior) = &original.work {
                 ensure!(std::sync::Weak::ptr_eq(prior, &Arc::downgrade(&work)),
@@ -1034,20 +1103,20 @@ impl RetainedOriginalWitnessFile {
             work.checkpoint()?;
             work.require_namespace(parent)?;
             self.require_original_process()?;
-            self.original.require_original(parent, &self.original.name)?;
+            self.original.require_original(parent, &self.original.inner.name)?;
             ensure!(original.phase != OriginalWitnessRemovalPhase::Conflict,
                 "original witness retains namespace conflict");
             if original.parent.is_none() {
                 let bytes = std::mem::size_of::<PinnedDirectory>()
                     .checked_add(2 * std::mem::size_of::<usize>())
-                    .and_then(|n| self.original.name.len().checked_mul(2)
+                    .and_then(|n| self.original.inner.name.len().checked_mul(2)
                         .and_then(|names| names.checked_add(16)).and_then(|names| n.checked_add(names)))
                     .context("original witness parent storage overflow")?;
                 work.prepay_original_removal_parent(u64::try_from(bytes)?, 2)?;
                 self.require_original_process()?;
-                *original.parent = Some(Arc::new(parent.try_clone()?));
+                original.parent = Some(Arc::new(parent.try_clone()?));
                 let mut quarantine = std::ffi::OsString::from("cleanup.");
-                quarantine.push(&self.original.name);
+                quarantine.push(&*self.original.inner.name);
                 original.quarantine = Some(quarantine);
             }
             let retained_parent = original.parent.as_ref().expect("cached original witness parent").clone();
@@ -1056,7 +1125,7 @@ impl RetainedOriginalWitnessFile {
             self.original.metadata_original()?;
             if matches!(original.phase, OriginalWitnessRemovalPhase::UnlinkedPendingSync | OriginalWitnessRemovalPhase::RemovedDurable) {
                 work.debit_steps(2)?;
-                ensure!(retained_parent.entry_no_follow(&self.original.name)?.is_none()
+                ensure!(retained_parent.entry_no_follow(&self.original.inner.name)?.is_none()
                     && retained_parent.entry_no_follow(&quarantine)?.is_none(),
                     "removed witness coordinate reappeared");
                 if original.phase == OriginalWitnessRemovalPhase::UnlinkedPendingSync {
@@ -1066,8 +1135,8 @@ impl RetainedOriginalWitnessFile {
                 }
             } else {
                 let (source, target) = if original.phase == OriginalWitnessRemovalPhase::Quarantined {
-                    (quarantine.as_os_str(), self.original.name.as_os_str())
-                } else { (self.original.name.as_os_str(), quarantine.as_os_str()) };
+                    (quarantine.as_os_str(), self.original.inner.name.as_os_str())
+                } else { (self.original.inner.name.as_os_str(), quarantine.as_os_str()) };
                 work.debit_steps(1)?;
                 ensure_original_deadline(deadline)?;
                 self.require_original_process()?;
@@ -1085,7 +1154,7 @@ impl RetainedOriginalWitnessFile {
                         };
                         if let Some(progress) = self.original_removal_progress(original, &work) {
                             if let Err(callback) = work.retain_original_witness_progress(&progress) {
-                                return Err(callback.context(error));
+                                return Err(crate::RefusalSupersedes::superseding(callback, anyhow::Error::new(error)));
                             }
                         }
                         return Err(anyhow::Error::new(error));
@@ -1164,7 +1233,7 @@ impl RetainedOriginalWitnessFile {
         let ended = {
             let mut state = self.removal.try_lock()
                 .map_err(|_| anyhow::anyhow!("original witness parent transfer memo busy or poisoned"))?;
-            let state = state.as_mut().context("original witness removal transferring")?;
+            let state = state.as_mut().context("original witness removal transferring")?.get_mut();
             ensure!(!state.parent_transferred && state.phase == OriginalWitnessRemovalPhase::RemovedDurable
                 && state.parent.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, &parent)),
                 "original witness parent transfer changed custody");
@@ -5400,7 +5469,7 @@ mod tests {
         });
     }
     #[cfg(target_os = "linux")]
-    fn stopped_plan_fixture(
+    pub(super) fn stopped_plan_fixture(
         runtime: &PinnedDirectory,
         root: &std::path::Path,
         sources: [StoppedSqliteRoleSource; 3],
@@ -5891,6 +5960,8 @@ mod tests {
             // Child isolation keeps the configured syscall override out of
             // other tests. Restore the EXACT original callback after probe.
             let original = (*vfs).xGetSystemCall.unwrap()(vfs, c"open".as_ptr()).unwrap();
+            // SQLite's `sqlite3_syscall_ptr` is a type-erased fn pointer, so only a
+            // transmute can restate it as the `open` signature.
             let typed = std::mem::transmute::<
                 unsafe extern "C" fn(),
                 unsafe extern "C" fn(*const std::ffi::c_char, i32, i32) -> i32,
@@ -6021,7 +6092,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     const STOCK_ALIAS_REFUSAL: rusqlite::ErrorCode = rusqlite::ErrorCode::CannotOpen;
     #[cfg(target_os = "linux")]
-    fn seed_wal_on(host: &crate::test_host::TestNativeHost, root: &std::path::Path) {
+    pub(super) fn seed_wal_on(host: &crate::test_host::TestNativeHost, root: &std::path::Path) {
         let (connection, ticket) = host.armed(|| Connection::open(root.join("scheduler.sqlite3")).unwrap());
         host.scope(|| {
             connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE custody(value INTEGER); INSERT INTO custody VALUES(1);").unwrap();
@@ -7245,6 +7316,9 @@ mod guarded_inspection_copy_controls {
     }
     #[test]
     fn dropped_witness_with_prepared_parent_retains_the_parent() {
+        // The witness tests that count this abandoned kind run under the same
+        // native-host serial guard, so no count here races another.
+        let _host = crate::test_host::TestNativeHost::acquire();
         let tmp = tempfile::tempdir().unwrap();
         let root = pin(tmp.path());
         let name = OsStr::new("prepared.original");
@@ -7304,6 +7378,8 @@ mod guarded_inspection_copy_controls {
             steps: std::sync::atomic::AtomicU64::new(0),
         });
         let cleanup: Arc<dyn OriginalWitnessCleanupWork> = work.clone();
+        let kind = "lillux-sqlite::witness-removal-parent";
+        let retained_before = lillux::custody::abandoned_custody().count(kind);
         let removed = owner
             .remove_original_planned(cleanup, &root, work.deadline)
             .unwrap();
@@ -7336,6 +7412,45 @@ mod guarded_inspection_copy_controls {
         assert!(alias.metadata_original().is_err());
         assert!(alias.read_original(8192).is_err());
         assert_eq!(foreign.read_original(8192).unwrap(), b"foreign witness");
+        // Durably removed and retired is settled: the last drop releases the
+        // cleanup parent and nothing is retained for the process lifetime.
+        drop(retired);
+        drop(removed);
+        drop(alias);
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(kind), retained_before);
+        // The never-removed foreign fixture still holds its open original and
+        // is dropped only after the settled-owner assertion.
+        drop(foreign);
+    }
+    #[test]
+    fn dropped_witness_removed_but_unretired_retains_the_parent() {
+        let host = crate::test_host::TestNativeHost::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = pin(tmp.path());
+        let (initialize, ticket) = armed_stock(&host, &tmp.path().join("initialize.sqlite3"));
+        close_armed(&host, initialize, ticket);
+        let name = OsStr::new("unretired.original");
+        let owner = Arc::new(RetainedOriginalWitnessFile::created(
+            root.atomic_create_regular(name, b"unretired witness", 0o600, crate::SQLITE_TEMP_PURPOSE)
+                .unwrap()
+                .unwrap(),
+            root.identity().unwrap(),
+            name.to_os_string(),
+        ));
+        let work = Arc::new(MechanismWitnessWork {
+            parent: root.try_clone().unwrap(),
+            deadline: lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)),
+            steps: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cleanup: Arc<dyn OriginalWitnessCleanupWork> = work.clone();
+        let removed = owner.remove_original_planned(cleanup, &root, work.deadline).unwrap();
+        assert!(root.entry_no_follow(name).unwrap().is_none());
+        let kind = "lillux-sqlite::witness-removal-parent";
+        let before = lillux::custody::abandoned_custody().count(kind);
+        drop(removed);
+        drop(owner);
+        assert_eq!(lillux::custody::abandoned_custody().count(kind), before + 1);
     }
     #[test]
     fn native_production_requires_genuine_terminal_acknowledgement() {
@@ -8317,5 +8432,328 @@ mod inspection_sql_controls {
             assert!(install_inspection_sql_work(&conn, &root, work).is_err());
         });
         close_memory(&host, conn, ticket);
+    }
+}
+
+/// The original factory's stopped-intake and service scopes: the stopped
+/// SQLite intake runs only in the first, every refusal leaves the caller's
+/// owners with the caller, and the cleanup reserve still settles the arena
+/// after a held intake is retried to its bound.
+#[cfg(all(test, target_os = "linux"))]
+mod stopped_intake_scope_controls {
+    use super::*;
+    use super::tests::{armed_stock, close_armed, seed_wal_on, stopped_plan_fixture};
+    use crate::offline_host::{OfflineNativeAuthority, OfflineNativeHost};
+    use crate::test_host::{TestNativeEnvelope, TestNativeHost, issue_offline_host};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// SQLite's BUSY code, as a refused nested scope entry reports it.
+    const NESTED_SCOPE_BUSY: &str = "sqlite code 5";
+
+    /// An operation window the test can close; the cleanup window stays open
+    /// so the host can always finish.
+    struct OperationWindow {
+        open: AtomicBool,
+    }
+    impl OperationWindow {
+        fn open() -> Arc<Self> {
+            Arc::new(Self { open: AtomicBool::new(true) })
+        }
+    }
+    impl OfflineNativeAuthority for OperationWindow {
+        fn checkpoint(&self, cleanup: bool) -> Result<()> {
+            ensure!(cleanup || self.open.load(Ordering::Acquire), "test operation window closed");
+            Ok(())
+        }
+        fn require_runtime(&self, _runtime: &PinnedDirectory) -> Result<()> {
+            Ok(())
+        }
+        // No SQL quota of its own; the host's raw budget meters SQL.
+        fn charge_sql_vm_steps(&self, _steps: u64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn absent_plan(runtime: &PinnedDirectory, root: &std::path::Path) -> StoppedSqliteProjectionPlan {
+        stopped_plan_fixture(runtime, root, [StoppedSqliteRoleSource::Absent; 3])
+    }
+
+    /// Mutate and release an all-absent stopped owner, the way the scheduler
+    /// retires one. The caller runs this inside an allocator scope.
+    fn retire_absent(mut owner: DrainedSqliteProjection) {
+        for role in SqliteRole::all() {
+            owner.quarantine_role(role).unwrap();
+            owner.purge_role(role).unwrap();
+        }
+        owner.release().unwrap();
+    }
+
+    fn transient(host: &OfflineNativeHost) -> OriginalNativeConnection {
+        // SAFETY: test-only issuance under this host's own funded factory.
+        let inputs = unsafe {
+            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, host.destination().unwrap())
+        }
+        .unwrap();
+        match host.factory().unwrap().open_transient(inputs) {
+            Ok(connection) => connection,
+            Err(failure) => panic!("test transient open refused: {failure}"),
+        }
+    }
+
+    fn finish(host: OfflineNativeHost) {
+        if let Err(retained) = host.finish() {
+            panic!("offline test host finish retained: {:#}", retained.error);
+        }
+    }
+
+    #[test]
+    fn stopped_intake_scope_admits_the_stopped_create_an_unscoped_intake_refuses() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let plan = absent_plan(&runtime, tmp.path());
+        // Outside every native scope the stopped create refuses MISUSE
+        // before it allocates or claims anything.
+        let refused = DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            .err()
+            .expect("stopped intake outside every native scope refuses");
+        assert!(refused.to_string().contains("refused (21)"), "{refused}");
+        assert!(matches!(refused.owner(), SqliteProjectionRetirementOwner::UnacquiredStopped { .. }));
+        refused.abort().unwrap();
+
+        let before = factory.budget_snapshot().unwrap().cleanup_steps;
+        let owner = factory
+            .with_original_stopped_intake(|_| {
+                DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            factory.budget_snapshot().unwrap().cleanup_steps > before,
+            "the stopped intake allocates inside the cleanup scope"
+        );
+        let observed = factory
+            .with_original_service_scope(|_| owner.observe_stopped_projection())
+            .unwrap()
+            .unwrap();
+        assert!(observed.ready);
+        assert_eq!(observed.plan, plan);
+        factory.with_original_service_scope(|_| retire_absent(owner)).unwrap();
+        assert!(!tmp.path().join("scheduler.sqlite3").exists());
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_inside_an_open_ticket_and_refuses_a_nested_scope() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        // A thread inside a ticketed open scope cannot open the cleanup scope.
+        let mut inside_ticket = None;
+        let (connection, ticket) = host.armed(|| {
+            inside_ticket = Some(factory.with_original_stopped_intake(|_| ()).map_err(|failure| failure.to_string()));
+            rusqlite::Connection::open_in_memory().unwrap()
+        });
+        close_armed(&host, connection, ticket);
+        let error = inside_ticket.expect("intake attempted").expect_err("intake inside an open ticket refuses");
+        assert!(error.contains(NESTED_SCOPE_BUSY), "{error}");
+
+        // A service scope nested in the intake scope does not match it.
+        let nested = factory
+            .with_original_stopped_intake(|_| factory.with_original_service_scope(|_| ()).map_err(|failure| failure.to_string()))
+            .unwrap();
+        let error = nested.expect_err("service scope nested in the intake scope refuses");
+        assert!(error.contains(NESTED_SCOPE_BUSY), "{error}");
+        // The held effect gate refuses a second intake nested in the first.
+        let again = factory
+            .with_original_stopped_intake(|_| factory.with_original_stopped_intake(|_| ()).map_err(|failure| failure.to_string()))
+            .unwrap();
+        let error = again.expect_err("intake nested in an intake refuses");
+        assert!(error.contains("effect in progress"), "{error}");
+        // Both scopes left: each opens again on this thread.
+        factory.with_original_service_scope(|_| ()).unwrap();
+        factory.with_original_stopped_intake(|_| ()).unwrap();
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_a_finishing_or_shut_down_backend() {
+        let host = TestNativeHost::acquire();
+        let factory = host.factory().clone();
+        factory.mark_lifecycle_for_test(true, false).unwrap();
+        let error = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("draining"), "{error}");
+        let error = factory.with_original_service_scope(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("draining"), "{error}");
+        factory.mark_lifecycle_for_test(false, true).unwrap();
+        let error = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(error.to_string().contains("shutdown"), "{error}");
+        factory.mark_lifecycle_for_test(false, false).unwrap();
+        factory.with_original_stopped_intake(|_| ()).unwrap();
+        drop(factory);
+    }
+
+    #[test]
+    fn stopped_intake_scope_refuses_a_closed_window_and_closed_admission() {
+        {
+            let authority = OperationWindow::open();
+            let (host, serial) = issue_offline_host(TestNativeEnvelope::default(), authority.clone());
+            let factory = host.factory().unwrap().clone();
+            factory.with_original_stopped_intake(|_| ()).unwrap();
+            authority.open.store(false, Ordering::Release);
+            let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+            assert!(format!("{:#}", refused.error()).contains("test operation window closed"), "{refused}");
+            // The closed window latched service refusal: reopening it does
+            // not readmit the intake or a service scope.
+            authority.open.store(true, Ordering::Release);
+            let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+            assert!(refused.to_string().contains("service refused"), "{refused}");
+            let refused = factory.with_original_service_scope(|_| ()).unwrap_err();
+            assert!(refused.to_string().contains("service refused"), "{refused}");
+            drop(factory);
+            finish(host);
+            drop(serial);
+        }
+        let (mut host, serial) = issue_offline_host(TestNativeEnvelope::default(), OperationWindow::open());
+        let factory = host.factory().unwrap().clone();
+        // A connection the census has not recorded holds the finish after it
+        // closed admission and marked the factory finishing.
+        let connection = transient(&host);
+        assert!(host.finish_backend().is_err(), "an unrecorded ticket holds the finish");
+        let refused = factory.with_original_stopped_intake(|_| ()).unwrap_err();
+        assert!(refused.to_string().contains("admission closed"), "{refused}");
+        let closed = connection.close().unwrap_or_else(|failure| panic!("close in cleanup window refused: {failure}"));
+        if let Err((_terminal, error)) = host.retain_terminal(OriginalNativeConnectionTerminal::Closed(closed)) {
+            panic!("terminal refused: {error:#}");
+        }
+        drop(host.finish_backend().unwrap());
+        // The backend terminal exists and SQLite has shut down.
+        let post = host.post_backend_factory().unwrap().clone();
+        assert!(post.with_original_stopped_intake(|_| ()).is_err());
+        assert!(post.with_original_service_scope(|_| ()).is_err());
+        drop((post, factory));
+        if let Err(retained) = host.release() {
+            panic!("offline test host release retained: {:#}", retained.error);
+        }
+        drop(serial);
+    }
+
+    #[test]
+    fn stopped_intake_late_refusal_hands_the_owner_back() {
+        let authority = OperationWindow::open();
+        let (host, serial) = issue_offline_host(TestNativeEnvelope::default(), authority.clone());
+        let factory = host.factory().unwrap().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let plan = absent_plan(&runtime, tmp.path());
+        let mut refused = factory
+            .with_original_stopped_intake(|_| {
+                let captured = DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone());
+                authority.open.store(false, Ordering::Release);
+                captured
+            })
+            .err()
+            .expect("the window closed during the intake refuses after it");
+        assert!(format!("{:#}", refused.error()).contains("test operation window closed"), "{refused}");
+        let owner = refused
+            .completed_owner()
+            .expect("the late refusal carries the callback's owner")
+            .unwrap();
+        assert!(refused.completed_owner().is_none(), "the owner is handed back once");
+        // Service refusal is latched; the owner still settles through this
+        // arena's own allocator scope.
+        factory.raw_scope_for_test(|| retire_absent(owner)).unwrap();
+        drop(factory);
+        finish(host);
+        drop(serial);
+    }
+
+    /// The stopped intake allocates inside the cleanup scope, so it spends
+    /// part of the cleanup reserve. Only its stopped create allocates:
+    /// retries of the held owner, here to the scheduler reset's bound of 240
+    /// after the first attempt, charge the reserve nothing more. The whole
+    /// intake stays within its named bound, which rides the layout quote's
+    /// fixed margin; what remains settles the stopped owner and finishes and
+    /// releases the arena.
+    #[test]
+    fn cleanup_reserve_settles_and_finishes_after_maximal_stopped_intake_retries() {
+        const RETRIES: usize = 240;
+        let envelope = TestNativeEnvelope::default();
+        let host = TestNativeHost::acquire_with(envelope);
+        let factory = host.factory().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        seed_wal_on(&host, tmp.path());
+        let runtime = Arc::new(PinnedDirectory::open(tmp.path()).unwrap().unwrap());
+        let source = StoppedSqliteRoleSource::Quarantine { generation: [1; 16] };
+        let mut skeleton = stopped_plan_fixture(
+            &runtime,
+            tmp.path(),
+            [StoppedSqliteRoleSource::Canonical, StoppedSqliteRoleSource::Absent, StoppedSqliteRoleSource::Absent],
+        );
+        skeleton.roles[0].source = source;
+        let selected = skeleton.source_name(SqliteRole::Main).unwrap();
+        std::fs::rename(tmp.path().join("scheduler.sqlite3"), tmp.path().join(&selected)).unwrap();
+        let plan = stopped_plan_fixture(
+            &runtime,
+            tmp.path(),
+            [source, StoppedSqliteRoleSource::Absent, StoppedSqliteRoleSource::Absent],
+        );
+        // A peer holding the selected inode keeps every intake attempt held.
+        let peer_path = tmp.path().join("peer.sqlite3");
+        std::fs::hard_link(tmp.path().join(&selected), &peer_path).unwrap();
+        let (peer, peer_ticket) = armed_stock(&host, &peer_path);
+        host.scope(|| peer.execute_batch("BEGIN; SELECT * FROM custody;").unwrap());
+
+        let reserved = factory.budget_snapshot().unwrap().cleanup_reserved;
+        let before = factory.budget_snapshot().unwrap().cleanup_steps;
+        let mut failure = factory
+            .with_original_stopped_intake(|_| {
+                DrainedSqliteProjection::capture_stopped_projection(Arc::clone(&runtime), plan.clone())
+            })
+            .unwrap()
+            .err()
+            .expect("the held peer refuses the intake");
+        let after_first = factory.budget_snapshot().unwrap().cleanup_steps;
+        for _ in 0..RETRIES {
+            failure = factory
+                .with_original_stopped_intake(|_| failure.retry_stopped_projection(&plan))
+                .unwrap()
+                .err()
+                .expect("the held peer refuses each retry");
+        }
+        let after_retries = factory.budget_snapshot().unwrap().cleanup_steps;
+        let intake = after_retries - before;
+        let first = after_first - before;
+
+        host.scope(|| peer.execute_batch("ROLLBACK;").unwrap());
+        close_armed(&host, peer, peer_ticket);
+        let owner = factory
+            .with_original_stopped_intake(|_| failure.retry_stopped_projection(&plan))
+            .unwrap()
+            .unwrap();
+        factory.with_original_service_scope(|_| owner.abort()).unwrap().unwrap();
+        assert!(tmp.path().join(&selected).exists());
+        drop(factory);
+
+        let required = crate::offline_host::offline_native_required_cleanup_steps(envelope.storage_bytes, envelope.tickets)
+            .unwrap();
+        let released = host.release();
+        let facts = released.facts.expect("finished backend facts");
+        let settled = facts.budget.cleanup_steps;
+        let teardown = settled - after_retries;
+        eprintln!(
+            "cleanup reserve {reserved}, required quote {required}, first intake {first}, intake with {RETRIES} retries {intake}, \
+             settlement and finish {teardown}, total {settled}"
+        );
+        assert_eq!(facts.arena, crate::OriginalNativeArenaDisposition::Released);
+        assert!(first > 0, "the stopped create allocates inside the cleanup scope");
+        assert_eq!(intake, first, "retries of the held owner charge the cleanup reserve nothing");
+        assert!(
+            intake <= crate::STOPPED_INTAKE_CLEANUP_STEPS,
+            "intake charged {intake} cleanup steps, beyond its bound {}",
+            crate::STOPPED_INTAKE_CLEANUP_STEPS
+        );
+        assert!(crate::STOPPED_INTAKE_CLEANUP_STEPS <= crate::NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS);
+        assert_eq!(required, reserved, "the host reserves exactly the layout quote");
     }
 }

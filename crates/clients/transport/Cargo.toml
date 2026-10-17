@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-client-transport"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Signed client transport for Rye OS: daemon discovery, request signing, HTTP and SSE"
+
+[dependencies]
+base64     = { workspace = true }
+hex        = { workspace = true }
+lillux     = { workspace = true }
+rand       = { workspace = true }
+reqwest    = { workspace = true, features = ["rustls-tls"] }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }

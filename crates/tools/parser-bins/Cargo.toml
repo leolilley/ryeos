@@ -1,0 +1,30 @@
+[package]
+name = "ryeos-parser-bins"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+# Core's document parsers, kept in their own package so their build graph holds
+# only the handler protocol and document libraries, never the engine or state.
+
+[dependencies]
+ryeos-handler-protocol.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+[[bin]]
+name = "rye-parser-yaml-document"
+path = "src/bin/parser_yaml_document.rs"
+
+[[bin]]
+name = "rye-parser-yaml-header-document"
+path = "src/bin/parser_yaml_header_document.rs"
+
+[[bin]]
+name = "rye-parser-regex-kv"
+path = "src/bin/parser_regex_kv.rs"
+
+[lib]
+path = "src/lib.rs"

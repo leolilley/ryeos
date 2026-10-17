@@ -89,7 +89,8 @@ fn build_test_state_at(
     // exercise the production identity check instead of failing before the
     // claim contract is reached.
     if create_identity {
-        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
+            .unwrap();
     }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
@@ -100,7 +101,13 @@ fn build_test_state_at(
         *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(root, signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        root,
+        signer,
+        write_barrier.clone(),
+        Arc::new(head_trust),
+    )
+    .unwrap();
     let state_store = std::sync::Arc::clone(store_owner.store());
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
@@ -150,6 +157,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         &[
             core_bundle.join(".ai/node/engine/kinds"),
             standard_bundle.join(".ai/node/engine/kinds"),
+            ryeos_ui_bundle.join(".ai/node/engine/kinds"),
         ],
         &trust_store,
     )
@@ -193,12 +201,14 @@ fn build_test_state_with_hosted_policy_choices(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(test_object_closure_policy()),
-            Arc::new(ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy {
-                schema: 1,
-                admission_enabled,
-                admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
-                allow_loopback_http: true,
-            }),
+            Arc::new(
+                ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy {
+                    schema: 1,
+                    admission_enabled,
+                    admission_token_ttl_secs: admission_enabled.then_some(token_ttl_secs),
+                    allow_loopback_http: true,
+                },
+            ),
         ]),
     );
     (tmpdir, store_owner, state)

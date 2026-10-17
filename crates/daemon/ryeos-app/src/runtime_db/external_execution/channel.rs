@@ -1235,12 +1235,15 @@ impl RuntimeDb {
                     && rows.iter().all(|row| row.2 == application),
                 "external export prefix retained a partial or contradictory claim"
             );
+            // A capability report is linked evidence its owner consumed when
+            // it admitted the guest; it is never applied and holds back no
+            // import, exactly as the journal's own predecessor checks treat it.
             let unsettled_non_export_predecessor: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_frame
              WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence<?2
                AND application NOT IN ('applied','revoked')
                AND json_extract(frame_json,'$.frame.payload.kind')
-                   NOT IN ('export_object_chunk','export_sealed'))",
+                   NOT IN ('export_object_chunk','export_sealed','capability_report'))",
                 params![binding_digest, i64::try_from(seal_sequence)?],
                 |row| row.get(0),
             )?;
@@ -4291,6 +4294,7 @@ Ok(())
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let exchange = db
@@ -4491,6 +4495,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         db.conn.with_sql(|connection| Ok(connection.execute_batch("CREATE TRIGGER test_refuse_owner_ack BEFORE INSERT ON external_execution_frame
@@ -4747,6 +4752,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         assert!(
@@ -6113,6 +6119,144 @@ Ok(())
     }
 
     #[test]
+    fn a_retained_capability_report_holds_back_no_export_import() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&root.path().join("runtime.sqlite3"));
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let supervisor_direction = ChannelDirection::SupervisorToOwner;
+        let owner_direction = ChannelDirection::OwnerToSupervisor;
+        let boot_id = "997aad14-f3e6-4990-9d40-d1068e5a38d5";
+        let (ready, ready_digest) = wire(
+            &binding,
+            &supervisor,
+            supervisor_direction,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: Some(ryeos_state::external_execution::SupervisorReadyBoot {
+                    boot_id: boot_id.into(),
+                    verified_input_digests: vec!["7".repeat(64)],
+                    ready_at_ms: lillux::time::timestamp_millis(),
+                }),
+            },
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &ready)
+                .unwrap()
+        );
+        assert!(
+            db.claim_external_frame_application(placement, supervisor_direction, 1, &ready_digest)
+                .unwrap()
+        );
+        db.finish_external_frame_application(placement, supervisor_direction, 1, &ready_digest)
+            .unwrap();
+        let (report, report_digest) = wire(
+            &binding,
+            &supervisor,
+            supervisor_direction,
+            2,
+            Some(ready_digest),
+            0,
+            ExecutionChannelPayload::CapabilityReport {
+                boot_id: boot_id.into(),
+                provided: Default::default(),
+                missing: Default::default(),
+            },
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &report)
+                .unwrap()
+        );
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            owner_direction,
+            1,
+            None,
+            2,
+            ExecutionChannelPayload::Release,
+        );
+        retain_fixture_owner_release(&db, placement, &owner, &release).unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, owner_direction, 1, &release_digest)
+                .unwrap()
+        );
+        db.finish_external_frame_application(placement, owner_direction, 1, &release_digest)
+            .unwrap();
+        let completion = "e".repeat(64);
+        let (quiesce, quiesce_digest) = wire(
+            &binding,
+            &owner,
+            owner_direction,
+            2,
+            Some(release_digest),
+            2,
+            ExecutionChannelPayload::Quiesce {
+                completion_request_digest: completion.clone(),
+            },
+        );
+        db.record_external_execution_frame(placement, &quiesce)
+            .unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, owner_direction, 2, &quiesce_digest)
+                .unwrap()
+        );
+        db.finish_external_frame_application(placement, owner_direction, 2, &quiesce_digest)
+            .unwrap();
+        let chunk_bytes = b"durable-controller-staging";
+        let (chunk, chunk_digest) = wire(
+            &binding,
+            &supervisor,
+            supervisor_direction,
+            3,
+            Some(report_digest),
+            2,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ryeos_state::external_execution::ExportContentKind::Blob,
+                object_hash: lillux::sha256_hex(chunk_bytes),
+                offset: 0,
+                bytes_base64: STANDARD.encode(chunk_bytes),
+                final_chunk: true,
+            },
+        );
+        db.record_external_execution_frame(placement, &chunk)
+            .unwrap();
+        let (seal, seal_digest) = wire(
+            &binding,
+            &supervisor,
+            supervisor_direction,
+            4,
+            Some(chunk_digest),
+            2,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: "1".repeat(64),
+                candidate_output_capture_hash: None,
+                completion_request_digest: completion,
+                writer_exclusion_evidence_hash: "2".repeat(64),
+            },
+        );
+        db.record_external_execution_frame(placement, &seal)
+            .unwrap();
+        let plan = match db
+            .claim_external_candidate_import(placement, 4, &seal_digest)
+            .unwrap()
+        {
+            ExternalCandidateImportClaim::Reconcile(plan) => plan,
+            ExternalCandidateImportClaim::AlreadyApplied(_) => {
+                panic!("fresh retained export was already applied")
+            }
+        };
+        assert_eq!(plan.export_frames.len(), 2);
+        assert_eq!(plan.export_frames[0].frame().sequence, 3);
+        assert_eq!(plan.seal_digest, seal_digest);
+    }
+
+    #[test]
     fn sealed_export_claims_complete_retained_prefix_and_recovers_exactly() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.sqlite3");
@@ -7073,6 +7217,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         let first = db
@@ -7445,6 +7590,7 @@ Ok(())
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         let first = db

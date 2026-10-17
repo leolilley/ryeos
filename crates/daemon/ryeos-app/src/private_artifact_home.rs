@@ -42,6 +42,26 @@ fn validate_component(label: &str, value: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// The directory every private artifact home lives under, credential
+/// profile homes included.
+pub fn root(runtime_state_dir: &Path) -> PathBuf {
+    runtime_state_dir.join(HOME_ROOT)
+}
+
+/// Establish the home root, private to the node's account (mode 0700),
+/// without creating any home in it. The node does this before its
+/// capability report grades the root, so a node that has not yet enrolled
+/// a credential profile reports the private credential home it will give
+/// its first one; a credential login workload requires that grade.
+pub fn ensure_root(runtime_state_dir: &Path) -> Result<PathBuf> {
+    let path = root(runtime_state_dir);
+    let directory = lillux::PinnedDirectory::open_or_create(&path)
+        .context("open node-private artifact-home root")?;
+    directory.set_mode(0o700)?;
+    directory.sync()?;
+    Ok(path)
+}
+
 pub fn home_path(runtime_state_dir: &Path, home_id: &str) -> Result<PathBuf> {
     validate_component("private artifact home id", home_id, MAX_HOME_ID_BYTES)?;
     Ok(runtime_state_dir.join(HOME_ROOT).join(home_id))

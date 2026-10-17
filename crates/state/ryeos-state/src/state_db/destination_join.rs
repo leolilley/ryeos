@@ -9,7 +9,7 @@ use lillux_sqlite::original_physical_custody::{
     OriginalPhysicalRegistry, OriginalPhysicalRegistryIdentity, OutsideWork,
     RetiredOriginalPhysicalRegistry,
 };
-use std::mem::ManuallyDrop;
+use lillux::custody::Held;
 
 pub fn quote_state_destination_join(maximum: usize) -> anyhow::Result<OutsideWork> {
     anyhow::ensure!(maximum > 0, "empty original State leaf bound");
@@ -110,61 +110,41 @@ pub(crate) struct OriginalStateDestinationJoin {
     process: u32,
     factory: std::sync::Weak<OriginalNativeFactory>,
     maximum: usize,
-    state: Mutex<JoinState>,
+    state: Mutex<Held<JoinState>>,
 }
+const JOIN_STATE_KIND: &str = "ryeos-state::destination-join";
+
+/// The join's retained owners and facts. Constructible only in this module,
+/// and held so that dropping it unsettled keeps it whole until the process
+/// exits: settled exactly when it owns nothing, since every consuming path
+/// leaves each slot None or empty first. A retained parent, source alias,
+/// generated root or registration ends only through the supervised outside
+/// receiver.
 struct JoinState {
     // Cache the canonical parent before releasing any redundant parent alias.
-    parent: ManuallyDrop<Option<OriginalProjectionStateOwner>>,
-    leaves: ManuallyDrop<Vec<RetainedLeaf>>,
+    parent: Option<OriginalProjectionStateOwner>,
+    leaves: Vec<RetainedLeaf>,
     census_closed: bool,
     // Full actual live parent remains accessible after its canonical Arc body
     // moves. Its Store/lease/factory edges must join the real upper receiver.
-    live_parent: ManuallyDrop<Option<live_native::LiveStateNativeOwner>>,
+    live_parent: Option<live_native::LiveStateNativeOwner>,
     // Moving the body outward is not retirement. Keep native/holder terminal
     // predicates pending until that actual outside body has a terminal join.
     live_parent_outside_pending: bool,
     generated_root_registry: Option<OriginalPhysicalRegistryIdentity>,
     generated_roots_retired: bool,
 }
-impl JoinState {
-    /// No owner remains: the canonical and live parents moved out, and every
-    /// leaf released its source alias, generated root and registration.
-    fn owns_nothing(
-        parent: &Option<OriginalProjectionStateOwner>,
-        leaves: &[RetainedLeaf],
-        live_parent: &Option<live_native::LiveStateNativeOwner>,
-    ) -> bool {
-        parent.is_none()
-            && live_parent.is_none()
-            && leaves.iter().all(|leaf| {
-                leaf.source.is_none()
-                    && leaf.generated.as_ref().is_none_or(|owner| {
-                        owner.root.is_none() && owner.registration.is_none()
-                    })
-            })
-    }
-}
-impl Drop for JoinState {
-    fn drop(&mut self) {
-        // Each field is taken exactly once, here; every consuming path leaves
-        // it None or empty first.
-        let parent = unsafe { ManuallyDrop::take(&mut self.parent) };
-        let leaves = unsafe { ManuallyDrop::take(&mut self.leaves) };
-        let live_parent = unsafe { ManuallyDrop::take(&mut self.live_parent) };
-        if Self::owns_nothing(&parent, &leaves, &live_parent) {
-            drop(parent);
-            drop(leaves);
-            drop(live_parent);
-        } else {
-            // A retained parent, source alias, generated root or registration
-            // ends only through the supervised outside receiver. Dropped
-            // without it, the whole graph stays held until the process exits.
-            lillux::custody::abandon(
-                "ryeos-state::destination-join",
-                (parent, leaves, live_parent),
-            );
-        }
-    }
+/// No owner remains: the canonical and live parents moved out, and every
+/// leaf released its source alias, generated root and registration.
+fn join_state_owns_nothing(state: &JoinState) -> bool {
+    state.parent.is_none()
+        && state.live_parent.is_none()
+        && state.leaves.iter().all(|leaf| {
+            leaf.source.is_none()
+                && leaf.generated.as_ref().is_none_or(|owner| {
+                    owner.root.is_none() && owner.registration.is_none()
+                })
+        })
 }
 struct RetainedLeaf {
     evidence: OriginalNativeOutsideLeafEvidence,
@@ -278,15 +258,15 @@ impl OriginalProjectionStateOwner {
             process: std::process::id(),
             factory: Arc::downgrade(factory),
             maximum,
-            state: Mutex::new(JoinState {
-                parent: ManuallyDrop::new(Some(self.clone())),
-                leaves: ManuallyDrop::new(Vec::with_capacity(maximum)),
+            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
+                parent: Some(self.clone()),
+                leaves: Vec::with_capacity(maximum),
                 census_closed: false,
-                live_parent: ManuallyDrop::new(None),
+                live_parent: None,
                 live_parent_outside_pending: false,
                 generated_root_registry: None,
                 generated_roots_retired: false,
-            }),
+            }, join_state_owns_nothing)),
         });
         let mut link = match self.join_link().try_lock() {
             Ok(link) => link,
@@ -314,7 +294,7 @@ impl OriginalStateDestinationJoin {
         aggregate: &OriginalNativeTerminal,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original State join"
         );
         factory.require_original_process()?;
@@ -327,7 +307,7 @@ impl OriginalStateDestinationJoin {
     }
     pub(super) fn holders_retired(&self) -> anyhow::Result<bool> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign original State join observation"
         );
         let state = self
@@ -389,15 +369,15 @@ impl OriginalStateDestinationJoin {
             process: std::process::id(),
             factory: std::sync::Weak::new(),
             maximum: 1,
-            state: Mutex::new(JoinState {
-                parent: ManuallyDrop::new(None),
-                leaves: ManuallyDrop::new(Vec::new()),
+            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
+                parent: None,
+                leaves: Vec::new(),
                 census_closed: true,
-                live_parent: ManuallyDrop::new(None),
+                live_parent: None,
                 live_parent_outside_pending: false,
                 generated_root_registry: None,
                 generated_roots_retired: false,
-            }),
+            }, join_state_owns_nothing)),
         })
     }
     // Only ordinary wrapper aliases are retired here. The full canonical
@@ -447,18 +427,18 @@ impl OriginalStateDestinationJoin {
                 })
             });
             if duplicate {
-                drop(state.leaves[index].source.take());
+                drop(state.get_mut().leaves[index].source.take());
             }
         }
         for index in 0..state.leaves.len() {
-            let Some(source) = state.leaves[index].source.take() else {
+            let Some(source) = state.get_mut().leaves[index].source.take() else {
                 continue;
             };
             match source {
                 StateDestinationLeaf::State(owner) => match Arc::try_unwrap(owner) {
                     Ok(parent_alias) => drop(parent_alias),
                     Err(owner) => {
-                        state.leaves[index].source = Some(StateDestinationLeaf::State(owner));
+                        state.get_mut().leaves[index].source = Some(StateDestinationLeaf::State(owner));
                         anyhow::bail!("actual State wrapper still has an external alias");
                     }
                 },
@@ -473,7 +453,7 @@ impl OriginalStateDestinationJoin {
                             name,
                             expected_identity,
                         } = owner;
-                        state.leaves[index].generated = Some(GeneratedLeafCustody {
+                        state.get_mut().leaves[index].generated = Some(GeneratedLeafCustody {
                             root: Some(root),
                             registration: None,
                             registering: false,
@@ -486,7 +466,7 @@ impl OriginalStateDestinationJoin {
                         drop(preparation);
                     }
                     Err(owner) => {
-                        state.leaves[index].source = Some(StateDestinationLeaf::Generated(owner));
+                        state.get_mut().leaves[index].source = Some(StateDestinationLeaf::Generated(owner));
                         anyhow::bail!("actual generated State wrapper still has an external alias");
                     }
                 },
@@ -531,8 +511,9 @@ impl OriginalStateDestinationJoin {
             ),
             "live State census cannot consume offline preparation"
         );
-        state.census_closed = true;
+        state.get_mut().census_closed = true;
         let OriginalProjectionStateOwner::Live(parent) = state
+            .get_mut()
             .parent
             .take()
             .expect("checked actual live State parent")
@@ -543,11 +524,11 @@ impl OriginalStateDestinationJoin {
             Ok(parent) => {
                 // Cache every real root/recovery/trust/host field BEFORE any
                 // later upper Store transfer or fallible physical operation.
-                *state.live_parent = Some(parent);
+                state.get_mut().live_parent = Some(parent);
                 Ok(())
             }
             Err(parent) => {
-                *state.parent = Some(OriginalProjectionStateOwner::Live(parent));
+                state.get_mut().parent = Some(OriginalProjectionStateOwner::Live(parent));
                 anyhow::bail!("actual live State parent still has an external alias")
             }
         }
@@ -577,8 +558,8 @@ impl OriginalStateDestinationJoin {
         anyhow::ensure!(state.census_closed && state.parent.is_none()
             && state.leaves.iter().all(|leaf| leaf.source.is_none()),
             "live State parent transfer lacks complete original source census");
-        let original = state.live_parent.take().context("actual live State parent body absent")?;
-        state.live_parent_outside_pending = true;
+        let original = state.get_mut().live_parent.take().context("actual live State parent body absent")?;
+        state.get_mut().live_parent_outside_pending = true;
         *destination = Some(original);
         Ok(())
     }
@@ -603,12 +584,12 @@ impl OriginalStateDestinationJoin {
         anyhow::ensure!(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
             && state.leaves.iter().all(|leaf| leaf.source.is_none()),
             "live State parent completion lacks its closed source census");
-        state.live_parent_outside_pending = false;
+        state.get_mut().live_parent_outside_pending = false;
         Ok(())
     }
     /// Cached completion of the live parent handoff; reads no factory.
     pub(crate) fn live_parent_completed(&self) -> anyhow::Result<bool> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign original State join observation");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign original State join observation");
         let state = self.state.try_lock()
             .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
         Ok(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
@@ -620,7 +601,7 @@ impl OriginalStateDestinationJoin {
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.process == std::process::id(),
+            !crate::foreign_process(self.process),
             "foreign State root registration"
         );
         let registry_identity = registry.identity()?;
@@ -634,7 +615,7 @@ impl OriginalStateDestinationJoin {
             if let Some(expected) = state.generated_root_registry.as_ref() {
                 expected.require_same_registry(&registry_identity)?;
             } else {
-                state.generated_root_registry = Some(registry_identity.clone());
+                state.get_mut().generated_root_registry = Some(registry_identity.clone());
             }
             anyhow::ensure!(
                 state.census_closed
@@ -667,7 +648,7 @@ impl OriginalStateDestinationJoin {
         if complete {
             let quote = quote_generated_root_registration_at(registry, count, 0)?;
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-            anyhow::ensure!(self.process == std::process::id(),
+            anyhow::ensure!(!crate::foreign_process(self.process),
                 "foreign State roots after completed-stage validation debit");
             return self.require_generated_roots_registered(registry);
         }
@@ -675,14 +656,14 @@ impl OriginalStateDestinationJoin {
         // Counted aliases and membership checks are funded before any
         // source checkout; the original callback runs outside State's gate.
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-        anyhow::ensure!(self.process == std::process::id(), "foreign State roots after original prepay");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State roots after original prepay");
         for index in 0..count {
             let source = {
                 let mut state = self
                     .state
                     .try_lock()
                     .map_err(|_| anyhow::anyhow!("original State root source busy or poisoned"))?;
-                let Some(owner) = &mut state.leaves[index].generated else {
+                let Some(owner) = &mut state.get_mut().leaves[index].generated else {
                     continue;
                 };
                 if let Some(binding) = &owner.registration {
@@ -709,7 +690,7 @@ impl OriginalStateDestinationJoin {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let owner = state.leaves[index]
+            let owner = state.get_mut().leaves[index]
                 .generated
                 .as_mut()
                 .expect("cached original generated root");
@@ -733,7 +714,7 @@ impl OriginalStateDestinationJoin {
         &self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign State generated registry census");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
         let registry_identity = registry.identity()?;
         let state = self.state.try_lock()
             .map_err(|_| anyhow::anyhow!("State generated registry census busy or poisoned"))?;
@@ -766,7 +747,7 @@ impl OriginalStateDestinationJoin {
         registry: &RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign retired State generated-root receipt frame");
         let (leaves, generated_roots, identity) = {
             let state = self.state.try_lock()
@@ -808,7 +789,7 @@ impl OriginalStateDestinationJoin {
         let quote = quote_retired_generated_root_receipts(leaves, generated_roots)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!crate::foreign_process(self.process),
             "foreign State generated-root frame after retirement debit");
 
         let mut state = self.state.try_lock()
@@ -842,12 +823,12 @@ impl OriginalStateDestinationJoin {
                 drop(binding.receipt_in(registry)?);
             }
         }
-        for leaf in state.leaves.iter_mut() {
+        for leaf in state.get_mut().leaves.iter_mut() {
             if let Some(owner) = leaf.generated.as_mut() {
                 owner.registration = None;
             }
         }
-        state.generated_roots_retired = true;
+        state.get_mut().generated_roots_retired = true;
         Ok(())
     }
     pub(super) fn require_generated_roots_registered_with_prepay(
@@ -855,7 +836,7 @@ impl OriginalStateDestinationJoin {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign State generated registry census");
+        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
         let queries = {
             let state = self.state.try_lock()
                 .map_err(|_| anyhow::anyhow!("original State generated membership census busy or poisoned"))?;
@@ -934,7 +915,7 @@ impl OriginalStateDestinationJoin {
         if let Err(error) = checked {
             return Err((source, evidence, error));
         }
-        state.leaves.push(RetainedLeaf {
+        state.get_mut().leaves.push(RetainedLeaf {
             evidence,
             source: Some(source),
             generated: None,
@@ -953,9 +934,9 @@ fn discard_unpublished(candidate: Arc<OriginalStateDestinationJoin>) {
         .state
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    drop(state.parent.take());
-    drop(std::mem::take(&mut *state.leaves));
-    drop(state.live_parent.take());
+    drop(state.get_mut().parent.take());
+    drop(std::mem::take(&mut state.get_mut().leaves));
+    drop(state.get_mut().live_parent.take());
     drop(state);
 }
 
@@ -1029,7 +1010,7 @@ struct StateLeafContinuation {
 unsafe impl lillux_sqlite::OriginalOutsideDestinationContinuation for StateLeafContinuation {
     fn require_original_process(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.join.process == std::process::id(),
+            !crate::foreign_process(self.join.process),
             "foreign original State leaf continuation"
         );
         Ok(())
@@ -1107,15 +1088,15 @@ mod drop_tests {
             process: std::process::id(),
             factory: std::sync::Weak::new(),
             maximum: 1,
-            state: Mutex::new(JoinState {
-                parent: ManuallyDrop::new(parent),
-                leaves: ManuallyDrop::new(Vec::with_capacity(1)),
+            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
+                parent: parent,
+                leaves: Vec::with_capacity(1),
                 census_closed,
-                live_parent: ManuallyDrop::new(None),
+                live_parent: None,
                 live_parent_outside_pending,
                 generated_root_registry: None,
                 generated_roots_retired: false,
-            }),
+            }, join_state_owns_nothing)),
         }
     }
 

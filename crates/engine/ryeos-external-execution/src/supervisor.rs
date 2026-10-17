@@ -74,9 +74,39 @@ pub struct SupervisorCaptureOutcome {
     pub sealed_frame: String,
 }
 
+/// What a supervisor running on a leased guest binds into its Ready and
+/// reports right after it. The host observation is taken once, so the boot
+/// named by Ready and the boot the capability report was measured on cannot
+/// differ.
+pub struct LeaseReadyPlan {
+    verified_input_digests: Vec<String>,
+    host: lillux::process_control::HostFacts,
+}
+
+impl LeaseReadyPlan {
+    /// Observe this host now. `verified_input_digests` are the activation
+    /// inputs the supervisor verified, in the order the owner delivered them.
+    pub fn observe(verified_input_digests: Vec<String>) -> Result<Self> {
+        ensure!(
+            !verified_input_digests.is_empty(),
+            "a leased guest Ready names at least one verified activation input"
+        );
+        let host = lillux::process_control::HostFacts::observe(0, std::path::Path::new("/"));
+        ensure!(
+            !host.boot_id.is_empty(),
+            "the host boot identity could not be observed"
+        );
+        Ok(Self {
+            verified_input_digests,
+            host,
+        })
+    }
+}
+
 pub struct SerializedExternalCandidateSupervisor<L> {
     journal: LiveGuestJournal,
     launcher: L,
+    lease_ready: Option<LeaseReadyPlan>,
     pending_protocol: Option<GuestApplicationToken>,
     pending_execution_output: Option<CandidateExecutionOutput>,
     execution_output_closed: bool,
@@ -87,6 +117,7 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         Self {
             journal,
             launcher,
+            lease_ready: None,
             pending_protocol: None,
             pending_execution_output: None,
             execution_output_closed: false,
@@ -95,6 +126,18 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
 
     pub fn journal(&self) -> &LiveGuestJournal {
         &self.journal
+    }
+
+    /// Run on a leased guest: Ready names the boot and the verified inputs,
+    /// and a capability report follows it. Must be set before Ready is
+    /// published.
+    pub fn with_lease_ready(mut self, plan: LeaseReadyPlan) -> Self {
+        self.lease_ready = Some(plan);
+        self
+    }
+
+    pub fn is_lease_ready(&self) -> bool {
+        self.lease_ready.is_some()
     }
 
     /// Join one native point read to the protected occurrence journal. `false`
@@ -151,13 +194,45 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
         let binding = self.journal.binding();
+        let boot = self.lease_ready.as_ref().map(|plan| {
+            ryeos_state::external_execution::SupervisorReadyBoot {
+                boot_id: plan.host.boot_id.clone(),
+                verified_input_digests: plan.verified_input_digests.clone(),
+                ready_at_ms: lillux::time::timestamp_millis(),
+            }
+        });
         self.journal.author_supervisor_frame(
             signing_key,
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot,
             },
         )
+    }
+
+    /// Author the supervisor's second frame: the host capability probe taken
+    /// on the boot Ready named. Nothing is authored, and `None` is returned,
+    /// unless this supervisor runs on a leased guest.
+    pub fn author_capability_report(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        let Some(plan) = self.lease_ready.as_ref() else {
+            return Ok(None);
+        };
+        let lillux::process_control::HostCapabilities { provided, missing } =
+            plan.host.capabilities();
+        self.journal
+            .author_supervisor_frame(
+                signing_key,
+                ExecutionChannelPayload::CapabilityReport {
+                    boot_id: plan.host.boot_id.clone(),
+                    provided,
+                    missing,
+                },
+            )
+            .map(Some)
     }
 
     /// Move one bounded execution observation into the authenticated guest
@@ -957,6 +1032,182 @@ mod tests {
         assert_eq!(launcher.captures, 1);
         assert_eq!(launcher.finish_acks.len(), 3);
         journal.validate().unwrap();
+        ryeos_state::external_execution::native_journal::testing::retire(
+            state.host(),
+            journal.close(),
+        );
+    }
+    fn lease_fixture_binding(
+        owner: &lillux::crypto::SigningKey,
+        supervisor_key: &lillux::crypto::SigningKey,
+    ) -> ExecutionChannelBinding {
+        let now = lillux::time::timestamp_millis();
+        ExecutionChannelBinding {
+            schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
+            placement_thread_id: "T-external-supervisor-lease".into(),
+            allocation_request_digest: "a".repeat(64),
+            occurrence_id: "occurrence-external-supervisor-lease".into(),
+            admitted_capsule_hash: "b".repeat(64),
+            base_snapshot_hash: "9".repeat(64),
+            execution_binding_hash: "c".repeat(64),
+            supervisor_runtime_hash: "d".repeat(64),
+            candidate_program_digest: "0".repeat(64),
+            channel_nonce: "e".repeat(64),
+            owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
+            supervisor_public_key: STANDARD.encode(supervisor_key.verifying_key().as_bytes()),
+            issued_at_ms: now - 1_000,
+            execution_deadline_ms: now + 60_000,
+            expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 1024 * 1024,
+            max_frames: 32,
+            max_bytes: 2 * 1024 * 1024,
+        }
+    }
+
+    fn lease_fixture_live_journal(
+        state: &ryeos_state::test_support::TestState,
+        binding: &ExecutionChannelBinding,
+        journal_root: &std::path::Path,
+    ) -> LiveGuestJournal {
+        let authority = state.pinned_authority().unwrap();
+        let journal_directory = lillux::PinnedDirectory::open(journal_root)
+            .unwrap()
+            .unwrap();
+        journal_directory.tighten_owner_private_directory().unwrap();
+        let prepared = PreparedGuestJournal::create(
+            journal_directory,
+            &authority,
+            &"f".repeat(64),
+            binding.clone(),
+            state.host().factory(),
+            state.host().destination(),
+            &ryeos_state::external_execution::native_journal::testing::census(state.host()),
+        )
+        .unwrap();
+        let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
+            lillux::ExactProcessIdentity {
+                boot_id: "external-supervisor-lease-boot".into(),
+                target_pid: 200,
+                target_start_time_ticks: 300,
+                group_leader_pid: 200,
+                group_leader_start_time_ticks: 300,
+            },
+            &"1".repeat(64),
+            &"2".repeat(64),
+        )
+        .unwrap();
+        prepared
+            .bind_launcher(occurrence)
+            .unwrap()
+            .mark_launcher_ready(
+                AuthenticatedLauncherReady::from_handshake_transcript(&"3".repeat(64)).unwrap(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn lease_mode_binds_the_boot_and_authors_the_report_second_and_release_launches() {
+        let state_root = tempfile::tempdir().unwrap();
+        let state = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
+        let owner = lillux::crypto::generate_signing_key();
+        let supervisor_key = lillux::crypto::generate_signing_key();
+        let binding = lease_fixture_binding(&owner, &supervisor_key);
+        let journal_root = tempfile::tempdir().unwrap();
+        let live = lease_fixture_live_journal(&state, &binding, journal_root.path());
+        let inputs = vec!["5".repeat(64), "6".repeat(64), "7".repeat(64)];
+        let plan = LeaseReadyPlan::observe(inputs.clone()).unwrap();
+        let mut runtime = SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default())
+            .with_lease_ready(plan);
+        assert!(runtime.is_lease_ready());
+
+        let ready = runtime.publish_ready(&supervisor_key).unwrap();
+        let ExecutionChannelPayload::Ready {
+            boot: Some(boot), ..
+        } = &ready.frame().payload
+        else {
+            panic!("a leased guest Ready names its boot");
+        };
+        assert_eq!(boot.verified_input_digests, inputs);
+        assert!(!boot.boot_id.is_empty());
+
+        let report = runtime
+            .author_capability_report(&supervisor_key)
+            .unwrap()
+            .expect("a leased guest reports its capabilities");
+        assert_eq!(report.frame().sequence, 2);
+        assert_eq!(
+            report.frame().previous_frame_digest.as_deref(),
+            Some(ready.digest())
+        );
+        let ExecutionChannelPayload::CapabilityReport {
+            boot_id, provided, ..
+        } = &report.frame().payload
+        else {
+            panic!("the second frame is the capability report");
+        };
+        assert_eq!(boot_id, &boot.boot_id);
+        assert!(provided.contains_key("time"));
+
+        // Neither frame starts the candidate; only the owner's Release does.
+        assert_eq!(runtime.launcher.releases, 0);
+        let release = signed_owner_frame(
+            &binding,
+            &owner,
+            1,
+            None,
+            ExecutionChannelPayload::Release,
+        );
+        assert_eq!(
+            runtime
+                .dispatch_release(release.canonical().as_bytes())
+                .unwrap(),
+            SupervisorApplicationOutcome::Applied
+        );
+        assert_eq!(runtime.launcher.releases, 1);
+
+        let (journal, _launcher) = runtime.into_parts();
+        ryeos_state::external_execution::native_journal::testing::retire(
+            state.host(),
+            journal.close(),
+        );
+    }
+
+    #[test]
+    fn ordinary_mode_ready_names_no_boot_and_no_report_follows() {
+        let state_root = tempfile::tempdir().unwrap();
+        let state = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
+        let owner = lillux::crypto::generate_signing_key();
+        let supervisor_key = lillux::crypto::generate_signing_key();
+        let binding = lease_fixture_binding(&owner, &supervisor_key);
+        let journal_root = tempfile::tempdir().unwrap();
+        let live = lease_fixture_live_journal(&state, &binding, journal_root.path());
+        let runtime = SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default());
+        assert!(!runtime.is_lease_ready());
+
+        let ready = runtime.publish_ready(&supervisor_key).unwrap();
+        assert!(matches!(
+            ready.frame().payload,
+            ExecutionChannelPayload::Ready { boot: None, .. }
+        ));
+        assert!(
+            runtime
+                .author_capability_report(&supervisor_key)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.launcher.releases, 0);
+
+        let (journal, _launcher) = runtime.into_parts();
         ryeos_state::external_execution::native_journal::testing::retire(
             state.host(),
             journal.close(),

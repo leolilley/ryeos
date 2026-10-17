@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T01:55:13Z:3437218e29ffd349df967641728f5be1557f6ecb64624effdf35a1dbe97a12ac:vZzyQ35dwAigOp3qoQb6vRZtV/7z1e5ukyknf/jsGZMPtyMdPfruFLivP3+3UjMABLHCP5q+XQymZImOaN2qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T00:59:19Z:b20c4fb2c46252a9957bc3b8c452cb485a09174bce231bb883347c4d7a19765d:c8Eb5ECBwX9ffHTcolu2t1xftB/eDJ0uu2gVlSMMId15pXSWykyxpdtP0Zj+dK6+kLSVRcSoDFkmLA98mDudAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -26,9 +26,9 @@ The Rust workspace produces 14 executables across 8 crates:
 | `rye-composer-extends-chain`  | `ryeos-handler-bins`     | Composer handler subprocess      |
 | `ryeos-graph-effective-validator` | `ryeos-handler-bins` | Effective graph validator subprocess |
 | `rye-composer-identity`       | `ryeos-handler-bins`     | Composer handler subprocess      |
-| `rye-parser-yaml-document`    | `ryeos-handler-bins`     | Parser handler subprocess        |
-| `rye-parser-yaml-header-document` | `ryeos-handler-bins` | Parser handler subprocess        |
-| `rye-parser-regex-kv`         | `ryeos-handler-bins`     | Parser handler subprocess        |
+| `rye-parser-yaml-document`    | `ryeos-parser-bins`      | Parser handler subprocess        |
+| `rye-parser-yaml-header-document` | `ryeos-parser-bins` | Parser handler subprocess        |
+| `rye-parser-regex-kv`         | `ryeos-parser-bins`      | Parser handler subprocess        |
 | `lillux`                      | `lillux`                  | Kernel primitives (CAS, crypto, exec, identity, time) |
 
 Two naming prefixes coexist:

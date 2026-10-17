@@ -40,7 +40,8 @@ pub mod runtime_dispatch;
 mod selected_invocation_root;
 pub use selected_invocation_root::{
     SelectedDedicatedInvocationLoan, SelectedInstallationRefusal, SelectedInvocationAttachment,
-    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence, abandoned_selected_compositions,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
+    abandoned_selected_compositions,
 };
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
@@ -1201,11 +1202,6 @@ pub(crate) fn seal_callback_workspace_generation(
     let authority = pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
-    let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
-        &cas,
-        base_snapshot_hash,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
     let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
         .root
@@ -1226,6 +1222,15 @@ pub(crate) fn seal_callback_workspace_generation(
     if record.base_snapshot != base_snapshot_hash {
         anyhow::bail!("callback workspace base snapshot contradicts its resume base");
     }
+    // Freezing is one-way: a node that cannot quiesce every bound borrower
+    // refuses here, while the workspace is still Active, rather than after
+    // fencing it for a capture that can never run.
+    require_workspace_quiescence_admitted(state, &record, "callback workspace freeze")?;
+    let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        &cas,
+        base_snapshot_hash,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
     match record.state {
         WorkspaceState::Active => state.state_store.transition_execution_workspace_owned(
             workspace_id,
@@ -1327,6 +1332,13 @@ pub(crate) fn capture_runtime_workspace_input_generation(
     effective_project: &Path,
     base_snapshot_hash: &str,
 ) -> Result<PendingProjectResult> {
+    // A node that cannot quiesce workspace borrowers refuses before the
+    // operation is read or moved out of Reserved.
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        "workspace-input capture",
+    )?;
     let intent = state
         .state_store
         .get_runtime_action_intent(operation_id)?
@@ -1368,6 +1380,10 @@ pub(crate) fn capture_runtime_workspace_input_generation(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
+    // Each current borrower's process scope is judged while the operation
+    // is still Reserved, so a refusal never leaves it Quiescing.
+    bound_workspace_targets(state, &record)
+        .context("workspace-input capture refused before it started")?;
     state.state_store.transition_runtime_workspace_operation(
         operation_id,
         &[ryeos_app::runtime_db::RuntimeWorkspaceOperationPhase::Reserved],
@@ -1482,6 +1498,14 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     {
         anyhow::bail!("runtime workspace operation is not an unstarted exclusive operation");
     }
+    // Refuse while the operation is still unstarted: an exclusive operation
+    // on a scope-configured node freezes every borrower's scope, and that
+    // freeze must not be the barrier's first use.
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        "exclusive workspace operation",
+    )?;
 
     let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
@@ -1509,6 +1533,13 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
+    // Each current borrower's process scope is judged while the operation
+    // is still unstarted, so an execution recovered with a scope on a node
+    // whose policy no longer configures scopes refuses here rather than
+    // after strict groups were stopped. Stopping re-resolves the borrowers
+    // under the quiescing barrier and judges them again.
+    bound_workspace_targets(state, &record)
+        .context("exclusive workspace operation refused before it started")?;
     state.state_store.transition_runtime_workspace_operation(
         operation_id,
         &[ryeos_app::runtime_db::RuntimeWorkspaceOperationPhase::Reserved],
@@ -1994,6 +2025,25 @@ fn quiesce_bound_workspace(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
 ) -> Result<QuiescedExecutionGroup> {
+    let qualified = &state.isolation.inspection().process_scope_capabilities;
+    let targets = bound_workspace_targets(state, record)?;
+    let mut quiesced = QuiescedExecutionGroup {
+        authorities: Vec::new(),
+    };
+    let mut groups = std::collections::BTreeMap::new();
+    for identity in &targets {
+        quiesced.stop_once(identity, qualified, &mut groups)?;
+    }
+    Ok(quiesced)
+}
+
+/// Every live execution bound to the workspace, by exact identity, after
+/// checking that this node can freeze each one's process scope. Nothing is
+/// stopped here: a refusal leaves every group running.
+fn bound_workspace_targets(
+    state: &ryeos_app::state::AppState,
+    record: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<Vec<ryeos_app::process::ExecutionProcessIdentity>> {
     let view_identity = record
         .mount_identity
         .as_deref()
@@ -2017,14 +2067,16 @@ fn quiesce_bound_workspace(
         .map(serde_json::from_str)
         .transpose()
         .context("decode workspace process owner")?;
-    let mut quiesced = QuiescedExecutionGroup {
-        authorities: Vec::new(),
-    };
-    let mut groups = std::collections::BTreeMap::new();
-    let root_identity = state
-        .state_store
-        .execution_process_identity_owned(root, launch_owner)?;
-    quiesced.stop_once(&root_identity, &mut groups)?;
+    let qualified = &state.isolation.inspection().process_scope_capabilities;
+    // Every bound execution's exact identity is resolved, and every process
+    // scope among them checked against what this node can freeze, before any
+    // group is stopped: a refusal after some groups stopped would leave them
+    // stopped for an operation that never runs.
+    let mut targets = vec![
+        state
+            .state_store
+            .execution_process_identity_owned(root, launch_owner)?,
+    ];
     let mut after = None;
     let mut root_seen = false;
     loop {
@@ -2058,7 +2110,7 @@ fn quiesce_bound_workspace(
                         member.thread_id
                     )
                 })?;
-            quiesced.stop_once(&identity, &mut groups)?;
+            targets.push(identity);
         }
         after = members.last().map(|member| member.thread_id.clone());
     }
@@ -2076,10 +2128,35 @@ fn quiesce_bound_workspace(
                 // group absence; a dead leader alone does not stabilize it.
                 ryeos_app::process::assert_reaped_process_group_absent(identity)?;
             }
-            _ => quiesced.stop_once(identity, &mut groups)?,
+            _ => targets.push(identity.clone()),
         }
     }
-    Ok(quiesced)
+    require_bound_scopes_quiescence_qualified(&targets, qualified)?;
+    Ok(targets)
+}
+
+/// Refuse when any bound execution runs in a process scope and this node
+/// has not qualified scope quiescence. It is judged per identity, not from
+/// the node's scope policy: an execution recovered with a scope still needs
+/// its scope frozen on a node that no longer configures scopes.
+fn require_bound_scopes_quiescence_qualified(
+    identities: &[ryeos_app::process::ExecutionProcessIdentity],
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+) -> Result<()> {
+    match identities
+        .iter()
+        .find(|identity| identity.process_scope.is_some())
+    {
+        Some(scoped) => ryeos_app::process::require_scope_quiescence_qualified(qualified)
+            .with_context(|| {
+                format!(
+                    "workspace quiescence refused before any process group was stopped: the \
+                     execution with process group leader {} runs in a process scope",
+                    scoped.group_leader_pid
+                )
+            }),
+        None => Ok(()),
+    }
 }
 
 /// The caller already owns the root contact fence. Empty membership is the
@@ -2169,6 +2246,7 @@ impl QuiescedExecutionGroup {
     fn stop_once(
         &mut self,
         identity: &ryeos_app::process::ExecutionProcessIdentity,
+        qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
         groups: &mut std::collections::BTreeMap<WorkspaceCaptureOwner, Option<(String, i64)>>,
     ) -> Result<()> {
         let first = register_workspace_capture_group(groups, identity)?;
@@ -2184,6 +2262,7 @@ impl QuiescedExecutionGroup {
             self.authorities
                 .push(ryeos_app::process::quiesce_exact_process_group(
                     identity,
+                    qualified,
                     lillux::time::Duration::from_secs(2),
                 )?);
         }
@@ -2222,6 +2301,42 @@ impl QuiescedExecutionGroup {
         }
         Ok(())
     }
+}
+
+/// Whether this node can freeze the borrowers of a workspace operation that
+/// quiesces them (`operation` names it in the refusal). A node without
+/// configured process scopes stops strict process groups by signal and needs
+/// no scope guarantee; a scope-configured node freezes each borrower's scope,
+/// so it must have qualified quiescence.
+fn require_workspace_quiescence_qualified(
+    process_scopes: &ryeos_engine::isolation::IsolationProcessScopePolicy,
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+    operation: &str,
+) -> Result<()> {
+    match process_scopes {
+        ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
+        ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: _,
+        } => ryeos_app::process::require_scope_quiescence_qualified(qualified)
+            .with_context(|| format!("{operation} refused before it started")),
+    }
+}
+
+/// The node-level and per-borrower quiescence judgement, run before an
+/// operation's first durable transition. Nothing is stopped here.
+fn require_workspace_quiescence_admitted(
+    state: &ryeos_app::state::AppState,
+    record: &ryeos_app::runtime_db::WorkspaceRecord,
+    operation: &str,
+) -> Result<()> {
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        operation,
+    )?;
+    bound_workspace_targets(state, record)
+        .with_context(|| format!("{operation} refused before it started"))?;
+    Ok(())
 }
 
 /// Cancellation-safe ownership of exclusively quiesced workspace borrowers.
@@ -2391,6 +2506,285 @@ mod pinned_child_authority_tests {
         assert_eq!(groups.len(), 2);
     }
 
+    fn bound_identity(
+        process_scope: Option<lillux::ProcessScopeRecovery>,
+        leader: i64,
+    ) -> ryeos_app::process::ExecutionProcessIdentity {
+        ryeos_app::process::ExecutionProcessIdentity {
+            schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            process_scope,
+            boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            target_pid: leader + 1,
+            target_start_time_ticks: 200,
+            group_leader_pid: leader,
+            group_leader_start_time_ticks: 190,
+            resource_selections: Vec::new(),
+            resource_settlement_authority: None,
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_recovered_scope_on_an_unconfigured_node_refuses_before_any_stop() {
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
+                "parent": {"containing_device": 1, "inode": 2},
+                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+        }))
+        .unwrap();
+        // An unconfigured node qualifies no scope capability. Its node-level
+        // pre-check admits, yet a strict group listed before the recovered
+        // scoped borrower must not be stopped and then abandoned: the whole
+        // set is judged first.
+        let unconfigured = std::collections::BTreeSet::new();
+        require_workspace_quiescence_qualified(
+            &ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            &unconfigured,
+            "exclusive workspace operation",
+        )
+        .unwrap();
+        let targets = [bound_identity(None, 39), bound_identity(Some(scope), 49)];
+        let message = format!(
+            "{:#}",
+            require_bound_scopes_quiescence_qualified(&targets, &unconfigured).unwrap_err()
+        );
+        assert!(
+            message.contains("before any process group was stopped"),
+            "{message}"
+        );
+        assert!(message.contains("process group leader 49"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        // Strict groups alone need no scope guarantee.
+        require_bound_scopes_quiescence_qualified(&targets[..1], &unconfigured).unwrap();
+        let qualified: std::collections::BTreeSet<_> =
+            [lillux::ProcessScopeCapability::Quiescence].into();
+        require_bound_scopes_quiescence_qualified(&targets, &qualified).unwrap();
+    }
+
+    #[test]
+    fn unqualified_scope_quiescence_is_refused_before_any_freeze() {
+        let boot = "00000000-0000-4000-8000-000000000000";
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
+                "parent": {"containing_device": 1, "inode": 2},
+                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+        }))
+        .unwrap();
+        let identity = ryeos_app::process::ExecutionProcessIdentity {
+            schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            process_scope: Some(scope),
+            boot_id: boot.to_owned(),
+            target_pid: 40,
+            target_start_time_ticks: 200,
+            group_leader_pid: 39,
+            group_leader_start_time_ticks: 190,
+            resource_selections: Vec::new(),
+            resource_settlement_authority: None,
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        };
+        // Termination and recovery qualified, the freezer not: the fixture
+        // scope names no real cgroup, so reaching the freezer would fail
+        // differently from this refusal.
+        let without_quiescence: std::collections::BTreeSet<_> = [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+        ]
+        .into();
+        let error = ryeos_app::process::quiesce_exact_process_group(
+            &identity,
+            &without_quiescence,
+            lillux::time::Duration::from_secs(1),
+        )
+        .err()
+        .expect("unqualified scope quiescence must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("this node did not qualify scope quiescence"),
+            "{error:#}"
+        );
+
+        let required = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1000,
+        };
+        let error = require_workspace_quiescence_qualified(
+            &required,
+            &without_quiescence,
+            "exclusive workspace operation",
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("refused before it started"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        let mut with_quiescence = without_quiescence.clone();
+        with_quiescence.insert(lillux::ProcessScopeCapability::Quiescence);
+        require_workspace_quiescence_qualified(
+            &required,
+            &with_quiescence,
+            "exclusive workspace operation",
+        )
+        .unwrap();
+        // Strict process groups are stopped by signal, not frozen.
+        require_workspace_quiescence_qualified(
+            &ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            &std::collections::BTreeSet::new(),
+            "exclusive workspace operation",
+        )
+        .unwrap();
+    }
+
+    /// A scope-configured node whose freezer is unqualified: termination
+    /// and recovery are proved, quiescence is not.
+    #[cfg(target_os = "linux")]
+    fn unqualified_scope_quiescence_isolation(
+        app_root: &Path,
+    ) -> Arc<ryeos_engine::isolation::IsolationRuntime> {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.process_scopes = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1_000,
+        };
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        let runtime =
+            ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
+                app_root,
+                policy,
+                app_root.join("isolation-policy.json"),
+                "0".repeat(64),
+                None,
+            )
+            .unwrap();
+        assert!(
+            !runtime
+                .inspection()
+                .process_scope_capabilities
+                .contains(&lillux::ProcessScopeCapability::Quiescence)
+        );
+        Arc::new(runtime)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unqualified_callback_freeze_refuses_while_the_workspace_is_still_active() {
+        let (temp, _store_owner, mut state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        state.isolation = unqualified_scope_quiescence_isolation(temp.path());
+        let workspace_id = "workspace-runtime-parent";
+        let parent = "T-runtime-parent";
+        let before = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.state, WorkspaceState::Active);
+        let fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+            &state.state_store,
+            parent,
+        )
+        .unwrap();
+        let project = temp
+            .path()
+            .join(workspace_id)
+            .join(ryeos_engine::execution_workspace::PROJECT_DIR);
+        let error = seal_callback_workspace_generation(
+            &state,
+            parent,
+            &project,
+            &before.base_snapshot,
+            &fence,
+        )
+        .err()
+        .expect("an unqualified node must refuse the callback freeze");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("callback workspace freeze refused before it started"),
+            "{message}"
+        );
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        let after = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, WorkspaceState::Active);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unqualified_workspace_input_capture_refuses_before_any_operation_phase_moves() {
+        let (temp, _store_owner, mut state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        state.isolation = unqualified_scope_quiescence_isolation(temp.path());
+        let workspace_id = "workspace-runtime-parent";
+        let before = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        let project = temp
+            .path()
+            .join(workspace_id)
+            .join(ryeos_engine::execution_workspace::PROJECT_DIR);
+        // No intent is reserved: the refusal names the node's missing
+        // guarantee, not the absent operation, so it precedes every read
+        // and every phase transition of the operation.
+        let error = capture_runtime_workspace_input_generation(
+            &state,
+            "runtime-op-unqualified-capture",
+            "T-runtime-parent",
+            &project,
+            &before.base_snapshot,
+        )
+        .err()
+        .expect("an unqualified node must refuse workspace-input capture");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("workspace-input capture refused before it started"),
+            "{message}"
+        );
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
+        let after = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, WorkspaceState::Active);
+    }
+
     #[test]
     fn workspace_capture_deduplicates_scope_across_distinct_process_groups() {
         let boot = "00000000-0000-4000-8000-000000000000";
@@ -2463,9 +2857,11 @@ mod pinned_child_authority_tests {
         use std::os::unix::fs::MetadataExt as _;
 
         let state_root = tempfile::tempdir().unwrap();
-        let state_db =
-            ryeos_app::test_support::TestState::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_app::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();

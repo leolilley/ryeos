@@ -7,14 +7,9 @@ license.workspace = true
 [features]
 default = []
 common-handler = ["dep:ryeos-handler-protocol", "dep:serde_json"]
-basic-parsers = [
-    "common-handler",
-    "dep:regex",
-    "dep:serde",
-    "dep:serde_yaml",
-]
 core-handlers = [
-    "basic-parsers",
+    "common-handler",
+    "dep:serde",
     "dep:ryeos-engine",
     "dep:ryeos-state",
 ]
@@ -48,24 +43,8 @@ ryeos-runtime = { workspace = true, optional = true }
 ryeos-state = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
-serde_yaml = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-
-[[bin]]
-name = "rye-parser-yaml-document"
-path = "src/bin/parser_yaml_document.rs"
-required-features = ["basic-parsers"]
-
-[[bin]]
-name = "rye-parser-yaml-header-document"
-path = "src/bin/parser_yaml_header_document.rs"
-required-features = ["basic-parsers"]
-
-[[bin]]
-name = "rye-parser-regex-kv"
-path = "src/bin/parser_regex_kv.rs"
-required-features = ["basic-parsers"]
 
 [[bin]]
 name = "rye-composer-extends-chain"
@@ -114,3 +93,6 @@ required-features = ["core-handlers"]
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+serde_yaml.workspace = true

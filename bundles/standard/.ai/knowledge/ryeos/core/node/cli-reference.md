@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T20:48:06Z:14dd9054e2ea188e12dd17a2d313acfe9614c2b11ada4acff42e852312727293:g2uoZxxZnoCTflSKbsrokMFcKQFesVUa9zPbVAbZ59AdTMAz2DKaMeoIIpLBQpBcJbB2LizJUEdugyCm96glBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T08:44:06Z:402cfb4cf0d6b7b4edabc718202f94b298d7bc06b7a9955d5ad693ecc23b2554:mdxzFCrasZqCGG0k4FjQ9Jq4+BJlvk+D6dwD0zRcAVt3gXytlmXGys5YJlVswan5pxE29SayNpfe20cCi2mtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -53,21 +53,23 @@ Signed command aliases still use their declared selector-to-service mappings.
 ### `ryeos init`
 
 ```bash
-ryeos init [--node-profile <name>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
+ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
 Packaged installs use `/usr/share/ryeos` by default. The full package selects
 its exact complete seed explicitly:
 
 ```bash
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ```
 
 Fresh init refuses an absent selector; bundle presence never implies one.
+`--host-class` is given exactly when `--node-profile` is, and names one of the
+profile's declared host classes (`full` declares only `local`).
 Development usage:
 
 ```bash
-ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`
@@ -199,7 +201,7 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
-ryeos node reset policy-generation --node-profile <name> --confirm [--source <dir>] [--trust-file <file>]...
+ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
@@ -218,6 +220,48 @@ after the operation completes, and startup refuses an absent or contradictory
 fence. The cut preserves node identity, vault credentials, projects, and
 execution history while deliberately retiring predecessor policy
 customization.
+
+### `ryeos node external-execution compose`
+
+```bash
+ryeos node external-execution compose --id <binding-id> --backend <backend|render> \
+  --transport https --origin <https://host[:port]> --roots <roots.pem> \
+  --account <label> --settings <file> --program <program.json> \
+  --guest-runtime-manifest-hash <hash> \
+  [--capacity-group <group>] [--runtime-qualification <file|none>] \
+  [--limits <limits.json>] [--app-root <dir>] [--json]
+ryeos node external-execution compose --id <binding-id> --backend <backend|render> \
+  --transport file-relay --owner-workspace-id <id> --private-mailbox-parent <dir> \
+  --account <label> --settings <file> --program <program.json> \
+  --guest-runtime-manifest-hash <hash> [...same optional flags]
+```
+
+Composes, signs with the node identity and installs one external placement
+binding under `.ai/node/external_execution/<id>.yaml` on a stopped node. It
+holds the node state lock, so it refuses while the daemon runs. Artifact
+identities (backend, supervisor, launcher, configuration adapter, connector)
+and the settings schema digest come from the installed, verified bundles; an
+unknown provider or backend, or an ambiguous installed generation, is refused.
+`render` selects `render-sandbox-early-access`. The https origin must be a
+canonical bare origin (lowercase ASCII host, no default port, no path, query,
+fragment or userinfo, non-zero port) and `--roots` must hold only X.509
+CERTIFICATE blocks. Every run names a fresh credential generation; provision
+the provider secret next and then restart the node.
+
+### `ryeos node external-execution provision-credential`
+
+```bash
+ryeos node external-execution provision-credential --binding <binding-id> \
+  [--secret-fd <fd>] [--app-root <dir>] [--json]
+```
+
+Stores the provider secret for an installed binding in the node vault. The
+binding names the owner, generation, backend and account, so the operator
+supplies only the secret, from stdin or an inherited sealed memfd
+(`--secret-fd`). Provisioning is insert-only: the same secret again is a
+no-op and a different secret for an existing generation is refused; a new
+secret needs a newly composed binding. Reports never carry the secret or the
+physical vault key.
 
 ## Other local operator verbs
 
@@ -238,7 +282,7 @@ customization.
 
 ## Bundle Management
 
-- `ryeos bundle install <path>` — install bundle offline.
+- `ryeos bundle install <name> <path>` — install bundle offline.
 - `ryeos bundle list` — list installed bundles.
 - `ryeos bundle remove <name>` — remove installed bundle offline.
 

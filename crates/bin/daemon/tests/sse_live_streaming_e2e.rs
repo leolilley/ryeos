@@ -128,7 +128,6 @@ model:
     Ok(())
 }
 
-
 /// Plant the project-owned routing overlay and directive. Provider authority
 /// lives in the registered fixture bundle.
 fn plant_project_items(project: &Path, signer: &SigningKey) {
@@ -262,7 +261,14 @@ async fn read_timed_until_terminal(
 /// response. Returns the harness, the user signing key (HTTP principal), the
 /// publisher signing key (signs project items), the node fingerprint
 /// (audience).
-async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
+async fn boot_live_daemon() -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    SigningKey,
+    String,
+) {
     let mock = MockProvider::start_with_response_delay(
         vec![
             MockResponse::Text("Hello ".into()),
@@ -295,11 +301,10 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     .await
     .expect("start daemon with delayed mock + execute-stream route");
 
-    std::mem::forget(mock);
     let user_sk = fixture.user.clone();
     let publisher_sk = fixture.publisher.clone();
     let node_fp = fixture.node_fp();
-    (h, user_sk, publisher_sk, node_fp)
+    (Box::new(mock), h, user_sk, publisher_sk, node_fp)
 }
 
 /// Open the gateway `/execute/stream` and return the live response plus the
@@ -385,7 +390,7 @@ async fn open_gateway_stream(
 /// delivery rather than a single buffered flush at completion.
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_stream_delivers_events_incrementally_not_buffered() {
-    let (mut h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
+    let (_keep, mut h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
@@ -473,7 +478,7 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 /// the terminal only later — once the delayed provider settles.
 #[tokio::test(flavor = "multi_thread")]
 async fn chain_tail_attached_before_terminal_receives_terminal_live() {
-    let (h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
+    let (_keep, h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();

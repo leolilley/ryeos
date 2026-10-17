@@ -12,6 +12,34 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, ensure};
 
+/// What a qualification hook asks a planned removal to do between its move
+/// into the second coordinate and the unlink there.
+#[cfg(feature = "crash-qualification-test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedRemovalCut {
+    /// Unlink as usual.
+    Proceed,
+    /// Report the unlink as failed with the original still at the second
+    /// coordinate, without attempting it.
+    FailUnlink,
+}
+
+/// Called with the source and sink coordinates after a planned removal's move
+/// succeeded and before its unlink. The hook may block forever to park the
+/// process at that boundary.
+#[cfg(feature = "crash-qualification-test-support")]
+pub type PlannedRemovalHook = fn(&OsStr, &OsStr) -> PlannedRemovalCut;
+
+#[cfg(feature = "crash-qualification-test-support")]
+static PLANNED_REMOVAL_HOOK: std::sync::OnceLock<PlannedRemovalHook> = std::sync::OnceLock::new();
+
+/// Install the process-wide planned-removal hook. The first installation
+/// wins; later calls with another hook are ignored.
+#[cfg(feature = "crash-qualification-test-support")]
+pub fn install_planned_removal_hook(hook: PlannedRemovalHook) {
+    PLANNED_REMOVAL_HOOK.get_or_init(|| hook);
+}
+
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
 #[cfg(target_os = "linux")]
@@ -507,6 +535,7 @@ pub struct OpenFileIdentity {
     mode: u32,
     file_type: u32,
     owner: u32,
+    link_count: u64,
 }
 
 impl OpenFileIdentity {
@@ -548,6 +577,12 @@ impl OpenFileIdentity {
 
     pub fn owner(self) -> u32 {
         self.owner
+    }
+
+    /// How many directory entries name the file. Zero means the open file
+    /// is an orphaned inode that no path reaches any more.
+    pub fn link_count(self) -> u64 {
+        self.link_count
     }
 
     pub fn is_executable(self) -> bool {
@@ -757,6 +792,79 @@ pub fn observe_open_file_identity(file: &File) -> Result<OpenFileIdentity> {
             mode: metadata.mode(),
             file_type: metadata.mode() & libc::S_IFMT,
             owner: metadata.uid(),
+            link_count: metadata.nlink(),
+        })
+    }
+}
+
+/// The longest pathname [`observe_open_file_path`] accepts for an open file.
+/// Linux builds a descriptor's name, unlinked marker included, in a
+/// `PATH_MAX` (4096-byte) buffer and fails the read when it does not fit, so
+/// current kernels return at most 4095 bytes. The reader still checks the
+/// bound itself instead of relying on that kernel detail.
+pub const MAX_OPENED_PATH_BYTES: usize = 4096;
+
+/// The kernel's current pathname for an open file. It names where the open
+/// file is linked now, which follows renames made after the file was opened;
+/// it is information about the file's location, not an identity of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPath {
+    /// The pathname as the kernel reports it, with the kernel's unlinked
+    /// marker removed. A descriptor that names no filesystem object (a pipe,
+    /// a socket, an anonymous inode) reports a name that is not absolute.
+    pub path: PathBuf,
+    /// The kernel marks the name as unlinked: the open file is no longer
+    /// reachable under `path`. A file whose own name ends with the kernel's
+    /// marker is reported the same way.
+    pub unlinked: bool,
+}
+
+/// Read the kernel's current pathname for `file`, refusing a name longer
+/// than [`MAX_OPENED_PATH_BYTES`]. Only Linux reports one.
+pub fn observe_open_file_path(file: &File) -> Result<OpenedPath> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("reading an open file's current pathname is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        const UNLINKED_MARKER: &[u8] = b" (deleted)";
+        let link = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("name the open file's descriptor link")?;
+        // One byte past the bound tells a name of exactly the bound from a
+        // truncated longer one.
+        let mut buffer = vec![0_u8; MAX_OPENED_PATH_BYTES + 1];
+        // SAFETY: `link` is a NUL-terminated string that outlives the call,
+        // and `buffer` is a live, writable allocation of exactly the length
+        // passed; readlink writes at most that many bytes and no terminator.
+        let read = unsafe {
+            libc::readlink(
+                link.as_ptr(),
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+            )
+        };
+        let read = usize::try_from(read).map_err(|_| {
+            anyhow::Error::new(std::io::Error::last_os_error())
+                .context("read the open file's current pathname")
+        })?;
+        if read > MAX_OPENED_PATH_BYTES {
+            anyhow::bail!(
+                "the open file's current pathname is longer than {MAX_OPENED_PATH_BYTES} bytes"
+            );
+        }
+        buffer.truncate(read);
+        let (name, unlinked) = match buffer.strip_suffix(UNLINKED_MARKER) {
+            Some(name) => (name, true),
+            None => (buffer.as_slice(), false),
+        };
+        Ok(OpenedPath {
+            path: PathBuf::from(OsStr::from_bytes(name)),
+            unlinked,
         })
     }
 }
@@ -2290,6 +2398,32 @@ impl PinnedRegularFile {
     ) -> Result<Vec<u8>> {
         let mut file = self.file.try_clone()?;
         read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+    }
+
+    /// Read at most `max_bytes` from the start of this exact observed file.
+    /// Unlike a complete bounded read, larger files are deliberately accepted.
+    /// The caller must label the result as a prefix when observation.size()
+    /// exceeds the ceiling. This observes mutable content, not an immutable
+    /// snapshot or a digest proof. Positional reads do not move shared cursors.
+    pub fn read_stable_prefix(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        let length = usize::try_from(observation.size().min(max_bytes))
+            .map_err(|_| anyhow::anyhow!("regular file prefix does not fit this platform"))?;
+        let mut bytes = vec![0_u8; length];
+        let mut offset = 0;
+        while offset < length {
+            let count = read_regular_file_at(&self.file, &mut bytes[offset..], offset as u64)?;
+            if count == 0 {
+                anyhow::bail!("regular file ended before its observed prefix length");
+            }
+            offset += count;
+        }
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        Ok(bytes)
     }
 
     /// Capture exactly this prior descriptor observation, refusing an
@@ -7179,6 +7313,17 @@ impl PinnedDirectory {
         self.quarantine_if_same_planned_atomic(name, expected, quarantine)?;
         #[cfg(target_os = "linux")]
         {
+            #[cfg(feature = "crash-qualification-test-support")]
+            if let Some(hook) = PLANNED_REMOVAL_HOOK.get() {
+                if hook(name, quarantine) == PlannedRemovalCut::FailUnlink {
+                    return Err(PlannedQuarantineFailure {
+                        disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                        stage: PlannedQuarantineStage::QuarantinedOriginal,
+                        quarantine_name: quarantine.to_os_string(),
+                        error: anyhow::anyhow!("injected failure after planned move, before unlink"),
+                    });
+                }
+            }
             let name_c = std::ffi::CString::new(quarantine.as_bytes()).expect("validated child");
             if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
                 return Err(PlannedQuarantineFailure {
@@ -8844,6 +8989,98 @@ fn restore_quarantined_regular(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {
+        use std::io::{Seek, SeekFrom};
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let mut file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        file.seek(SeekFrom::Start(7)).unwrap();
+        assert_eq!(file.read_stable_prefix(&observation, 4).unwrap(), b"0123");
+        assert_eq!(file.stream_position().unwrap(), 7);
+        assert_eq!(
+            file.read_stable_prefix(&observation, 10).unwrap(),
+            b"0123456789"
+        );
+        assert_eq!(
+            file.read_stable_prefix(&observation, 40).unwrap(),
+            b"0123456789"
+        );
+        assert!(file.read_stable_prefix(&observation, 0).unwrap().is_empty());
+        std::fs::write(&path, b"short").unwrap();
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
+
+    #[test]
+    fn stable_prefix_rejects_a_same_size_rewrite_of_the_same_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        // The kernel stamps times at a coarse tick, so let one pass before the
+        // rewrite for the change to be visible in the observation.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let inode_before = std::fs::metadata(&path).unwrap();
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let inode_after = std::fs::metadata(&path).unwrap();
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(inode_before.ino(), inode_after.ino());
+        }
+        assert_eq!(inode_before.len(), inode_after.len());
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_names_the_open_file_where_it_is_linked_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().canonicalize().unwrap();
+        let original = tmp_path.join("auth.json");
+        std::fs::write(&original, b"credential").unwrap();
+        let file = File::open(&original).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: original.clone(), unlinked: false }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 1);
+
+        let renamed = tmp_path.join("elsewhere.json");
+        std::fs::rename(&original, &renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: renamed.clone(), unlinked: false }
+        );
+
+        std::fs::remove_file(&renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath { path: renamed, unlinked: true }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_of_a_pipe_is_not_absolute() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let file = File::from(std::os::fd::OwnedFd::from(reader));
+        let opened = observe_open_file_path(&file).unwrap();
+        assert!(!opened.path.is_absolute(), "{}", opened.path.display());
+        assert!(!opened.unlinked);
+    }
 
     #[test]
     #[cfg(unix)]

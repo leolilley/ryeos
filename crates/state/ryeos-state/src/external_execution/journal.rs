@@ -370,6 +370,7 @@ pub fn append_frame(
     let mut budget = retained_budget(tx, &binding, direction)?;
     retain_frame_budget(tx, &binding, frame, wire.len() as u64, &mut budget)?;
     require_direct_command_append(tx, &binding, &frame.payload)?;
+    require_capability_report_position(tx, &binding, frame)?;
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
         &frame.payload,
@@ -457,6 +458,53 @@ pub fn append_frame(
         _ => {}
     }
     Ok(true)
+}
+
+/// A capability report is the supervisor's second frame, directly after a
+/// Ready that names the boot the report was taken on. Anything else (a report
+/// with no Ready before it, a second report, or a report from another boot)
+/// is refused.
+fn require_capability_report_position(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+    frame: &super::ExecutionFrame,
+) -> Result<()> {
+    let ExecutionChannelPayload::CapabilityReport { boot_id, .. } = &frame.payload else {
+        return Ok(());
+    };
+    ensure!(
+        frame.direction == ChannelDirection::SupervisorToOwner && frame.sequence == 2,
+        "a capability report is only the supervisor's second frame, directly after its Ready"
+    );
+    let ready: Option<(String, String)> = conn
+        .query_row(
+            "SELECT frame_digest,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=1",
+            [binding.digest()?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (ready_digest, ready_json) =
+        ready.context("a capability report has no retained Ready before it")?;
+    ensure!(
+        frame.previous_frame_digest.as_deref() == Some(ready_digest.as_str()),
+        "a capability report does not follow its retained Ready"
+    );
+    let ready: SignedExecutionFrame =
+        serde_json::from_str(&ready_json).context("decode retained Ready")?;
+    match &ready.frame.payload {
+        ExecutionChannelPayload::Ready {
+            boot: Some(boot), ..
+        } => ensure!(
+            boot.boot_id == *boot_id,
+            "a capability report names a different boot than its Ready"
+        ),
+        ExecutionChannelPayload::Ready { boot: None, .. } => {
+            bail!("a capability report follows a Ready that names no boot")
+        }
+        _ => bail!("a capability report follows a first frame that is not a Ready"),
+    }
+    Ok(())
 }
 
 /// Chunks need only the last authenticated same-stream frontier, not a repeated
@@ -1335,9 +1383,12 @@ pub fn claim_application(
     {
         bail!("external execution was revoked before pending application");
     }
+    // A capability report is linked evidence that is never applied, so it is
+    // no predecessor application a later frame waits on.
     let pending_prior: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM external_execution_frame WHERE binding_digest=?1
-         AND direction=?2 AND sequence<?3 AND application NOT IN ('applied','revoked'))",
+         AND direction=?2 AND sequence<?3 AND application NOT IN ('applied','revoked')
+         AND json_extract(frame_json,'$.frame.payload.kind')!='capability_report')",
         params![binding_digest, direction.as_str(), sequence],
         |row| row.get(0),
     )?;
@@ -1715,10 +1766,14 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             // Acknowledgements are durable transcript evidence, not executable
             // applications. Their cumulative peer frontier retires transport;
             // requiring an acknowledgement-of-acknowledgement would create an
-            // infinite control loop.
-            unsettled[index] |=
-                !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. })
-                    && !matches!(application.as_str(), "applied" | "revoked");
+            // infinite control loop. A capability report is evidence its owner
+            // consumed directly; it stays linked in the chain and is never
+            // applied, so it holds back nothing after it.
+            unsettled[index] |= !matches!(
+                frame.payload,
+                ExecutionChannelPayload::Acknowledge { .. }
+                    | ExecutionChannelPayload::CapabilityReport { .. }
+            ) && !matches!(application.as_str(), "applied" | "revoked");
             frontiers[index] = FrameFrontier::from_retained(
                 frame.sequence,
                 Some(verified.digest().to_owned()),
@@ -2119,6 +2174,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
                 true,
             )
@@ -2847,6 +2903,7 @@ mod tests {
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         );
         append(conn, binding, &wire).unwrap();
@@ -3099,6 +3156,7 @@ mod tests {
             let observation = ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             };
             let ready = author_direct(
                 conn,
@@ -3156,6 +3214,298 @@ mod tests {
                 .unwrap();
             assert_eq!(phase, "stopping");
             validate_channels(conn, &TestOwner).unwrap();
+        });
+    }
+
+    const BOOT: &str = "997aad14-f3e6-4990-9d40-d1068e5a38d5";
+
+    fn report_payload(boot_id: &str) -> ExecutionChannelPayload {
+        ExecutionChannelPayload::CapabilityReport {
+            boot_id: boot_id.into(),
+            provided: Default::default(),
+            missing: Default::default(),
+        }
+    }
+
+    /// Retain and apply a Ready that names `boot_id`, as a remote guest sends.
+    fn booted_ready(
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        supervisor: &SigningKey,
+        boot_id: &str,
+    ) -> String {
+        let (wire, digest) = wire(
+            binding,
+            supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: Some(super::super::SupervisorReadyBoot {
+                    boot_id: boot_id.into(),
+                    verified_input_digests: vec!["7".repeat(64)],
+                    ready_at_ms: lillux::time::timestamp_millis(),
+                }),
+            },
+        );
+        append(conn, binding, &wire).unwrap();
+        claim(
+            conn,
+            binding,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            &digest,
+        )
+        .unwrap();
+        finish(
+            conn,
+            binding,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            &digest,
+        )
+        .unwrap();
+        digest
+    }
+
+    #[test]
+    fn capability_report_is_linked_after_ready_and_never_holds_back_later_frames() {
+        use super::super::ExternalCommandOutputStream::Stdout;
+        let (journal, binding, owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            booted_ready(conn, &binding, &supervisor, BOOT);
+            let report = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                report_payload(BOOT),
+            )
+            .unwrap();
+            assert_eq!(report.frame().sequence, 2);
+            let phase: String = conn
+                .query_row(
+                    "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                    [&binding.placement_thread_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, "ready", "a capability report moves no phase");
+            assert!(
+                author_direct(
+                    conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    report_payload(BOOT),
+                )
+                .is_err(),
+                "a second capability report must be refused"
+            );
+
+            let release = author_direct(
+                conn,
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Release,
+            )
+            .unwrap();
+            apply_direct(conn, &binding, &release);
+            let output = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                command_output(Stdout, 0, b"abc"),
+            )
+            .unwrap();
+            assert_eq!(output.frame().sequence, 3);
+            assert_eq!(
+                output.frame().previous_frame_digest.as_deref(),
+                Some(report.digest())
+            );
+            apply_direct(conn, &binding, &output);
+
+            let application: String = conn
+                .query_row(
+                    "SELECT application FROM external_execution_frame
+                      WHERE direction='supervisor_to_owner' AND sequence=2",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(application, "pending");
+            validate_channels(conn, &TestOwner).unwrap();
+        });
+    }
+
+    #[test]
+    fn capability_report_after_a_cancel_crossing_ready_keeps_the_guest_chain_whole() {
+        let (journal, binding, owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            let tx =
+                Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+            let cancel = prepare_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            record_revocation(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                cancel.canonical().as_bytes(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            append(conn, &binding, cancel.canonical().as_bytes()).unwrap();
+            let ready = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::Ready {
+                    supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                    base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: Some(super::super::SupervisorReadyBoot {
+                        boot_id: BOOT.into(),
+                        verified_input_digests: vec!["7".repeat(64)],
+                        ready_at_ms: lillux::time::timestamp_millis(),
+                    }),
+                },
+            )
+            .unwrap();
+            assert_eq!(ready.frame().sequence, 1);
+            let report = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                report_payload(BOOT),
+            )
+            .unwrap();
+            assert_eq!(report.frame().sequence, 2);
+            let stopped = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::Stopped {
+                    reason: super::super::ExternalStopReason::Cancelled,
+                },
+            )
+            .unwrap();
+            assert_eq!(stopped.frame().sequence, 3);
+            assert_eq!(
+                stopped.frame().previous_frame_digest.as_deref(),
+                Some(report.digest())
+            );
+            validate_channels(conn, &TestOwner).unwrap();
+        });
+    }
+
+    #[test]
+    fn capability_report_without_ready_is_refused() {
+        let (journal, binding, _owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            let (report, _) = wire(
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                2,
+                Some("8".repeat(64)),
+                0,
+                report_payload(BOOT),
+            );
+            assert!(append(conn, &binding, &report).is_err());
+        });
+    }
+
+    #[test]
+    fn capability_report_from_another_boot_or_after_an_unbooted_ready_is_refused() {
+        let (journal, binding, _owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            booted_ready(conn, &binding, &supervisor, BOOT);
+            let error = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                report_payload("00000000-0000-4000-8000-000000000000"),
+            )
+            .err()
+            .unwrap();
+            assert!(format!("{error:#}").contains("different boot"), "{error:#}");
+        });
+        let (journal, binding, _owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            ready(conn, &binding, &supervisor);
+            let error = author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                report_payload(BOOT),
+            )
+            .err()
+            .unwrap();
+            assert!(format!("{error:#}").contains("names no boot"), "{error:#}");
+        });
+    }
+
+    #[test]
+    fn capability_report_after_release_or_a_later_frame_is_refused() {
+        use super::super::ExternalCommandOutputStream::Stdout;
+        // After Release the channel is running: no report.
+        let (journal, binding, owner, supervisor) = direct_setup(TestJournal::transient());
+        journal.sql(|conn| {
+            booted_ready(conn, &binding, &supervisor, BOOT);
+            let release = author_direct(
+                conn,
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Release,
+            )
+            .unwrap();
+            apply_direct(conn, &binding, &release);
+            assert!(
+                author_direct(
+                    conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    report_payload(BOOT),
+                )
+                .is_err()
+            );
+            // Nor as a later supervisor frame once workload output exists.
+            author_direct(
+                conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                command_output(Stdout, 0, b"abc"),
+            )
+            .unwrap();
+            assert!(
+                author_direct(
+                    conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    report_payload(BOOT),
+                )
+                .is_err()
+            );
         });
     }
 
@@ -3608,6 +3958,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             {
@@ -3950,6 +4301,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             append(conn, &binding, &ready_wire).unwrap();
@@ -4340,6 +4692,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             conn.execute(
@@ -4389,6 +4742,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let corrupt_digest = "0".repeat(64);
@@ -4440,6 +4794,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let wire_bytes = i64::try_from(ready_wire.len()).unwrap();
@@ -4492,6 +4847,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             let (release_wire, release_digest) = wire(

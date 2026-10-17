@@ -13,7 +13,7 @@ post_install() {
     echo "ryeos bundles installed to /usr/share/ryeos"
     echo
     echo "Initialize with:"
-    echo "  ryeos init --node-profile full"
+    echo "  ryeos init --node-profile full --host-class local"
     echo
     echo "The packaged bundle artifact is signed by the official publisher."
     echo "ryeos init verifies it against the publisher key built into the binary;"

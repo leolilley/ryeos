@@ -101,13 +101,15 @@ pub(crate) fn authenticated_schedule_authority_for_site(
         "schedule registration requires stable authorized-key grant-generation evidence",
     )?;
     let origin_site_id = ctx.execution_origin(site_id);
-    Ok(ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
-        principal_id: ctx.fingerprint.clone(),
-        principal_class,
-        effective_origin_site_id: origin_site_id,
-        grant_authority,
-        registration_request_hash,
-    })
+    Ok(
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
+            principal_id: ctx.fingerprint.clone(),
+            principal_class,
+            effective_origin_site_id: origin_site_id,
+            grant_authority,
+            registration_request_hash,
+        },
+    )
 }
 
 fn require_scope(caller: &HandlerContext, capability: &str) -> Result<()> {
@@ -608,5 +610,175 @@ mod tests {
         session.restore().unwrap();
         assert!(registry.job_ids().is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A caller whose grants are never consulted: omission decides before any
+    /// authority question is asked.
+    struct UnconsultedCaller;
+
+    impl ProjectScheduleCaller for UnconsultedCaller {
+        fn require_registration(&self) -> Result<()> {
+            unreachable!("omission never asks for registration authority")
+        }
+
+        fn require_owner(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!("omission never asks for ownership")
+        }
+
+        fn require_capability(&self, _: &str) -> Result<()> {
+            unreachable!("omission never asks for capabilities")
+        }
+
+        fn authenticated_execution_authority(
+            &self,
+            _: String,
+        ) -> Result<ryeos_scheduler_contract::ScheduleExecutionAuthority> {
+            unreachable!("omission never mints execution authority")
+        }
+    }
+
+    fn omission_request(staging: &Path) -> ProjectScheduleDeployRequest {
+        ProjectScheduleDeployRequest {
+            staging_root: staging.to_path_buf(),
+            project_path: staging.to_path_buf(),
+            project_key: "0".repeat(64),
+            snapshot_hash: "1".repeat(64),
+            caller: Arc::new(UnconsultedCaller),
+        }
+    }
+
+    #[tokio::test]
+    async fn core_without_scheduler_refuses_a_deploy_declaring_schedules() {
+        let (_root, store_owner, state) = shared_test_state::build_test_state();
+        assert!(
+            state.scheduler().is_none(),
+            "Core composes no scheduler participant"
+        );
+        let staging = tempfile::TempDir::new().unwrap();
+        let declarations = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&declarations).unwrap();
+        std::fs::write(
+            declarations.join("project.yaml"),
+            r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: project-alpha
+    item_ref: graph:project/project-alpha
+    ref_bindings: {}
+    schedule_type: interval
+    expression: "60"
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    lateness_grace_secs: 60
+    enabled: true
+    capabilities:
+      - ryeos.execute.graph.project/project-alpha
+    execution_policy:
+      schema_version: 2
+      ownership: daemon_owned
+      recovery: restart_recoverable
+      response: accepted
+      target:
+        kind: here
+      environment:
+        kind: none
+      project:
+        kind: live_direct
+        access: read_write
+        child_policy:
+          kind: inherit
+    params: {}
+"#,
+        )
+        .unwrap();
+
+        let mut session = acquire_session(&state).await.unwrap();
+        let error = session
+            .plan(omission_request(staging.path()))
+            .expect_err("declared schedules need the scheduler service");
+        assert!(
+            format!("{error:#}").contains("has no scheduler service"),
+            "got: {error:#}"
+        );
+        assert!(
+            session.has_actions().is_err(),
+            "a refused plan never reaches preparation"
+        );
+        assert!(session.prepare().is_err());
+        drop(session);
+
+        // The non-blocking probe used by recovery selects the same omission.
+        let mut session = try_acquire_session(&state).unwrap().unwrap();
+        assert!(session.plan(omission_request(staging.path())).is_err());
+        drop(session);
+        drop(state);
+        store_owner.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn core_without_scheduler_accepts_a_deploy_declaring_none() {
+        let (_root, store_owner, state) = shared_test_state::build_test_state();
+        assert!(
+            state.scheduler().is_none(),
+            "Core composes no scheduler participant"
+        );
+        // Both shapes of "no schedules": no declaration root, or an empty one.
+        let absent = tempfile::TempDir::new().unwrap();
+        let empty = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(empty.path().join(".ai/config/schedules")).unwrap();
+
+        for staging in [absent.path(), empty.path()] {
+            let mut session = acquire_session(&state).await.unwrap();
+            let report = session.plan(omission_request(staging)).unwrap();
+            assert_eq!(
+                (
+                    report.declared,
+                    report.created,
+                    report.updated,
+                    report.deleted
+                ),
+                (0, 0, 0, 0)
+            );
+            assert!(!session.has_actions().unwrap());
+            session.prepare_recovery().await.unwrap();
+            assert!(session.before_images().unwrap().is_empty());
+            let plan = ProjectDeployPlan {
+                schedules: report,
+                has_schedule_actions: false,
+            };
+            let mut prepared = prepare_commit_with_recovery(&plan, session.as_mut()).unwrap();
+            prepared.finalize().unwrap();
+            drop(prepared);
+            // Restart recovery of a schedule-free journal resolves without a
+            // scheduler; a journal naming schedules cannot be restored here.
+            session.prepare_restoration(&[]).await.unwrap();
+            session.restore().unwrap();
+        }
+
+        let mut session = acquire_session(&state).await.unwrap();
+        let images = [ryeos_scheduler_contract::ScheduleRecoveryBeforeImage {
+            schedule_id: "project-alpha".to_owned(),
+            signed_yaml: None,
+        }];
+        assert!(session.prepare_restoration(&images).await.is_err());
+        drop(session);
+        drop(state);
+        store_owner.close().unwrap();
+    }
+
+    #[test]
+    fn schedule_free_session_refuses_a_non_directory_declaration_root() {
+        let staging = tempfile::TempDir::new().unwrap();
+        let config = staging.path().join(".ai/config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("schedules"), "not a directory\n").unwrap();
+        let mut session = NoSchedulerProjectSession::default();
+        assert!(session.plan(omission_request(staging.path())).is_err());
+    }
+
+    mod shared_test_state {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_state.rs"));
     }
 }

@@ -6,8 +6,11 @@
 //! These keys never enter the node's enrolled-principal namespace.
 
 use anyhow::{Context as _, Result, bail, ensure};
+use std::collections::BTreeMap;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use lillux::crypto::{Signature, Signer as _, SigningKey, VerifyingKey};
+use lillux::process_control::CapabilityEvidence;
 pub use ryeos_external_execution_contract::{
     ExternalCommandOutputCommitment, ExternalCommandOutputStream, ExternalCommandTermination,
     ExternalCommandTerminationReason, ExternalExecutionMode, ExternalTargetExit,
@@ -53,6 +56,11 @@ pub const TERMINAL_CONTROL_BYTES: u64 = 4096;
 pub const Q_FINISH_FRAMES: u32 = 8;
 pub const Q_FINISH_BYTES: u64 = 128 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-execution.frame.v1\0";
+/// Bounds on what a supervisor may report about its own boot and host.
+pub const MAX_READY_VERIFIED_INPUTS: usize = 8;
+pub const MAX_CAPABILITY_REPORT_ENTRIES: usize = 64;
+const MAX_CAPABILITY_NAME_BYTES: usize = 128;
+const MAX_CAPABILITY_TEXT_BYTES: usize = 512;
 
 /// Shared by precontact admission, bootstrap validation and channel validation.
 pub fn validate_channel_journal_limits(
@@ -189,6 +197,42 @@ impl ChannelDirection {
     }
 }
 
+/// What a supervisor binds into its Ready about the boot it runs on.
+/// Workload: an owner that activates a supervisor on a remote guest it
+/// cannot observe, and must notice a reboot or a second activation. The
+/// owner compares every field against what it retained before contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorReadyBoot {
+    /// Kernel boot id of the host, as the lowercase hyphenated UUID Linux
+    /// reports in `/proc/sys/kernel/random/boot_id`.
+    pub boot_id: String,
+    /// Digests of the activation inputs the supervisor verified on this boot
+    /// before reporting ready, in the order the owner delivered them.
+    pub verified_input_digests: Vec<String>,
+    /// Wall-clock time the supervisor became ready.
+    pub ready_at_ms: i64,
+}
+
+impl SupervisorReadyBoot {
+    fn validate(&self, binding: &ExecutionChannelBinding) -> Result<()> {
+        boot_id(&self.boot_id)?;
+        ensure!(
+            !self.verified_input_digests.is_empty()
+                && self.verified_input_digests.len() <= MAX_READY_VERIFIED_INPUTS,
+            "supervisor Ready verified-input list is empty or exceeds its bound"
+        );
+        for digest in &self.verified_input_digests {
+            hash(digest)?;
+        }
+        ensure!(
+            self.ready_at_ms >= binding.issued_at_ms && self.ready_at_ms < binding.expires_at_ms,
+            "supervisor Ready time is outside the channel lifetime"
+        );
+        Ok(())
+    }
+}
+
 /// Tool protocol bytes cannot manufacture a control/export observation. The
 /// protected supervisor, not the candidate endpoint, signs control frames.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +241,24 @@ pub enum ExecutionChannelPayload {
     Ready {
         supervisor_runtime_hash: String,
         base_snapshot_hash: String,
+        /// The boot the supervisor reports ready from. Absent when the owner
+        /// does not ask for it; an owner that needs it refuses a Ready
+        /// without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot: Option<SupervisorReadyBoot>,
+    },
+    /// The supervisor's own capability probe of the host it runs on, taken
+    /// on the boot named in its Ready and before any workload code runs
+    /// there. Workload: a disposable remote guest whose owner admits it only
+    /// if this report covers the workload's guest requirements. Each entry
+    /// is evidence the owner grades with its own requirement data; a missing
+    /// name carries the supervisor's plain reason. The owner that asked
+    /// consumes it directly; a channel journal retains it, linked after Ready
+    /// so the next frame chains to it, but never applies it.
+    CapabilityReport {
+        boot_id: String,
+        provided: BTreeMap<String, CapabilityEvidence>,
+        missing: BTreeMap<String, String>,
     },
     /// Exact child-owned pre-exec observation projected from the guest's
     /// immutable occurrence row. This proves neither exec success nor a
@@ -435,6 +497,7 @@ impl ExecutionChannelPayload {
         let supervisor_only = matches!(
             self,
             Ready { .. }
+                | CapabilityReport { .. }
                 | RuntimeApplied { .. }
                 | QualificationScopeSettled { .. }
                 | ProtocolEof
@@ -482,12 +545,42 @@ impl ExecutionChannelPayload {
             Ready {
                 supervisor_runtime_hash,
                 base_snapshot_hash,
+                boot,
             } => {
                 ensure!(
                     supervisor_runtime_hash == &binding.supervisor_runtime_hash
                         && base_snapshot_hash == &binding.base_snapshot_hash,
                     "supervisor readiness changed admitted inputs"
                 );
+                if let Some(boot) = boot {
+                    boot.validate(binding)?;
+                }
+            }
+            CapabilityReport {
+                boot_id: reported_boot,
+                provided,
+                missing,
+            } => {
+                boot_id(reported_boot)?;
+                ensure!(
+                    provided.len() <= MAX_CAPABILITY_REPORT_ENTRIES
+                        && missing.len() <= MAX_CAPABILITY_REPORT_ENTRIES,
+                    "capability report exceeds its entry bound"
+                );
+                for (name, evidence) in provided {
+                    capability_text(name, MAX_CAPABILITY_NAME_BYTES)?;
+                    capability_text(evidence.source.as_str(), MAX_CAPABILITY_NAME_BYTES)?;
+                    capability_text(&evidence.provider, MAX_CAPABILITY_NAME_BYTES)?;
+                    capability_text(&evidence.basis, MAX_CAPABILITY_TEXT_BYTES)?;
+                }
+                for (name, reason) in missing {
+                    capability_text(name, MAX_CAPABILITY_NAME_BYTES)?;
+                    capability_text(reason, MAX_CAPABILITY_TEXT_BYTES)?;
+                    ensure!(
+                        !provided.contains_key(name),
+                        "capability report names {name} both provided and missing"
+                    );
+                }
             }
             RuntimeApplied {
                 launcher_occurrence_digest,
@@ -709,6 +802,12 @@ fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> 
             "external readiness must be the first supervisor observation"
         );
     }
+    if matches!(frame.payload, ExecutionChannelPayload::CapabilityReport { .. }) {
+        ensure!(
+            frame.sequence > 1,
+            "a capability report cannot precede the supervisor's readiness"
+        );
+    }
     if let ExecutionChannelPayload::Acknowledge {
         peer_frame_sequence,
         peer_frame_digest: _,
@@ -905,6 +1004,29 @@ fn hash(value: &str) -> Result<()> {
     );
     Ok(())
 }
+/// Lowercase hyphenated UUID, the form Linux reports for a kernel boot id.
+fn boot_id(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 36
+            && value.bytes().enumerate().all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+            }),
+        "supervisor boot id is malformed"
+    );
+    Ok(())
+}
+/// Printable ASCII, non-empty and bounded: capability names, grades,
+/// provider ids and reasons are quoted into refusals.
+fn capability_text(value: &str, maximum: usize) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= maximum
+            && value.bytes().all(|byte| (0x20..0x7f).contains(&byte)),
+        "capability report entry is empty, oversized or not printable"
+    );
+    Ok(())
+}
 fn text(value: &str, maximum: usize) -> Result<()> {
     ensure!(
         !value.is_empty()
@@ -918,6 +1040,8 @@ fn text(value: &str, maximum: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use lillux::process_control::ProofSource;
+
     use super::*;
 
     #[test]
@@ -1519,6 +1643,190 @@ mod tests {
         let changed = lillux::canonical_json(&serde_json::to_value(changed).unwrap()).unwrap();
         assert!(SignedExecutionFrame::decode_and_verify(changed.as_bytes(), &binding, 50).is_err());
     }
+    fn supervisor_frame(
+        binding: &ExecutionChannelBinding,
+        sequence: u64,
+        payload: ExecutionChannelPayload,
+    ) -> ExecutionFrame {
+        ExecutionFrame {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            direction: ChannelDirection::SupervisorToOwner,
+            sequence,
+            previous_frame_digest: (sequence > 1).then(|| "9".repeat(64)),
+            acknowledged_peer_sequence: 0,
+            payload,
+        }
+    }
+
+    fn ready_with(binding: &ExecutionChannelBinding, boot: Option<SupervisorReadyBoot>) -> ExecutionChannelPayload {
+        ExecutionChannelPayload::Ready {
+            supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            boot,
+        }
+    }
+
+    fn ready_boot() -> SupervisorReadyBoot {
+        SupervisorReadyBoot {
+            boot_id: "997aad14-f3e6-4990-9d40-d1068e5a38d5".into(),
+            verified_input_digests: vec!["1".repeat(64), "2".repeat(64)],
+            ready_at_ms: 10,
+        }
+    }
+
+    #[test]
+    fn ready_boot_is_optional_on_the_wire_and_validated_when_present() {
+        let (binding, _, supervisor) = binding();
+        let without = SignedExecutionFrame::sign(
+            supervisor_frame(&binding, 1, ready_with(&binding, None)),
+            &binding,
+            &supervisor,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(&without).unwrap()).unwrap();
+        assert!(!wire.contains("\"boot\""), "an absent boot leaves the wire unchanged");
+        SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, 50).unwrap();
+        let mut explicit_null = serde_json::to_value(&without).unwrap();
+        explicit_null["frame"]["payload"]["boot"] = serde_json::Value::Null;
+        assert!(
+            SignedExecutionFrame::decode_and_verify(
+                lillux::canonical_json(&explicit_null).unwrap().as_bytes(),
+                &binding,
+                50
+            )
+            .is_err(),
+            "an explicit null boot is noncanonical"
+        );
+
+        let with = SignedExecutionFrame::sign(
+            supervisor_frame(&binding, 1, ready_with(&binding, Some(ready_boot()))),
+            &binding,
+            &supervisor,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(&with).unwrap()).unwrap();
+        let verified =
+            SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, 50).unwrap();
+        assert!(matches!(
+            &verified.frame().payload,
+            ExecutionChannelPayload::Ready { boot: Some(boot), .. } if boot == &ready_boot()
+        ));
+
+        let mut malformed = ready_boot();
+        malformed.boot_id = "997AAD14-F3E6-4990-9D40-D1068E5A38D5".into();
+        let mut empty_inputs = ready_boot();
+        empty_inputs.verified_input_digests.clear();
+        let mut too_many_inputs = ready_boot();
+        too_many_inputs.verified_input_digests = vec!["1".repeat(64); MAX_READY_VERIFIED_INPUTS + 1];
+        let mut bad_digest = ready_boot();
+        bad_digest.verified_input_digests = vec!["X".repeat(64)];
+        let mut before_issue = ready_boot();
+        before_issue.ready_at_ms = 0;
+        let mut after_expiry = ready_boot();
+        after_expiry.ready_at_ms = binding.expires_at_ms;
+        for boot in [
+            malformed,
+            empty_inputs,
+            too_many_inputs,
+            bad_digest,
+            before_issue,
+            after_expiry,
+        ] {
+            assert!(
+                SignedExecutionFrame::sign(
+                    supervisor_frame(&binding, 1, ready_with(&binding, Some(boot))),
+                    &binding,
+                    &supervisor,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    fn capability_report(
+        provided: &[(&str, ProofSource)],
+        missing: &[(&str, &str)],
+    ) -> ExecutionChannelPayload {
+        ExecutionChannelPayload::CapabilityReport {
+            boot_id: "997aad14-f3e6-4990-9d40-d1068e5a38d5".into(),
+            provided: provided
+                .iter()
+                .map(|(name, source)| {
+                    (
+                        (*name).to_owned(),
+                        CapabilityEvidence {
+                            source: source.clone(),
+                            provider: "host".into(),
+                            basis: "probe".into(),
+                        },
+                    )
+                })
+                .collect(),
+            missing: missing
+                .iter()
+                .map(|(name, reason)| ((*name).to_owned(), (*reason).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn capability_report_is_a_bounded_supervisor_observation_after_ready() {
+        let (binding, owner, supervisor) = binding();
+        let report = capability_report(
+            &[
+                ("isolation:namespaces", ProofSource::Measured),
+                ("network:egress_denied", ProofSource::ProviderAttested),
+            ],
+            &[("persistence:durable_state", "no persistent disk")],
+        );
+        let signed = SignedExecutionFrame::sign(
+            supervisor_frame(&binding, 2, report.clone()),
+            &binding,
+            &supervisor,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(&signed).unwrap()).unwrap();
+        let verified =
+            SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, 50).unwrap();
+        assert_eq!(verified.frame().payload, report);
+
+        assert!(
+            SignedExecutionFrame::sign(supervisor_frame(&binding, 1, report.clone()), &binding, &supervisor)
+                .is_err(),
+            "a report cannot take readiness's place"
+        );
+        let mut from_owner = supervisor_frame(&binding, 2, report);
+        from_owner.direction = ChannelDirection::OwnerToSupervisor;
+        assert!(SignedExecutionFrame::sign(from_owner, &binding, &owner).is_err());
+
+        let contradictory = capability_report(
+            &[("isolation:namespaces", ProofSource::Measured)],
+            &[("isolation:namespaces", "no")],
+        );
+        let control_character = capability_report(&[], &[("isolation:namespaces", "bad\u{7}")]);
+        let names: Vec<String> = (0..=MAX_CAPABILITY_REPORT_ENTRIES)
+            .map(|index| format!("name:{index}"))
+            .collect();
+        let oversized = capability_report(
+            &[],
+            &names
+                .iter()
+                .map(|name| (name.as_str(), "absent"))
+                .collect::<Vec<_>>(),
+        );
+        let mut bad_boot = capability_report(&[], &[]);
+        if let ExecutionChannelPayload::CapabilityReport { boot_id, .. } = &mut bad_boot {
+            *boot_id = "not-a-boot".into();
+        }
+        for payload in [contradictory, control_character, oversized, bad_boot] {
+            assert!(
+                SignedExecutionFrame::sign(supervisor_frame(&binding, 2, payload), &binding, &supervisor)
+                    .is_err()
+            );
+        }
+    }
+
     #[test]
     fn external_frames_reject_unknown_fields_wrong_directions_and_bounds() {
         let (binding, owner, supervisor) = binding();

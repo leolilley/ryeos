@@ -169,20 +169,23 @@ AUR packages (`ryeos`, `ryeos-mcp`) are coming soon. Once published:
 
 ```bash
 yay -S ryeos ryeos-mcp
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ryeos start
 ryeos node status
 ```
 
-On a capable terminal, `ryeos init --node-profile full` opens the
-first-contact ceremony. It
+On a capable terminal, `ryeos init --node-profile full --host-class local`
+opens the first-contact ceremony. It
 discovers packaged bundles under `/usr/share/ryeos`, installs them into the
 system space, creates operator and node keys, initializes trust and vault
 material, and optionally connects a verified model provider. Use
 `ryeos setup` to reopen provider/model setup later. Automation must use
-`ryeos init --non-interactive --node-profile full` or
-`ryeos init --json --node-profile full`. Every fresh init requires an exact
-publisher-signed init profile; absence is never replaced with runtime defaults.
+`ryeos init --non-interactive --node-profile full --host-class local` or
+`ryeos init --json --node-profile full --host-class local`. Every fresh init
+requires an exact publisher-signed init profile and an explicit host class the
+profile declares (`full` declares only `local`); absence is never replaced
+with runtime defaults, and the class is never inferred from what the host
+proves.
 Isolation backends are ordinary, separately installed bundles. `ryeos start`
 launches `ryeosd`. See the
 [execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
@@ -191,7 +194,7 @@ enabling or tightening the node-owned policy.
 The user lifecycle surface is intentionally small:
 
 ```bash
-ryeos init --node-profile full  # interactive first-contact initialization
+ryeos init --node-profile full --host-class local  # interactive first-contact initialization
 ryeos setup         # reopen optional provider/model setup
 ryeos start         # bring the local node online
 ryeos stop          # stop it
@@ -218,8 +221,12 @@ Production deployment should pin the resolved digest of the immutable version
 tag rather than the mutable `latest` channel.
 
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
-entrypoint runs `ryeos init --non-interactive --node-profile standard` for
-first policy publication. On later boots it omits the init profile and asks
+entrypoint runs `ryeos init --non-interactive --node-profile standard
+--host-class "$RYEOS_INIT_HOST_CLASS"` for first policy publication. The image
+never sets `RYEOS_INIT_HOST_CLASS`: the deployment sets it to `hosted` in a
+hosting provider's container (Railway, a Render service, plain Docker) or to
+`local` on a host the operator runs, and the node keeps that class for life.
+On later boots it omits the init profile and asks
 RyeOS to validate and preserve the existing complete signed generation before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
 so keys, trust, and runtime state survive redeploys. Release containers rely
@@ -318,7 +325,7 @@ can start the node for optional provider setup; `ryeos start` remains
 idempotent if setup was skipped or initialization was non-interactive:
 
 ```bash
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ryeos start
 ryeos node status
 ```
@@ -412,7 +419,6 @@ The repository currently includes bundles such as:
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
 | `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
-| `hosted-node`  | Admission services and schemas for a hosted remote target.                               |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
 
 ## State model

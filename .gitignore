@@ -191,3 +191,6 @@ bundles/.*.publish-staging/
 
 # Local daemon state from dev/test runs
 .local/
+
+## Development publisher private key (local only)
+.dev-keys/PUBLISHER_DEV.pem

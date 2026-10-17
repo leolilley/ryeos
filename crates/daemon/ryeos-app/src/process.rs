@@ -891,14 +891,38 @@ pub fn signal_exact_group(identity: &ExecutionProcessIdentity, signal: i32) -> S
     }
 }
 
+/// Refuse unless this node's process-scope provider qualified its kernel
+/// freeze barrier. Qualification exercises the barrier only when the signed
+/// floor names `quiescence:scope`, so a scope freeze on any other node would
+/// be the barrier's first, untested use.
+pub fn require_scope_quiescence_qualified(
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+) -> Result<()> {
+    if !qualified.contains(&lillux::ProcessScopeCapability::Quiescence) {
+        bail!(
+            "this node did not qualify scope quiescence ({}); an execution scope cannot be frozen until its node policy requires that guarantee and the process-scope provider qualifies it",
+            lillux::ProcessScopeCapability::Quiescence.capability_name()
+        );
+    }
+    Ok(())
+}
+
 /// Stop the exact execution group and retain a descriptor-pinned Lillux
 /// authority only after every live member has crossed the stop barrier.
 /// Application code supplies durable coordinates; Lillux exclusively owns
 /// procfs enumeration, pidfds, signals, clocks, and settle waits.
+///
+/// `qualified` is the node's qualified process-scope guarantee set. A scoped
+/// execution is frozen only when it names quiescence; a strict process group
+/// is stopped by signal and needs no scope guarantee.
 pub fn quiesce_exact_process_group(
     identity: &ExecutionProcessIdentity,
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
     timeout: lillux::time::Duration,
 ) -> Result<lillux::QuiescedProcesses> {
+    if identity.process_scope.is_some() {
+        require_scope_quiescence_qualified(qualified)?;
+    }
     validate_execution_process_identity_shape(identity)?;
     if let Some(scope) = &identity.process_scope {
         return scope
@@ -906,6 +930,13 @@ pub fn quiesce_exact_process_group(
             .map(Into::into)
             .map_err(anyhow::Error::msg);
     }
+    quiesce_strict_process_group(identity, timeout)
+}
+
+fn quiesce_strict_process_group(
+    identity: &ExecutionProcessIdentity,
+    timeout: lillux::time::Duration,
+) -> Result<lillux::QuiescedProcesses> {
     lillux::quiesce_exact_process_group(&lillux_process_identity(identity)?, timeout)
         .map(Into::into)
         .map_err(anyhow::Error::msg)
@@ -926,7 +957,7 @@ pub fn recover_quiesced_execution(
             .map(Into::into)
             .map_err(anyhow::Error::msg);
     }
-    quiesce_exact_process_group(identity, timeout)
+    quiesce_strict_process_group(identity, timeout)
 }
 
 fn lillux_process_identity(

@@ -4207,6 +4207,17 @@ impl Runner {
                     }
                     return Ok(response.state);
                 }
+                // A typed daemon refusal is a decision, not a transient
+                // failure: retrying the same transition cannot change it.
+                Err(ryeos_runtime::callback::CallbackError::ActionFailed {
+                    code,
+                    message,
+                    retryable: false,
+                }) if code != "request_failed" => {
+                    anyhow::bail!(
+                        "provider attempt issue refused ({code}): {message}; zero provider connections"
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         retry,
@@ -6208,6 +6219,8 @@ mod tests {
         /// daemon's exact idempotent recovery.
         ErrThenOk(u32),
         AlwaysErr,
+        /// Every call answers with a typed, non-retryable daemon refusal.
+        AlwaysRefused,
     }
 
     struct MethodState {
@@ -6226,7 +6239,7 @@ mod tests {
             self.calls += 1;
             match self.script {
                 Script::Ok => (false, false),
-                Script::AlwaysErr => (true, false),
+                Script::AlwaysErr | Script::AlwaysRefused => (true, false),
                 Script::ErrThenOk(failures) => {
                     if call_index < failures {
                         (true, false)
@@ -6412,7 +6425,15 @@ mod tests {
             params: Value,
         ) -> Result<Value, CallbackError> {
             self.record("mark_issued", &params);
+            let refused = matches!(self.issue.lock().unwrap().script, Script::AlwaysRefused);
             let (should_error, replayed) = self.issue.lock().unwrap().next();
+            if should_error && refused {
+                return Err(CallbackError::ActionFailed {
+                    code: "capability_rejected".to_string(),
+                    message: "recipient rule no longer lists this principal".to_string(),
+                    retryable: false,
+                });
+            }
             if should_error {
                 return Err(Self::transport_err("mark_issued"));
             }
@@ -6845,6 +6866,37 @@ mod tests {
         assert!(matches!(admission, LedgerAdmission::Admitted(_)));
         assert_eq!(mock.recorded("mark_issued").len(), LEDGER_RPC_RETRIES + 1);
         assert_eq!(mock.recorded("get").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn typed_issue_refusal_ends_the_issue_without_retry() {
+        let authority = base_ledger_authority();
+        let prepared = test_prepared();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::AlwaysRefused);
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let verified = test_verified(&authority, &prepared);
+
+        let error = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .expect_err("a typed refusal at issue must end the attempt");
+        assert!(
+            format!("{error:#}").contains("provider attempt issue refused (capability_rejected)"),
+            "{error:#}"
+        );
+        assert_eq!(mock.recorded("mark_issued").len(), 1);
+        assert!(mock.recorded("get").is_empty());
+        assert!(mock.recorded("release_unissued").is_empty());
     }
 
     #[tokio::test]

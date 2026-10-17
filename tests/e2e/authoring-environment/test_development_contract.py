@@ -94,13 +94,13 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         for name in ("authoring-environment-products", "authoring-prepared-input-products"):
             source = load(f".ai/config/development/ryeos/{name}.yaml")
             installed = load(
-                f"bundles/standard/.ai/config/development/ryeos/{name}.yaml")
+                f"bundles/environment-qualification/.ai/config/development/ryeos/{name}.yaml")
             self.assertEqual(installed, source)
 
     def test_installed_native_verifier_runtime_is_projectless(self):
         """Qualification consumes sealed products and must not require a project."""
         runtime = load(
-            "bundles/standard/.ai/tools/ryeos/environments/qualification/"
+            "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/"
             "native-authoring/runtime.yaml")
         self.assertNotIn("${project_path}", runtime["config"]["args"])
         source = next(arg["literal"] for arg in runtime["config"]["args"]
@@ -177,8 +177,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIn("#   executor_id: tool:ryeos/development/authoring-environment-production/runtime",
                       finalizer_source)
         self.assertIn("#     type: strict_signed_project_bundle", finalizer_source)
-        self.assertIn("#     bundle_name: standard", finalizer_source)
-        intent_path = "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+        self.assertIn("#     bundle_name: environment-qualification", finalizer_source)
+        intent_path = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
         self.assertIn("#     config_path: " + intent_path, finalizer_source)
         self.assertRegex(load(intent_path)["expected_sha256"], r"^[0-9a-f]{64}$")
         self.assertIn('OUTPUT = Path("products/cargo-vendor/Cargo.lock")', finalizer_source)

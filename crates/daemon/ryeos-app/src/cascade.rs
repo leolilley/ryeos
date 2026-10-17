@@ -106,7 +106,12 @@ fn descendant_stop_unproven(report: &Value) -> bool {
     scoped_child_settlement_failed(report)
         || matches!(
             report.get("skipped").and_then(Value::as_str),
-            Some("stop_tombstone_failed" | "read_error" | "no_thread_row")
+            Some(
+                "stop_tombstone_failed"
+                    | "read_error"
+                    | "no_thread_row"
+                    | "in_process_handler_running"
+            )
         )
 }
 
@@ -283,12 +288,10 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
 /// Signal one descendant of a cascade. An inline in-process child is a
 /// descendant like any other thread in its parent's chain, but its handler is
 /// a daemon-owned task with no cancellation contract, so the store refuses a
-/// stop request on its row. The cascade therefore classifies it before asking
-/// for a stop: a terminal handler is already settled, and a running handler
-/// settles its own row through its owner guard or boot recovery. Neither is
-/// an unproven descendant stop. A direct stop of such a thread as the
-/// cascade target still goes through `signal_thread` and keeps the store's
-/// refusal.
+/// stop request on its row and there is nothing to signal. Its stop is
+/// reported from its own row instead: a terminal handler is a proven stop, a
+/// running one is not. A direct stop of such a thread as the cascade target
+/// still goes through `signal_thread` and keeps the store's refusal.
 fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
     let thread = match state.state_store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
@@ -306,14 +309,27 @@ fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
     if !in_process_handler {
         return signal_thread(state, thread_id, mode);
     }
-    if crate::state_store::is_terminal_status(&thread.status) {
-        return json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status });
+    in_process_descendant_report(thread_id, &thread.status)
+}
+
+/// The cascade report for an in-process handler descendant at `status`.
+/// Terminal: the stop is proven by the row itself. Not terminal: the
+/// handler is still running with no cancellation contract, so the stop is
+/// unproven and the cascade says so.
+fn in_process_descendant_report(thread_id: &str, status: &str) -> Value {
+    if crate::state_store::is_terminal_status(status) {
+        json!({
+            "thread_id": thread_id,
+            "in_process_handler": "terminal",
+            "status": status,
+        })
+    } else {
+        json!({
+            "thread_id": thread_id,
+            "skipped": "in_process_handler_running",
+            "status": status,
+        })
     }
-    json!({
-        "thread_id": thread_id,
-        "skipped": "in_process_handler",
-        "status": thread.status,
-    })
 }
 
 /// Stop a thread and its live descendants: signal the target per `mode`, then
@@ -388,5 +404,26 @@ mod tests {
             "result": "sent",
             "scoped_child_settlement": "settled"
         })));
+    }
+
+    #[test]
+    fn in_process_descendant_stop_is_proven_only_by_its_terminal() {
+        for status in ["running", "created"] {
+            let report = in_process_descendant_report("T-in-process-child", status);
+            assert_eq!(report["skipped"], "in_process_handler_running");
+            assert!(
+                descendant_stop_unproven(&report),
+                "a {status} in-process descendant must not count as stopped"
+            );
+        }
+        for status in ["cancelled", "killed", "completed", "failed"] {
+            let report = in_process_descendant_report("T-in-process-child", status);
+            assert_eq!(report["in_process_handler"], "terminal");
+            assert_eq!(report["status"], status);
+            assert!(
+                !descendant_stop_unproven(&report),
+                "a {status} in-process descendant is a proven stop"
+            );
+        }
     }
 }

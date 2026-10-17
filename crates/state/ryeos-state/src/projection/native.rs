@@ -209,7 +209,7 @@ impl OriginalProjectionFailure {
             FailureCustody::Open(mut failure) => {
                 if failure.retained_admission().is_some() {
                     if let Err(refusal) = failure.recover_retained_admission() {
-                        error = refusal.context(error);
+                        error = lillux_sqlite::RefusalSupersedes::superseding(refusal, error);
                         Err(FailureCustody::Open(failure))
                     } else {
                         failure.retry_close().map(OriginalNativeConnectionTerminal::Released).map_err(FailureCustody::Open)
@@ -756,5 +756,24 @@ mod native_host_tests {
         let first = costs[0];
         assert!(costs.iter().all(|cost| *cost <= first * 2), "per-build cost grew with live blocks: {costs:?}");
         assert!(first < 200_000, "one projection schema build costs {first} steps");
+    }
+}
+
+#[cfg(test)]
+mod refusal_layer_tests {
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+
+    /// An admission recovery refusal met while settling a projection open
+    /// refusal is classified by itself, not by the open refusal.
+    #[test]
+    fn a_later_refusal_classifies_over_the_earlier_one() {
+        let fact = || anyhow::anyhow!("retained admission recovery refused");
+        let contended = || anyhow::Error::new(FixedHostRefusal::Contended).context("projection open");
+        let later_fact = fact().superseding(contended());
+        assert!(native_refusal_is_fact(&later_fact), "{later_fact:#}");
+        let later_contention = anyhow::Error::new(NativeCheckContended).superseding(fact());
+        assert!(!native_refusal_is_fact(&later_contention), "{later_contention:#}");
+        assert!(format!("{later_fact:#}").contains("projection open"));
     }
 }

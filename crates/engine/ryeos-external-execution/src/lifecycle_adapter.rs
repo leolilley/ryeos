@@ -21,6 +21,22 @@ pub enum LifecycleAdapterInvocation {
     Inspect,
     VerifyRuntimeProbe,
     Operate,
+    /// Stage-one lease admission: an offline verdict on whether the signed
+    /// provider spec can meet a workload's lease requirements, given only
+    /// the request and the captured spec, before any provider contact.
+    ///
+    /// Offline is a property of the contract, not of the enclosure: the
+    /// controller hands this invocation no placement credential and no
+    /// network or channel descriptor, so the adapter holds nothing with
+    /// which to authenticate to a provider. The enclosure denies process
+    /// creation here but does not deny network access.
+    AdmitLease,
+    /// Lease readiness judgement: the adapter receives the guest's first two
+    /// authenticated frames over an inherited length-prefixed duplex
+    /// descriptor and returns a verdict (admitted, or terminate). Like lease
+    /// admission it is handed no placement credential and never contacts the
+    /// provider or the network itself; the enclosure denies process creation.
+    AwaitLeaseReady,
     RelayFile,
     ProduceSnapshot,
     ProduceSnapshotUpload,
@@ -60,6 +76,8 @@ impl LifecycleAdapterInvocation {
             Self::Inspect => "inspect",
             Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
+            Self::AdmitLease => "admit-lease",
+            Self::AwaitLeaseReady => "await-lease-ready",
             Self::RelayFile => "relay-file",
             Self::ProduceSnapshot => "produce-snapshot",
             Self::ProduceSnapshotUpload => "produce-snapshot-upload",
@@ -83,6 +101,8 @@ impl LifecycleAdapterInvocation {
                 | Self::ProduceSnapshotUpload
                 | Self::ProduceSnapshotCreate
                 | Self::RelayFile
+                | Self::AdmitLease
+                | Self::AwaitLeaseReady
         )
     }
 }
@@ -236,6 +256,46 @@ mod tests {
                 MAX_LIFECYCLE_RESPONSE_BYTES
             );
         }
+    }
+
+    #[test]
+    fn lease_admission_is_a_bounded_offline_verdict() {
+        let invocation = LifecycleAdapterInvocation::AdmitLease;
+        assert_eq!(invocation.argument(), "admit-lease");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        assert!(invocation.requires_no_process_creation());
+        // A verdict that arrives after its deadline is not a verdict.
+        assert!(lifecycle_adapter_output(invocation, late_result()).is_err());
+        let mut timely = late_result();
+        timely.timed_out = false;
+        timely.success = true;
+        assert_eq!(
+            lifecycle_adapter_output(invocation, timely).unwrap().bytes,
+            b"{\"observation\":true}"
+        );
+    }
+
+    #[test]
+    fn lease_readiness_is_a_bounded_timely_verdict_without_process_creation() {
+        let invocation = LifecycleAdapterInvocation::AwaitLeaseReady;
+        assert_eq!(invocation.argument(), "await-lease-ready");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        assert!(invocation.requires_no_process_creation());
+        // A readiness verdict that arrives after its deadline is not a verdict.
+        assert!(lifecycle_adapter_output(invocation, late_result()).is_err());
+        let mut timely = late_result();
+        timely.timed_out = false;
+        timely.success = true;
+        assert_eq!(
+            lifecycle_adapter_output(invocation, timely).unwrap().bytes,
+            b"{\"observation\":true}"
+        );
     }
 
     #[test]

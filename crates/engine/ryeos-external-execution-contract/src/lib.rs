@@ -8,6 +8,8 @@
 
 pub mod guest_import_authorization;
 pub mod guest_supervisor_descriptors;
+pub mod lease_ready_inputs;
+pub mod length_prefixed;
 pub mod provider_configuration;
 pub use provider_configuration::{
     PROVIDER_CONFIGURATION_RESPONSE_PROTOCOL, PROVIDER_CONFIGURATION_RESPONSE_SCHEMA,
@@ -74,6 +76,31 @@ pub const LIFECYCLE_RESOLVER_SHA256_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_SHA256
 pub const LIFECYCLE_HOSTS_SHA256_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_SHA256";
 pub const LIFECYCLE_NETWORK_POLICY_SHA256_ENV: &str = "RYEOS_LIFECYCLE_NETWORK_POLICY_SHA256";
 pub const LIFECYCLE_REMAINING_TIMEOUT_MS_ENV: &str = "RYEOS_LIFECYCLE_REMAINING_TIMEOUT_MS";
+/// Sealed descriptor carrying the exact canonical request bytes the adapter
+/// itself admitted before spend for the placement an `operate` contact
+/// serves. The controller retains them opaquely and hands them back on every
+/// `operate` contact for that placement; an operation that receives none
+/// serves no admitted request.
+pub const LEASE_ADMISSION_FD_ENV: &str = "RYEOS_LIFECYCLE_LEASE_ADMISSION_FD";
+/// Bound on the admitted request bytes the controller retains and returns.
+pub const MAX_LEASE_ADMISSION_BYTES: usize = 64 * 1024;
+/// Bound on the budget weight a signed lease provider spec declares: how many
+/// node lease-budget seconds one second of its lease costs. A weight of 1
+/// costs a lease-second as one budget second; a costlier provider (a GPU
+/// lease, say) declares a larger weight so the same node budget admits fewer
+/// of its seconds. Zero would make a lease free and is never admitted.
+pub const MAX_LEASE_BUDGET_WEIGHT: u32 = 1000;
+
+/// Whether `weight` is a budget weight a provider spec may declare.
+pub fn valid_lease_budget_weight(weight: u32) -> bool {
+    (1..=MAX_LEASE_BUDGET_WEIGHT).contains(&weight)
+}
+/// Inherited bidirectional byte-stream descriptor over which the controller
+/// relays one occurrence's channel frames to the adapter and the adapter's
+/// replies back, each one message framed by `length_prefixed`.
+pub const LIFECYCLE_GUEST_FRAMES_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_FRAMES_FD";
+/// Bound on one message on the guest-frames descriptor.
+pub const MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_GUEST_INPUTS: usize = 64;
 pub const MAX_GUEST_ENVIRONMENT_ENTRIES: usize = 256;
 pub const MAX_GUEST_EXECUTABLE_SEARCH_ENTRIES: usize = 64;

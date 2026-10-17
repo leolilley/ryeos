@@ -33,6 +33,11 @@ fn install_once() -> anyhow::Result<()> {
             generation_links,
         ),
         registration(
+            ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+            validate_payload_ownership,
+            no_links,
+        ),
+        registration(
             ryeos_bundle_publication_contract::BUNDLE_SET_KIND,
             validate_set,
             set_links,
@@ -85,6 +90,10 @@ fn registration(
 fn validate_generation(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::BundleGeneration::from_current_value(value).map(|_| ())
 }
+fn validate_payload_ownership(value: &Value) -> anyhow::Result<()> {
+    ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(value)
+        .map(|_| ())
+}
 fn validate_materialization(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::PublisherMaterializationResult::from_current_value(value)
         .map(|_| ())
@@ -135,6 +144,11 @@ fn generation_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
         &mut links,
         &object.publisher_materialization_result_hash,
         ryeos_bundle_publication_contract::PUBLISHER_MATERIALIZATION_RESULT_KIND,
+    );
+    push_kind(
+        &mut links,
+        &object.payload_ownership_hash,
+        ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
     );
     if let Some(hash) = &object.source_snapshot_hash {
         push_kind(&mut links, hash, "project_snapshot");
@@ -378,6 +392,7 @@ mod tests {
             ryeos_provider_contract::LOCAL_WORKER_OBSERVATION_KIND,
             ryeos_bundle_publication_contract::PUBLISHER_MATERIALIZATION_RESULT_KIND,
             ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
+            ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
             ryeos_bundle_publication_contract::BUNDLE_SET_KIND,
             ryeos_bundle_publication_contract::NODE_BUNDLE_SELECTION_KIND,
             ryeos_bundle_publication_contract::BUNDLE_CATALOG_SNAPSHOT_KIND,
@@ -385,6 +400,35 @@ mod tests {
         ] {
             assert!(kinds.contains(&kind), "missing {kind}");
         }
+    }
+
+    #[test]
+    fn generation_closure_carries_the_payload_ownership_object() {
+        let value = json!({
+            "schema": ryeos_bundle_publication_contract::BUNDLE_GENERATION_SCHEMA,
+            "kind": ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
+            "bundle_name": "standard", "authored_version": "1.2.3",
+            "content_manifest_hash": hash('a'), "manifest_item_hash": hash('b'),
+            "target": {"kind":"portable"}, "build_profile": "release",
+            "substrate_protocol": 1, "bundle_manifest_format": "ryeos.bundle-manifest/v1",
+            "accepted_product_result_hash": hash('c'), "selected_product_identity": "bundle",
+            "selected_product_witness": hash('d'),
+            "publisher_materialization_result_hash": hash('e'),
+            "accepted_capture_result_hash": hash('f'),
+            "selected_signed_product_identity": "signed-bundle",
+            "selected_signed_product_witness": hash('9'),
+            "payload_ownership_hash": hash('8'),
+            "source_snapshot_hash": null, "qualification_evidence_hashes": [],
+            "provenance_hash": null, "sbom_hash": null
+        });
+        let links = generation_links(&value).unwrap();
+        assert!(links.object_edges.iter().any(|edge| edge.hash == hash('8')
+            && matches!(
+                edge.expected,
+                RegisteredObjectExpectation::Kind(
+                    ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND
+                )
+            )));
     }
 
     #[test]

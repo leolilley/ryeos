@@ -9,8 +9,8 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use crate::dispatch_error::DispatchError;
 
 use super::super::process_attachment::{
-    AttachOptions, AttachedLaunch, AttachedProcessGuard, AuthorizedLaunch, HeldLaunch,
-    HeldProcess, LaunchFailure, LaunchOwnerCoordinate, ReleaseTestimony, ReleasedLaunch,
+    AttachOptions, AttachedLaunch, AttachedProcessGuard, AuthorizedLaunch, HeldLaunch, HeldProcess,
+    LaunchFailure, LaunchOwnerCoordinate, ReleaseTestimony, ReleasedLaunch,
 };
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::envelope::RuntimeResultStatus;
@@ -742,10 +742,12 @@ impl HeldProcess for ManagedHeld {
             identity.resource_occupancy_limit.clone(),
             identity.resource_cleanup_allowance_ms,
         ) {
-            (Some(limit), Some(cleanup_ms)) => self.spawned.release_after_attachment_with_occupancy(
-                limit,
-                lillux::time::Duration::from_millis(cleanup_ms),
-            ),
+            (Some(limit), Some(cleanup_ms)) => {
+                self.spawned.release_after_attachment_with_occupancy(
+                    limit,
+                    lillux::time::Duration::from_millis(cleanup_ms),
+                )
+            }
             (None, None) => self.spawned.release_after_attachment(),
             _ => return Err(ManagedReleaseError::IncompleteOccupancyContract),
         }

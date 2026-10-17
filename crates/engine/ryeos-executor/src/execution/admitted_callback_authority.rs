@@ -1,8 +1,8 @@
 //! Shared direct-only qualification root admission; no spawn authority.
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
-use ryeos_app::{state::AppState, callback_token::AdmittedRemoteConsumerGrant};
+use ryeos_app::{callback_token::AdmittedRemoteConsumerGrant, state::AppState};
 use ryeos_engine::protocol_vocabulary::CallbackChannel;
+use serde_json::Value;
 pub(super) fn admitted_qualification_root(
     state: &AppState,
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,

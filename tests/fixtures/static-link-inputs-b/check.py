@@ -22,8 +22,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 OVERLAY = HERE / "overlay"
 CONTRACT = Path(".ai/config/development/ryeos/static-link-inputs.yaml")
-INTENT = Path("bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml")
-POLICY = Path("bundles/standard/.ai/config/ryeos/environments/qualification/static-link-inputs.yaml")
+INTENT = Path("bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml")
+POLICY = Path("bundles/environment-qualification/.ai/config/ryeos/environments/qualification/static-link-inputs.yaml")
 TOOL = Path(".ai/tools/ryeos/development/static-link-inputs/assemble.py")
 MEMBER = "usr/lib/x86_64-linux-gnu/libmcheck.a"
 MEMBER_DIGEST = "c735a6c71d4e69b0a069ff3430c8c5e0ffccc3b201854d792644506feaaec5f1"
@@ -178,7 +178,7 @@ def check(realization):
         producer = load_module("static_input_producer_b_check", REPO / TOOL)
         verifier = load_module(
             "static_input_verifier_b_check",
-            REPO / "bundles/standard/.ai/tools/ryeos/environments/qualification/static-link-inputs.py")
+            REPO / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/static-link-inputs.py")
         producer.SOURCE = realization
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -186,7 +186,7 @@ def check(realization):
             candidate_contract.parent.mkdir(parents=True)
             shutil.copyfile(OVERLAY / CONTRACT, candidate_contract)
             request = {"resolved_config": {"value": b_intent, "source": {
-                "bundle_name": "standard", "config_path": INTENT.as_posix(),
+                "bundle_name": "environment-qualification", "config_path": INTENT.as_posix(),
                 "signer_fingerprint": trust["fingerprint"]}}}
             result = producer.assemble(project, request)
             require(result["input_evidence"]["file_count"] == 12 and

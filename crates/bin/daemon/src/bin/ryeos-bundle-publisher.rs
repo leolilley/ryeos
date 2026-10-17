@@ -24,16 +24,21 @@ struct Args {
     cas_root: Option<PathBuf>,
     #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
     policy: Option<PathBuf>,
+    /// Installed bundle-release bundle root; its signed payload ownership
+    /// (signed by the catalog publisher) bounds every release input's
+    /// payloads and Cargo features.
+    #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
+    bundle_release_root: Option<PathBuf>,
     /// Validate an operator-authored bundle_publication YAML section and emit
     /// the matching standalone publisher JSON policy; never start a listener.
-    #[arg(long, requires = "catalog_namespace", conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "measure_tool"])]
+    #[arg(long, requires = "catalog_namespace", conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "bundle_release_root", "measure_tool"])]
     prepare_policy: Option<PathBuf>,
     #[arg(long, requires = "prepare_policy")]
     catalog_namespace: Option<String>,
     /// Measure this exact publisher executable and emit the closed operation
     /// definition and artifact identities without loading keys or starting a
     /// listener.
-    #[arg(long, conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "prepare_policy", "catalog_namespace"])]
+    #[arg(long, conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "bundle_release_root", "prepare_policy", "catalog_namespace"])]
     measure_tool: Option<PathBuf>,
 }
 
@@ -62,6 +67,9 @@ async fn main() -> anyhow::Result<()> {
     let bearer_file = args.bearer_file.context("bearer file is required")?;
     let cas_root = args.cas_root.context("CAS root is required")?;
     let policy_path = args.policy.context("publisher policy is required")?;
+    let bundle_release_root = args
+        .bundle_release_root
+        .context("bundle-release root is required")?;
     anyhow::ensure!(
         args.bind.ip().is_loopback(),
         "plain HTTP publisher must bind to loopback"
@@ -80,6 +88,18 @@ async fn main() -> anyhow::Result<()> {
         &policy.catalog_publisher_fingerprint,
         identity.fingerprint(),
     )?;
+    // The payload ownership is trusted only when the catalog publisher itself
+    // signed it: the publisher key is the sole signer admitted here.
+    let ownership_trust =
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: identity.fingerprint().to_owned(),
+            verifying_key: identity.signing_key().verifying_key(),
+            label: None,
+        }]);
+    let ownership = ryeos_app::bundle_publication::admitted_build::load_installed_payload_ownership(
+        &bundle_release_root,
+        &ownership_trust,
+    )?;
     let observed_tool = observe_current_publisher_tool()?;
     policy.require_observed_tool(&observed_tool)?;
     let cas_root = lillux::PinnedDirectory::open(&cas_root)?.context("pin publication CAS root")?;
@@ -87,11 +107,13 @@ async fn main() -> anyhow::Result<()> {
     let proof = Arc::new(StandalonePublisherProof::new(
         Arc::clone(&cas),
         policy.clone(),
+        ownership.clone(),
     )?);
     let tree = Arc::new(ManifestOnlyTreePublisher::new(
         Arc::clone(&cas),
         identity,
         policy,
+        ownership,
     )?);
     let authority = Arc::new(LocalConstrainedPublisherAuthority::new_with_cas(
         cas,

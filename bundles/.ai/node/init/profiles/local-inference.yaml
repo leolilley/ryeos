@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-13T23:52:06Z:fe0e7a3ea520374e2a7ac6f8f3789bce80b369803d99626cc961b9d2c3166f71:nTMc2NUaF8Lf9wgfwf7U17PxQ5CwkOumjTAvBbug7GbCtss2bHf5gn0zHWAGkGAh57wiRKalpJJukddnx8XoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-14T12:31:24Z:563bd1c1115d4b5398271a9036a4e3964eec30366426c5f5be52dd4fb0c41b72:YZ5i719lTWELi2d1GOKAbDE466Xta1p8+pSLno0qEkuzhB/65ke8S+gj1vhbK+KY/hhSeSysCAwA/JFC2kaUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -252,25 +252,34 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # Device allocation and bounded occupancy are released only after
+            # Lillux proves this exact process scope empty.
+            mode: required
+            control_timeout_ms: 5000
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        # Device allocation and bounded occupancy are released only after
-        # Lillux proves this exact process scope empty.
-        mode: required
-        control_timeout_ms: 5000
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -356,7 +365,7 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

@@ -73,11 +73,51 @@ fn apply_maintenance_schedules(
         .map(|schedule| schedule.schedule_id.clone())
         .collect::<HashSet<_>>();
 
-    let node_directory = lillux::PinnedDirectory::open_or_create(node_dir)
-        .context("establish no-follow node configuration root")?;
-    let schedules_directory = node_directory
-        .open_or_create_child(std::ffi::OsStr::new("schedules"), 0o777)
-        .context("establish no-follow schedules directory")?;
+    // A policy with no declarations only retires previously managed specs, so
+    // it never creates the schedules directory: an absent directory has
+    // nothing to retire, and creating it would leave scheduler-shaped state on
+    // a node that never held a schedule. Only a missing entry is skipped: a
+    // regular file, a symlink or any other non-directory at that name is
+    // refused, never read past as if no schedules existed.
+    let schedules_name = std::ffi::OsStr::new("schedules");
+    let schedules_directory = if declarations.is_empty() {
+        let Some(node_directory) = lillux::PinnedDirectory::open(node_dir)
+            .context("open no-follow node configuration root")?
+        else {
+            return Ok(());
+        };
+        let Some(entry) = node_directory
+            .entry_no_follow(schedules_name)
+            .context("observe the no-follow schedules entry")?
+        else {
+            return Ok(());
+        };
+        let not_a_directory = || {
+            anyhow::anyhow!(
+                "maintenance schedules cannot be retired: {} is not a directory",
+                node_directory.path().join(schedules_name).display()
+            )
+        };
+        if !matches!(entry.entry_type, lillux::PinnedEntryType::Directory) {
+            return Err(not_a_directory());
+        }
+        match node_directory
+            .open_entry(schedules_name, false)
+            .context("open no-follow schedules directory")?
+        {
+            Some(lillux::PinnedDirectoryEntry::Directory(schedules_directory)) => {
+                schedules_directory
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) | None => {
+                return Err(not_a_directory());
+            }
+        }
+    } else {
+        lillux::PinnedDirectory::open_or_create(node_dir)
+            .context("establish no-follow node configuration root")?
+            .open_or_create_child(schedules_name, 0o777)
+            .context("establish no-follow schedules directory")?
+    };
     let _schedules_lock = schedules_directory.lock_exclusive()?;
     let schedules_dir = schedules_directory.path();
     let existing_files = scan_schedule_files(&schedules_directory)?;
@@ -764,6 +804,70 @@ schedules:
         assert!(
             node_dir.join("schedules/operator-job.yaml").exists(),
             "unowned schedules must not be removed"
+        );
+    }
+
+    #[test]
+    fn empty_policy_never_creates_the_schedules_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai").join("node");
+        let id = identity();
+        let trust = trust_store(&id);
+        let empty = NodeMaintenancePolicy {
+            schema: 5,
+            offline_reset: None,
+            offline_native: Default::default(),
+            schedules: Vec::new(),
+        };
+
+        apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
+        assert!(!node_dir.exists(), "no declarations must not create the node root");
+
+        std::fs::create_dir_all(&node_dir).unwrap();
+        apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
+        assert!(
+            !node_dir.join("schedules").exists(),
+            "no declarations must not create the schedules directory"
+        );
+    }
+
+    #[test]
+    fn empty_policy_refuses_a_non_directory_schedules_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai").join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let id = identity();
+        let trust = trust_store(&id);
+        let empty = NodeMaintenancePolicy {
+            schema: 5,
+            offline_reset: None,
+            offline_native: Default::default(),
+            schedules: Vec::new(),
+        };
+        let schedules = node_dir.join("schedules");
+
+        std::fs::write(&schedules, b"not a directory").unwrap();
+        let refusal = apply_maintenance_schedules(&node_dir, &id, &trust, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("is not a directory"), "{refusal}");
+        assert_eq!(std::fs::read(&schedules).unwrap(), b"not a directory");
+
+        std::fs::remove_file(&schedules).unwrap();
+        let target = tmp.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        lillux::PinnedDirectory::open(&node_dir)
+            .unwrap()
+            .unwrap()
+            .create_symlink(std::ffi::OsStr::new("schedules"), target.as_os_str().as_encoded_bytes())
+            .unwrap();
+        let refusal = apply_maintenance_schedules(&node_dir, &id, &trust, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("is not a directory"), "{refusal}");
+        assert!(
+            std::fs::symlink_metadata(&schedules).unwrap().file_type().is_symlink(),
+            "the refused symlink stays in place"
         );
     }
 }

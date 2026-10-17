@@ -614,7 +614,10 @@ mod tests {
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.code(), "direct_continuation_unsupported");
         let message = err.to_string();
-        assert!(message.contains("tool:test/run") && message.contains("T-prior"), "{message}");
+        assert!(
+            message.contains("tool:test/run") && message.contains("T-prior"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -43,16 +43,17 @@ use ryeos_app::state_store::{
 };
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{
-    self, ResolvedExecutionRequest, SealedRootExecutionRequest,
-    ThreadFinalizeParams,
+    self, ResolvedExecutionRequest, SealedRootExecutionRequest, ThreadFinalizeParams,
 };
 
+use super::admitted_callback_authority::{
+    admitted_qualification_root, admitted_remote_consumer_grant,
+};
 use super::launch::RecoveryLaunchOutcome;
-use super::admitted_callback_authority::{admitted_qualification_root, admitted_remote_consumer_grant};
 use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
 use super::process_attachment::{
-    AttachOptions, AuthorizedLaunch, HeldLaunch, LaunchFailure, LaunchOwnerCoordinate,
-    LaunchStage, ReleasedLaunch,
+    AttachOptions, AuthorizedLaunch, HeldLaunch, LaunchFailure, LaunchOwnerCoordinate, LaunchStage,
+    ReleasedLaunch,
 };
 
 mod external_direct;
@@ -175,7 +176,9 @@ impl SelectedQualificationInvocation {
     pub(super) fn claim_identity(&self) -> (&str, &str, &str) {
         self.claim.selected_claim_identity()
     }
-    pub(super) fn dedicated_admission(&self) -> Option<&ryeos_app::SelectedDedicatedWorkerAdmission> {
+    pub(super) fn dedicated_admission(
+        &self,
+    ) -> Option<&ryeos_app::SelectedDedicatedWorkerAdmission> {
         match &self.paired {
             SelectedInvocationCustody::Dedicated(admission) => Some(admission),
             SelectedInvocationCustody::Remote(_) => None,
@@ -189,22 +192,38 @@ impl SelectedQualificationInvocation {
         claim: ThreadLaunchClaim,
         admission: ryeos_app::SelectedDedicatedWorkerAdmission,
     ) -> Result<Self> {
-        let invocation = Self { guard, claim,
-            paired: SelectedInvocationCustody::Dedicated(admission) };
+        let invocation = Self {
+            guard,
+            claim,
+            paired: SelectedInvocationCustody::Dedicated(admission),
+        };
         invocation.checked(|invocation| {
             let (thread, claim, owner) = invocation.claim.selected_claim_identity();
             let guard = &invocation.guard;
             let SelectedInvocationCustody::Dedicated(admission) = &invocation.paired else {
                 bail!("dedicated precontact requires the distinct dedicated proof");
             };
-            anyhow::ensure!(guard.thread_id.as_deref() == Some(thread)
-                && guard.launch_owner.as_deref() == Some(owner),
-                "dedicated guard differs from the exact original claim");
-            anyhow::ensure!(admission.matches_guarded_issuer(
-                guard.callback_token.as_deref().context("dedicated guard has no callback")?,
-                guard.thread_auth_token.as_deref().context("dedicated guard has no TAT")?,
-                thread, claim, owner,
-            ), "dedicated proof differs from original guarded credential/claim");
+            anyhow::ensure!(
+                guard.thread_id.as_deref() == Some(thread)
+                    && guard.launch_owner.as_deref() == Some(owner),
+                "dedicated guard differs from the exact original claim"
+            );
+            anyhow::ensure!(
+                admission.matches_guarded_issuer(
+                    guard
+                        .callback_token
+                        .as_deref()
+                        .context("dedicated guard has no callback")?,
+                    guard
+                        .thread_auth_token
+                        .as_deref()
+                        .context("dedicated guard has no TAT")?,
+                    thread,
+                    claim,
+                    owner,
+                ),
+                "dedicated proof differs from original guarded credential/claim"
+            );
             Ok(())
         })
     }
@@ -218,19 +237,33 @@ impl SelectedQualificationInvocation {
     ) -> Result<Self> {
         // Construct BEFORE any fallible check: parameter drop ordering must
         // never release the claim before the guard finishes its cleanup.
-        let invocation = Self { guard, claim, paired: SelectedInvocationCustody::Remote(paired) };
+        let invocation = Self {
+            guard,
+            claim,
+            paired: SelectedInvocationCustody::Remote(paired),
+        };
         invocation.checked(|invocation| {
             let owner = invocation.claim.canonical_owner()?;
             let guard = &invocation.guard;
-            let thread = guard.thread_id.as_deref().context("selected precontact guard has no born thread")?;
+            let thread = guard
+                .thread_id
+                .as_deref()
+                .context("selected precontact guard has no born thread")?;
             let SelectedInvocationCustody::Remote(paired) = &invocation.paired else {
                 bail!("remote precontact requires the distinct remote proof");
             };
             if guard.launch_owner.as_deref() != Some(owner.as_str())
                 || !paired.matches_guarded_issuer(
-                    guard.callback_token.as_deref().context("selected guard has no callback")?,
-                    guard.thread_auth_token.as_deref().context("selected guard has no TAT")?,
-                    thread, &owner,
+                    guard
+                        .callback_token
+                        .as_deref()
+                        .context("selected guard has no callback")?,
+                    guard
+                        .thread_auth_token
+                        .as_deref()
+                        .context("selected guard has no TAT")?,
+                    thread,
+                    &owner,
                 )
             {
                 bail!("selected paired witness differs from actual guarded claim");
@@ -2097,7 +2130,11 @@ fn settle_direct_launch_failure(
 
 /// Outcome code for a class C launch failure. Attachment and release
 /// transitions carry their own codes; `step_code` names the caller's step.
-fn direct_outcome_code<'a>(stage: LaunchStage, attach_code: &'a str, step_code: &'a str) -> &'a str {
+fn direct_outcome_code<'a>(
+    stage: LaunchStage,
+    attach_code: &'a str,
+    step_code: &'a str,
+) -> &'a str {
     match stage {
         LaunchStage::Attach => attach_code,
         LaunchStage::WorkspaceActivation => "workspace_activation_failed",
@@ -2408,13 +2445,12 @@ fn verify_dispatch_effect_record(
         }
     }
     let evidence_hash = &record.admission_evidence_hash;
-    let evidence = match authority
-        .cas_store()
-        .and_then(|cas| cas.get_object_bounded(
+    let evidence = match authority.cas_store().and_then(|cas| {
+        cas.get_object_bounded(
             evidence_hash,
             ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
-        ))
-    {
+        )
+    }) {
         Ok(Some(value)) => value,
         Ok(None) => {
             return ryeos_state::ReplayRecordVerification::IntegrityFailure {
@@ -3481,8 +3517,10 @@ fn read_admitted_direct_secrets(
     state: &AppState,
     params: &ExecutionParams,
     admission: SecretReadAdmission,
-) -> std::result::Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError>
-{
+) -> std::result::Result<
+    ryeos_engine::contracts::DeliveredSecretEnv,
+    ryeos_app::vault::VaultReadError,
+> {
     let names: Vec<String> = crate::execution::launch::build_secret_requirements(
         &params.resolved.resolved_item.metadata.required_secrets,
     )
@@ -3500,7 +3538,9 @@ fn read_admitted_direct_secrets(
     }
     ryeos_app::vault::authorize_secret_delivery(
         &state.secret_sources(),
-        &params.acting_principal,
+        ryeos_app::vault::SecretRecipient {
+            principal: &params.acting_principal,
+        },
         &names,
         params.provenance.project_authority(),
     )
@@ -4834,14 +4874,15 @@ fn validate_retained_bundle_member_source_trust(
             "raw_content_digest": primary.root.raw_content_digest,
         })
     } else {
-        let authority = plan
-            .executor_authorities
-            .get(index - 1)
-            .ok_or_else(|| anyhow::anyhow!("retained Bundle runtime owner position has no plan authority"))?;
+        let authority = plan.executor_authorities.get(index - 1).ok_or_else(|| {
+            anyhow::anyhow!("retained Bundle runtime owner position has no plan authority")
+        })?;
         serde_json::to_value(authority)?
     };
     if serde_json::to_value(&selection.definition_owner)? != expected_owner {
-        anyhow::bail!("retained Bundle runtime owner differs from its exact authenticated chain authority");
+        anyhow::bail!(
+            "retained Bundle runtime owner differs from its exact authenticated chain authority"
+        );
     }
 
     if !engine
@@ -5038,9 +5079,8 @@ pub async fn run_and_wait(
         resume_snapshot_hash,
         mut tree_publication,
     } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
-    let secret_env =
-        read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
-            .context("authorize declared secrets for the admitted waiting root")?;
+    let secret_env = read_admitted_direct_secrets(&state, &params, SecretReadAdmission::FreshRoot)
+        .context("authorize declared secrets for the admitted waiting root")?;
     let wait_project_authority = params.provenance.project_authority().clone();
     let admission_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
@@ -5823,8 +5863,10 @@ pub async fn run_and_wait(
         Err(join_err) => {
             tracing::error!(error = %join_err, "failed to observe waiting execution");
             if let Err(error) = wait_settlement.settle_after_reap() {
-                return Err(anyhow::Error::new(wait_settlement.into_unsettled_failure(error))
-                    .context(format!("observe waiting execution: {join_err:#}")));
+                return Err(
+                    anyhow::Error::new(wait_settlement.into_unsettled_failure(error))
+                        .context(format!("observe waiting execution: {join_err:#}")),
+                );
             }
             guard.fail_thread("process_observation_failed");
             guard.cleanup();
@@ -7152,12 +7194,17 @@ async fn dispatch_detached_bg_task(
                 "{}: held launch attachment refused",
                 attach_outcome_code,
             );
-            let code =
-                direct_outcome_code(failure.stage, attach_outcome_code, attach_outcome_code);
+            let code = direct_outcome_code(failure.stage, attach_outcome_code, attach_outcome_code);
             report_detached_launch_failure(
                 &bg_state,
                 &bg_thread_id,
-                settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+                settle_direct_launch_failure(
+                    &bg_state,
+                    &bg_thread_id,
+                    &launch_owner,
+                    code,
+                    failure,
+                ),
                 bg_temp_dir.take(),
             );
             return;
@@ -7219,7 +7266,13 @@ async fn dispatch_detached_bg_task(
             report_detached_launch_failure(
                 &bg_state,
                 &bg_thread_id,
-                settle_direct_launch_failure(&bg_state, &bg_thread_id, &launch_owner, code, failure),
+                settle_direct_launch_failure(
+                    &bg_state,
+                    &bg_thread_id,
+                    &launch_owner,
+                    code,
+                    failure,
+                ),
                 bg_temp_dir.take(),
             );
             return;
@@ -8734,6 +8787,51 @@ pub async fn run_existing_admitted_root(
     .await
 }
 
+/// How a recovered direct tool's declared node guarantees stand against
+/// this node's current signed capability report.
+#[derive(Debug)]
+enum RecoveredToolAdmission {
+    Admitted,
+    /// The report could not be read at this moment and the row's bounded
+    /// retry window is still open: leave the row for the next recovery.
+    Deferred(anyhow::Error),
+    /// The tool declares a guarantee this node does not prove, its
+    /// `requires` is invalid, or the report stayed unreadable past the
+    /// row's retry window: the recovery is refused.
+    Refused(anyhow::Error),
+}
+
+/// Judge a recovered direct tool's `requires.node` list and declared
+/// credential kind's list with the same admission a fresh tool launch
+/// applies, bounding how long `row` may meet an unreadable report.
+fn admit_recovered_tool_node_requirements(
+    node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
+    row: &str,
+    item_ref: &str,
+    requires: Option<&Value>,
+) -> RecoveredToolAdmission {
+    use ryeos_app::node_requirement_admission::{
+        NodeRequirementRefused, admit_item_requirements, bound_unreadable_report_retries,
+        is_report_unreadable,
+    };
+    let Some(requires) = requires else {
+        return RecoveredToolAdmission::Admitted;
+    };
+    let requires = match ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires) {
+        Ok(requires) => requires,
+        Err(reason) => {
+            return RecoveredToolAdmission::Refused(anyhow::Error::new(NodeRequirementRefused(
+                format!("launch refused: {item_ref}: invalid `requires`: {reason}"),
+            )));
+        }
+    };
+    match bound_unreadable_report_retries(row, admit_item_requirements(node, item_ref, &requires)) {
+        Ok(()) => RecoveredToolAdmission::Admitted,
+        Err(error) if is_report_unreadable(&error) => RecoveredToolAdmission::Deferred(error),
+        Err(error) => RecoveredToolAdmission::Refused(error),
+    }
+}
+
 async fn run_existing_recovered_thread(
     state: AppState,
     thread_id: String,
@@ -8785,10 +8883,43 @@ async fn run_existing_recovered_thread(
             "attached_process_not_reconciled",
         ));
     }
+    // The recovered tool is judged against this node's current signed
+    // capability report before it is spawned again, as a fresh tool launch
+    // is. This runs before the guard tracks the row: a report that cannot be
+    // read just now leaves the row exactly as it was for the next recovery
+    // sweep, while a refusal finalizes it below.
+    let node_refusal = match admit_recovered_tool_node_requirements(
+        &state,
+        &thread_id,
+        &params.resolved.item_ref,
+        params.resolved.resolved_item.metadata.extra.get("requires"),
+    ) {
+        RecoveredToolAdmission::Admitted => None,
+        RecoveredToolAdmission::Deferred(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %format!("{error:#}"),
+                "direct recovery deferred: the node capability report could not be read"
+            );
+            return Ok(RecoveryLaunchOutcome::Skipped("node_report_unreadable"));
+        }
+        RecoveredToolAdmission::Refused(error) => Some(error),
+    };
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
     let resume_launch_owner = resume_claim.canonical_owner()?;
     guard.track_launch_owner(resume_launch_owner.clone());
+    if let Some(error) = node_refusal {
+        guard.fail_thread_with_error(
+            "node_requirement_refused",
+            json!({
+                "code": "node_requirement_refused",
+                "message": format!("{error:#}"),
+            }),
+        );
+        guard.cleanup();
+        return Err(ResumeError::Other(error));
+    }
 
     // The retained endpoint is authoritative before any controller workspace
     // materialization. External recovery must never enter the local spawn path.
@@ -9082,7 +9213,9 @@ async fn run_existing_recovered_thread(
                 ryeos_app::vault::VaultReadError::Internal(e) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(
-                        guard.fail_before_spawn(ryeos_app::vault::VaultReadError::Internal(e).into()),
+                        guard.fail_before_spawn(
+                            ryeos_app::vault::VaultReadError::Internal(e).into(),
+                        ),
                     )
                 }
             })?
@@ -9240,6 +9373,91 @@ mod tests {
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
 
     #[test]
+    fn a_recovered_tool_is_judged_on_this_nodes_report_before_it_is_spawned_again() {
+        use lillux::process_control::{HOST_PROVIDER, HostCapabilities, ProofSource};
+        use ryeos_app::node_requirement_admission::{
+            NodeCapabilityReportReader, NodeRequirementRefused,
+        };
+        let requires = json!({
+            "node": [{"name": "persistence:durable_state", "accept": ["measured", "trusted"]}],
+        });
+        let node = |read: fn() -> Result<HostCapabilities>| {
+            let extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(Arc::new(NodeCapabilityReportReader::new(read)));
+            extensions
+        };
+        let proving = node(|| {
+            let mut view = HostCapabilities::default();
+            view.provide(
+                "persistence:durable_state",
+                ProofSource::Measured,
+                HOST_PROVIDER,
+                "fixture",
+            );
+            Ok(view)
+        });
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &proving,
+                "T-recovered-proven",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Admitted
+        ));
+        // A node that no longer proves the guarantee refuses the re-spawn,
+        // plainly, naming the unmet entry.
+        let lacking = node(|| Ok(HostCapabilities::default()));
+        let RecoveredToolAdmission::Refused(error) = admit_recovered_tool_node_requirements(
+            &lacking,
+            "T-recovered-lacking",
+            "tool:fixture/durable",
+            Some(&requires),
+        ) else {
+            panic!("a node without the guarantee admitted the recovered tool");
+        };
+        let text = &error.downcast_ref::<NodeRequirementRefused>().unwrap().0;
+        assert!(
+            text.contains("requires.node persistence:durable_state"),
+            "{text}"
+        );
+        // A report that does not stand is a refusal too.
+        let stale = node(|| anyhow::bail!("the recorded node capability report is stale"));
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &stale,
+                "T-recovered-stale",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Refused(_)
+        ));
+        // A report that cannot be read just now defers the row.
+        let unreadable = node(|| {
+            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "state directory busy").into())
+        });
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &unreadable,
+                "T-recovered-unreadable",
+                "tool:fixture/durable",
+                Some(&requires),
+            ),
+            RecoveredToolAdmission::Deferred(_)
+        ));
+        // A tool that declares nothing is admitted without any report.
+        assert!(matches!(
+            admit_recovered_tool_node_requirements(
+                &ryeos_app::extension_state::ExtensionState::new(),
+                "T-recovered-plain",
+                "tool:fixture/plain",
+                None,
+            ),
+            RecoveredToolAdmission::Admitted
+        ));
+    }
+
+    #[test]
     fn fresh_root_without_exact_admission_is_refused() {
         let error = require_fresh_root_admission::<()>(None).unwrap_err();
         assert!(error.to_string().contains("no exact admitted root"));
@@ -9268,22 +9486,37 @@ mod tests {
             let claim_live = Rc::new(Cell::new(true));
             let observed = Rc::new(RefCell::new(Vec::new()));
             let invocation = SelectedQualificationInvocation {
-                guard: Probe { guard: true, claim_live: claim_live.clone(), observed: observed.clone() },
-                claim: Probe { guard: false, claim_live: claim_live.clone(), observed: observed.clone() },
+                guard: Probe {
+                    guard: true,
+                    claim_live: claim_live.clone(),
+                    observed: observed.clone(),
+                },
+                claim: Probe {
+                    guard: false,
+                    claim_live: claim_live.clone(),
+                    observed: observed.clone(),
+                },
                 paired: (),
             };
             // This is the SAME private checked owner mechanism used by the
             // concrete constructor, with no fake admission or native caller.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                invocation.checked(|_| {
-                    if panic_in_validation { panic!("validation unwind control"); }
-                    bail!("constructor rejected")
-                }).map(|_| ())
+                invocation
+                    .checked(|_| {
+                        if panic_in_validation {
+                            panic!("validation unwind control");
+                        }
+                        bail!("constructor rejected")
+                    })
+                    .map(|_| ())
             }));
             if panic_in_validation {
                 assert!(result.is_err());
             } else {
-                assert_eq!(result.unwrap().unwrap_err().to_string(), "constructor rejected");
+                assert_eq!(
+                    result.unwrap().unwrap_err().to_string(),
+                    "constructor rejected"
+                );
             }
             assert_eq!(&*observed.borrow(), &[true]);
             assert!(!claim_live.get());
@@ -9293,39 +9526,118 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn partial_credential_mint_unwind_revokes_exact_pair_and_preserves_error() {
-        let (temp, _store_owner, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let (temp, _store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
         let path = temp.path().to_path_buf();
-        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
-        let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
+        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
+            &path,
+            state.isolation.as_ref(),
+        )
+        .unwrap();
+        let provenance =
+            ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority)
+                .unwrap();
         let callback = state.callback_tokens.generate(
-            "T-mint-control", path, lillux::time::Duration::from_secs(60), vec![], provenance, "0".repeat(64),
+            "T-mint-control",
+            path,
+            lillux::time::Duration::from_secs(60),
+            vec![],
+            provenance,
+            "0".repeat(64),
         );
-        let tat = state.thread_auth.mint("T-mint-control", "fp:control".into(), vec![], None, "site:control", "site:control", lillux::time::Duration::from_secs(60)).unwrap();
-        let other = state.thread_auth.mint("T-other-control", "fp:control".into(), vec![], None, "site:control", "site:control", lillux::time::Duration::from_secs(60)).unwrap();
+        let tat = state
+            .thread_auth
+            .mint(
+                "T-mint-control",
+                "fp:control".into(),
+                vec![],
+                None,
+                "site:control",
+                "site:control",
+                lillux::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        let other = state
+            .thread_auth
+            .mint(
+                "T-other-control",
+                "fp:control".into(),
+                vec![],
+                None,
+                "site:control",
+                "site:control",
+                lillux::time::Duration::from_secs(60),
+            )
+            .unwrap();
         let failure: Result<()> = (|| {
             let _guard = ProtocolCredentialMintGuard {
-                state: &state, callback: Some(callback.token.clone()), thread_auth: Some(tat.token.clone()),
+                state: &state,
+                callback: Some(callback.token.clone()),
+                thread_auth: Some(tat.token.clone()),
             };
             bail!("initiating context failure")
         })();
-        assert_eq!(failure.unwrap_err().to_string(), "initiating context failure");
-        assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-mint-control").is_err());
-        assert!(state.thread_auth.validate(&tat.token, "T-mint-control").is_err());
-        assert!(state.thread_auth.validate(&other.token, "T-other-control").is_ok());
+        assert_eq!(
+            failure.unwrap_err().to_string(),
+            "initiating context failure"
+        );
+        assert!(
+            state
+                .callback_tokens
+                .validate_token_and_thread(&callback.token, "T-mint-control")
+                .is_err()
+        );
+        assert!(
+            state
+                .thread_auth
+                .validate(&tat.token, "T-mint-control")
+                .is_err()
+        );
+        assert!(
+            state
+                .thread_auth
+                .validate(&other.token, "T-other-control")
+                .is_ok()
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn callback_only_mint_failure_cannot_leave_first_credential_live() {
-        let (temp, _store_owner, state) = crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture();
+        let (temp, _store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
         let path = temp.path().to_path_buf();
-        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(&path, state.isolation.as_ref()).unwrap();
-        let provenance = ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority).unwrap();
-        let callback = state.callback_tokens.generate("T-first-mint", path, lillux::time::Duration::from_secs(60), vec![], provenance, "0".repeat(64));
+        let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
+            &path,
+            state.isolation.as_ref(),
+        )
+        .unwrap();
+        let provenance =
+            ExecutionProvenance::root_live_fs(path.clone(), state.engine.clone(), authority)
+                .unwrap();
+        let callback = state.callback_tokens.generate(
+            "T-first-mint",
+            path,
+            lillux::time::Duration::from_secs(60),
+            vec![],
+            provenance,
+            "0".repeat(64),
+        );
         {
-            let _guard = ProtocolCredentialMintGuard { state: &state, callback: Some(callback.token.clone()), thread_auth: None };
+            let _guard = ProtocolCredentialMintGuard {
+                state: &state,
+                callback: Some(callback.token.clone()),
+                thread_auth: None,
+            };
         }
-        assert!(state.callback_tokens.validate_token_and_thread(&callback.token, "T-first-mint").is_err());
+        assert!(
+            state
+                .callback_tokens
+                .validate_token_and_thread(&callback.token, "T-first-mint")
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -9361,10 +9673,22 @@ mod tests {
         // The durable Kill tombstone is the runtime row's stop intent, which
         // live reconcile reads to kill the exact group.
         let runtime = state.threads.get_thread(child).unwrap().unwrap().runtime;
-        assert_eq!(runtime.stop_intent, Some(StopIntent::Kill), "no durable Kill tombstone");
-        assert!(runtime.stop_requested_at_ms.is_some(), "no durable Kill tombstone");
-        assert!(!is_terminal_status(&store.get_thread(child).unwrap().unwrap().status));
-        assert!(workspace_path.exists(), "workspace removed before reconcile killed the process");
+        assert_eq!(
+            runtime.stop_intent,
+            Some(StopIntent::Kill),
+            "no durable Kill tombstone"
+        );
+        assert!(
+            runtime.stop_requested_at_ms.is_some(),
+            "no durable Kill tombstone"
+        );
+        assert!(!is_terminal_status(
+            &store.get_thread(child).unwrap().unwrap().status
+        ));
+        assert!(
+            workspace_path.exists(),
+            "workspace removed before reconcile killed the process"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -9406,8 +9730,13 @@ mod tests {
         guard.track_launch_owner(claim.claimed_by.clone());
         let returned = wait_launch_failure(&mut guard, DirectLaunchFailure::Unsettled(error));
         assert!(super::super::process_attachment::is_unsettled_launch_cleanup(&returned));
-        assert!(!guard.thread_finalized, "unsettled cleanup must leave the owner armed");
-        assert!(!is_terminal_status(&store.get_thread(child).unwrap().unwrap().status));
+        assert!(
+            !guard.thread_finalized,
+            "unsettled cleanup must leave the owner armed"
+        );
+        assert!(!is_terminal_status(
+            &store.get_thread(child).unwrap().unwrap().status
+        ));
         // The armed guard's owner-drop stop is the settlement path; detach it
         // here so this control observes only the mapping.
         guard.thread_id = None;

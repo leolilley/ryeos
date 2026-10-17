@@ -18,6 +18,8 @@ use ryeos_scheduler_contract::{
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 const MANAGED_BY_TYPE: &str = "project_ai_sync";
+const LOCKED_SCAN_REFUSAL: &str =
+    "project schedule directory is not canonical under the deploy lock";
 const MAX_RECOVERY_SCHEDULE_SOURCE_BYTES: u64 = 1024 * 1024;
 const SCHEDULE_DIRECTORY_LOCK_TIMEOUT: lillux::time::Duration =
     lillux::time::Duration::from_secs(5);
@@ -364,26 +366,36 @@ fn prepare_commit_with_recovery(
     {
         anyhow::bail!("schedule recovery preparation does not match its deploy plan");
     }
-    apply_actions(plan, ctx, &mut preparation.tx)
+    let ScheduleRecoveryPreparation { before_images, tx } = preparation;
+    apply_actions(plan, ctx, tx, before_images)
 }
 
 fn apply_actions(
     plan: &ScheduleDeployPlan,
     ctx: &ProjectContext,
     tx: &mut ScheduleReconcileTx,
+    before_images: &[ScheduleRecoveryBeforeImage],
 ) -> Result<ScheduleDeployReport> {
     let mut report = ScheduleDeployReport {
         declared: plan.declared,
         ..ScheduleDeployReport::default()
     };
+    // Under the held lock the whole directory must still be canonical schedule
+    // sources: no stray entries and no invalid schedule ids.
+    ryeos_scheduler::projection::canonical_schedule_source_paths(tx.directory.path())
+        .context(LOCKED_SCAN_REFUSAL)?;
 
     for action in &plan.actions {
-        revalidate_action(action, ctx, tx.directory.path())?;
+        // The verified incumbent is the exact pinned inode whose bytes were
+        // checked; the backup and the conditional write both bind to it.
+        let incumbent = revalidate_action(action, ctx, &tx.directory)?;
+        require_incumbent_matches_before_image(action, incumbent.as_ref(), before_images)?;
         match action {
             ScheduleAction::Create(desired) => {
-                tx.backup(ctx, &desired.declaration.schedule_id)?;
+                tx.backup(ctx, &desired.declaration.schedule_id, incumbent.as_ref())?;
                 write_reconciled_schedule(
                     &tx.directory,
+                    incumbent.as_ref().map(|incumbent| &incumbent.file),
                     desired,
                     ctx,
                     lillux::time::timestamp_millis(),
@@ -396,8 +408,14 @@ fn apply_actions(
                 existing,
                 adopt_manual: _,
             } => {
-                tx.backup(ctx, &desired.declaration.schedule_id)?;
-                write_reconciled_schedule(&tx.directory, desired, ctx, existing.registered_at)?;
+                tx.backup(ctx, &desired.declaration.schedule_id, incumbent.as_ref())?;
+                write_reconciled_schedule(
+                    &tx.directory,
+                    incumbent.as_ref().map(|incumbent| &incumbent.file),
+                    desired,
+                    ctx,
+                    existing.registered_at,
+                )?;
                 tx.touch(desired.declaration.schedule_id.clone());
                 report.updated += 1;
             }
@@ -405,16 +423,18 @@ fn apply_actions(
                 schedule_id,
                 existing: _,
             } => {
-                tx.backup(ctx, schedule_id)?;
-                let yaml_path = tx.schedule_path(schedule_id);
-                let name = yaml_path
-                    .file_name()
-                    .ok_or_else(|| anyhow!("schedule path has no filename"))?;
-                if let Some(file) = tx.directory.open_regular(name, false)? {
-                    tx.directory
-                        .remove_if_same(name, &file)
-                        .with_context(|| format!("delete schedule YAML {}", yaml_path.display()))?;
-                }
+                let incumbent = incumbent.as_ref().ok_or_else(|| {
+                    anyhow!("schedule_id '{schedule_id}' delete has no verified source")
+                })?;
+                tx.backup(ctx, schedule_id, Some(incumbent))?;
+                tx.directory
+                    .remove_pinned_regular_if_same(&incumbent.file)
+                    .with_context(|| {
+                        format!(
+                            "delete schedule YAML {}",
+                            tx.schedule_path(schedule_id).display()
+                        )
+                    })?;
                 ctx.db.delete_spec(schedule_id)?;
                 tx.touch(schedule_id.clone());
                 report.deleted += 1;
@@ -422,6 +442,40 @@ fn apply_actions(
         }
     }
     Ok(report)
+}
+
+/// In-process rollback restores the backup bytes and journal recovery restores
+/// the captured before-image. Both must be the same bytes, so a source that was
+/// replaced after capture is refused even when its signed body is unchanged.
+fn require_incumbent_matches_before_image(
+    action: &ScheduleAction,
+    incumbent: Option<&VerifiedIncumbent>,
+    before_images: &[ScheduleRecoveryBeforeImage],
+) -> Result<()> {
+    let schedule_id = match action {
+        ScheduleAction::Create(desired)
+        | ScheduleAction::Update {
+            desired,
+            existing: _,
+            adopt_manual: _,
+        } => desired.declaration.schedule_id.as_str(),
+        ScheduleAction::DeleteMissing {
+            schedule_id,
+            existing: _,
+        } => schedule_id.as_str(),
+    };
+    let image = before_images
+        .iter()
+        .find(|image| image.schedule_id == schedule_id)
+        .ok_or_else(|| anyhow!("schedule_id '{schedule_id}' has no recovery before-image"))?;
+    let captured = image.signed_yaml.as_deref().map(str::as_bytes);
+    let current = incumbent.map(|incumbent| incumbent.bytes.as_slice());
+    if captured != current {
+        anyhow::bail!(
+            "schedule_id '{schedule_id}' source changed after its recovery before-image was captured"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -468,11 +522,51 @@ fn load_project_managed_schedule_yaml(
     Ok(out)
 }
 
+/// A current source read once through the pinned schedule directory: the
+/// descriptor a later conditional write or removal must still find, and the
+/// exact bytes that were verified. The bytes are kept because the descriptor's
+/// read cursor is spent; a second read through it would observe nothing.
+struct VerifiedIncumbent {
+    file: lillux::PinnedRegularFile,
+    bytes: Vec<u8>,
+}
+
+/// One no-follow read of the current source through the pinned schedule
+/// directory, verified from exactly the bytes read.
+fn read_pinned_verified_source(
+    directory: &lillux::PinnedDirectory,
+    schedule_id: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<
+    Option<(
+        VerifiedIncumbent,
+        ryeos_scheduler::projection::VerifiedScheduleSource,
+    )>,
+> {
+    let name = format!("{schedule_id}.yaml");
+    let path = directory.path().join(&name);
+    let Some(file) = directory
+        .open_pinned_regular(std::ffi::OsStr::new(&name), false)
+        .with_context(|| format!("open schedule source {}", path.display()))?
+    else {
+        return Ok(None);
+    };
+    let bytes = file.read_bounded(MAX_RECOVERY_SCHEDULE_SOURCE_BYTES)?;
+    let content = std::str::from_utf8(&bytes)
+        .with_context(|| format!("schedule source {} is not UTF-8", path.display()))?;
+    let verified =
+        ryeos_scheduler::projection::verify_schedule_source_content(&path, content, trust_store)
+            .with_context(|| format!("verify existing schedule YAML {}", path.display()))?;
+    Ok(Some((VerifiedIncumbent { file, bytes }, verified)))
+}
+
+/// Re-prove one planned action under the held directory lock and return the
+/// verified incumbent source (absent for a create).
 fn revalidate_action(
     action: &ScheduleAction,
     ctx: &ProjectContext,
-    schedules_dir: &Path,
-) -> Result<()> {
+    directory: &lillux::PinnedDirectory,
+) -> Result<Option<VerifiedIncumbent>> {
     let canonical_project_path = project_path_identity(ctx.request.project_path.as_path())?;
     match action {
         ScheduleAction::Create(desired) => {
@@ -483,14 +577,14 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            if read_existing_schedule_body(schedules_dir, schedule_id, &ctx.trust_store)?.is_some()
-            {
+            if read_pinned_verified_source(directory, schedule_id, &ctx.trust_store)?.is_some() {
                 anyhow::bail!(
                     "schedule_id '{}' gained node YAML during project deploy; refusing to overwrite",
                     schedule_id
                 );
             }
             reject_schedule_history_reuse(ctx, schedule_id)?;
+            Ok(None)
         }
         ScheduleAction::Update {
             desired,
@@ -513,26 +607,24 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body = read_existing_schedule_body(schedules_dir, schedule_id, &ctx.trust_store)?
-                .ok_or_else(|| {
+            let (incumbent, verified) = read_pinned_verified_source(
+                directory,
+                schedule_id,
+                &ctx.trust_store,
+            )?
+            .ok_or_else(|| {
                 anyhow!(
                     "schedule_id '{}' lost node YAML during project deploy; refusing update",
                     schedule_id
                 )
             })?;
-            let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' lost node YAML during project deploy",
-                        schedule_id
-                    )
-                })?;
-            if yaml_hash != existing.spec_hash {
+            if verified.spec_hash != existing.spec_hash {
                 anyhow::bail!(
                     "schedule_id '{}' YAML changed during project deploy; retry project sync",
                     schedule_id
                 );
             }
+            let body = serde_json::to_value(&verified.record)?;
             match parse_project_managed_by(&body) {
                 Some(managed) => {
                     if managed.project_key != ctx.request.project_key.as_str() {
@@ -562,20 +654,18 @@ fn revalidate_action(
                     );
                 }
             }
+            Ok(Some(incumbent))
         }
         ScheduleAction::DeleteMissing {
             schedule_id,
             existing,
         } => {
-            let current = ctx
-                .db
-                .get_spec(schedule_id)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' disappeared during project deploy; refusing delete",
-                        schedule_id
-                    )
-                })?;
+            let current = ctx.db.get_spec(schedule_id)?.ok_or_else(|| {
+                anyhow!(
+                    "schedule_id '{}' disappeared during project deploy; refusing delete",
+                    schedule_id
+                )
+            })?;
             if current.spec_hash != existing.spec_hash
                 || current.registered_at != existing.registered_at
                 || current.execution.principal_id() != existing.execution.principal_id()
@@ -585,26 +675,24 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body = read_existing_schedule_body(schedules_dir, schedule_id, &ctx.trust_store)?
-                .ok_or_else(|| {
+            let (incumbent, verified) = read_pinned_verified_source(
+                directory,
+                schedule_id,
+                &ctx.trust_store,
+            )?
+            .ok_or_else(|| {
                 anyhow!(
                     "schedule_id '{}' lost node YAML during project deploy; refusing delete",
                     schedule_id
                 )
             })?;
-            let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' lost node YAML during project deploy",
-                        schedule_id
-                    )
-                })?;
-            if yaml_hash != existing.spec_hash {
+            if verified.spec_hash != existing.spec_hash {
                 anyhow::bail!(
                     "schedule_id '{}' YAML changed during project deploy; refusing delete",
                     schedule_id
                 );
             }
+            let body = serde_json::to_value(&verified.record)?;
             let managed = parse_project_managed_by(&body).ok_or_else(|| {
                 anyhow!(
                     "schedule_id '{}' is no longer project-managed during project deploy",
@@ -625,9 +713,9 @@ fn revalidate_action(
                 schedule_id,
                 current.execution.principal_id(),
             )?;
+            Ok(Some(incumbent))
         }
     }
-    Ok(())
 }
 
 pub fn validate_project_declarations(staging_root: &Path, project_path: &Path) -> Result<usize> {
@@ -929,35 +1017,9 @@ fn read_existing_schedule_body(
     Ok(Some(serde_json::to_value(verified.record)?))
 }
 
-fn read_existing_schedule_content_hash(
-    schedules_dir: &Path,
-    schedule_id: &str,
-) -> Result<Option<String>> {
-    let yaml_path = canonical_project_schedule_path(schedules_dir, schedule_id)?;
-    match fs::symlink_metadata(&yaml_path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            anyhow::bail!(
-                "schedule source {} is not a regular non-symlink file",
-                yaml_path.display()
-            );
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(None);
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("inspect schedule source {}", yaml_path.display()));
-        }
-    }
-    let content = fs::read(&yaml_path)
-        .with_context(|| format!("read existing schedule YAML {}", yaml_path.display()))?;
-    Ok(Some(lillux::cas::sha256_hex(&content)))
-}
-
-#[allow(clippy::too_many_arguments)]
 fn write_reconciled_schedule(
     schedules_dir: &lillux::PinnedDirectory,
+    expected: Option<&lillux::PinnedRegularFile>,
     desired: &DesiredSchedule,
     ctx: &ProjectContext,
     registered_at: i64,
@@ -1033,10 +1095,9 @@ fn write_reconciled_schedule(
     )?;
     let filename = format!("{}.yaml", schedule.schedule_id);
     let filename = std::ffi::OsStr::new(&filename);
-    let expected = schedules_dir.open_regular(filename, false)?;
-    schedules_dir.atomic_write_if_same(
+    schedules_dir.atomic_write_pinned_if_same(
         filename,
-        expected.as_ref(),
+        expected,
         &bytes,
         0o600,
         crate::SCHEDULER_TEMP_PURPOSE,
@@ -1095,20 +1156,16 @@ impl ScheduleReconcileTx {
         self.directory.path().join(format!("{schedule_id}.yaml"))
     }
 
-    fn backup(&mut self, ctx: &ProjectContext, schedule_id: &str) -> Result<()> {
+    fn backup(
+        &mut self,
+        ctx: &ProjectContext,
+        schedule_id: &str,
+        incumbent: Option<&VerifiedIncumbent>,
+    ) -> Result<()> {
         if self.backups.iter().any(|b| b.schedule_id == schedule_id) {
             return Ok(());
         }
-        let yaml_path = self.schedule_path(schedule_id);
-        let name = yaml_path
-            .file_name()
-            .ok_or_else(|| anyhow!("schedule path has no filename"))?;
-        let yaml_bytes = self
-            .directory
-            .open_pinned_regular(name, false)?
-            .map(|file| file.read_bounded(MAX_RECOVERY_SCHEDULE_SOURCE_BYTES))
-            .transpose()
-            .with_context(|| format!("backup {}", yaml_path.display()))?;
+        let yaml_bytes = incumbent.map(|incumbent| incumbent.bytes.clone());
         let db_record = ctx.db.get_spec(schedule_id)?;
         self.backups.push(ScheduleBackup {
             schedule_id: schedule_id.to_string(),
@@ -1412,16 +1469,13 @@ impl ProjectScheduleSession for ProjectScheduleSessionImpl {
         ) {
             return Ok(());
         }
+        // A finalized deploy is committed: its retained backups must never
+        // revert it. Only a captured, not yet resolved session may roll back.
         if !matches!(
             self.phase,
-            SessionPhase::Acquired
-                | SessionPhase::Planned
-                | SessionPhase::RecoveryPrepared
+            SessionPhase::RecoveryPrepared
                 | SessionPhase::Prepared
                 | SessionPhase::RecoveryRequired
-                | SessionPhase::Finalized
-                | SessionPhase::Restored
-                | SessionPhase::RolledBack
         ) {
             anyhow::bail!("project schedule session cannot rollback in its current phase");
         }
@@ -1601,5 +1655,1000 @@ fn reload_touched_sender(
                 tracing::warn!(%schedule_id, %error, "scheduler reload notification failed; timer repair will reconcile changes");
             }
         }
+    }
+}
+
+/// Project deployment evidence against a real scheduler store: exact signed
+/// before-images (absence included), rollback of every action kind, restore
+/// from journal-shaped images after the store is reopened, and the recovery
+/// owner kept when a session is dropped or its rollback fails.
+#[cfg(test)]
+mod deploy_recovery_tests {
+    use super::*;
+    use ryeos_scheduler::test_native::TestSchedulerHost;
+    use ryeos_scheduler_contract::ScheduleExecutionAuthority;
+    use std::sync::atomic::Ordering;
+
+    const ALPHA: &str = "project-alpha";
+    const BRAVO: &str = "project-bravo";
+    const CHARLIE: &str = "project-charlie";
+    const OBSERVED: [&str; 3] = [ALPHA, BRAVO, CHARLIE];
+
+    /// A caller holding every deployment grant; it signs schedules under the
+    /// node's own execution authority so the fixture needs no authorized key.
+    struct GrantedCaller {
+        identity: Arc<ryeos_node_runtime::identity::NodeIdentity>,
+    }
+
+    impl ProjectScheduleCaller for GrantedCaller {
+        fn require_registration(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn require_owner(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn require_capability(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn authenticated_execution_authority(
+            &self,
+            _: String,
+        ) -> Result<ScheduleExecutionAuthority> {
+            Ok(ScheduleExecutionAuthority::Node {
+                principal_id: self.identity.principal_id(),
+                effective_origin_site_id: self.identity.site_id(),
+            })
+        }
+    }
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        app_root: PathBuf,
+        runtime: PathBuf,
+        project: PathBuf,
+        identity: Arc<ryeos_node_runtime::identity::NodeIdentity>,
+        trust: Arc<ryeos_engine::trust::TrustStore>,
+    }
+
+    /// One open scheduler store and the service bound to it.
+    struct Node {
+        db: Arc<ScheduleDb>,
+        service: Arc<SchedulerService>,
+    }
+
+    type Observation = BTreeMap<String, (Option<Vec<u8>>, Option<Value>)>;
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let app_root = root.path().join("app");
+            let runtime = app_root.join(ryeos_engine::AI_DIR).join("state");
+            fs::create_dir_all(&runtime).unwrap();
+            fs::create_dir_all(app_root.join(ryeos_engine::AI_DIR).join("node/schedules")).unwrap();
+            let project = root.path().join("project");
+            fs::create_dir_all(&project).unwrap();
+            let project = project.canonicalize().unwrap();
+            let identity = Arc::new(
+                ryeos_node_runtime::identity::NodeIdentity::create(
+                    &root.path().join("identity.key"),
+                )
+                .unwrap(),
+            );
+            let trust = Arc::new(ryeos_engine::trust::TrustStore::from_signers(vec![
+                ryeos_engine::trust::TrustedSigner {
+                    fingerprint: identity.fingerprint().to_owned(),
+                    verifying_key: *identity.verifying_key(),
+                    label: Some("project-deploy-test-node".to_owned()),
+                },
+            ]));
+            Self {
+                root,
+                app_root,
+                runtime,
+                project,
+                identity,
+                trust,
+            }
+        }
+
+        /// Create the store as a node's first start does: its fresh fire
+        /// projection is published once.
+        fn open(&self, host: &TestSchedulerHost) -> Node {
+            self.open_store(host, true)
+        }
+
+        /// Reopen the existing store as a restarted node does.
+        fn reopen(&self, host: &TestSchedulerHost) -> Node {
+            self.open_store(host, false)
+        }
+
+        fn open_store(&self, host: &TestSchedulerHost, fresh: bool) -> Node {
+            let db = match host.open_at(&self.runtime) {
+                Ok(db) => Arc::new(db),
+                Err(failure) => {
+                    let error = failure.to_string();
+                    host.settle_refusal(failure);
+                    panic!("open test scheduler store: {error}");
+                }
+            };
+            if fresh {
+                db.finish_fire_projection_rebuild().unwrap();
+            }
+            let runtime_directory = Arc::new(
+                lillux::PinnedDirectory::open(&self.runtime)
+                    .unwrap()
+                    .unwrap(),
+            );
+            let service = Arc::new(
+                SchedulerService::new(
+                    self.app_root.clone(),
+                    runtime_directory,
+                    Arc::clone(&db),
+                    Arc::new(RwLock::new(())),
+                    Arc::clone(&self.identity),
+                    Arc::clone(&self.trust),
+                )
+                .unwrap(),
+            );
+            Node { db, service }
+        }
+
+        /// Close the service and its store the way a stopping node does: the
+        /// drained gate closes the store, then the last alias settles it.
+        fn close(&self, host: &TestSchedulerHost, node: Node) {
+            let Node { db, service } = node;
+            service.close_after_shutdown_drain().unwrap();
+            drop(service);
+            host.settle_shared(db);
+        }
+
+        fn schedules_dir(&self) -> PathBuf {
+            self.app_root
+                .join(ryeos_engine::AI_DIR)
+                .join("node/schedules")
+        }
+
+        /// Stage one project snapshot declaring `schedules` as
+        /// `(schedule_id, interval seconds)` pairs.
+        fn stage(&self, label: &str, schedules: &[(&str, u32)]) -> PathBuf {
+            let staging = self.root.path().join(format!("staging-{label}"));
+            let declarations = staging.join(".ai/config/schedules");
+            fs::create_dir_all(&declarations).unwrap();
+            let mut body = String::from(
+                "category: schedules\nversion: 1.0.0\nschema_version: 1.0.0\nschedules:\n",
+            );
+            for (schedule_id, interval) in schedules {
+                body.push_str(&format!(
+                    r#"  - schedule_id: {schedule_id}
+    item_ref: graph:project/{schedule_id}
+    ref_bindings: {{}}
+    schedule_type: interval
+    expression: "{interval}"
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    lateness_grace_secs: 60
+    enabled: true
+    capabilities:
+      - ryeos.execute.graph.project/{schedule_id}
+    execution_policy:
+      schema_version: 2
+      ownership: daemon_owned
+      recovery: restart_recoverable
+      response: accepted
+      target:
+        kind: here
+      environment:
+        kind: none
+      project:
+        kind: live_direct
+        access: read_write
+        child_policy:
+          kind: inherit
+    project_root: {project}
+    params: {{}}
+"#,
+                    project = self.project.display(),
+                ));
+            }
+            fs::write(declarations.join("project.yaml"), body).unwrap();
+            staging
+        }
+
+        fn request(&self, staging: PathBuf, snapshot: &str) -> ProjectScheduleDeployRequest {
+            ProjectScheduleDeployRequest {
+                staging_root: staging,
+                project_path: self.project.clone(),
+                project_key: lillux::cas::sha256_hex(b"project-deploy-test-project"),
+                snapshot_hash: lillux::cas::sha256_hex(snapshot.as_bytes()),
+                caller: Arc::new(GrantedCaller {
+                    identity: Arc::clone(&self.identity),
+                }),
+            }
+        }
+
+        /// Exact source bytes and projected record for every observed id.
+        fn observe(&self, db: &ScheduleDb) -> Observation {
+            OBSERVED
+                .iter()
+                .map(|schedule_id| {
+                    let path = self.schedules_dir().join(format!("{schedule_id}.yaml"));
+                    let bytes = match fs::read(&path) {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => panic!("read {}: {error}", path.display()),
+                    };
+                    let record = db
+                        .get_spec(schedule_id)
+                        .unwrap()
+                        .map(|record| serde_json::to_value(record).unwrap());
+                    ((*schedule_id).to_owned(), (bytes, record))
+                })
+                .collect()
+        }
+
+        /// The first deployment: ALPHA and BRAVO exist, CHARLIE does not.
+        async fn deploy_baseline(&self, node: &Node) -> Observation {
+            let mut session = node.service.acquire_project_schedules().await.unwrap();
+            session
+                .plan(self.request(self.stage("baseline", &[(ALPHA, 60), (BRAVO, 120)]), "one"))
+                .unwrap();
+            session.prepare_recovery().await.unwrap();
+            let report = session.prepare().unwrap();
+            assert_eq!((report.created, report.updated, report.deleted), (2, 0, 0));
+            session.finalize().unwrap();
+            drop(session);
+            let baseline = self.observe(&node.db);
+            assert!(baseline[ALPHA].0.is_some() && baseline[ALPHA].1.is_some());
+            assert!(baseline[BRAVO].0.is_some() && baseline[BRAVO].1.is_some());
+            assert_eq!(baseline[CHARLIE], (None, None));
+            baseline
+        }
+
+        /// The second deployment, prepared but unresolved: ALPHA is updated,
+        /// BRAVO is no longer declared and is deleted, CHARLIE is created.
+        async fn prepare_second(&self, node: &Node) -> Box<dyn ProjectScheduleSession> {
+            let mut session = node.service.acquire_project_schedules().await.unwrap();
+            session
+                .plan(self.request(self.stage("second", &[(ALPHA, 300), (CHARLIE, 90)]), "two"))
+                .unwrap();
+            assert!(session.has_actions().unwrap());
+            session.prepare_recovery().await.unwrap();
+            let report = session.prepare().unwrap();
+            assert_eq!((report.created, report.updated, report.deleted), (1, 1, 1));
+            session
+        }
+    }
+
+    fn assert_second_applied(applied: &Observation, baseline: &Observation) {
+        assert_ne!(
+            applied[ALPHA].0, baseline[ALPHA].0,
+            "update rewrote the source"
+        );
+        assert_ne!(
+            applied[ALPHA].1, baseline[ALPHA].1,
+            "update reprojected the record"
+        );
+        assert_eq!(
+            applied[BRAVO],
+            (None, None),
+            "delete removed source and record"
+        );
+        assert!(applied[CHARLIE].0.is_some() && applied[CHARLIE].1.is_some());
+    }
+
+    /// The journal carries before-images as canonical JSON; decode them back
+    /// through that exact encoding so restoration sees what a restart reads.
+    fn journal_round_trip(
+        images: &[ScheduleRecoveryBeforeImage],
+    ) -> Vec<ScheduleRecoveryBeforeImage> {
+        let encoded = lillux::canonical_json(&serde_json::to_value(images).unwrap()).unwrap();
+        serde_json::from_str(&encoded).unwrap()
+    }
+
+    fn recovery_pending(node: &Node) -> bool {
+        node.service
+            .project_recovery_pending
+            .load(Ordering::Acquire)
+    }
+
+    #[tokio::test]
+    async fn before_images_are_exact_signed_source_bytes_and_record_absence() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session
+            .plan(fixture.request(
+                fixture.stage("second", &[(ALPHA, 300), (CHARLIE, 90)]),
+                "two",
+            ))
+            .unwrap();
+        assert!(
+            session.before_images().is_err(),
+            "images exist only after preparation"
+        );
+        session.prepare_recovery().await.unwrap();
+        let images = session.before_images().unwrap().to_vec();
+
+        let ids = images
+            .iter()
+            .map(|image| image.schedule_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![ALPHA, BRAVO, CHARLIE],
+            "sorted, one image per touched id"
+        );
+        for image in &images {
+            let expected = baseline[&image.schedule_id]
+                .0
+                .as_ref()
+                .map(|bytes| String::from_utf8(bytes.clone()).unwrap());
+            assert_eq!(image.signed_yaml, expected, "{} image", image.schedule_id);
+        }
+        assert!(
+            images[2].signed_yaml.is_none(),
+            "a created schedule's image is absence"
+        );
+        assert_eq!(journal_round_trip(&images).len(), images.len());
+        for (decoded, original) in journal_round_trip(&images).iter().zip(&images) {
+            assert_eq!(decoded.signed_yaml, original.signed_yaml);
+        }
+
+        // Capture alone mutates nothing.
+        assert_eq!(fixture.observe(&node.db), baseline);
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_created_updated_and_deleted_schedules_exactly() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        assert_second_applied(&fixture.observe(&node.db), &baseline);
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert!(!recovery_pending(&node));
+        // Repeating a completed rollback is a no-op, not a second mutation.
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        drop(session);
+        assert!(
+            !recovery_pending(&node),
+            "a rolled-back session leaves no obligation"
+        );
+
+        // The node accepts the next deployment without residue.
+        let mut next = node.service.acquire_project_schedules().await.unwrap();
+        let report = next
+            .plan(fixture.request(fixture.stage("again", &[(ALPHA, 60), (BRAVO, 120)]), "one"))
+            .unwrap();
+        assert_eq!(
+            report.declared, 2,
+            "the restored node plans the next deployment"
+        );
+        drop(next);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn restart_restores_journal_images_after_the_store_is_reopened() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        let journal = journal_round_trip(session.before_images().unwrap());
+        session.retain_for_recovery().unwrap();
+        drop(session);
+        assert!(recovery_pending(&node));
+        let applied = fixture.observe(&node.db);
+        assert_second_applied(&applied, &baseline);
+        fixture.close(&host, node);
+
+        // A new process: a reopened store, a fresh service and session. Only
+        // the journal's images say what existed before the interrupted apply.
+        let node = fixture.reopen(&host);
+        assert_eq!(
+            fixture.observe(&node.db),
+            applied,
+            "the reopened store kept the partial apply"
+        );
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session.prepare_restoration(&journal).await.unwrap();
+        session.restore().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert!(!recovery_pending(&node));
+        // Restoration is idempotent for a predecessor that crashed after it.
+        session.restore().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        drop(session);
+
+        let mut next = node.service.acquire_project_schedules().await.unwrap();
+        let report = next
+            .plan(fixture.request(fixture.stage("again", &[(ALPHA, 60), (BRAVO, 120)]), "one"))
+            .unwrap();
+        assert_eq!(
+            report.declared, 2,
+            "the restored node plans the next deployment"
+        );
+        drop(next);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn restart_commit_resolution_keeps_the_applied_target() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        let journal = journal_round_trip(session.before_images().unwrap());
+        session.retain_for_recovery().unwrap();
+        drop(session);
+        let applied = fixture.observe(&node.db);
+        assert_second_applied(&applied, &baseline);
+        fixture.close(&host, node);
+
+        let node = fixture.reopen(&host);
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session.prepare_restoration(&journal).await.unwrap();
+        session.finalize().unwrap();
+        assert_eq!(
+            fixture.observe(&node.db),
+            applied,
+            "commit keeps the published target"
+        );
+        drop(session);
+        assert!(!recovery_pending(&node));
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn restoration_refuses_unsorted_or_mismatched_journal_images() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        let images = session.before_images().unwrap().to_vec();
+        let mut altered = images.clone();
+        altered[0].signed_yaml = Some("# not the captured source\n".to_owned());
+        assert!(
+            session.prepare_restoration(&altered).await.is_err(),
+            "the retained session refuses images it did not capture"
+        );
+        session.retain_for_recovery().unwrap();
+        drop(session);
+        fixture.close(&host, node);
+
+        let node = fixture.reopen(&host);
+        let mut reversed = images.clone();
+        reversed.reverse();
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        assert!(session.prepare_restoration(&reversed).await.is_err());
+        drop(session);
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session.prepare_restoration(&images).await.unwrap();
+        session.restore().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn dropped_unresolved_session_keeps_the_recovery_owner_until_restore() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let session = fixture.prepare_second(&node).await;
+        let images = session.before_images().unwrap().to_vec();
+        drop(session);
+        assert!(
+            recovery_pending(&node),
+            "dropping a prepared session never implies success"
+        );
+
+        let refused = match node.service.try_acquire_project_schedules() {
+            Ok(_) => panic!("pending recovery must refuse a new mutation session"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(refused.contains("unresolved recovery"), "got: {refused}");
+        let mut blocked = node.service.acquire_project_schedules().await.unwrap();
+        let refused = blocked
+            .plan(fixture.request(fixture.stage("blocked", &[(ALPHA, 60)]), "three"))
+            .expect_err("planning is blocked until the obligation resolves");
+        assert!(format!("{refused:#}").contains("unresolved recovery"));
+        assert_second_applied(&fixture.observe(&node.db), &baseline);
+
+        blocked.prepare_restoration(&images).await.unwrap();
+        blocked.restore().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert!(!recovery_pending(&node));
+        drop(blocked);
+        assert!(
+            node.service
+                .try_acquire_project_schedules()
+                .unwrap()
+                .is_some()
+        );
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_keeps_the_same_owner_until_restore_succeeds() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        let images = session.before_images().unwrap().to_vec();
+        // Occupy ALPHA's source name with a non-regular entry so neither
+        // rollback nor restoration can rewrite it.
+        let alpha = fixture.schedules_dir().join(format!("{ALPHA}.yaml"));
+        fs::remove_file(&alpha).unwrap();
+        fs::create_dir(&alpha).unwrap();
+
+        assert!(session.rollback().is_err());
+        assert!(
+            recovery_pending(&node),
+            "a failed rollback keeps the obligation"
+        );
+        assert!(
+            matches!(node.service.try_acquire_project_schedules(), Ok(None)),
+            "the failed session still holds the scheduler gate"
+        );
+        session.prepare_restoration(&images).await.unwrap();
+        assert!(session.restore().is_err());
+        assert!(recovery_pending(&node));
+
+        fs::remove_dir(&alpha).unwrap();
+        session.restore().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert!(!recovery_pending(&node));
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    /// How a planned source is disturbed after its before-image is captured.
+    #[derive(Clone, Copy, Debug)]
+    enum Tamper {
+        /// A different body, validly re-signed by the trusted node key.
+        Resigned,
+        /// The same body re-signed at another time: same spec hash, new bytes.
+        SameBodyResigned,
+        /// A different body under the original, now invalid signature.
+        InvalidSignature,
+        /// The exact original bytes, reachable only through a symlink.
+        Symlink,
+        /// A non-regular entry at the source name.
+        Directory,
+        /// The source removed.
+        Removed,
+        /// A valid trusted source placed where none existed.
+        Planted,
+    }
+
+    impl Fixture {
+        /// Plan the second deployment without preparing anything.
+        async fn plan_second(&self, node: &Node) -> Box<dyn ProjectScheduleSession> {
+            let mut session = node.service.acquire_project_schedules().await.unwrap();
+            session
+                .plan(self.request(self.stage("second", &[(ALPHA, 300), (CHARLIE, 90)]), "two"))
+                .unwrap();
+            session
+        }
+
+        fn sign(&self, body: &str, signed_at: &str) -> String {
+            lillux::signature::sign_content_at(
+                body,
+                self.identity.signing_key(),
+                "#",
+                None,
+                signed_at,
+            )
+        }
+
+        fn tamper(&self, schedule_id: &str, tamper: Tamper) {
+            let name = format!("{schedule_id}.yaml");
+            let path = self.schedules_dir().join(&name);
+            if let Tamper::Planted = tamper {
+                // A trusted source for this id, derived from ALPHA's.
+                let alpha =
+                    fs::read_to_string(self.schedules_dir().join(format!("{ALPHA}.yaml"))).unwrap();
+                let body =
+                    lillux::signature::strip_signature_lines(&alpha).replace(ALPHA, schedule_id);
+                fs::write(&path, self.sign(&body, "2001-01-01T00:00:00Z")).unwrap();
+                return;
+            }
+            let original = fs::read_to_string(&path).unwrap();
+            let body = lillux::signature::strip_signature_lines(&original);
+            let changed_body = body.replace("enabled: true", "enabled: false");
+            assert_ne!(changed_body, body, "fixture source declares enabled: true");
+            match tamper {
+                Tamper::Resigned => {
+                    fs::write(&path, self.sign(&changed_body, "2001-01-01T00:00:00Z")).unwrap();
+                }
+                Tamper::SameBodyResigned => {
+                    let resigned = self.sign(&body, "2001-01-01T00:00:00Z");
+                    assert_ne!(resigned, original, "re-signing changed only the signature");
+                    fs::write(&path, resigned).unwrap();
+                }
+                Tamper::InvalidSignature => {
+                    let signature_line = original.lines().next().unwrap();
+                    assert!(signature_line.starts_with('#'));
+                    fs::write(&path, format!("{signature_line}\n{changed_body}")).unwrap();
+                }
+                Tamper::Symlink => {
+                    let elsewhere = self.root.path().join(format!("elsewhere-{name}"));
+                    fs::write(&elsewhere, &original).unwrap();
+                    fs::remove_file(&path).unwrap();
+                    lillux::PinnedDirectory::open(&self.schedules_dir())
+                        .unwrap()
+                        .unwrap()
+                        .create_symlink(
+                            std::ffi::OsStr::new(&name),
+                            elsewhere.to_str().unwrap().as_bytes(),
+                        )
+                        .unwrap();
+                }
+                Tamper::Directory => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                Tamper::Removed => fs::remove_file(&path).unwrap(),
+                Tamper::Planted => unreachable!("handled above"),
+            }
+        }
+    }
+
+    /// The disturbed entry exactly as it now stands on disk, if present.
+    fn entry_state(path: &Path) -> Option<(bool, bool, Option<Vec<u8>>)> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("inspect {}: {error}", path.display()),
+        };
+        let bytes = metadata
+            .file_type()
+            .is_file()
+            .then(|| fs::read(path).unwrap());
+        Some((
+            metadata.file_type().is_symlink(),
+            metadata.file_type().is_dir(),
+            bytes,
+        ))
+    }
+
+    /// Disturb `schedule_id` after before-image capture (so preparation's own
+    /// revalidation under the lock must refuse) or before it (so capture
+    /// refuses). The refusal must name `expected`, and neither the disturbed
+    /// entry nor the projected record may change.
+    async fn assert_tampered_source_refused(
+        schedule_id: &str,
+        tamper: Tamper,
+        after_capture: bool,
+        expected: &str,
+    ) {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let path = fixture.schedules_dir().join(format!("{schedule_id}.yaml"));
+
+        let mut session = fixture.plan_second(&node).await;
+        let error = if after_capture {
+            session.prepare_recovery().await.unwrap();
+            fixture.tamper(schedule_id, tamper);
+            session.prepare().map(|_| ())
+        } else {
+            fixture.tamper(schedule_id, tamper);
+            session.prepare_recovery().await
+        };
+        let disturbed = entry_state(&path);
+        let error = match error {
+            Ok(()) => panic!("{tamper:?} {schedule_id} source must be refused"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains(expected),
+            "{tamper:?} {schedule_id}: expected {expected:?}, got: {error}"
+        );
+        assert_eq!(
+            entry_state(&path),
+            disturbed,
+            "{tamper:?}: the refused deploy never rewrote or removed the entry"
+        );
+        let record = node
+            .db
+            .get_spec(schedule_id)
+            .unwrap()
+            .map(|record| serde_json::to_value(record).unwrap());
+        assert_eq!(
+            record, baseline[schedule_id].1,
+            "{tamper:?}: the record is unchanged"
+        );
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_resigned_different_source() {
+        assert_tampered_source_refused(ALPHA, Tamper::Resigned, true, "YAML changed").await;
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_same_body_resign_after_capture() {
+        assert_tampered_source_refused(
+            ALPHA,
+            Tamper::SameBodyResigned,
+            true,
+            "changed after its recovery before-image was captured",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_source_with_an_invalid_signature() {
+        assert_tampered_source_refused(
+            ALPHA,
+            Tamper::InvalidSignature,
+            true,
+            "verify existing schedule YAML",
+        )
+        .await;
+    }
+
+    // A symlink or directory placed after capture is refused by the
+    // directory-wide scan that opens preparation under the lock, before any
+    // per-action read; the scan's own refusal text proves which check fired.
+    // The pinned per-action open refuses the same entries (shown by the
+    // capture tests below) only if one appears after that scan.
+    #[tokio::test]
+    async fn locked_scan_refuses_a_symlinked_source_after_capture() {
+        assert_tampered_source_refused(ALPHA, Tamper::Symlink, true, LOCKED_SCAN_REFUSAL).await;
+    }
+
+    #[tokio::test]
+    async fn locked_scan_refuses_a_non_regular_source_after_capture() {
+        assert_tampered_source_refused(ALPHA, Tamper::Directory, true, LOCKED_SCAN_REFUSAL).await;
+    }
+
+    #[tokio::test]
+    async fn capture_refuses_a_symlinked_source() {
+        assert_tampered_source_refused(ALPHA, Tamper::Symlink, false, "open secure regular file")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn capture_refuses_a_non_regular_source() {
+        assert_tampered_source_refused(
+            ALPHA,
+            Tamper::Directory,
+            false,
+            "secure input is not a regular file",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_resigned_different_source() {
+        assert_tampered_source_refused(BRAVO, Tamper::Resigned, true, "YAML changed").await;
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_missing_source() {
+        assert_tampered_source_refused(BRAVO, Tamper::Removed, true, "lost node YAML").await;
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_present_verifying_source() {
+        assert_tampered_source_refused(CHARLIE, Tamper::Planted, true, "gained node YAML").await;
+    }
+
+    #[tokio::test]
+    async fn rollback_after_finalize_is_refused_and_keeps_the_committed_target() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.prepare_second(&node).await;
+        session.finalize().unwrap();
+        let applied = fixture.observe(&node.db);
+        assert_second_applied(&applied, &baseline);
+        let error = session
+            .rollback()
+            .expect_err("a finalized deploy is committed and cannot be reverted");
+        assert!(
+            format!("{error:#}").contains("cannot rollback"),
+            "got: {error:#}"
+        );
+        assert_eq!(fixture.observe(&node.db), applied);
+        assert!(!recovery_pending(&node));
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    /// A stray entry at a name no planned action reads: only the locked
+    /// directory scan can refuse it.
+    #[tokio::test]
+    async fn locked_scan_refuses_a_stray_entry_no_action_reads() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.plan_second(&node).await;
+        session.prepare_recovery().await.unwrap();
+        let stray = fixture.schedules_dir().join("operator-notes.txt");
+        fs::write(&stray, "not a schedule source\n").unwrap();
+        let error = session
+            .prepare()
+            .expect_err("a stray entry must refuse preparation");
+        assert!(
+            format!("{error:#}").contains(LOCKED_SCAN_REFUSAL),
+            "got: {error:#}"
+        );
+        assert_eq!(fixture.observe(&node.db), baseline, "nothing was applied");
+        assert_eq!(fs::read(&stray).unwrap(), b"not a schedule source\n");
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    /// A create whose captured image is a present source must still find that
+    /// source: removing it after capture would make rollback and journal
+    /// restoration disagree, so preparation refuses.
+    #[tokio::test]
+    async fn create_refuses_a_source_removed_after_its_image_was_captured() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        fixture.deploy_baseline(&node).await;
+
+        let mut session = fixture.plan_second(&node).await;
+        fixture.tamper(CHARLIE, Tamper::Planted);
+        session.prepare_recovery().await.unwrap();
+        let captured = session
+            .before_images()
+            .unwrap()
+            .iter()
+            .find(|image| image.schedule_id == CHARLIE)
+            .and_then(|image| image.signed_yaml.clone());
+        assert!(captured.is_some(), "capture recorded the planted source");
+        let path = fixture.schedules_dir().join(format!("{CHARLIE}.yaml"));
+        fs::remove_file(&path).unwrap();
+
+        let error = session
+            .prepare()
+            .expect_err("a source removed after capture must refuse preparation");
+        assert!(
+            format!("{error:#}").contains("changed after its recovery before-image was captured"),
+            "got: {error:#}"
+        );
+        assert!(entry_state(&path).is_none(), "the source stays absent");
+        assert!(
+            node.db.get_spec(CHARLIE).unwrap().is_none(),
+            "no record was projected"
+        );
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    /// The per-schedule fire history directory a deploy never owns.
+    fn fire_history(fixture: &Fixture, schedule_id: &str) -> PathBuf {
+        fixture
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("schedules")
+            .join(schedule_id)
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_id_whose_fire_history_is_retained() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let history = fire_history(&fixture, CHARLIE);
+        fs::create_dir_all(&history).unwrap();
+
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        let error = session
+            .plan(fixture.request(
+                fixture.stage("second", &[(ALPHA, 300), (CHARLIE, 90)]),
+                "two",
+            ))
+            .expect_err("a new schedule must not inherit a retired id's fire history");
+        assert!(
+            format!("{error:#}").contains("reuse not allowed"),
+            "got: {error:#}"
+        );
+        assert_eq!(fixture.observe(&node.db), baseline, "refusal mutates nothing");
+        assert!(history.is_dir(), "the retained history is untouched");
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn omission_and_rollback_keep_the_omitted_schedules_fire_history() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let history = fire_history(&fixture, BRAVO);
+        fs::create_dir_all(&history).unwrap();
+        fs::write(history.join("fire.marker"), b"retained").unwrap();
+
+        let mut session = fixture.prepare_second(&node).await;
+        assert_eq!(fixture.observe(&node.db)[BRAVO], (None, None));
+        assert_eq!(
+            fs::read(history.join("fire.marker")).unwrap(),
+            b"retained",
+            "omission deletes the schedule, never its fire history"
+        );
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn omitting_every_declaration_deletes_all_and_rollback_restores_them() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let histories: Vec<PathBuf> = [ALPHA, BRAVO]
+            .iter()
+            .map(|schedule_id| {
+                let history = fire_history(&fixture, schedule_id);
+                fs::create_dir_all(&history).unwrap();
+                fs::write(history.join("fire.marker"), b"retained").unwrap();
+                history
+            })
+            .collect();
+
+        let staging = fixture.stage("empty", &[(ALPHA, 300)]);
+        fs::remove_file(staging.join(".ai/config/schedules/project.yaml")).unwrap();
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session.plan(fixture.request(staging, "empty")).unwrap();
+        assert!(session.has_actions().unwrap());
+        session.prepare_recovery().await.unwrap();
+        let report = session.prepare().unwrap();
+        assert_eq!((report.created, report.updated, report.deleted), (0, 0, 2));
+        let emptied = fixture.observe(&node.db);
+        assert_eq!(emptied[ALPHA], (None, None));
+        assert_eq!(emptied[BRAVO], (None, None));
+        for history in &histories {
+            assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        }
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        for history in &histories {
+            assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        }
+        drop(session);
+        fixture.close(&host, node);
     }
 }

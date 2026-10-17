@@ -25,7 +25,10 @@ use super::{
 
 pub const CALIBRATION_MANIFEST_SCHEMA: &str = "ryeos.bundle_publication_calibration_manifest.v1";
 pub const CALIBRATION_MANIFEST_CLAIM: &str = "bundle_publication_authority_calibration_manifest_v1";
-pub const CALIBRATION_MANIFEST_POLICY: &str = "ryeos.bundle_publication_authority_calibration.v1";
+/// A calibration manifest is signed under the current authority-calibration
+/// policy it is measured for; its own schema and claim keep it
+/// domain-separated from the calibration evidence itself.
+pub const CALIBRATION_MANIFEST_POLICY: &str = super::calibration::AUTHORITY_CALIBRATION_POLICY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

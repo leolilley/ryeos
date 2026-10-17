@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:2df2af758dffc4d7e47f7fa96d0c028a1f580e2c929c6a325767c9a111952aee:PHIMCaXtQhBgbqxOg6eSA10wJE8MCnKCm4qTMlBIPlnb7F3tVghtKFi+/CmXd3nU4VE4OOr36g4nMQdFE1eVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-17T01:32:58Z:59d2921d6cf55b039022fb6dddaa39bb2350908b8761068ac472400c646930b3:6/8zMHlAWMJE65MuSGLur6IhNbjig9ariJB+fujCwzfJH1FhpdoR1B6mw3BKluEqn7FeahHbwsbKfBWEky7wCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, threads, lifecycle]
@@ -10,7 +10,7 @@ description: Thread query service reference.
 
 Invariant: thread query services expose persisted execution state without directly controlling subprocesses.
 
-Services: `threads/list`, `threads/get`, `threads/children`, and `threads/chain`. Thread cancellation is route-backed by a core service descriptor because the public HTTP cancellation route is a daemon control-plane surface.
+Services: `threads/children`, `threads/chain`, `threads/list` and `threads/get`, all shipped by the core bundle so the core `/threads` routes work on a core-only node. Thread cancellation is route-backed by a core service descriptor because the public HTTP cancellation route is a daemon control-plane surface.
 
 Normal child lineage is projected from `upstream_thread_id` and runtime spawn
 events. Trace branches are different: `trace.branch` deliberately creates a

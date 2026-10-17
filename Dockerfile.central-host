@@ -6,7 +6,7 @@
 # Bakes core + scheduling + standard + central-auth + web: everything the
 # `standard` image ships, plus the central-auth bundle (login/verify/revoke,
 # policy) so the node is its own auth authority, and the web bundle
-# (rye/web/search + rye/web/tavily-search). RyeOS UI, browser, and hosted-node
+# (rye/web/search + rye/web/tavily-search). RyeOS UI and browser
 # are intentionally excluded.
 #
 # This is the base for app-hosting images, which layer their project tree, any
@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/

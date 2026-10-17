@@ -18,6 +18,9 @@ path = "src/main.rs"
 # Arms Lillux interruption hooks from test code; never enable outside
 # [dev-dependencies].
 test-support = []
+# Process-kill qualification hook between the move and the unlink of a planned
+# removal; never enable outside test builds.
+crash-qualification-test-support = []
 
 [dependencies]
 anyhow = { workspace = true }

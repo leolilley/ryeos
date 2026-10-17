@@ -124,6 +124,15 @@ fn fixture() -> (MemoryObjects, BundleGeneration) {
         "producer_partition_identity": hash('f'),
         "products": [{"product_name": "bundle", "witness_hash": witness, "qualification_hash": null}]
     }));
+    let ownership = ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(&json!({
+        "schema": "ryeos.bundle_payload_ownership.v2",
+        "kind": "bundle_payload_ownership",
+        "host_packages": [], "no_default_features_packages": [],
+        "feature_implications": {}, "data_only_bundles": ["example"],
+        "host_only_bundles": [], "bundles": []
+    }))
+    .unwrap();
+    let ownership_hash = objects.insert(ownership.to_value().unwrap());
     let input_hash = objects.insert(manifest("input", &hash('1')));
     let output_hash = objects.insert(manifest("output", &hash('2')));
     let manifest_item_hash = hash('3');
@@ -160,12 +169,32 @@ fn fixture() -> (MemoryObjects, BundleGeneration) {
         accepted_capture_result_hash: accepted_hash.clone(),
         selected_signed_product_identity: "bundle".into(),
         selected_signed_product_witness: witness.clone(),
+        payload_ownership_hash: ownership_hash,
         source_snapshot_hash: None,
         qualification_evidence_hashes: vec![],
         provenance_hash: None,
         sbom_hash: None,
     };
     (objects, generation)
+}
+
+#[test]
+fn generation_requires_its_payload_ownership_object() {
+    let (mut objects, generation) = fixture();
+    let proof = Proof {
+        called: AtomicBool::new(false),
+        accept: true,
+    };
+    objects.0.remove(&generation.payload_ownership_hash);
+    assert!(
+        verify_bundle_generation(generation.clone(), &objects, &proof, &proof, &binding())
+            .is_err()
+    );
+    let mut tampered = generation;
+    tampered.payload_ownership_hash = hash('7');
+    assert!(
+        verify_bundle_generation(tampered, &objects, &proof, &proof, &binding()).is_err()
+    );
 }
 
 #[test]

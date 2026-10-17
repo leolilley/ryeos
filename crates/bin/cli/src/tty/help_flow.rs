@@ -826,8 +826,8 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
 fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
-            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
+            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME> --host-class <NAME>]",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes\n--host-class <NAME>   kind of host the node runs on (local, hosted); required with --node-profile",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",
@@ -878,8 +878,8 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "--dry-run         report without mutation\n--confirm         confirm binding retirement\n--app-root <DIR>  application root",
         ),
         "node reset policy-generation" => (
-            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
-            "--node-profile <NAME> trusted publisher profile\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
+            "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
+            "--node-profile <NAME> trusted publisher profile\n--host-class <NAME>   the node's host class\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
         ),
         "help" => (
             "ryeos help [<tokens>...] [--plain]",

@@ -13,7 +13,9 @@ use lillux::network::NetworkContext;
 use lillux::time::{Duration, MonotonicDeadline};
 use std::io;
 
-pub use http1::{Header, HttpRequest, HttpResponse, RequestBodySource, ResponseBody};
+pub use http1::{
+    Header, HttpRequest, HttpResponse, RequestBodySource, ResponseBody, TlsStream, open_tls_stream,
+};
 pub use sse::{SseEvent, SseLimits, SseReader};
 
 /// Whether the HTTP mutator may have reached the remote peer.

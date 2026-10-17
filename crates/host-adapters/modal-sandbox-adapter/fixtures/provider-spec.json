@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "provider_profile": "modal_sandbox_v1",
+  "settings_schema_digest": "1789a6c8cd8d26db144511effbbc1478426e2a116aa5284f992c6d31eaef6095",
+  "origin_profile": "modal_lease_facade_v1",
+  "budget_weight": 1,
+  "network_policy": {
+    "creatable_types": ["block-network", "domain-allow-list"],
+    "allow_list": {
+      "rule_protocol": "https",
+      "max_rules": 4,
+      "host_syntax": "exact_dns_name"
+    }
+  },
+  "facade": {
+    "path": "facade/ryeos_lease_facade.py",
+    "sha256": "a06e28fb71e06cbf476499427375c2af54f158590dd8082536dc11664cfa5d03",
+    "app": "ryeos-lease-facade",
+    "lease_app": "ryeos-lease-sandboxes",
+    "endpoint_label": "ryeos-lease",
+    "response_schema": "ryeos.modal_lease_facade.response.v1",
+    "policy": {
+      "schema": "ryeos.modal_lease_policy.v2",
+      "cpu": 1.0,
+      "memory_mib": 1024,
+      "image": "modal.debian_slim(python_version=3.12)+mkdir -p /ryeos/guest",
+      "command": [
+        "/bin/sh",
+        "-c",
+        "while [ ! -d /ryeos/run.go ]; do sleep 1; done; exec /ryeos/guest/entrypoint < /ryeos/run.stdin"
+      ],
+      "stage": {
+        "max_slots": 4,
+        "max_chunk_bytes": 33554432,
+        "max_slot_bytes": 4295032832
+      }
+    }
+  },
+  "operations": {
+    "allocate": {
+      "kind": "create_once",
+      "route": "create",
+      "body": {
+        "timeout_seconds": { "source": "reservation.maximum_lifetime_seconds" },
+        "network": { "source": "lease.guest_network_allow" }
+      },
+      "bind_proof_profile": "modal_facade_create_v1",
+      "no_occurrence_proof_profile": "modal_no_request_sent_v1"
+    },
+    "reconcile_allocation": {
+      "kind": "observe_exact_occurrence",
+      "route": "get_by_name",
+      "bind_proof_profile": "modal_facade_observed_by_name_v1"
+    },
+    "activate_supervisor": { "kind": "unsupported_pending" },
+    "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
+    "relay_file": { "kind": "unsupported_pending" },
+    "snapshot": { "kind": "unsupported_pending" },
+    "guest_channel": { "kind": "unsupported_pending" },
+    "terminate": {
+      "kind": "terminate_once_then_observe_exact",
+      "mutation_route": "terminate",
+      "observation_route": "get_by_id",
+      "terminal_proof_profile": "modal_facade_terminal_v1"
+    },
+    "reconcile_termination": {
+      "kind": "observe_exact_occurrence",
+      "route": "get_by_id",
+      "terminal_proof_profile": "modal_facade_terminal_v1"
+    }
+  }
+}

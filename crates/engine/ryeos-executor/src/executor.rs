@@ -738,6 +738,10 @@ pub async fn execute_service_verified(
     pre_minted_thread_id: Option<&str>,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
+    // Every in-process entry point (generic dispatch, service routes, UI
+    // invocations, the local socket) runs through here, so the item is
+    // refused here before anything is recorded or the handler is reached.
+    crate::dispatch::refuse_in_process_node_requirements(&verified.resolved, service_ref)?;
     let (planning_fingerprint, planning_scopes) = match &ctx.plan_ctx.requested_by {
         ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
             (principal.fingerprint.as_str(), principal.scopes.as_slice())
@@ -976,11 +980,20 @@ pub async fn execute_service_verified(
         // An inline in-process child is born in its parent's chain; a direct
         // invocation is its own chain root. The parent row is read before
         // owner registration so the guard knows the chain it must settle in.
+        // A parent already terminal is refused here, before any registration
+        // or write; the store's birth repeats the check under its locks.
         let inline_parent = inline_parent_thread_id
             .map(|parent_thread_id| {
-                state.threads.get_thread(parent_thread_id)?.ok_or_else(|| {
+                let parent = state.threads.get_thread(parent_thread_id)?.ok_or_else(|| {
                     anyhow::anyhow!("inline callback parent thread not found: {parent_thread_id}")
-                })
+                })?;
+                if ryeos_app::state_store::is_terminal_status(&parent.status) {
+                    bail!(
+                        "refusing inline service child {invocation_id}: parent {parent_thread_id} is already {}",
+                        parent.status
+                    );
+                }
+                Ok(parent)
             })
             .transpose()?;
         let chain_root_id = inline_parent.as_ref().map_or_else(
@@ -1230,6 +1243,31 @@ mod tests {
                 validate_service_invocation_id(invalid).is_err(),
                 "{invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn inherited_stop_terminal_is_the_durable_stop_outcome() {
+        for (intent, status) in [
+            (ryeos_app::state_store::StopIntent::Cancel, "cancelled"),
+            (ryeos_app::state_store::StopIntent::Kill, "killed"),
+        ] {
+            let terminal = inherited_stop_terminal("T-inline-child", intent);
+            assert_eq!(terminal.thread_id, "T-inline-child");
+            assert_eq!(terminal.status, status);
+            assert_eq!(terminal.outcome_code.as_deref(), Some(status));
+            assert!(terminal.result.is_none());
+            assert_eq!(
+                terminal.error,
+                Some(serde_json::json!({
+                    "reason": "durable_stop_intent",
+                    "intent": intent.as_str(),
+                }))
+            );
+            assert!(terminal.metadata.is_none());
+            assert!(terminal.artifacts.is_empty());
+            assert!(terminal.final_cost.is_none());
+            assert!(terminal.summary_json.is_none());
         }
     }
 

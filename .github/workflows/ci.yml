@@ -39,7 +39,6 @@ on:
         options:
           - full
           - standard
-          - hosted-node
           - hosted-workflow
 
 permissions:
@@ -71,6 +70,9 @@ jobs:
 
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Check custody token ban
+        run: ./scripts/ci/check-custody-tokens.sh
 
       - name: Check release input validation
         run: ./scripts/release/test-resolve-version.sh

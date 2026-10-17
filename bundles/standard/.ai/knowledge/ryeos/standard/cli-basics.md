@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T23:19:40Z:79bb166dc012d7bb93621cd2b1c80c48d590f6d7e01b6bffabac1fb6fc48aeaf:oGj48um+z4cxUXJhka+mOTVpRsi4leDIcs811xF0yeqB1Q2kRMK2iES3sMo89v0D99USejo+ARU4djxxiN7rBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-14T14:38:11Z:ed2f3e56bc3a0f45fd6ec0cc476aa0605006f9d265171b6efcb4f3854d5ffeed:FqgZPOF3PxYelXUe871KI7u+3Wa8bngyPd0Gcm0vUZVgqfwL51NKSlDKPAzZAeGx+2fLyN0yeZ2VGOa5vsk3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -35,7 +35,7 @@ Run init once per machine or whenever installed bundles need refreshing.
 Packaged install:
 
 ```bash
-ryeos init --node-profile full
+ryeos init --node-profile full --host-class local
 ```
 
 Development checkout:
@@ -43,7 +43,7 @@ Development checkout:
 ```bash
 ryeos init \
   --source /path/to/ryeos/bundles \
-  --node-profile full \
+  --node-profile full --host-class local \
   --trust-file /path/to/ryeos/bundles/core/PUBLISHER_TRUST.toml \
   --trust-file /path/to/ryeos/bundles/standard/PUBLISHER_TRUST.toml
 ```
@@ -51,7 +51,7 @@ ryeos init \
 Custom app root:
 
 ```bash
-ryeos init --app-root /tmp/ryeos-state --source /path/to/bundles --node-profile full
+ryeos init --app-root /tmp/ryeos-state --source /path/to/bundles --node-profile full --host-class local
 ```
 
 The init result reports the app-root path, operator key fingerprint,

@@ -573,7 +573,10 @@ enum UnsettledProcess {
     Exact(ryeos_app::process::ExecutionProcessIdentity),
     /// Identity capture itself failed; only the held numeric coordinate of
     /// the still-unreleased process exists.
-    Uncaptured { pid: u32, pgid: i64 },
+    Uncaptured {
+        pid: u32,
+        pgid: i64,
+    },
 }
 
 impl UnsettledLaunchCleanup {
@@ -665,10 +668,15 @@ impl LaunchFailure {
     /// Physical cleanup is proved; classify a durable stop that may have won.
     fn aborted(stage: LaunchStage, error: anyhow::Error, stop: Result<bool>) -> Self {
         let (error, stop_settled) = match stop {
-            Ok(true) => (error.context("launch stopped by a durable stop request"), true),
+            Ok(true) => (
+                error.context("launch stopped by a durable stop request"),
+                true,
+            ),
             Ok(false) => (error, false),
             Err(stop_error) => (
-                error.context(format!("durable stop settlement also failed: {stop_error:#}")),
+                error.context(format!(
+                    "durable stop settlement also failed: {stop_error:#}"
+                )),
                 false,
             ),
         };
@@ -689,7 +697,9 @@ impl std::fmt::Display for LaunchFailure {
             PhysicalDisposition::Aborted { stop_settled: true } => {
                 write!(formatter, " (durable stop settled)")
             }
-            PhysicalDisposition::Aborted { stop_settled: false } => Ok(()),
+            PhysicalDisposition::Aborted {
+                stop_settled: false,
+            } => Ok(()),
             PhysicalDisposition::UnsettledCleanup(cleanup) => write!(
                 formatter,
                 " (physical cleanup unproved; attachment of {} retained)",
@@ -708,9 +718,11 @@ impl std::error::Error for LaunchFailure {
 /// True when `error` carries a launch failure whose cleanup is unproved.
 /// Such a row must stay non-terminal and its lifecycle owner armed.
 pub(crate) fn is_unsettled_launch_cleanup(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<LaunchFailure>().is_some_and(LaunchFailure::is_unsettled))
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<LaunchFailure>()
+            .is_some_and(LaunchFailure::is_unsettled)
+    })
 }
 
 /// Inputs of the durable attachment transition.
@@ -958,9 +970,7 @@ impl<P: HeldProcess> AttachedLaunch<P> {
 impl<P: HeldProcess> AuthorizedLaunch<P> {
     /// One-shot release. An unproved release cleanup is never settled,
     /// compare-cleared, or terminalized.
-    pub(crate) fn release(
-        self,
-    ) -> std::result::Result<ReleasedLaunch<P::Running>, LaunchFailure> {
+    pub(crate) fn release(self) -> std::result::Result<ReleasedLaunch<P::Running>, LaunchFailure> {
         let AttachedLaunch {
             state,
             coord,
@@ -1163,8 +1173,14 @@ mod release_failure_controls {
                 Ok(false)
             },
         );
-        assert!(!settlement_called, "unproved physical cleanup must not clear durable attachment");
-        assert!(!stop_called, "unproved physical cleanup must not settle a durable stop");
+        assert!(
+            !settlement_called,
+            "unproved physical cleanup must not clear durable attachment"
+        );
+        assert!(
+            !stop_called,
+            "unproved physical cleanup must not settle a durable stop"
+        );
         assert!(failure.is_unsettled());
         assert_eq!(failure.stage, LaunchStage::Release);
         assert!(failure.error.downcast_ref::<ReleaseFixture>().is_some());
@@ -1230,9 +1246,15 @@ mod release_failure_controls {
             || Ok(false),
         );
         let rendered = format!("{:#}", anyhow::Error::new(failure).context("spawn/attach"));
-        assert_eq!(rendered.matches("workspace binding changed").count(), 1, "{rendered}");
         assert_eq!(
-            rendered.matches("wrapper/scope disposition unresolved").count(),
+            rendered.matches("workspace binding changed").count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered
+                .matches("wrapper/scope disposition unresolved")
+                .count(),
             1,
             "{rendered}"
         );
@@ -1253,7 +1275,10 @@ mod release_failure_controls {
         assert!(matches!(
             &failure.disposition,
             PhysicalDisposition::UnsettledCleanup(UnsettledLaunchCleanup {
-                process: UnsettledProcess::Uncaptured { pid: 4242, pgid: 4242 },
+                process: UnsettledProcess::Uncaptured {
+                    pid: 4242,
+                    pgid: 4242
+                },
                 coord: _,
             })
         ));
@@ -1263,7 +1288,11 @@ mod release_failure_controls {
 
     #[test]
     fn class_a_and_b_unsettled_failures_are_never_finalizable() {
-        for stage in [LaunchStage::Attach, LaunchStage::Release, LaunchStage::Settlement] {
+        for stage in [
+            LaunchStage::Attach,
+            LaunchStage::Release,
+            LaunchStage::Settlement,
+        ] {
             let failure = LaunchFailure::unsettled(
                 &coord(),
                 &identity(),

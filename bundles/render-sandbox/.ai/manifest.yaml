@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-28T11:57:31Z:09c09405094c8ec72b0246b020d78449e7e8955800f404e573f43ed3ef7656cd:ak35s1aXB0eq7s0bK+eF+UaIIzfEMsb86u25I9Uya+ifroO5vjVL6a30EvboFfo1qLwnSV21egV4HSMKt+fYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T01:15:37Z:345b9b02be4d5165f6654f9b250e37fbcd7d9b914b2317fcdff9700e05d1b0ce:IkgNd1jGmecdO2fLr8w8D99gjsp+PDeTcxfaAv6heJf6v1fTARgGMsxVcnB91HjajBqgVyC9t7YTmnE3K2GWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: render-sandbox
 version: 0.1.0
-description: Early-access Render Sandbox lifecycle adapter; activation remains disabled by its signed provider profile
+description: Early-access Render Sandbox lifecycle adapter with qualified-guest one-shot startup, retained file relay and a controller-relayed guest channel; reconciliation remains pending
 provides_kinds: []
 requires_kinds:
 - graph
@@ -18,11 +18,12 @@ external_lifecycle_adapters:
   restoration_verifier: ryeos-external-guest-restoration-verifier
   provider_spec:
     path: specs/provider-spec.json
-    sha256: 96c7f56970d6187fc444c93a9d06e3c921961e6427347f721776594f1f52011e
+    sha256: 034d74470756c038292f038f6a51ef114791f442b55f59e5133466fe4998d020
   snapshot_production_spec:
     path: specs/snapshot-production-spec.json
     sha256: 5cec9da4b46523ffc79aaf581d84b9302bafc511b91a4f54aed1ec3d93af12d8
   settings_schema_digest: f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172
   capabilities:
+  - supervisor_activation
   - authoritative_no_occurrence
   - exact_terminal_observation

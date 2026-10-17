@@ -407,7 +407,9 @@ pub(crate) enum InvocationRootCarrier<'a> {
 }
 
 impl InvocationRootCarrier<'_> {
-    fn requires_selected(self) -> bool { matches!(self, Self::Required(_)) }
+    fn requires_selected(self) -> bool {
+        matches!(self, Self::Required(_))
+    }
 }
 
 /// Context struct for subprocess dispatch, carrying all the hop-derived
@@ -3061,6 +3063,7 @@ pub async fn dispatch_service(
                     }
                 })?,
             };
+            refuse_in_process_node_requirements(&verified.resolved, item_ref)?;
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
             // handler body must NEVER be reached because it will fail on
@@ -3502,6 +3505,89 @@ fn derive_manifest_runtime_caps(
     .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
 }
 
+/// Judge a tool item's `requires.node` list and its declared credential
+/// kind's list against this node's current signed capability report, with
+/// the same admission and refusal a managed launch applies to its admitted
+/// program. A tool's `requires` is its resolved item's own block: tools use
+/// the identity composer, so nothing widens or narrows it.
+fn admit_tool_node_requirements(
+    node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
+    resolved_item: &ResolvedItem,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    let Some(requires) = resolved_item.metadata.extra.get("requires") else {
+        return Ok(());
+    };
+    let requires = ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires)
+        .map_err(|reason| {
+            DispatchError::InvalidRef(
+                item_ref.to_string(),
+                format!("invalid `requires`: {reason}"),
+            )
+        })?;
+    ryeos_app::node_requirement_admission::admit_item_requirements(node, item_ref, &requires)
+        .map_err(|error| DispatchError::CapabilityRejected {
+            reason: format!("{error:#}"),
+        })
+}
+
+/// Every check a tool launch passes before anything of it is finalized or
+/// spawned: the manifest-backed runtime caps it is entitled to, and the node
+/// guarantees it declares. The accepted-launch preflight and the tool
+/// subprocess dispatch both run this, so a tool this node cannot host is
+/// refused before a thread exists and again, against the then-current
+/// report, before its process starts.
+fn admit_tool_launch(
+    node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
+    resolved_item: &ResolvedItem,
+    item_ref: &str,
+    ctx: &ExecutionContext,
+) -> Result<Vec<String>, DispatchError> {
+    let caps = derive_manifest_runtime_caps(resolved_item, item_ref, ctx)?;
+    admit_tool_node_requirements(node, resolved_item, item_ref)?;
+    Ok(caps)
+}
+
+/// Refuse an in-process item that declares node guarantees or a credential
+/// kind. An in-process handler runs inside the daemon process itself: no
+/// process is launched for it, so no enclosure, persistence or credential
+/// guarantee the node proves for launched processes would describe how it
+/// runs, and no credential binding is ever made for it. Judging the list
+/// against the node's report would admit it on guarantees it never receives,
+/// so such an item is refused instead. Its `requires.capabilities` are not
+/// node guarantees and are left to the service's own authorization.
+pub(crate) fn refuse_in_process_node_requirements(
+    resolved_item: &ResolvedItem,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    let Some(requires) = resolved_item.metadata.extra.get("requires") else {
+        return Ok(());
+    };
+    let requires = ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires)
+        .map_err(|reason| {
+            DispatchError::InvalidRef(
+                item_ref.to_string(),
+                format!("invalid `requires`: {reason}"),
+            )
+        })?;
+    let declared = match (
+        requires.node.is_empty(),
+        requires.credential_kinds.is_empty(),
+    ) {
+        (true, true) => return Ok(()),
+        (false, true) => "`requires.node`",
+        (true, false) => "`requires.credential_kinds`",
+        (false, false) => "`requires.node` and `requires.credential_kinds`",
+    };
+    Err(DispatchError::CapabilityRejected {
+        reason: format!(
+            "{item_ref} declares {declared}, but it runs in-process inside the daemon, where no \
+             launched-process guarantee or credential binding applies; declare node \
+             requirements on a launched tool instead"
+        ),
+    })
+}
+
 // ── Top-level dispatch loop ───────────────────────────────────────────
 
 /// **P1.1**: The subject item being dispatched. For direct runtime
@@ -3565,7 +3651,14 @@ pub async fn dispatch(
     // and constructing the unboxed nested future can exhaust the worker stack
     // before the selected leaf gets a chance to run.
     Box::pin(dispatch_inner(
-        item_ref, None, None, request, ctx, state, None, InvocationRootCarrier::Ordinary,
+        item_ref,
+        None,
+        None,
+        request,
+        ctx,
+        state,
+        None,
+        InvocationRootCarrier::Ordinary,
     ))
     .await
 }
@@ -3762,13 +3855,21 @@ pub async fn dispatch_verified(
     if request.lifecycle_authority.ownership
         == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
-        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state, None)
-            .await
-            .map_err(|error| {
-                DispatchError::Internal(anyhow::anyhow!(
-                    "daemon-owned verified dispatch task ended before settlement: {error}"
-                ))
-            })?;
+        return dispatch_daemon_owned_inner(
+            item_ref,
+            Some(verified),
+            None,
+            request,
+            ctx,
+            state,
+            None,
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned verified dispatch task ended before settlement: {error}"
+            ))
+        })?;
     }
     Box::pin(dispatch_inner(
         item_ref,
@@ -3838,20 +3939,37 @@ pub async fn dispatch_with_application_publication(
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let state = publication.app().as_ref();
-    if launch_handoff.is_none() && request.lifecycle_authority.ownership
-        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    if launch_handoff.is_none()
+        && request.lifecycle_authority.ownership
+            == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
     {
         return dispatch_daemon_owned_inner(
-            item_ref, None, handler_context, request, ctx, state,
+            item_ref,
+            None,
+            handler_context,
+            request,
+            ctx,
+            state,
             Some(publication.attachment().clone()),
-        ).await.map_err(|error| DispatchError::Internal(anyhow::anyhow!(
-            "daemon-owned publication dispatch ended before settlement: {error}"
-        )))?;
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned publication dispatch ended before settlement: {error}"
+            ))
+        })?;
     }
     let result = Box::pin(dispatch_inner(
-        item_ref, None, handler_context, request, ctx, state, launch_handoff,
+        item_ref,
+        None,
+        handler_context,
+        request,
+        ctx,
+        state,
+        launch_handoff,
         InvocationRootCarrier::Available(publication.attachment()),
-    )).await;
+    ))
+    .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
         handoff.publish_dispatch_failure(error);
     }
@@ -3869,11 +3987,20 @@ pub async fn dispatch_with_selected_invocation(
     state: &AppState,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
-    attachment.validate_for_store(&state.state_store).map_err(DispatchError::Internal)?;
+    attachment
+        .validate_for_store(&state.state_store)
+        .map_err(DispatchError::Internal)?;
     let result = Box::pin(dispatch_inner(
-        item_ref, None, handler_context, request, ctx, state,
-        launch_handoff, InvocationRootCarrier::Required(attachment),
-    )).await;
+        item_ref,
+        None,
+        handler_context,
+        request,
+        ctx,
+        state,
+        launch_handoff,
+        InvocationRootCarrier::Required(attachment),
+    ))
+    .await;
     if let (Some(handoff), Err(error)) = (launch_handoff, &result) {
         handoff.publish_dispatch_failure(error);
     }
@@ -4656,7 +4783,9 @@ fn require_prepared_launch_secret_availability(
     names.dedup();
     ryeos_app::vault::check_secret_availability(
         &state.secret_sources(),
-        &ctx.principal_fingerprint,
+        ryeos_app::vault::SecretRecipient {
+            principal: &ctx.principal_fingerprint,
+        },
         &names,
         project_authority,
     )
@@ -5785,6 +5914,10 @@ pub fn preflight_root_dispatch(
                             "in-process root did not resolve and verify".to_string(),
                         )
                     })?;
+                    refuse_in_process_node_requirements(
+                        &subject.resolved,
+                        &subject.resolved.canonical_ref.to_string(),
+                    )?;
                     return finish_root_dispatch_preflight(
                         RootDispatchClass::InProcess,
                         LaunchContractApplicability::NonEnvelope {
@@ -5820,17 +5953,13 @@ pub fn preflight_root_dispatch(
                             validate_ordinary_protocol_contract(protocol, &hop_ref.kind)?;
                             require_terminal_executor_id(verified.as_ref(), &hop_ref.to_string())?;
                             // Mirror dispatch_tool_subprocess's FULL pre-thread
-                            // manifest-cap validation (declared rejection +
-                            // signed-manifest-backed mint) so an invalid tool
-                            // `requires.capabilities.{declared,manifest}` fails
-                            // before a thread_id is minted, not in the
-                            // background after 202.
+                            // admission (declared rejection, signed-manifest-
+                            // backed mint, node requirements) so an invalid tool
+                            // `requires` or a node guarantee this node does not
+                            // prove fails before a thread_id is minted, not in
+                            // the background after 202.
                             if let Some(v) = verified.as_ref() {
-                                derive_manifest_runtime_caps(
-                                    &v.resolved,
-                                    &hop_ref.to_string(),
-                                    ctx,
-                                )?;
+                                admit_tool_launch(state, &v.resolved, &hop_ref.to_string(), ctx)?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
                                 // wrapper subprocess thread. Resolve the chain
@@ -6262,7 +6391,9 @@ async fn dispatch_by(
         runtime,
         root_subject,
     } = params;
-    if invocation_root.requires_selected() && !matches!(&terminator, TerminatorDecl::Subprocess { .. }) {
+    if invocation_root.requires_selected()
+        && !matches!(&terminator, TerminatorDecl::Subprocess { .. })
+    {
         return Err(DispatchError::Internal(anyhow::anyhow!(
             "selected invocation requires its owned subprocess driver"
         )));
@@ -7814,6 +7945,171 @@ requires:
     // (covered by `runtime_registry` integration tests) and
     // `dispatch_native_runtime` consumes that owned value, so the
     // per-call lookup path no longer exists.
+
+    /// The extension bag the daemon's application state carries, with the
+    /// composition root's report reader registered over `report`.
+    fn node_reporting(
+        report: lillux::process_control::HostCapabilities,
+    ) -> ryeos_app::extension_state::ExtensionState {
+        let extensions = ryeos_app::extension_state::ExtensionState::new();
+        extensions.insert(Arc::new(
+            ryeos_app::node_requirement_admission::NodeCapabilityReportReader::new(move || {
+                Ok(report.clone())
+            }),
+        ));
+        extensions
+    }
+
+    fn login_tool_requires() -> std::collections::HashMap<String, serde_json::Value> {
+        // Mirrors the shipped login items: durable state and the credential
+        // home rest on declared lifetime data, so a trusted grade counts.
+        let accept = json!(["measured", "provider_attested", "trusted"]);
+        requires_extra(json!({
+            "node": [{ "name": "persistence:durable_state", "accept": accept.clone() }],
+            "credential_kinds": {
+                "credential_profile": [{ "name": "credential:private_home", "accept": accept }]
+            },
+        }))
+    }
+
+    #[test]
+    fn a_tool_launch_is_admitted_when_the_node_proves_what_it_declares() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved =
+            resolved_tool_with_extra(&bundle, "tool:example-bundle/login", login_tool_requires());
+        let mut report = lillux::process_control::HostCapabilities::default();
+        for name in ["persistence:durable_state", "credential:private_home"] {
+            report.provide(
+                name,
+                lillux::process_control::ProofSource::Trusted,
+                lillux::process_control::HOST_PROVIDER,
+                "fixture basis",
+            );
+        }
+        let caps = admit_tool_launch(
+            &node_reporting(report),
+            &resolved.resolved_item,
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
+        assert!(caps.is_empty(), "{caps:?}");
+
+        // A tool declaring no node guarantee needs no report at all.
+        let plain = resolved_tool(&bundle, "tool:example-bundle/plain");
+        admit_tool_launch(
+            &ryeos_app::extension_state::ExtensionState::new(),
+            &plain.resolved_item,
+            &plain.item_ref,
+            &ctx,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_tool_launch_is_refused_with_the_reports_reason_for_an_unproved_guarantee() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved =
+            resolved_tool_with_extra(&bundle, "tool:example-bundle/login", login_tool_requires());
+        let mut report = lillux::process_control::HostCapabilities::default();
+        report.provide(
+            "persistence:durable_state",
+            lillux::process_control::ProofSource::Trusted,
+            lillux::process_control::HOST_PROVIDER,
+            "fixture basis",
+        );
+        report.refuse(
+            "credential:private_home",
+            "this node keeps no durable private credential home",
+        );
+        let error = admit_tool_launch(
+            &node_reporting(report),
+            &resolved.resolved_item,
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, DispatchError::CapabilityRejected { .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("launch refused"), "{message}");
+        assert!(
+            message.contains(
+                "requires.credential_kinds.credential_profile credential:private_home: this node \
+                 keeps no durable private credential home"
+            ),
+            "{message}"
+        );
+
+        // A node composed without a report reader cannot prove anything the
+        // tool declares, so it refuses too.
+        let error = admit_tool_launch(
+            &ryeos_app::extension_state::ExtensionState::new(),
+            &resolved.resolved_item,
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("this node has no signed capability report"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_in_process_item_declaring_node_guarantees_is_refused() {
+        let bundle = tempdir().join("example-bundle");
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "service:example-bundle/login",
+            login_tool_requires(),
+        );
+        let error =
+            refuse_in_process_node_requirements(&resolved.resolved_item, &resolved.item_ref)
+                .unwrap_err();
+        assert!(
+            matches!(error, DispatchError::CapabilityRejected { .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("declares `requires.node` and `requires.credential_kinds`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("runs in-process inside the daemon"),
+            "{message}"
+        );
+
+        let node_only = resolved_tool_with_extra(
+            &bundle,
+            "service:example-bundle/node-only",
+            requires_extra(json!({ "node": ["persistence:durable_state"] })),
+        );
+        let message =
+            refuse_in_process_node_requirements(&node_only.resolved_item, &node_only.item_ref)
+                .unwrap_err()
+                .to_string();
+        assert!(message.contains("declares `requires.node`,"), "{message}");
+
+        // An item declaring neither, or no `requires` at all, is admitted.
+        let caps_only = resolved_tool_with_extra(
+            &bundle,
+            "service:example-bundle/caps-only",
+            requires_extra(json!({ "capabilities": { "manifest": [] } })),
+        );
+        refuse_in_process_node_requirements(&caps_only.resolved_item, &caps_only.item_ref).unwrap();
+        let plain = resolved_tool(&bundle, "service:example-bundle/plain");
+        refuse_in_process_node_requirements(&plain.resolved_item, &plain.item_ref).unwrap();
+    }
 
     #[test]
     fn reject_tool_declared_capabilities_rejects_declared_key() {

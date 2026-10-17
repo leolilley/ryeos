@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-30T00:54:19Z:58d7d9aed1039e143865a89586904aa93809903fd8543b59b77157242cfcaed8:ol+nanKWKk4PGzy+66CpFslX+NDoA8h37Ol6+zwHy28iQAWcBS1EGME5DI3gbcNqxwx21WJzywCn08oA41U8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T10:45:18Z:f69bf1ede36158219dee1c13972ab84d437e93d298ac8b3e2b67f9463edd8bfd:R6m1vh8HvvK68LucL1WpGfBM2H9nj1kr1UDB3x0PQYGaCaf0Vpp9GfHvGNtzvx8sWtrhRDHCdiAfJQ21UQCpCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.1.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -167,6 +167,7 @@ config:
             accepted_capture_result_hash: "${state.captured.accepted_capture_result_hash}"
             selected_signed_product_identity: "${state.captured.signed_product_identity}"
             selected_signed_product_witness: "${state.captured.signed_product_witness}"
+            payload_ownership_hash: "${state.release_input.payload_ownership_content_hash}"
             source_snapshot_hash: "${inputs.source_snapshot_hash}"
             qualification_evidence_hashes: "${state.qualification.evidence_hashes}"
             provenance_hash: "${state.qualification.provenance_hash}"

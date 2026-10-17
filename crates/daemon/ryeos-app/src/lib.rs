@@ -29,10 +29,6 @@ pub mod event_store_service;
 pub mod event_stream;
 pub mod execution_comparison;
 pub mod execution_history_reset;
-#[cfg(test)]
-mod no_forget_gate;
-#[cfg(test)]
-mod custody_drop_gate;
 pub mod execution_identity_probe;
 pub mod execution_policy;
 pub mod execution_provenance;
@@ -66,6 +62,7 @@ pub mod live_input_queue;
 pub mod managed_external_content;
 pub mod managed_external_content_operation;
 pub mod node_config;
+pub mod node_requirement_admission;
 pub mod object_contracts;
 pub mod operator_authority;
 pub mod offline_native;
@@ -121,6 +118,9 @@ pub mod write_barrier;
 // Original bearer custody only; opaque admission is issued separately.
 pub use callback_token::{DedicatedWorkerCredentialTransport, SelectedDedicatedWorkerAdmission};
 
+#[cfg(any(test, feature = "test-support"))]
+mod test_support_native;
+
 /// Native-gate test builders for other crates' tests: the Runtime store, the
 /// node State and, through the State, its Operational store, each opened the
 /// way a live node opens it and closed into a test host's census.
@@ -133,6 +133,7 @@ pub mod test_support {
     pub use crate::state_store::test_native::{
         TEST_STATE_STORE_ENVELOPE, TestAccountingDb, TestStateStore, with_store_host,
     };
+    pub use crate::test_support_native::{NativeTestNode, NativeTestState};
     pub use ryeos_state::test_support::{
         TEST_STATE_ENVELOPE, TestState, live_state_open_refusal, open_live_state,
         open_live_state_with_repair_sink, release_shared_test_host, retire_live_state, seed_node_state,

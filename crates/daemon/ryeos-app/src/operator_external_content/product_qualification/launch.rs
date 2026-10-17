@@ -671,10 +671,12 @@ mod tests {
         let outer_relationship_name = "runtime_to_qualified_runtime";
         let outer_consumer_declaration = "runtime";
         let workspace = ryeos_engine::test_support::workspace_root();
-        let standard = ryeos_engine::test_support::standard_bundle_root();
+        let qualification = workspace.join("bundles/environment-qualification");
         let policy: serde_yaml::Value = serde_yaml::from_slice(
-            &fs::read(standard.join(".ai/config/ryeos/environments/qualification/gnu-python.yaml"))
-                .unwrap(),
+            &fs::read(
+                qualification.join(".ai/config/ryeos/environments/qualification/gnu-python.yaml"),
+            )
+            .unwrap(),
         )
         .unwrap();
         let policy_inner_subject_declaration =
@@ -710,7 +712,7 @@ mod tests {
         assert!(inner["qualification"]["policy_ref"].is_null());
 
         let verifier: serde_yaml::Value = serde_yaml::from_slice(
-            &fs::read(standard.join(".ai/tools/ryeos/environments/qualification/gnu-python.yaml"))
+            &fs::read(qualification.join(".ai/tools/ryeos/environments/qualification/gnu-python.yaml"))
                 .unwrap(),
         )
         .unwrap();

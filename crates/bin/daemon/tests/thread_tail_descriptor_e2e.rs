@@ -185,7 +185,15 @@ const TERMINAL_EVENTS: [&str; 5] = [
 /// ownership branch instead of being rejected by the signature verifier.
 async fn boot_and_run_directive(
     extra_keys: &[SigningKey],
-) -> (DaemonHarness, SigningKey, String, String, String) {
+) -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    String,
+    String,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
@@ -248,14 +256,19 @@ async fn boot_and_run_directive(
         .expect("thread.thread_id")
         .to_string();
 
-    std::mem::forget(project);
-    std::mem::forget(mock);
-    (h, user_sk, node_fp, thread_id, project_path)
+    (
+        Box::new((project, mock)),
+        h,
+        user_sk,
+        node_fp,
+        thread_id,
+        project_path,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_tail_descriptor_round_trip() {
-    let (h, user_sk, node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
+    let (_keep, h, user_sk, node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
 
     // 1. Owner POSTs /execute service:threads/tail with thread_only=true → the
     //    daemon returns the single-thread descriptor. (The default follows the
@@ -346,7 +359,7 @@ async fn thread_tail_descriptor_defaults_to_braid() {
     // With no flag, `thread tail` follows the braid: the descriptor points at the
     // chain-events route and declares `follow: chain`. The stream is not opened
     // here — a chain stream stays open across continuations and wouldn't EOF.
-    let (h, _user_sk, _node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
+    let (_keep, h, _user_sk, _node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
 
     let (status, body) = h
         .post_execute(
@@ -380,7 +393,7 @@ async fn thread_tail_descriptor_defaults_to_braid() {
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_tail_descriptor_denied_for_non_owner() {
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _user_sk, node_fp, thread_id, project_path) =
+    let (_keep, h, _user_sk, node_fp, thread_id, project_path) =
         boot_and_run_directive(std::slice::from_ref(&other_sk)).await;
 
     // A different (but authorized) principal asks for the descriptor of a thread

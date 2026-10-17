@@ -343,6 +343,27 @@ impl BuildAndLaunchError {
         }
     }
 
+    /// Whether a launch failed only because the node's capability report
+    /// could not be read just now. This is the one failure that leaves a
+    /// claimed `created` row in place for its recovery owner: the admission
+    /// that raises it bounds how long it may keep recurring for one row and
+    /// turns a report that stays unreadable into a final refusal.
+    pub fn node_report_unreadable(&self) -> bool {
+        match self {
+            Self::Internal(error) => error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<ryeos_app::node_requirement_admission::NodeReportUnreadable>()
+                    .is_some()
+            }),
+            Self::LaunchPreparation(_)
+            | Self::Materialization(_)
+            | Self::MissingSecrets { .. }
+            | Self::CapabilityRejected { .. }
+            | Self::LaunchCancelled { .. }
+            | Self::RuntimeCleanupUnresolved { .. } => false,
+        }
+    }
+
     /// Whether a launch failure is an infrastructure interruption that is safe
     /// to re-drive without changing the authored execution. Keep this deliberately
     /// narrow: capability, secret, materialization, and unknown failures are
@@ -350,14 +371,17 @@ impl BuildAndLaunchError {
     pub fn retryable_launch_interruption(&self) -> bool {
         match self {
             Self::Internal(error) => error.chain().any(|cause| {
-                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                    matches!(
-                        io.kind(),
-                        std::io::ErrorKind::Interrupted
-                            | std::io::ErrorKind::WouldBlock
-                            | std::io::ErrorKind::TimedOut
-                    )
-                })
+                cause
+                    .downcast_ref::<ryeos_app::node_requirement_admission::NodeReportUnreadable>()
+                    .is_some()
+                    || cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::Interrupted
+                                | std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                        )
+                    })
             }),
             Self::Materialization(_)
             | Self::MissingSecrets { .. }
@@ -3649,6 +3673,9 @@ struct PreparedManagedLaunchAuthority {
     pending_external_realization: Option<super::PendingCasPublication>,
     pending_session_publications: Option<super::persistent_session::AdmittedSessionPublications>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
+    /// Which proof in this node's current capability report met each entry
+    /// of the admitted program's `requires`, recorded in the launch audit.
+    node_requirements_met_by: ryeos_app::node_requirement_admission::RequirementsMet,
     /// True when this preparation minted the accounting scope (fresh
     /// admission) rather than copying a frozen one forward. Only a freshly
     /// minted scope may create ledger accounts — a missing account for a
@@ -3673,6 +3700,7 @@ fn launch_audit_records(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
     augmentation_audits: &[crate::augmentations::LaunchAugmentationAudit],
+    node_requirements_met_by: &ryeos_app::node_requirement_admission::RequirementsMet,
 ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
     let mut records = [
         (
@@ -3688,7 +3716,7 @@ fn launch_audit_records(
         ),
         (
             RuntimeEventType::RuntimeLaunchFacts,
-            json!({"facts": prepared_launch.runtime_facts.clone()}),
+            launch_runtime_facts_payload(&prepared_launch.runtime_facts, node_requirements_met_by),
         ),
     ]
     .into_iter()
@@ -3708,6 +3736,18 @@ fn launch_audit_records(
         }
     }));
     Ok(records)
+}
+
+/// The `runtime_launch_facts` audit payload: the prepared runtime facts and
+/// which proof in this node's report met each admitted requirement entry.
+fn launch_runtime_facts_payload(
+    runtime_facts: &BTreeMap<String, Value>,
+    node_requirements_met_by: &ryeos_app::node_requirement_admission::RequirementsMet,
+) -> Value {
+    json!({
+        "facts": runtime_facts,
+        "node_requirements_met_by": node_requirements_met_by,
+    })
 }
 
 fn sealed_ref_binding_records(
@@ -3902,6 +3942,53 @@ pub(crate) fn verify_admitted_signed_descriptor_document(
     .map_err(BuildAndLaunchError::Internal)
 }
 
+/// Judge the `requires` block of the admitted program against this node's
+/// current signed capability report. It runs for every launch that executes
+/// on this node, whatever authority the launch was prepared from, so a
+/// capsule admitted elsewhere or on an earlier report never carries a
+/// guarantee this node no longer proves.
+///
+/// Only a [`NodeRequirementRefused`] is a capability refusal. Any other
+/// failure, a report that could not be read now among them, is returned as
+/// an internal error carrying its typed cause, so a recovered execution is
+/// left recoverable rather than finalized on a fact the node never stated.
+/// The launches of `row` meet an unreadable report for a bounded window
+/// only; past it the unreadability is itself a refusal, so no recovery owner
+/// re-drives the row forever. On admission it returns which proof met each
+/// entry, for the launch audit.
+///
+/// [`NodeRequirementRefused`]: ryeos_app::node_requirement_admission::NodeRequirementRefused
+fn admit_launch_node_requirements(
+    node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
+    row: &str,
+    item_ref: &str,
+    requires: Option<&serde_json::Value>,
+) -> Result<ryeos_app::node_requirement_admission::RequirementsMet, BuildAndLaunchError> {
+    let Some(requires) = requires else {
+        return Ok(ryeos_app::node_requirement_admission::RequirementsMet::new());
+    };
+    let requires = ryeos_bundle::runtime_authority::parse_runtime_requires_block(requires)
+        .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
+    ryeos_app::node_requirement_admission::bound_unreadable_report_retries(
+        row,
+        ryeos_app::node_requirement_admission::admit_item_requirements_met_by(
+            node, item_ref, &requires,
+        ),
+    )
+    .map_err(|error| {
+        if error
+            .downcast_ref::<ryeos_app::node_requirement_admission::NodeRequirementRefused>()
+            .is_some()
+        {
+            BuildAndLaunchError::CapabilityRejected {
+                reason: format!("{error:#}"),
+            }
+        } else {
+            BuildAndLaunchError::Internal(error)
+        }
+    })
+}
+
 async fn prepare_managed_launch_authority(
     params: &BuildAndLaunchParams<'_>,
     thread_id: &str,
@@ -4090,6 +4177,18 @@ async fn prepare_managed_launch_authority(
         resolution.effective_trust_class,
         &params.resolved.item_ref,
         &params.resolved.resolved_item.kind,
+    )?;
+    // The node guarantees the admitted program declares are judged against
+    // this node's current signed capability report for every launch that
+    // will run here: a fresh one, a local recovery or continuation of an
+    // admitted capsule, and a continuation transferred from another site.
+    // An earlier admission proves only what the node that made it held at
+    // that time, so no capsule origin skips the judgement.
+    let node_requirements_met_by = admit_launch_node_requirements(
+        params.state,
+        thread_id,
+        &params.resolved.item_ref,
+        resolution.composed.composed.get("requires"),
     )?;
 
     let (selected_runtime, verified_protocol, admitted_prepared_launch, current_managed_selection) =
@@ -5072,7 +5171,9 @@ async fn prepare_managed_launch_authority(
         .collect();
     let secret_env = ryeos_app::vault::authorize_secret_delivery(
         &params.state.secret_sources(),
-        params.acting_principal,
+        ryeos_app::vault::SecretRecipient {
+            principal: params.acting_principal,
+        },
         &secret_names,
         params.provenance.project_authority(),
     )
@@ -5343,6 +5444,7 @@ async fn prepare_managed_launch_authority(
         pending_external_realization,
         pending_session_publications: Some(pending_session_publications),
         augmentation_audits,
+        node_requirements_met_by,
         freshly_minted_accounting_scope,
         selected_resources: None,
     })
@@ -5799,6 +5901,7 @@ async fn build_and_launch_inner(
         authority.effective_program.resolution(),
         &authority.prepared_launch,
         &authority.augmentation_audits,
+        &authority.node_requirements_met_by,
     )?;
     if params.effect_authority.is_some() {
         let intent = params
@@ -6007,6 +6110,10 @@ async fn run_claimed_thread_row(
     .await
     {
         Ok(authority) => authority,
+        // A node capability report that could not be read just now says
+        // nothing final about this launch: the row stays `created` for its
+        // recovery owner to re-drive. Every other failure finalizes below.
+        Err(error) if error.node_report_unreadable() => return Err(error),
         Err(error) => {
             let terminal_error = match &error {
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
@@ -6158,6 +6265,7 @@ async fn run_claimed_thread_row_inner(
         pending_external_realization,
         pending_session_publications,
         augmentation_audits,
+        node_requirements_met_by,
         freshly_minted_accounting_scope,
         selected_resources,
     } = authority;
@@ -6903,6 +7011,7 @@ async fn run_claimed_thread_row_inner(
                 &resolution,
                 &prepared_launch,
                 &augmentation_audits,
+                &node_requirements_met_by,
             )?;
             state
                 .threads
@@ -8055,6 +8164,7 @@ impl PreparedOperatorSuccessorLaunch {
             self.prepared.authority.effective_program.resolution(),
             &self.prepared.authority.prepared_launch,
             &self.prepared.authority.augmentation_audits,
+            &self.prepared.authority.node_requirements_met_by,
         )
     }
 
@@ -8119,6 +8229,7 @@ impl PreparedFollowChildLaunch {
             self.authority.effective_program.resolution(),
             &self.authority.prepared_launch,
             &self.authority.augmentation_audits,
+            &self.authority.node_requirements_met_by,
         )
     }
 
@@ -8501,6 +8612,7 @@ impl PreparedMachineSuccessorLaunch {
             self.prepared.authority.effective_program.resolution(),
             &self.prepared.authority.prepared_launch,
             &self.prepared.authority.augmentation_audits,
+            &self.prepared.authority.node_requirements_met_by,
         )
     }
 
@@ -9277,6 +9389,10 @@ async fn launch_successor_inner_with_claim(
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
+        // A node capability report that could not be read just now is not a
+        // defect: the successor stays `created` for its caller's retry or
+        // reconcile to re-drive. Every other failure finalizes below.
+        Err(e) if e.node_report_unreadable() => Err(e),
         Err(e) => {
             // A pre-run launch DEFECT (absent ResumeContext, snapshot-pinned
             // source, capability drift, envelope rebuild) would otherwise leave
@@ -10384,20 +10500,14 @@ async fn launch_admitted_root_with_claim(
     .await;
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
-        Err(error) => {
-            if let Err(cleanup_error) = finalize_failed_and_kick_follow(
-                &state,
-                thread_id,
-                &chain_root_id,
-                &launch_owner,
-                json!({ "error": error.to_string() }),
-            ) {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "admitted root launch failed: {error}; terminal cleanup also failed: {cleanup_error}"
-                )));
-            }
-            Err(error)
-        }
+        Err(error) => Err(settle_claimed_launch_failure(
+            &state,
+            thread_id,
+            &chain_root_id,
+            &launch_owner,
+            error,
+            "admitted root launch",
+        )),
     }
 }
 
@@ -10856,24 +10966,51 @@ async fn launch_follow_child_with_claim(
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
-        Err(e) => {
-            // A pre-run failure flips the waiter to `ready` (degraded failure);
-            // finalize + kick so the parent resumes live. The child is its own chain
-            // root, so its id is the chain root the waiter keys on.
-            if let Err(cleanup_error) = finalize_failed_and_kick_follow(
-                &state,
-                child_id,
-                child_id,
-                &launch_owner,
-                json!({ "error": e.to_string() }),
-            ) {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "follow-child launch failed: {e}; terminal cleanup also failed: \
-                     {cleanup_error}"
-                )));
-            }
-            Err(e)
-        }
+        // The child is its own chain root, so its id is the chain root the
+        // follow waiter keys on.
+        Err(error) => Err(settle_claimed_launch_failure(
+            &state,
+            child_id,
+            child_id,
+            &launch_owner,
+            error,
+            "follow-child launch",
+        )),
+    }
+}
+
+/// Settle a claimed `created` row whose launch failed before it ran, and
+/// return the failure to report.
+///
+/// A node capability report that could not be read just now leaves the row
+/// `created` and untouched: its recovery owner re-drives it (the periodic
+/// follow reconciler for a follow child, recovery for an admitted root).
+/// Any other failure, other transient ones included, finalizes the
+/// row failed and wakes the launch window and any follow parent waiting on
+/// `chain_root_id`, so a parent resumes live rather than at the next
+/// restart.
+fn settle_claimed_launch_failure(
+    state: &AppState,
+    thread_id: &str,
+    chain_root_id: &str,
+    launch_owner: &str,
+    error: BuildAndLaunchError,
+    launch: &str,
+) -> BuildAndLaunchError {
+    if error.node_report_unreadable() {
+        return error;
+    }
+    match finalize_failed_and_kick_follow(
+        state,
+        thread_id,
+        chain_root_id,
+        launch_owner,
+        json!({ "error": error.to_string() }),
+    ) {
+        Ok(()) => error,
+        Err(cleanup_error) => BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "{launch} failed: {error}; terminal cleanup also failed: {cleanup_error}"
+        )),
     }
 }
 
@@ -12500,6 +12637,247 @@ mod tests {
             error.to_string().contains("failed its content check"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn launch_node_requirements_are_judged_on_this_nodes_current_report() {
+        use lillux::process_control::{HOST_PROVIDER, HostCapabilities, ProofSource};
+        use ryeos_app::node_requirement_admission::NodeCapabilityReportReader;
+        let requires = json!({
+            "node": [{"name": "persistence:durable_state", "accept": ["measured", "trusted"]}],
+            "credential_kinds": {"credential_profile": ["credential:private_home"]},
+        });
+        let node = |provided: &[&str]| {
+            let mut view = HostCapabilities::default();
+            for name in provided {
+                view.provide(name, ProofSource::Measured, HOST_PROVIDER, "fixture");
+            }
+            let extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(std::sync::Arc::new(NodeCapabilityReportReader::new(
+                move || Ok(view.clone()),
+            )));
+            extensions
+        };
+        let met = admit_launch_node_requirements(
+            &node(&["credential:private_home", "persistence:durable_state"]),
+            "T-launch-requirements",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap();
+        // The launch audit records which proof met each entry.
+        let facts = launch_runtime_facts_payload(&BTreeMap::new(), &met);
+        assert_eq!(
+            facts["node_requirements_met_by"],
+            json!({
+                "requires.credential_kinds.credential_profile": {
+                    "credential:private_home": {
+                        "name": "credential:private_home",
+                        "grade": "measured",
+                        "provider": HOST_PROVIDER,
+                    },
+                },
+                "requires.node": {
+                    "persistence:durable_state": {
+                        "name": "persistence:durable_state",
+                        "grade": "measured",
+                        "provider": HOST_PROVIDER,
+                    },
+                },
+            })
+        );
+        // A node that lost the credential home refuses the launch whatever
+        // authority it was prepared from: the judgement reads only this
+        // node's report, never the capsule.
+        let error = admit_launch_node_requirements(
+            &node(&["persistence:durable_state"]),
+            "T-launch-requirements",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap_err();
+        let BuildAndLaunchError::CapabilityRejected { reason } = error else {
+            panic!("not a capability refusal");
+        };
+        assert!(
+            reason.contains("requires.credential_kinds.credential_profile credential:private_home"),
+            "{reason}"
+        );
+        let error = admit_launch_node_requirements(
+            &node(&["persistence:durable_state"]),
+            "T-launch-requirements",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap_err();
+        assert!(!error.retryable_launch_interruption());
+        let error = admit_launch_node_requirements(
+            &ryeos_app::extension_state::ExtensionState::new(),
+            "T-launch-requirements",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BuildAndLaunchError::CapabilityRejected { .. }
+        ));
+        assert!(!error.retryable_launch_interruption());
+        // A report that cannot be read just now is not a refusal: it is a
+        // transient interruption, so a recovered execution stays recoverable
+        // instead of being finalized as failed.
+        let unreadable = ryeos_app::extension_state::ExtensionState::new();
+        unreadable.insert(std::sync::Arc::new(NodeCapabilityReportReader::new(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the capability report is being rewritten",
+            )
+            .into())
+        })));
+        let error = admit_launch_node_requirements(
+            &unreadable,
+            "T-launch-requirements",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap_err();
+        assert!(matches!(error, BuildAndLaunchError::Internal(_)), "{error}");
+        assert!(error.retryable_launch_interruption(), "{error}");
+        admit_launch_node_requirements(
+            &ryeos_app::extension_state::ExtensionState::new(),
+            "T-launch-requirements",
+            "directive:fixture/plain",
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_report_that_does_not_stand_refuses_the_launch_permanently() {
+        use ryeos_app::node_requirement_admission::NodeCapabilityReportReader;
+        let requires = json!({
+            "node": [{"name": "persistence:durable_state", "accept": ["measured", "trusted"]}],
+        });
+        // A stale or unverifiable report cannot clear while the daemon
+        // runs, so a recovered launch is refused rather than re-driven.
+        let stale = ryeos_app::extension_state::ExtensionState::new();
+        stale.insert(std::sync::Arc::new(NodeCapabilityReportReader::new(|| {
+            anyhow::bail!("node capability report signature is invalid")
+        })));
+        let error = admit_launch_node_requirements(
+            &stale,
+            "T-launch-stale-report",
+            "worker_execution:fixture/login",
+            Some(&requires),
+        )
+        .unwrap_err();
+        let BuildAndLaunchError::CapabilityRejected { reason } = &error else {
+            panic!("not a capability refusal: {error}");
+        };
+        assert!(reason.contains("signature is invalid"), "{reason}");
+        assert!(!error.retryable_launch_interruption());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_claimed_launch_interrupted_transiently_leaves_its_row_created() {
+        let (_temp, _store_owner, state) =
+            crate::augmentations::compose_context_positions::tests::lifecycle_test_state();
+        let created = |thread_id: &str| {
+            state
+                .state_store
+                .create_thread_for_test(
+                    &crate::augmentations::compose_context_positions::tests::augmentation_child_record(
+                        thread_id,
+                    ),
+                )
+                .unwrap();
+            let ThreadLaunchClaimOutcome::Claimed(claim) =
+                ThreadLaunchClaim::acquire(&state, thread_id).unwrap()
+            else {
+                panic!("fixture row was already claimed");
+            };
+            claim
+        };
+        let status = |thread_id: &str| {
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .status
+        };
+
+        // A node report that could not be read just now: the follow child
+        // stays `created` for the follow reconciler to re-drive.
+        let claim = created("T-follow-interrupted");
+        let owner = claim.canonical_owner().unwrap();
+        let interrupted = BuildAndLaunchError::Internal(anyhow::Error::new(
+            ryeos_app::node_requirement_admission::NodeReportUnreadable(
+                "the report could not be read".to_owned(),
+            ),
+        ));
+        let returned = settle_claimed_launch_failure(
+            &state,
+            "T-follow-interrupted",
+            "T-follow-interrupted",
+            &owner,
+            interrupted,
+            "follow-child launch",
+        );
+        assert!(returned.node_report_unreadable(), "{returned}");
+        assert_eq!(status("T-follow-interrupted"), "created");
+        drop(claim);
+
+        // Any other transient failure is not held open: an unavailable
+        // service finalizes the row failed with its reason.
+        let claim = created("T-follow-unavailable");
+        let owner = claim.canonical_owner().unwrap();
+        let unavailable = BuildAndLaunchError::LaunchPreparation(Box::new(
+            crate::dispatch_error::DispatchError::ServiceUnavailable {
+                service_ref: "service:fixture/offline".to_owned(),
+                mode: "standalone".to_owned(),
+                requires: "daemon".to_owned(),
+            },
+        ));
+        assert!(unavailable.retryable_launch_interruption());
+        assert!(!unavailable.node_report_unreadable());
+        let returned = settle_claimed_launch_failure(
+            &state,
+            "T-follow-unavailable",
+            "T-follow-unavailable",
+            &owner,
+            unavailable,
+            "follow-child launch",
+        );
+        assert!(matches!(
+            returned,
+            BuildAndLaunchError::LaunchPreparation(_)
+        ));
+        assert!(returned.to_string().contains("unavailable"), "{returned}");
+        assert_eq!(status("T-follow-unavailable"), "failed");
+        drop(claim);
+
+        // A refusal is final: the row is finalized failed.
+        let claim = created("T-follow-refused");
+        let owner = claim.canonical_owner().unwrap();
+        let refused = BuildAndLaunchError::CapabilityRejected {
+            reason: "launch refused: this node cannot prove what it requires".to_owned(),
+        };
+        let returned = settle_claimed_launch_failure(
+            &state,
+            "T-follow-refused",
+            "T-follow-refused",
+            &owner,
+            refused,
+            "follow-child launch",
+        );
+        assert!(matches!(
+            returned,
+            BuildAndLaunchError::CapabilityRejected { .. }
+        ));
+        assert_eq!(status("T-follow-refused"), "failed");
+        drop(claim);
     }
 
     #[test]

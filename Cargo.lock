@@ -177,6 +177,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -195,8 +196,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -303,6 +306,12 @@ name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -2601,6 +2610,7 @@ dependencies = [
  "chrono",
  "flate2",
  "form_urlencoded",
+ "futures-util",
  "glob",
  "hmac",
  "libc",
@@ -2610,6 +2620,7 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "rusqlite",
+ "rustls",
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
@@ -2619,6 +2630,8 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-external-candidate-supervisor",
+ "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
@@ -2641,9 +2654,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
+ "tokio-tungstenite",
  "toml",
  "tracing",
+ "tungstenite",
  "url",
  "uuid",
  "zeroize",
@@ -2664,9 +2680,9 @@ dependencies = [
  "lillux-sqlite",
  "once_cell",
  "rand 0.8.6",
- "regex",
  "reqwest",
  "rusqlite",
+ "rustls",
  "ryeos-accounting",
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",
@@ -2723,6 +2739,7 @@ dependencies = [
  "rand 0.8.6",
  "ryeos-engine",
  "ryeos-external-execution-contract",
+ "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
  "serde",
@@ -2752,14 +2769,13 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures-util",
- "hex",
  "libc",
  "lillux",
  "rand 0.8.6",
- "reqwest",
  "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-client-transport",
  "ryeos-core-tools",
  "ryeos-directive-definition",
  "ryeos-engine",
@@ -2809,8 +2825,8 @@ dependencies = [
  "lillux",
  "notify",
  "reqwest",
- "ryeos-cli",
  "ryeos-client-base",
+ "ryeos-client-transport",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2819,6 +2835,19 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-width",
+]
+
+[[package]]
+name = "ryeos-client-transport"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "lillux",
+ "rand 0.8.6",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2835,9 +2864,8 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
- "ryeos-cli",
  "ryeos-client-base",
- "ryeos-engine",
+ "ryeos-client-transport",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -3095,6 +3123,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tungstenite",
  "url",
 ]
 
@@ -3307,6 +3336,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-modal-sandbox-lifecycle-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "lillux",
+ "ryeos-external-execution-contract",
+ "ryeos-http-transport",
+ "ryeos-remote-lease-core",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ryeos-node"
 version = "0.1.0"
 dependencies = [
@@ -3352,6 +3399,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-bundle-publication-contract",
  "ryeos-engine",
+ "ryeos-external-execution-contract",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
  "ryeos-scheduler-contract",
@@ -3364,6 +3412,17 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ryeos-parser-bins"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "ryeos-handler-protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -3394,6 +3453,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-remote-lease-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution-contract",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "ryeos-render-sandbox-lifecycle-adapter"
 version = "0.1.0"
 dependencies = [
@@ -3405,6 +3478,7 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
+ "ryeos-remote-lease-core",
  "ryeos-state",
  "serde",
  "serde_json",
@@ -3541,7 +3615,6 @@ dependencies = [
  "lillux",
  "reqwest",
  "ryeos-engine",
- "ryeos-handler-bins",
  "ryeos-handler-protocol",
  "ryeos-runtime",
  "ryeos-state",
@@ -3920,6 +3993,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
@@ -4307,6 +4391,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4498,6 +4594,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.6",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
 name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4572,6 +4686,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"

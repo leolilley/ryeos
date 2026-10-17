@@ -1,14 +1,11 @@
-# ryeos:signed:2026-10-10T19:41:28Z:7b42c34d12585f15f9cd0800971485129076fb033390c333e6209d813cf3263c:qNrlYWI53QMOjMldwbqrKg7oH37+86dNLNhuKL7FhG/mh1DMJ+UGAGeALgYXEKh+URK5SWtDDAI7UnUzIaDVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:41:27Z:1f4d686c4ec93443e65dc467f785ee8a29146c21bb7c7d7076396bc3d5b56d56:LI4NglooxW1jQwO3rqKHCBLp1OswahT2UvWHxR5dDRAAaOllytGWAQgKK9Tn+Zu0PrvKc7STUUnsYMQigeXzDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: standard
 version: 0.5.0
 description: 'Workflow: directives, graphs, knowledge, model providers, threads'
 provides_kinds:
-- client
 - directive
 - graph
 - knowledge
-- surface
-- view
 requires_kinds:
 - config
 - handler

@@ -10,6 +10,25 @@
 //! mapping via `response.source_config`. It must not supply `project_path`,
 //! `item_ref`, or `parameters`; those are generic execution concepts, not route
 //! handler identity.
+//!
+//! Each request runs under the route's fixed principal against a fresh
+//! request-owned workspace. The workspace is the execution's project: the root
+//! for resolution, runtime state and callbacks (item authoring, snapshots,
+//! child spawn), and the only directory the route's live-write authority
+//! covers. It is not where the tool's process is placed. A tool whose runtime
+//! retains source content, as the script runtimes do, runs in a daemon-owned
+//! admitted-input scratch under the node's execution cache; what it writes
+//! there is discarded when the execution ends. Both directories are removed
+//! after the request.
+//!
+//! Confinement of the tool's process depends on the node's isolation mode.
+//! Under enforced isolation the sandbox grants it the scratch and nothing
+//! else of the node, so it cannot reach the workspace, the installed bundles
+//! or any other directory. Under direct-host or disabled isolation no sandbox
+//! is applied: the process runs with the node account's file access and can
+//! write the workspace, the node's installed bundles and anything else that
+//! account can write. Integrity of what it touches then rests on signature
+//! verification when items are loaded, not on confinement.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,10 +46,12 @@ use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
 use crate::routes::invocation::{
-    InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
-    attach_recorded_thread_header,
+    RouteInvocationContext, RouteInvocationResult, attach_recorded_thread_header,
 };
-use crate::routes::invokers::dispatch_invocation::{CompiledDispatchInvoker, DispatchAuthority};
+use crate::routes::invokers::dispatch_invocation::{
+    CompiledDispatchInvoker, DispatchAuthority, FIXED_PRINCIPAL_REFUSAL, FixedPrincipalConfinement,
+    PinnedDispatchSubject,
+};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
@@ -241,11 +262,12 @@ impl ResponseMode for HandlerMode {
             });
         }
         let execution_principal_id = format!("route-handler:{}:{}", route_bundle_id, raw.id);
-        // The handler executes its one tool against a workspace this route
-        // creates fresh for each request and removes afterwards; the live
-        // project write authority it holds therefore covers only that
-        // throwaway directory, and dispatch requires it for every live
-        // execution.
+        // Each execution's project is a workspace this route creates fresh
+        // for each request and removes afterwards; the live project write
+        // authority it holds therefore covers only that throwaway directory,
+        // and dispatch requires it for every live execution. The tool's
+        // process itself may be placed in a narrower daemon-owned scratch;
+        // it is confined there only under enforced isolation.
         let execution_scopes = vec![
             handler_execute_scope(source_ref, &raw.id)?,
             ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
@@ -285,13 +307,39 @@ impl CompiledResponseMode for CompiledHandlerMode {
         compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<Response, RouteDispatchError> {
-        assert_resolved_handler_source_anchored(
+        self.handle_request(compiled, ctx)
+            .await
+            .map_err(|error| error.conceal_handler_detail(&compiled.id, &self.source_ref))
+    }
+}
+
+impl CompiledHandlerMode {
+    /// Run one request. Internal failures may carry paths and digests in
+    /// their detail; `handle` replaces that detail with the fixed body before
+    /// the response leaves the node.
+    async fn handle_request(
+        &self,
+        compiled: &CompiledRoute,
+        ctx: RouteDispatchContext,
+    ) -> Result<Response, RouteDispatchError> {
+        let pinned_subject = assert_resolved_handler_source_anchored(
             &ctx,
             &self.source_ref,
             &self.project_root,
             &self.execution_principal_id,
             &self.execution_scopes,
-        )?;
+        )
+        .map_err(|error| {
+            // The caller may be unauthenticated: the detailed reason, which
+            // names bundle paths, is logged and the body stays terse.
+            tracing::warn!(
+                route = %compiled.id,
+                source = %self.source_ref,
+                %error,
+                "handler route refused before dispatch"
+            );
+            RouteDispatchError::Forbidden(FIXED_PRINCIPAL_REFUSAL.to_owned())
+        })?;
 
         let envelope = build_route_envelope(
             compiled,
@@ -306,16 +354,23 @@ impl CompiledResponseMode for CompiledHandlerMode {
         })?;
 
         // The bundle root is resolution authority, not a writable project.
-        // Handler mode invokes CompiledDispatchInvoker directly (it does not
-        // pass through execute mode), so allocate a narrow request-owned
-        // workspace here and hold its guard across the complete invocation.
-        let workspace = std::env::temp_dir().join(format!(
+        // Handler mode allocates a narrow request-owned workspace as the
+        // execution's project and hands its guard to the dispatch provenance,
+        // so the directory lives exactly as long as the execution and is
+        // removed afterwards. The parent is
+        // canonicalized first so the workspace path is canonical by
+        // construction and the live-write authority, the provenance and the
+        // guard all name the same directory.
+        let temp_root = std::env::temp_dir().canonicalize().map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "handler route '{}': canonicalize temporary directory: {error}",
+                compiled.id
+            ))
+        })?;
+        let workspace = temp_root.join(format!(
             "ryeos-route-handler-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
-        ));
-        let workspace_guard = Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
-            workspace.clone(),
         ));
         std::fs::create_dir(&workspace).map_err(|error| {
             RouteDispatchError::Internal(format!(
@@ -323,18 +378,27 @@ impl CompiledResponseMode for CompiledHandlerMode {
                 workspace.display()
             ))
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).map_err(
-                |error| {
-                    RouteDispatchError::Internal(format!(
-                        "protect isolated handler workspace {}: {error}",
-                        workspace.display()
-                    ))
-                },
-            )?;
-        }
+        // Armed only once this request has created the directory, so a failed
+        // create can never remove a directory some other owner holds.
+        let workspace_guard = Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
+            workspace.clone(),
+        ));
+        let pinned_workspace = lillux::PinnedDirectory::open(&workspace)
+            .and_then(|directory| {
+                directory.ok_or_else(|| anyhow::anyhow!("workspace vanished after creation"))
+            })
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "open isolated handler workspace {}: {error:#}",
+                    workspace.display()
+                ))
+            })?;
+        pinned_workspace.set_mode(0o700).map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "protect isolated handler workspace {}: {error:#}",
+                workspace.display()
+            ))
+        })?;
         std::fs::create_dir_all(workspace.join(ryeos_engine::AI_DIR)).map_err(|error| {
             RouteDispatchError::Internal(format!(
                 "create isolated handler workspace {}: {error}",
@@ -365,14 +429,21 @@ impl CompiledResponseMode for CompiledHandlerMode {
             webhook_dedupe: ctx.webhook_dedupe,
         };
 
-        let result = crate::routes::invocation::invoke_checked(
-            self.invoker.as_ref(),
-            InvocationCheck {
-                expected_output: RouteInvocationOutput::Json,
-            },
-            inv_ctx,
-        )
-        .await?;
+        // The confined entry point runs exactly the item the anchor check
+        // pinned, with the live-write authority bound to this workspace (the
+        // project callbacks write through). Dispatch resolves
+        // in normal registered order, so when an earlier-sorting bundle ships
+        // the same ref the route is refused rather than run with that item.
+        let result = self
+            .invoker
+            .invoke_confined(
+                inv_ctx,
+                FixedPrincipalConfinement {
+                    subject: pinned_subject,
+                    workspace,
+                },
+            )
+            .await?;
 
         match result {
             RouteInvocationResult::Json { value, thread_id } => {
@@ -397,33 +468,67 @@ impl CompiledResponseMode for CompiledHandlerMode {
                 attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
                 Ok(response)
             }
-            _ => unreachable!("invoke_checked enforces Json"),
+            _ => Err(RouteDispatchError::Internal(format!(
+                "handler '{}' dispatch returned a non-JSON invocation result",
+                self.source_ref
+            ))),
         }
     }
 }
 
+/// Resolve the handler source against exactly the route's own registered
+/// bundle and pin it; another bundle shipping the same ref is never
+/// consulted here.
 fn assert_resolved_handler_source_anchored(
     ctx: &RouteDispatchContext,
     source_ref: &str,
     project_root: &Path,
     execution_principal_id: &str,
     execution_scopes: &[String],
-) -> Result<(), RouteDispatchError> {
+) -> Result<PinnedDispatchSubject, RouteDispatchError> {
     let canonical_ref = CanonicalRef::parse(source_ref).map_err(|err| {
         RouteDispatchError::Internal(format!(
             "handler source '{source_ref}' is not a valid canonical ref: {err}"
         ))
     })?;
+    let canonical_bundle_root = project_root.canonicalize().map_err(|error| {
+        RouteDispatchError::Internal(format!(
+            "handler source '{source_ref}': canonicalize route bundle root {}: {error}",
+            project_root.display()
+        ))
+    })?;
+    let route_bundle = ctx
+        .state
+        .engine
+        .registered_bundle_name_at(&canonical_bundle_root)
+        .ok_or_else(|| {
+            RouteDispatchError::Internal(format!(
+                "handler source '{source_ref}': route bundle root {} is not a registered bundle",
+                canonical_bundle_root.display()
+            ))
+        })?
+        .to_owned();
+    let bundle_engine = ctx
+        .state
+        .engine
+        .with_registered_bundle_selection(
+            &route_bundle,
+            ryeos_engine::item_resolution::RegisteredBundleSelection::Only,
+        )
+        .map_err(|err| {
+            RouteDispatchError::Internal(format!(
+                "handler source '{source_ref}': select route bundle '{route_bundle}': {err}"
+            ))
+        })?;
     let site_id = ctx.state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: execution_principal_id.to_string(),
             scopes: execution_scopes.to_vec(),
         }),
-        project_context: ProjectContext::LocalPath {
-            path: project_root.to_path_buf(),
-        },
-        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+        project_context: ProjectContext::None,
+        subject_resolution_authority:
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         current_site_id: site_id.clone(),
         origin_site_id: site_id,
         execution_hints: Default::default(),
@@ -431,17 +536,21 @@ fn assert_resolved_handler_source_anchored(
         validate_only: false,
     };
 
-    let resolved = ctx
-        .state
-        .engine
+    let resolved = bundle_engine
         .resolve(&plan_ctx, &canonical_ref)
         .map_err(|err| {
             RouteDispatchError::Internal(format!(
-                "handler source '{source_ref}' resolution failed: {err}"
+                "handler source '{source_ref}' resolution in route bundle '{route_bundle}' \
+                 failed: {err}"
             ))
         })?;
 
-    validate_resolved_handler_source_path(&resolved.source_path, project_root, source_ref)
+    validate_resolved_handler_source_path(&resolved.source_path, project_root, source_ref)?;
+    PinnedDispatchSubject::from_resolved(&resolved).map_err(|error| {
+        RouteDispatchError::Internal(format!(
+            "handler source '{source_ref}' could not be pinned: {error}"
+        ))
+    })
 }
 
 fn handler_execute_scope(source_ref: &str, route_id: &str) -> Result<String, RouteConfigError> {
@@ -910,7 +1019,10 @@ mod tests {
         );
         assert_eq!(
             handler.execution_scopes,
-            vec!["ryeos.execute.tool.ryeos-email/webhook/track_click"]
+            vec![
+                "ryeos.execute.tool.ryeos-email/webhook/track_click".to_string(),
+                ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+            ]
         );
         match &handler.invoker.authority {
             DispatchAuthority::FixedPrincipal {

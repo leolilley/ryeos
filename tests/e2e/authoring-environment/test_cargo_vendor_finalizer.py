@@ -22,7 +22,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 FINALIZER = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
-INTENT_PATH = "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+INTENT_PATH = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
 INTENT = ROOT / INTENT_PATH
 SIGNER = "a" * 64  # Synthetic already-verified projection, not a node credential.
 
@@ -50,7 +50,7 @@ def authored_request(lock):
     intent = yaml.safe_load(INTENT.read_text())
     intent["expected_sha256"] = hashlib.sha256(lock).hexdigest()
     return {"resolved_config": {"value": intent, "source": {
-        "bundle_name": "standard", "config_path": INTENT_PATH,
+        "bundle_name": "environment-qualification", "config_path": INTENT_PATH,
         "signer_fingerprint": SIGNER,
     }}}
 
@@ -77,7 +77,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
     def test_signed_tool_selects_exact_source_config_and_refuses_caller_parameters(self):
         tool = tool_header()
         self.assertEqual(tool["config_resolve"], {
-            "type": "strict_signed_project_bundle", "bundle_name": "standard",
+            "type": "strict_signed_project_bundle", "bundle_name": "environment-qualification",
             "config_path": INTENT_PATH,
         })
         self.assertEqual(tool["config_schema"], {
@@ -94,7 +94,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
         self.assertNotIn("EXPECTED_SHA256", FINALIZER.read_text())
         self.assertEqual(self.module.admitted_lock_expectation({"resolved_config": {
             "value": yaml.safe_load(INTENT.read_text()), "source": {
-                "bundle_name": "standard", "config_path": INTENT_PATH,
+                "bundle_name": "environment-qualification", "config_path": INTENT_PATH,
                 "signer_fingerprint": SIGNER,
             },
         }}), yaml.safe_load(INTENT.read_text())["expected_sha256"])
@@ -222,7 +222,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
         # Exercise the existing consuming algorithm with its Cargo subprocess
         # boundary stubbed. This establishes exact lock handoff, not an actual
         # offline Cargo run or daemon qualification publication.
-        checker = load_module(ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/cargo-vendor.py",
+        checker = load_module(ROOT / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/cargo-vendor.py",
                               "cargo_vendor_checker")
         for version in ("1.0.0", "1.1.0"):
             lock = f'version = 4\n\n[[package]]\nname = "fixture"\nversion = "{version}"\n'.encode()

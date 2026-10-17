@@ -243,6 +243,12 @@ impl TestSchedulerHost {
         self.host().cleanup_scope(work)
     }
 
+    /// This host's native factory, for tests that enter its production
+    /// stopped-intake and service scopes.
+    pub fn factory(&self) -> &Arc<OriginalNativeFactory> {
+        self.host().factory()
+    }
+
     /// Retirement inputs for `generation`, admitted by a test authority.
     pub fn retirement_inputs(&self, generation: [u8; 16]) -> OriginalSchedulerRetirementInputs {
         // SAFETY: test-only issuance; the authority is funded by the test host.

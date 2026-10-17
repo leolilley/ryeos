@@ -4,8 +4,7 @@
 #
 # Bakes the exact standard set: core + scheduling + standard. This provides
 # project sync/CAS/remote APIs, native caller authorization, and scheduling,
-# graph/directive/knowledge schemas, services, and runtimes. The hosted-node
-# admission bundle, application central-auth, ryeos-ui, and web are explicit additions.
+# graph/directive/knowledge schemas, services, and runtimes. The application central-auth, ryeos-ui, and web are explicit additions.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -60,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/

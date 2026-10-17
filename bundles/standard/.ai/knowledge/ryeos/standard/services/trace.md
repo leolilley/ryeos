@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:d9420a9a3d4702ee9ea87e274b56972dcbdf9b70d9e624e863743a3cbbd41285:6NcZTSUFaS94In6jjLCz2MAGz5aWHHPBVcmtwIBTQBWtSI/3YJPZYe0ulnfYon+zNL1lTxEf04zFFvJXCghgCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-17T01:32:58Z:dd9624ca891c0f80fd1b026abf48619bf6f8a394d2aa47e8d137dea8ebe600fe:7YGqMmzSgBityDrXGiJ3EDQyv4B5wLt8Wz0CbxWX266Y7d4/khauJ6B9dAp/DAv3s+rhF2Evr8MLm6y8QvXhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, trace, replay, branch, provenance, state-anchor]
@@ -7,6 +7,8 @@ description: Programmable trace service reference.
 ---
 
 # Services: trace
+
+The core bundle ships these services; this reference lives with the standard workflow knowledge.
 
 Invariant: trace services make durable execution history programmable without
 rewriting parent history. They operate over signed, hash-linked chain events and

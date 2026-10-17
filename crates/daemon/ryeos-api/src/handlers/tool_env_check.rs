@@ -181,7 +181,9 @@ pub async fn handle(
     };
     let report = ryeos_app::vault::report_secret_presence(
         &state.secret_sources(),
-        &ctx.fingerprint,
+        ryeos_app::vault::SecretRecipient {
+            principal: &ctx.fingerprint,
+        },
         &names,
         &project_authority,
     )

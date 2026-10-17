@@ -170,9 +170,7 @@ pub(crate) fn create_restored_sandbox(
         plan: selected.plan,
         region: projection.region.clone(),
         timeout_seconds: projection.timeout_seconds,
-        network_policy: crate::NetworkPolicy {
-            default: crate::RenderNetworkPolicyDefault::DenyAll,
-        },
+        network_policy: crate::NetworkPolicy::requested(&projection.network_policy),
         snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let body = ryeos_external_execution_contract::canonical_json(&body)?;
@@ -458,8 +456,12 @@ pub(crate) fn terminate_restored_sandbox(
                 usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
             )
             .ok()?;
-        let terminated_at =
-            crate::exact_terminal_timestamp(&sandbox, &request.intent.occurrence_id, &settings)?;
+        let terminated_at = crate::exact_terminal_timestamp(
+            &sandbox,
+            &request.intent.occurrence_id,
+            &settings,
+            &crate::provider_spec::EgressPolicy::deny_all(),
+        )?;
         Some(
             RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
                 observation: RuntimeSnapshotQualificationTerminalObservation {

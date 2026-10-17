@@ -1229,7 +1229,7 @@ mod tests {
             root: ResolvedAncestor {
                 requested_id: "qualification/verify".into(),
                 resolved_ref: "tool:qualification/verify".into(),
-                source_path: "/bundles/standard/.ai/tools/qualification/verify.py".into(),
+                source_path: "/bundles/environment-qualification/.ai/tools/qualification/verify.py".into(),
                 source_space: ItemSpace::Bundle,
                 source_root: ItemSourceRoot::Bundle {
                     name: "standard".into(),

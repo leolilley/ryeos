@@ -19,6 +19,8 @@
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
+//!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
+//!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -94,6 +96,16 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "capacity", "reissue"],
         summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "compose"],
+        summary: "Compose and sign a stopped node's external-execution binding from installed bundles",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "provision-credential"],
+        summary: "Store the placement credential for an installed binding, read from stdin",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -209,6 +221,18 @@ pub async fn try_dispatch(
         }
         ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
             run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution")) if argv.get(2).map(String::as_str) == Some("compose") => {
+            crate::lifecycle_external_compose::run_external_compose(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("provision-credential") =>
+        {
+            crate::lifecycle_external_credential::run_external_provision_credential(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
@@ -358,6 +382,11 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long)]
     node_profile: String,
 
+    /// Host class the node was initialized under; the replacement profile
+    /// must declare it. A node's host class does not change.
+    #[arg(long)]
+    host_class: String,
+
     /// Additional publisher trust doc(s) needed to verify the replacement
     /// profile and selected source bundles.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
@@ -382,7 +411,11 @@ impl NodePolicyGenerationResetArgs {
             anyhow::bail!("replacing the complete node-policy generation requires --confirm");
         }
         ryeos_node_runtime::node_policy::generation::validate_init_profile_name(&self.node_profile)
-            .context("validate node init profile name")
+            .context("validate node init profile name")?;
+        if !ryeos_engine::isolation::valid_host_class_name(&self.host_class) {
+            anyhow::bail!("host class `{}` is not a canonical name", self.host_class);
+        }
+        Ok(())
     }
 }
 
@@ -406,6 +439,7 @@ fn run_node_policy_generation_reset_command(
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: Some(args.node_profile.clone()),
+        host_class: Some(args.host_class.clone()),
         substrate_identity: None,
         replace_node_policy_generation: true,
         skip_preflight: false,
@@ -416,6 +450,7 @@ fn run_node_policy_generation_reset_command(
         crate::tty::write_json(&serde_json::json!({
             "status": "replaced",
             "node_profile": args.node_profile,
+            "host_class": args.host_class,
             "app_root": report.app_root,
             "node_fingerprint": report.node_key_fingerprint,
             "bundles": report.bundles_installed,
@@ -489,10 +524,15 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
         .context("load node identity for policy apply")?;
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &config.runtime_config_dir())
         .context("load trust store for current node policies")?;
+    // The replacement generation must stay the isolation policy of the host
+    // class the node's signed substrate identity binds.
+    let substrate = ryeos_node::load_verified_substrate_identity(&config.app_root)
+        .context("verify the node's substrate identity for policy apply")?;
     let update = ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
         &config.app_root,
         &trust_store,
         &table,
+        substrate.bound_host_class()?,
         &args.section,
         body,
         &args.source,
@@ -963,6 +1003,27 @@ impl ExecutionHistoryResetArgs {
     }
 }
 
+/// Whether the stopped node's installed, trusted composition selects the
+/// scheduler. The engine is built from the node's verified bundle
+/// registrations; an installed scheduler service that does not resolve or is
+/// not trusted refuses the reset.
+fn scheduler_selected_by_installed_composition(app_root: Option<PathBuf>) -> Result<bool> {
+    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+        app_root,
+        ..Default::default()
+    })
+    .context("load local node location for scheduler selection")?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot(&config.app_root)
+        .context("load verified node composition for scheduler selection")?;
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(&snapshot);
+    let engine =
+        crate::effective_metadata::build_effective_item_engine(&config.app_root, None, &bundle_roots)
+            .context("build installed-composition engine for scheduler selection")?;
+    // A build that cannot run a selected scheduler refuses.
+    ryeos_api::scheduler_selection::resolve_scheduler_selection(&engine, cfg!(feature = "scheduling"))
+        .context("derive scheduler selection from the installed composition")
+}
+
 fn run_execution_history_reset_command(
     argv: &[String],
     console: &crate::tty::Console,
@@ -989,19 +1050,27 @@ fn run_execution_history_reset_command(
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
+    // The stopped node's installed, trusted composition decides whether the
+    // scheduler participant takes part, exactly as daemon startup decides it.
+    // An unselected scheduler is never opened or created; the reset then
+    // proves the runtime holds no scheduler namespace instead.
+    let scheduler_selected = scheduler_selected_by_installed_composition(options.app_root.clone())?;
     #[cfg(feature = "scheduling")]
     let scheduler_reset = ryeos_scheduler_service::SchedulerHistoryReset::new();
     #[cfg(feature = "scheduling")]
     let scheduler_participant: Option<
         &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = Some(
+    > = scheduler_selected.then_some(
         &scheduler_reset
             as &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
     );
     #[cfg(not(feature = "scheduling"))]
     let scheduler_participant: Option<
         &dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant,
-    > = None;
+    > = {
+        let _ = scheduler_selected;
+        None
+    };
     let report = match progress.as_mut() {
         Some(progress) => {
             let mut observer =
@@ -1231,6 +1300,14 @@ struct InitArgs {
     #[arg(long)]
     node_profile: Option<String>,
 
+    /// Host class naming the kind of host this node runs on (for example
+    /// `local` for a host the operator runs, `hosted` for a hosting
+    /// provider's container). Required with --node-profile; it must be a
+    /// class the profile declares, and it selects that profile's floor for
+    /// the class. It is fixed at initialization.
+    #[arg(long, requires = "node_profile")]
+    host_class: Option<String>,
+
     /// Immutable OCI digest of the substrate image executing this node.
     #[arg(long, requires = "substrate_protocol")]
     substrate_image_digest: Option<String>,
@@ -1273,6 +1350,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             digest,
             protocol,
             args.node_profile.clone(),
+            args.host_class.clone(),
         )?),
         (None, None) => None,
         _ => unreachable!("clap enforces paired substrate identity arguments"),
@@ -1284,6 +1362,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
+        host_class: args.host_class,
         substrate_identity,
         replace_node_policy_generation: args.replace_node_policy_generation,
         skip_preflight: false,
@@ -2322,6 +2401,7 @@ fn inspect_capability_report(
                 "daemon_digest": signed.report.daemon_digest,
                 "exposure": signed.report.exposure,
                 "app_root_storage": app_root_storage_json(&signed.report),
+                "credential_home": signed.report.credential_home,
                 "floor": signed.report.floor,
                 "provided": signed.report.provided,
                 "missing": signed.report.missing,
@@ -2394,6 +2474,22 @@ fn app_root_storage_line(report: &ryeos_node::capability_report::NodeCapabilityR
     }
 }
 
+/// One line for a named report entry: the grade, provider and basis that
+/// prove it, or the reason nothing does.
+fn decision_line(
+    report: &ryeos_node::capability_report::NodeCapabilityReport,
+    name: &str,
+) -> (String, crate::tty::Tone) {
+    match (report.provided.get(name), report.missing.get(name)) {
+        (Some(evidence), _) => (
+            format!("{name} ({} by {}): {}", evidence.source.as_str(), evidence.provider, evidence.basis),
+            crate::tty::Tone::Secondary,
+        ),
+        (None, Some(reason)) => (format!("{name} missing: {reason}"), crate::tty::Tone::Warning),
+        (None, None) => (format!("{name} not decided"), crate::tty::Tone::Warning),
+    }
+}
+
 fn lillux_resident_quote() -> Option<u64> {
     ryeos_node::capability_report::resident_region_bytes().ok()
 }
@@ -2419,6 +2515,7 @@ fn capability_section(
         "profile",
         composition.profile.as_deref().unwrap_or("unrecorded"),
     ));
+    section.rows.push(crate::tty::Row::key_value("host class", &composition.host_class));
     section.rows.push(crate::tty::Row::key_value("bundles", &composition.bundles.join(", ")));
     section.rows.push(crate::tty::Row::key_value(
         "compiled features",
@@ -2431,6 +2528,13 @@ fn capability_section(
     section.rows.push(crate::tty::Row::key_value("daemon binary", &report.daemon_digest));
     let (storage, storage_tone) = app_root_storage_line(report);
     section.rows.push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    for (key, name) in [
+        ("durable state", lillux::process_control::PERSISTENCE_DURABLE_STATE),
+        ("credential home", ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME),
+    ] {
+        let (text, tone) = decision_line(report, name);
+        section.rows.push(crate::tty::Row::key_value(key, &text).with_tone(tone));
+    }
     let exposure = &report.exposure;
     section.rows.push(crate::tty::Row::key_value(
         "listeners",
@@ -3150,6 +3254,10 @@ mod tests {
             STORAGE_DURABLE_ROOT.to_owned(),
             "the app root /data/app is on overlay (the container's writable layer)".to_owned(),
         );
+        missing.insert(
+            lillux::process_control::PERSISTENCE_DURABLE_STATE.to_owned(),
+            "no persistent disk; 24 h hard lifetime (fixture)".to_owned(),
+        );
         let report = NodeCapabilityReport {
             schema: ryeos_node::capability_report::CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: "fixture".to_owned(),
@@ -3159,12 +3267,17 @@ mod tests {
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: Some("hosted-node".to_owned()),
+                host_class: "hosted".to_owned(),
                 bundles: vec!["core".to_owned()],
                 compiled_features: vec!["model-provider-setup".to_owned(), "scheduling".to_owned()],
                 policy_generation: "fixture".to_owned(),
             },
             exposure: NodeExposure::unattested(vec!["[::]:8080".to_owned()]),
             host: HostFacts::observe(0, std::path::Path::new("/")),
+            credential_home: lillux::process_control::PrivateDirectoryFacts::observe(
+                std::path::Path::new("/"),
+                std::path::Path::new("/"),
+            ),
             provided: std::collections::BTreeMap::new(),
             missing,
             capacity: std::collections::BTreeMap::new(),
@@ -3191,9 +3304,15 @@ mod tests {
             signature: String::new(),
         };
         let section = capability_section(Some(&signed), None);
+        assert_eq!(row(&section, "host class"), "hosted");
         assert_eq!(row(&section, "compiled features"), "model-provider-setup, scheduling");
         assert_eq!(row(&section, "daemon binary"), "sha256:abc");
         assert!(row(&section, "app root storage").starts_with("not durable: the app root /data/app is on overlay"));
+        assert_eq!(
+            row(&section, "durable state"),
+            "persistence:durable_state missing: no persistent disk; 24 h hard lifetime (fixture)"
+        );
+        assert_eq!(row(&section, "credential home"), "credential:private_home not decided");
         assert_eq!(row(&section, "listeners"), "[::]:8080");
         assert_eq!(row(&section, "ingress"), "unattested: no provider attests what fronts this listener");
         let json = app_root_storage_json(&report);
@@ -3261,6 +3380,7 @@ mod tests {
         NodePolicyGenerationResetArgs {
             source: PathBuf::from("/usr/share/ryeos"),
             node_profile: "full".to_string(),
+            host_class: "local".to_string(),
             trust_files: Vec::new(),
             app_root: None,
             confirm,
@@ -3276,6 +3396,24 @@ mod tests {
         let mut invalid = policy_generation_reset_args(true);
         invalid.node_profile = "../full".to_string();
         assert!(invalid.validate().is_err());
+
+        let mut noncanonical = policy_generation_reset_args(true);
+        noncanonical.host_class = "Local".to_string();
+        assert!(noncanonical.validate().is_err());
+    }
+
+    #[test]
+    fn init_takes_a_host_class_only_with_a_node_profile() {
+        use clap::Parser as _;
+        let parsed = InitArgs::try_parse_from([
+            "--node-profile",
+            "core",
+            "--host-class",
+            "hosted",
+        ])
+        .unwrap();
+        assert_eq!(parsed.host_class.as_deref(), Some("hosted"));
+        assert!(InitArgs::try_parse_from(["--host-class", "hosted"]).is_err());
     }
 
     #[test]

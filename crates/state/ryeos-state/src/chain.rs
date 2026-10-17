@@ -2595,6 +2595,34 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
             chain_root_id
         );
     }
+    // A member born live with an event successor is a child of a live
+    // upstream member of this chain. Checked against the head read under this
+    // chain lock, before any object is written, so an upstream that turned
+    // terminal can never acquire a new live child.
+    if event_successor_snapshot.is_some() {
+        let upstream_thread_id = new_snapshot.upstream_thread_id.as_deref().ok_or_else(|| {
+            anyhow!(
+                "live member {} of chain {chain_root_id} names no upstream thread",
+                new_snapshot.thread_id
+            )
+        })?;
+        let upstream = current_chain_state
+            .threads
+            .get(upstream_thread_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "live member {} names upstream {upstream_thread_id}, which is not a member of chain {chain_root_id}",
+                    new_snapshot.thread_id
+                )
+            })?;
+        if upstream.status.is_terminal() {
+            anyhow::bail!(
+                "refusing to birth live member {} under terminal upstream {upstream_thread_id} ({}) in chain {chain_root_id}",
+                new_snapshot.thread_id,
+                upstream.status.as_str()
+            );
+        }
+    }
 
     let append_timestamp =
         validation::normalize_event_timestamps(&mut events, &current_chain_state.updated_at)?;

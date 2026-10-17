@@ -514,6 +514,7 @@ async fn scheduler_at_schedule_fires() {
     let fire = poll_for_fires(&h, "at-fire-test", 1, Duration::from_secs(10))
         .await
         .expect("expected at least 1 fire within 10s");
+    let fire = await_dispatch_handoff(&h, "at-fire-test", fire).await;
 
     // Fire record exists — proves the timer dispatched
     assert_eq!(fire["schedule_id"], "at-fire-test");
@@ -607,7 +608,7 @@ async fn scheduler_interval_schedule_fires() {
         panic!("expected at least 1 fire within 8s");
     }
 
-    let fire = fire.unwrap();
+    let fire = await_dispatch_handoff(&h, "interval-fire-test", fire.unwrap()).await;
     assert_eq!(fire["schedule_id"], "interval-fire-test");
     let status_str = fire["status"].as_str().unwrap_or("");
     assert!(
@@ -619,7 +620,7 @@ async fn scheduler_interval_schedule_fires() {
 // ── Authenticated Core doctor schedule: real subprocess + retained terminal ──
 
 #[tokio::test(flavor = "multi_thread")]
-async fn scheduler_dispatches_core_doctor_and_retains_terminal_findings() {
+async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
     let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
         .await
         .expect("start Core+Scheduling daemon from prepared bundles");
@@ -663,7 +664,6 @@ async fn scheduler_dispatches_core_doctor_and_retains_terminal_findings() {
         source.starts_with(&project_root),
         "doctor source must remain inside its admitted read-only project root"
     );
-    let source_text = source.display().to_string();
     let project_root_text = project_root.display().to_string();
     // This is the exact registered Core path under the daemon's selected app root.
     let core_registry_root = h.state_path.join(".ai/bundles/core");
@@ -680,7 +680,9 @@ async fn scheduler_dispatches_core_doctor_and_retains_terminal_findings() {
             "schedule_type": "at",
             "expression": fire_at_str,
             "params": {
-                "source": source_text,
+                // The admitted plan refuses any parameter that embeds its
+                // project root, so the source is named relative to it.
+                "source": ".ai/fixtures/scheduler-doctor-probe",
                 "registry_roots": [core_registry_root.display().to_string()]
             },
             "timezone": "UTC",
@@ -732,52 +734,9 @@ async fn scheduler_dispatches_core_doctor_and_retains_terminal_findings() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    let mut retained_result = None;
-    loop {
-        let (status, body) = exec(&h, "service:threads/get", json!({"thread_id": thread_id})).await;
-        let retained = unwrap_result(status, &body, "read retained doctor thread");
-        let thread_status = retained["thread"]["status"].as_str().unwrap_or_default();
-        if thread_status == "completed" {
-            let doctor_result = retained["result"]["result"].clone();
-            assert_eq!(
-                doctor_result["source"], source_text,
-                "retained doctor report must name the admitted source: {doctor_result}"
-            );
-            assert!(
-                doctor_result["checks"]
-                    .as_array()
-                    .is_some_and(|checks| !checks.is_empty()),
-                "terminal thread must retain the doctor's findings: {retained}"
-            );
-            let manifest_finding = doctor_result["checks"]
-                .as_array()
-                .and_then(|checks| checks.iter().find(|check| check["name"] == "manifest"))
-                .expect("doctor report must retain the manifest finding");
-            assert_eq!(manifest_finding["status"], "fail");
-            assert!(
-                manifest_finding["detail"]["error"]
-                    .as_str()
-                    .is_some_and(|error| error.contains("bogus_field")),
-                "malformed manifest finding must name the fixed unknown field: {manifest_finding}"
-            );
-            assert_eq!(doctor_result["ok"], false);
-            retained_result = Some(doctor_result);
-            break;
-        }
-        assert!(
-            !matches!(
-                thread_status,
-                "failed" | "cancelled" | "killed" | "timed_out"
-            ),
-            "doctor thread reached unsuccessful terminal state: {retained}"
-        );
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "doctor subprocess did not retain terminal findings within 30 seconds"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
+    // The fire record keeps only status, outcome class, thread id and the
+    // admitted capsule hash; the doctor's findings are read back through the
+    // Core `threads/get` service once the thread is terminal.
     loop {
         let (status, body) = exec(
             &h,
@@ -793,11 +752,25 @@ async fn scheduler_dispatches_core_doctor_and_retains_terminal_findings() {
             assert!(fire["completed_at"].as_i64().is_some());
             assert_eq!(fire["thread_id"], thread_id);
             assert_eq!(fire["admitted_capsule_hash"], admitted_capsule_hash);
-            let findings = retained_result.expect("terminal thread result was retained");
-            assert_eq!(findings["ok"], false);
-            // The tool completed and retained a well-formed report even though
-            // that report identifies a project failure; these are separate
-            // lifecycle and doctor-verdict authorities.
+            // The tool completing is a lifecycle verdict; the doctor's own
+            // project verdict is a separate authority carried in its result.
+            let (status, body) =
+                exec(&h, "service:threads/get", json!({"thread_id": thread_id})).await;
+            let retained = unwrap_result(status, &body, "read retained doctor thread");
+            assert_eq!(retained["thread"]["status"], "completed", "{retained}");
+            let doctor_result = &retained["result"]["result"];
+            assert_eq!(doctor_result["ok"], false, "{retained}");
+            let manifest_finding = doctor_result["checks"]
+                .as_array()
+                .and_then(|checks| checks.iter().find(|check| check["name"] == "manifest"))
+                .expect("doctor report must retain the manifest finding");
+            assert_eq!(manifest_finding["status"], "fail");
+            assert!(
+                manifest_finding["detail"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("bogus_field")),
+                "malformed manifest finding must name the fixed unknown field: {manifest_finding}"
+            );
             h.kill_daemon()
                 .await
                 .expect("stop daemon before restoring temporary cleanup");
@@ -1299,6 +1272,25 @@ async fn scheduler_registered_at_preserved_on_update() {
 
 /// Poll `show_fires` until at least `min_count` fire records appear.
 /// Returns the first fire record.
+/// A fire record is first written as `reserved` and becomes `dispatched` (or
+/// `failed`) when the launch handoff persists, so the first sighting of the
+/// record is not yet the dispatch outcome. Follow that fire, by identity
+/// since later fires may exist, until it leaves `reserved`; a fire that stays
+/// reserved past the deadline is returned as is and fails the caller's check.
+async fn await_dispatch_handoff(h: &DaemonHarness, schedule_id: &str, mut fire: Value) -> Value {
+    let first_fire_id = fire["fire_id"].clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while fire["status"] == "reserved" && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Some(fires) = poll_for_fires_count(h, schedule_id, 1, Duration::from_secs(1)).await
+            && let Some(latest) = fires.into_iter().find(|f| f["fire_id"] == first_fire_id)
+        {
+            fire = latest;
+        }
+    }
+    fire
+}
+
 async fn poll_for_fires(
     h: &DaemonHarness,
     schedule_id: &str,

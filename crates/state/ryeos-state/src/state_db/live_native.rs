@@ -1,6 +1,7 @@
 //! Live admission belongs to the actual opening State and its retained roots.
 //! The host and paid factory are real owners; paths/roles do not mint authority.
 use super::*;
+use lillux::custody::Held;
 use lillux_sqlite::{
     OriginalNativeBoundInputs, OriginalNativeBoundMode, OriginalNativeDestinationAuthority,
     OriginalNativeDomain, OriginalNativeFactory,
@@ -1373,24 +1374,40 @@ fn retire_parent_recovery_owner(
     Ok(())
 }
 
-pub(crate) struct LiveStatePhysicalParent {
+const LIVE_STATE_PHYSICAL_PARENT_KIND: &str = "ryeos-state::live-state-physical-parent";
+
+/// Everything a physical parent owns, in the order its release drops it, plus
+/// plain copied facts. Constructible only in this module, so no caller can
+/// swap the whole out from under its custody. `process` repeats the issuing
+/// process for the mid-operation re-checks after funding callbacks.
+struct LiveStatePhysicalParentParts {
     process: u32,
     runtime: Option<Arc<lillux::PinnedDirectory>>,
     namespace: Option<lillux::PinnedDirectoryLock>,
     roots: [Option<Arc<lillux::PinnedDirectory>>; 4],
     registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>; 6],
     registry_identity: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
-    retired_root_sources_consumed: bool,
     // Authority and lease edges remain actual original obligations. Root
     // registration cannot discard these or stand in for their terminal join.
-    _host: std::mem::ManuallyDrop<Option<LiveStateNativeHost>>,
+    _host: Option<LiveStateNativeHost>,
     retired_host: Option<RetiredLiveStateHostAliases>,
     // Taken by name when the parent's recovery alias retires.
     _recovery: Option<RecoveryStore>,
-    recovery_owner_consumed: bool,
     recovery_registrations: LiveRecoveryPhysicalRegistrations,
-    _trust: std::mem::ManuallyDrop<Arc<TrustStore>>,
-    _join_link: std::mem::ManuallyDrop<Mutex<std::sync::Weak<super::destination_join::OriginalStateDestinationJoin>>>,
+    _trust: Arc<TrustStore>,
+    _join_link: Mutex<std::sync::Weak<super::destination_join::OriginalStateDestinationJoin>>,
+    retired_root_sources_consumed: bool,
+    recovery_owner_consumed: bool,
+}
+/// Settled exactly when final exhaustion would accept these parts; they then
+/// release normally. Otherwise the host, trust map, join link and every root,
+/// registration and recovery owner stay retained together until the process
+/// exits.
+fn live_state_physical_parent_exhausted(parts: &LiveStatePhysicalParentParts) -> bool {
+    parts.require_exhausted_holders().is_ok()
+}
+pub(crate) struct LiveStatePhysicalParent {
+    inner: Held<LiveStatePhysicalParentParts>,
 }
 struct RetiredLiveStateHostAliases {
     factory: std::sync::Weak<OriginalNativeFactory>,
@@ -1398,38 +1415,7 @@ struct RetiredLiveStateHostAliases {
     lease: std::sync::Weak<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
     _deadline: lillux::time::MonotonicDeadline,
 }
-impl Drop for LiveStatePhysicalParent {
-    fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept these parts.
-        // Each retained slot is taken exactly once, here; otherwise the host,
-        // trust map, join link and every root, registration and recovery
-        // owner stay retained together until the process exits.
-        let settled = self.require_exhausted_holders().is_ok();
-        let host = unsafe { std::mem::ManuallyDrop::take(&mut self._host) };
-        let trust = unsafe { std::mem::ManuallyDrop::take(&mut self._trust) };
-        let join_link = unsafe { std::mem::ManuallyDrop::take(&mut self._join_link) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process((host, trust, join_link));
-            return;
-        }
-        if settled {
-            drop(host);
-            drop(trust);
-            drop(join_link);
-        } else {
-            lillux::custody::abandon("ryeos-state::live-state-physical-parent", (
-                host, trust, join_link,
-                self.runtime.take(), self.namespace.take(),
-                std::mem::replace(&mut self.roots, std::array::from_fn(|_| None)),
-                std::mem::replace(&mut self.registrations, std::array::from_fn(|_| None)),
-                self.retired_host.take(), self._recovery.take(),
-                std::mem::replace(&mut self.recovery_registrations, LiveRecoveryPhysicalRegistrations::empty()),
-            ));
-        }
-    }
-}
-impl LiveStatePhysicalParent {
+impl LiveStatePhysicalParentParts {
     pub(crate) fn retire_host_aliases(&mut self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         store: &Arc<dyn OriginalNativeDestinationAuthority>,
@@ -1503,29 +1489,24 @@ impl LiveStatePhysicalParent {
         Ok(())
     }
 
-    pub(crate) fn storage_bound() -> anyhow::Result<u64> {
-        u64::try_from(std::mem::size_of::<Self>())?
-            .checked_add(directory_wrapper_storage_bound(4)?)
-            .context("live State parent storage quote overflow")
-    }
-    pub(crate) fn from_original(original: LiveStateNativeOwner) -> Self {
+    fn from_original(original: LiveStateNativeOwner) -> Self {
         let LiveStateNativeOwner { outside_join, host, runtime, namespace, roots, _recovery, _trust } = original;
         Self { process: std::process::id(), runtime: Some(runtime), namespace: Some(namespace),
             roots: roots.map(|root| Some(Arc::new(root))),
             registrations: std::array::from_fn(|_| None),
             registry_identity: None, retired_root_sources_consumed: false,
-            _host: std::mem::ManuallyDrop::new(Some(host)), retired_host: None, _recovery: Some(_recovery),
+            _host: Some(host), retired_host: None, _recovery: Some(_recovery),
             recovery_owner_consumed: false, recovery_registrations: LiveRecoveryPhysicalRegistrations::empty(),
-            _trust: std::mem::ManuallyDrop::new(_trust), _join_link: std::mem::ManuallyDrop::new(outside_join) }
+            _trust, _join_link: outside_join }
     }
     /// Parts in the shape final exhaustion accepts: every root, registration,
     /// host alias and recovery owner already ended.
     #[cfg(test)]
-    pub(crate) fn exhausted_for_test() -> Self {
+    fn exhausted_for_test() -> Self {
         Self { process: std::process::id(), runtime: None, namespace: None,
             roots: std::array::from_fn(|_| None), registrations: std::array::from_fn(|_| None),
             registry_identity: None, retired_root_sources_consumed: true,
-            _host: std::mem::ManuallyDrop::new(None),
+            _host: None,
             retired_host: Some(RetiredLiveStateHostAliases {
                 factory: std::sync::Weak::new(),
                 store: std::sync::Weak::<LiveStateNativeOwner>::new(),
@@ -1534,8 +1515,8 @@ impl LiveStatePhysicalParent {
             }),
             _recovery: None, recovery_owner_consumed: true,
             recovery_registrations: LiveRecoveryPhysicalRegistrations::exhausted_for_test(),
-            _trust: std::mem::ManuallyDrop::new(Arc::new(TrustStore::new())),
-            _join_link: std::mem::ManuallyDrop::new(Mutex::new(std::sync::Weak::new())) }
+            _trust: Arc::new(TrustStore::new()),
+            _join_link: Mutex::new(std::sync::Weak::new()) }
     }
     /// # Safety
     /// This whole parent remains cached in the same prepaid original outside
@@ -1958,83 +1939,117 @@ struct StartupCloseProgress {
 /// Actual cleanup holders for a State which never became a service. This
 /// neither repairs domain recovery nor certifies successful startup.
 pub struct ReleasedLiveStateStartup {
-    schema_pending: std::mem::ManuallyDrop<Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>>,
-    schema_definitions: std::mem::ManuallyDrop<Vec<crate::sqlite_schema::SchemaSqlDefinition>>,
+    inner: Held<ReleasedLiveStateStartupParts>,
+    // A plain copied fact; it carries no custody.
     projection_leases_retired: bool,
-    projection_files: std::mem::ManuallyDrop<Vec<crate::projection::OutsideOriginalProjectionCustody>>,
-    projection_native: std::mem::ManuallyDrop<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>>,
-    projection_refusals: std::mem::ManuallyDrop<Vec<anyhow::Error>>,
-    // Destination inputs taken from State terminals, pending their State leaf.
-    destination_inputs: std::mem::ManuallyDrop<Vec<StateTakenDestination>>,
-    destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>, progress: std::mem::ManuallyDrop<StartupCloseProgress> }
-/// Every field of a released startup moved out of its owner.
+}
+const RELEASED_LIVE_STATE_STARTUP_KIND: &str = "ryeos-state::released-live-state-startup";
+
+/// Everything a released startup owns. No drop settles a released startup:
+/// its progress always holds the State parent, whose namespace exclusion,
+/// roots and host authority end only through the physical-custody or census
+/// transfer that consumes this frame whole, so it is held until taken.
+/// Constructible only in this module.
 struct ReleasedLiveStateStartupParts {
     schema_pending: Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>,
     schema_definitions: Vec<crate::sqlite_schema::SchemaSqlDefinition>,
     projection_files: Vec<crate::projection::OutsideOriginalProjectionCustody>,
     projection_native: Vec<lillux_sqlite::OriginalNativeConnectionTerminal>,
     projection_refusals: Vec<anyhow::Error>,
+    // Destination inputs taken from State terminals, pending their State leaf.
     destination_inputs: Vec<StateTakenDestination>,
     destination_join: std::sync::OnceLock<Arc<super::destination_join::OriginalStateDestinationJoin>>,
     progress: StartupCloseProgress,
 }
 impl ReleasedLiveStateStartup {
-    /// Move every field out exactly once; the emptied shell is never dropped.
-    /// Whether the leases retired is a plain copied fact.
-    fn into_parts(self) -> ReleasedLiveStateStartupParts {
-        let mut released = std::mem::ManuallyDrop::new(self);
-        unsafe {
-            ReleasedLiveStateStartupParts {
-                schema_pending: std::mem::ManuallyDrop::take(&mut released.schema_pending),
-                schema_definitions: std::mem::ManuallyDrop::take(&mut released.schema_definitions),
-                projection_files: std::mem::ManuallyDrop::take(&mut released.projection_files),
-                projection_native: std::mem::ManuallyDrop::take(&mut released.projection_native),
-                projection_refusals: std::mem::ManuallyDrop::take(&mut released.projection_refusals),
-                destination_inputs: std::mem::ManuallyDrop::take(&mut released.destination_inputs),
-                destination_join: std::ptr::read(&released.destination_join),
-                progress: std::mem::ManuallyDrop::take(&mut released.progress),
-            }
+    fn new(progress: StartupCloseProgress) -> Self {
+        Self {
+            inner: Held::until_taken(
+                RELEASED_LIVE_STATE_STARTUP_KIND,
+                ReleasedLiveStateStartupParts {
+                    schema_pending: Vec::new(),
+                    schema_definitions: Vec::new(),
+                    projection_files: Vec::new(),
+                    projection_native: Vec::new(),
+                    projection_refusals: Vec::new(),
+                    destination_inputs: Vec::new(),
+                    destination_join: std::sync::OnceLock::new(),
+                    progress,
+                },
+            ),
+            projection_leases_retired: false,
         }
     }
-}
-impl Drop for ReleasedLiveStateStartup {
-    fn drop(&mut self) {
-        // No drop settles a released startup: its progress always holds the
-        // State parent, whose namespace exclusion, roots and host authority
-        // end only through the physical-custody or census transfer that
-        // consumes this frame whole. Each slot is taken exactly once, here,
-        // and everything stays retained until the process exits.
-        let parts = unsafe {(
-            std::mem::ManuallyDrop::take(&mut self.schema_pending),
-            std::mem::ManuallyDrop::take(&mut self.schema_definitions),
-            std::mem::ManuallyDrop::take(&mut self.projection_files),
-            std::mem::ManuallyDrop::take(&mut self.projection_native),
-            std::mem::ManuallyDrop::take(&mut self.projection_refusals),
-            std::mem::ManuallyDrop::take(&mut self.destination_inputs),
-            std::mem::take(&mut self.destination_join),
-            std::mem::ManuallyDrop::take(&mut self.progress),
-        )};
-        lillux::custody::abandon("ryeos-state::released-live-state-startup", parts);
+    /// Move every field out; a copy in another process is refused and comes
+    /// back still held. Whether the leases retired is a plain copied fact.
+    fn into_parts(self) -> std::result::Result<ReleasedLiveStateStartupParts, Self> {
+        let Self { inner, projection_leases_retired } = self;
+        inner.take_whole().map_err(|inner| Self { inner, projection_leases_retired })
+    }
+    /// Move every field out, for a caller that already established the
+    /// original process; a foreign copy is relinquished and the process
+    /// aborts.
+    fn into_parts_or_abort(self) -> ReleasedLiveStateStartupParts {
+        self.inner.take_or_abort()
     }
 }
 // Original failed-start frame after its redundant parent edges end. Retaining
 // this graph is a resumable source transfer, not a physical terminal receipt.
 pub struct ReleasedLiveStatePhysicalCustody {
-    process: u32,
-    projection_physical: std::mem::ManuallyDrop<super::live_native::LiveProjectionPhysicalCustody>,
-    parent: std::mem::ManuallyDrop<Option<super::live_native::LiveStateNativeOwner>>,
-    parent_parts: std::mem::ManuallyDrop<Option<super::live_native::LiveStatePhysicalParent>>,
+    inner: Held<ReleasedLiveStatePhysicalParts>,
+}
+const RELEASED_LIVE_STATE_PHYSICAL_KIND: &str = "ryeos-state::released-live-state-physical-custody";
+
+/// Everything a failed-start State frame owns, in the order its release
+/// drops it. Constructible only in this module, so no caller can swap the
+/// whole out from under its custody.
+struct ReleasedLiveStatePhysicalParts {
+    projection_physical: super::live_native::LiveProjectionPhysicalCustody,
+    parent: Option<super::live_native::LiveStateNativeOwner>,
+    parent_parts: Option<super::live_native::LiveStatePhysicalParent>,
     join: Arc<super::destination_join::OriginalStateDestinationJoin>,
-    _context: std::mem::ManuallyDrop<Option<RetiredStartupProjectionContext>>,
-    _schema: std::mem::ManuallyDrop<(Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>,
+    _context: Option<RetiredStartupProjectionContext>,
+    _schema: (Vec<Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>>,
         Vec<crate::sqlite_schema::SchemaSqlDefinition>,
-        Vec<(Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>, OriginalProjectionStateOwner)>)>,
-    _projection: std::mem::ManuallyDrop<(Vec<crate::projection::OutsideOriginalProjectionCustody>,
-        Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, Vec<anyhow::Error>)>,
-    operational: std::mem::ManuallyDrop<Option<crate::operational::OutsideOriginalOperationalCustody>>,
-    _refusal: std::mem::ManuallyDrop<Option<anyhow::Error>>,
+        Vec<(Arc<crate::sqlite_schema::ClosedNativeSchemaSqlReference>, OriginalProjectionStateOwner)>),
+    _projection: (Vec<crate::projection::OutsideOriginalProjectionCustody>,
+        Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, Vec<anyhow::Error>),
+    operational: Option<crate::operational::OutsideOriginalOperationalCustody>,
+    _refusal: Option<anyhow::Error>,
     metadata_pins: StateMetadataPinRetirement,
     native_retired: Option<StateNativeSourcesRetired>,
+}
+impl ReleasedLiveStatePhysicalParts {
+    /// The registry- and funding-free part of final exhaustion. The dropped
+    /// frame settles on exactly these checks.
+    fn require_exhausted_holders(&self) -> anyhow::Result<()> {
+        self.native_retired.as_ref()
+            .context("failed State native-source receipt absent at exhaustion")?
+            .require_retired_holders()?;
+        self.metadata_pins.require_exhausted()?;
+        self.projection_physical.require_exhausted()?;
+        anyhow::ensure!(self.parent.is_none(), "failed State parent body remains at exhaustion");
+        self.parent_parts.as_ref()
+            .context("failed State parent parts absent at exhaustion")?
+            .require_exhausted_holders()?;
+        self.join.require_exhausted_holders()?;
+        anyhow::ensure!(self._context.is_none()
+            && self._schema.0.is_empty() && self._schema.1.is_empty() && self._schema.2.is_empty()
+            && self._projection.0.is_empty() && self._projection.1.is_empty()
+            && self._projection.2.is_empty() && self._refusal.is_none(),
+            "failed State frame retains a native, schema or projection owner");
+        if let Some(operational) = self.operational.as_ref() {
+            operational.require_exhausted_holders()?;
+        }
+        Ok(())
+    }
+}
+/// Settled exactly when final exhaustion would accept the frame; it then
+/// releases normally. Otherwise every cached source, parent part, context,
+/// schema, projection, Operational owner and receipt stays retained together
+/// until the process exits.
+fn released_state_physical_settled(parts: &ReleasedLiveStatePhysicalParts) -> bool {
+    parts.require_exhausted_holders().is_ok()
 }
 struct RetiredStartupProjectionContext {
     _factory: Arc<OriginalNativeFactory>,
@@ -2054,12 +2069,12 @@ impl ReleasedLiveStatePhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign failed State projection custody");
-        self.native_retired.as_ref()
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign failed State projection custody");
+        self.inner.native_retired.as_ref()
             .context("failed State native sources were not retired before the region seal")?
             .require_retired(prepay)?;
-        self.projection_physical.consume_retired_sources(registry, prepay)?;
-        self.join.consume_retired_generated_roots(registry, prepay)
+        self.inner.get_mut().projection_physical.consume_retired_sources(registry, prepay)?;
+        self.inner.join.consume_retired_generated_roots(registry, prepay)
     }
 
     /// Consume the shared State-parent and parent-RecoveryStore roots from
@@ -2072,12 +2087,12 @@ impl ReleasedLiveStatePhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign failed State root custody");
-        anyhow::ensure!(self.native_retired.is_some(),
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign failed State root custody");
+        anyhow::ensure!(self.inner.native_retired.is_some(),
             "failed State roots cannot retire before its native-source stage");
-        self.parent_parts.as_mut().context("actual failed State parent parts absent")?
+        self.inner.get_mut().parent_parts.as_mut().context("actual failed State parent parts absent")?
             .consume_retired_root_sources(registry, prepay)?;
-        if let Some(operational) = self.operational.as_mut() {
+        if let Some(operational) = self.inner.get_mut().operational.as_mut() {
             operational.consume_retired_shared_roots(registry, prepay)?;
             operational.consume_retired_live_metadata(registry, prepay)?;
         }
@@ -2100,8 +2115,8 @@ impl ReleasedLiveStatePhysicalCustody {
         ) -> anyhow::Result<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>,
     ) -> anyhow::Result<()> {
         self.require_original(factory, terminal)?;
-        let Self { process: _, projection_physical, parent, parent_parts, join, _context, _schema,
-            _projection, operational: _, _refusal, metadata_pins, native_retired } = self;
+        let ReleasedLiveStatePhysicalParts { projection_physical, parent, parent_parts, join, _context, _schema,
+            _projection, operational: _, _refusal, metadata_pins, native_retired } = self.inner.get_mut();
         if let Some(retired) = native_retired.as_ref() {
             retired.require_original_factory(factory)?;
             return retired.require_retired(prepay);
@@ -2165,7 +2180,7 @@ impl ReleasedLiveStatePhysicalCustody {
         let receipt = metadata_pins.into_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
         // Infallible from here: each owner is moved out and ended explicitly;
         // the retained fields keep only empty values.
-        if let Some(context) = std::mem::take(&mut **_context) {
+        if let Some(context) = std::mem::take(&mut *_context) {
             let RetiredStartupProjectionContext { _factory, _terminals, _durable, _selected,
                 _schema: schema, _leases: leases, _attempts } = context;
             drop(_durable);
@@ -2175,32 +2190,32 @@ impl ReleasedLiveStatePhysicalCustody {
             drop(leases);
             drop(_factory);
         }
-        let (files, native, refusals) = std::mem::take(&mut **_projection);
+        let (files, native, refusals) = std::mem::take(&mut *_projection);
         drop(native);
         drop(refusals);
         drop(files);
-        let (pending, definitions, admission) = std::mem::take(&mut **_schema);
+        let (pending, definitions, admission) = std::mem::take(&mut *_schema);
         drop(pending);
         drop(admission);
         drop(definitions);
-        drop(std::mem::take(&mut **_refusal));
+        drop(std::mem::take(&mut *_refusal));
         *native_retired = Some(receipt);
         Ok(())
     }
 
     pub fn native_sources_retired(&self) -> bool {
-        self.native_retired.is_some()
+        self.inner.native_retired.is_some()
     }
 
     /// Cached: the live parent handoff completed and its pending mark ended.
     pub fn live_parent_completed(&self) -> anyhow::Result<bool> {
-        self.join.live_parent_completed()
+        self.inner.join.live_parent_completed()
     }
 
     /// Bounded failure diagnostics kept after the native-source stage ended
     /// the projection refusals and prior refusal: (refusal count, prior?).
     pub fn retired_native_source_diagnostics(&self) -> Option<(usize, bool)> {
-        self.native_retired.as_ref().map(StateNativeSourcesRetired::diagnostics)
+        self.inner.native_retired.as_ref().map(StateNativeSourcesRetired::diagnostics)
     }
 
     pub fn retire_parent_host_aliases(&mut self, factory: &Arc<OriginalNativeFactory>,
@@ -2210,9 +2225,10 @@ impl ReleasedLiveStatePhysicalCustody {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         self.require_original(factory, aggregate)?;
-        let parts = self.parent_parts.as_mut().context("actual State parent parts absent")?;
-        parts.retire_host_aliases(factory, aggregate, store, lease, registry, prepay)?;
-        self.join.complete_live_parent(factory, aggregate, parts, registry, prepay)
+        let parts = self.inner.get_mut();
+        let parent = parts.parent_parts.as_mut().context("actual State parent parts absent")?;
+        parent.retire_host_aliases(factory, aggregate, store, lease, registry, prepay)?;
+        parts.join.complete_live_parent(factory, aggregate, parent, registry, prepay)
     }
 
     /// # Safety
@@ -2223,21 +2239,22 @@ impl ReleasedLiveStatePhysicalCustody {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         self.require_original(factory, aggregate)?;
-        if self.parent_parts.is_none() {
-            anyhow::ensure!(self.parent.is_some(), "actual live State parent body not transferred");
+        if self.inner.parent_parts.is_none() {
+            anyhow::ensure!(self.inner.parent.is_some(), "actual live State parent body not transferred");
             let quote = quote_live_state_physical_parent()?;
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
                 prepay(quote.bytes, quote.steps))?;
             self.require_original(factory, aggregate)?;
-            let original = self.parent.take().expect("checked actual live State body");
-            *self.parent_parts = Some(super::live_native::LiveStatePhysicalParent::from_original(original));
+            let original = self.inner.get_mut().parent.take().expect("checked actual live State body");
+            self.inner.get_mut().parent_parts = Some(super::live_native::LiveStatePhysicalParent::from_original(original));
         }
-        unsafe { self.parent_parts.as_mut().expect("cached actual live State parts")
+        let parts = self.inner.get_mut();
+        unsafe { parts.parent_parts.as_mut().expect("cached actual live State parts")
             .register_roots(registry, prepay) }?;
-        let generations = self._context.as_ref().map(|context| &context._leases);
-        unsafe { self.projection_physical.register(&mut self._projection.0,
+        let generations = parts._context.as_ref().map(|context| &context._leases);
+        unsafe { parts.projection_physical.register(&mut parts._projection.0,
             generations, factory, registry, prepay) }?;
-        unsafe { self.join.register_generated_roots(registry, prepay) }
+        unsafe { parts.join.register_generated_roots(registry, prepay) }
     }
 
     /// # Safety
@@ -2250,23 +2267,24 @@ impl ReleasedLiveStatePhysicalCustody {
         self.require_original(factory, aggregate)?;
         // Upper redundant parent edges ended only after this whole frame and
         // canonical receiver were retained by the consuming constructor.
-        if self.parent.is_some() || self.parent_parts.is_some() { return Ok(()); }
-        unsafe { self.join.advance_live_parent(factory, aggregate, prepay) }?;
+        if self.inner.parent.is_some() || self.inner.parent_parts.is_some() { return Ok(()); }
+        let parts = self.inner.get_mut();
+        unsafe { parts.join.advance_live_parent(factory, aggregate, prepay) }?;
         // Preserve every actual parent field in this whole cached upper frame
         // before generated roots or the Store backedge can advance separately.
-        unsafe { self.join.transfer_live_parent(factory, aggregate, &mut self.parent, prepay) }
+        unsafe { parts.join.transfer_live_parent(factory, aggregate, &mut parts.parent, prepay) }
     }
 
     pub fn require_original(&self, factory: &Arc<OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign failed State physical frame");
-        self.join.require_original(factory, aggregate)
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign failed State physical frame");
+        self.inner.join.require_original(factory, aggregate)
     }
     pub fn require_operational_registered(&self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign failed State registration");
-        if let Some(outside) = self.operational.as_ref() {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign failed State registration");
+        if let Some(outside) = self.inner.operational.as_ref() {
             outside.require_shared_roots_registered(registry, prepay)?;
         }
         Ok(())
@@ -2283,16 +2301,16 @@ impl ReleasedLiveStateStartup {
         let checked = lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
-            self.progress.original.require_original(factory)?;
-            self.destination_join.get().context("actual failed State receiver absent")?
+            self.inner.progress.original.require_original(factory)?;
+            self.inner.destination_join.get().context("actual failed State receiver absent")?
                 .require_original(factory, aggregate)?;
-            let p = &self.progress;
+            let p = &self.inner.progress;
             anyhow::ensure!(p.operational.is_none() && p.operational_failure.is_none()
                 && p.operational_closed.is_none() && p.projection_failure.is_none()
                 && p.projection_released.is_none() && p.schema_failure.is_none()
                 && p.schema_released.is_none() && p.schema_admission_custody.is_empty()
                 && p.publication_custody.is_empty() && p.lease_setup_custody.is_empty()
-                && self.schema_pending.is_empty() && self.projection_leases_retired,
+                && self.inner.schema_pending.is_empty() && self.projection_leases_retired,
                 "failed State source handoff incomplete");
             if let Some(context) = &p.context {
                 anyhow::ensure!(context.retired_selected.is_empty()
@@ -2305,21 +2323,24 @@ impl ReleasedLiveStateStartup {
             if let Some(outside) = &p.operational_outside {
                 outside.require_shared_roots_registered(registry, prepay)?;
             }
-            anyhow::ensure!(self.destination_inputs.is_empty(),
+            anyhow::ensure!(self.inner.destination_inputs.is_empty(),
                 "failed State destination inputs remain outside the State join");
-            require_no_destination_inputs(p.context.as_ref(), &self.projection_native)?;
-            require_refusals_without_native_owners(self.projection_refusals.iter())?;
+            require_no_destination_inputs(p.context.as_ref(), &self.inner.projection_native)?;
+            require_refusals_without_native_owners(self.inner.projection_refusals.iter())?;
             let quote = quote_released_live_state_physical_custody()?;
             prepay(quote.bytes, quote.steps)?;
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
-            self.destination_join.get().context("actual failed State receiver absent after funding")?
+            self.inner.destination_join.get().context("actual failed State receiver absent after funding")?
                 .require_original(factory, aggregate)
         });
         if let Err(error) = checked { return Err((self, error)); }
         let ReleasedLiveStateStartupParts { schema_pending, schema_definitions,
             projection_files, projection_native, projection_refusals, destination_inputs,
-            destination_join, progress } = self.into_parts();
+            destination_join, progress } = match self.into_parts() {
+            Ok(parts) => parts,
+            Err(this) => return Err((this, anyhow::anyhow!("foreign failed State startup"))),
+        };
         // Checked empty above.
         drop(destination_inputs);
         let StartupCloseProgress { original, context, operational, operational_failure, operational_closed,
@@ -2346,17 +2367,23 @@ impl ReleasedLiveStateStartup {
             None => (None, None),
         };
         let frame = ReleasedLiveStatePhysicalCustody {
-            projection_physical: std::mem::ManuallyDrop::new(super::live_native::LiveProjectionPhysicalCustody::empty()),
-            parent: std::mem::ManuallyDrop::new(None),
-            parent_parts: std::mem::ManuallyDrop::new(None),
-            process: std::process::id(), join: destination_join.into_inner().expect("checked failed State receiver"),
-            _context: std::mem::ManuallyDrop::new(context),
-            _schema: std::mem::ManuallyDrop::new((schema_pending, schema_definitions, schema_admission_custody)),
-            _projection: std::mem::ManuallyDrop::new((projection_files, projection_native, projection_refusals)),
-            operational: std::mem::ManuallyDrop::new(operational_outside),
-            _refusal: std::mem::ManuallyDrop::new(prior_refusal),
-            metadata_pins: StateMetadataPinRetirement::empty(),
-            native_retired: None,
+            inner: Held::new(
+                RELEASED_LIVE_STATE_PHYSICAL_KIND,
+                ReleasedLiveStatePhysicalParts {
+                    projection_physical: super::live_native::LiveProjectionPhysicalCustody::empty(),
+                    parent: None,
+                    parent_parts: None,
+                    join: destination_join.into_inner().expect("checked failed State receiver"),
+                    _context: context,
+                    _schema: (schema_pending, schema_definitions, schema_admission_custody),
+                    _projection: (projection_files, projection_native, projection_refusals),
+                    operational: operational_outside,
+                    _refusal: prior_refusal,
+                    metadata_pins: StateMetadataPinRetirement::empty(),
+                    native_retired: None,
+                },
+                released_state_physical_settled,
+            ),
         };
         // Canonical SAME parent is retained in the receiver before either
         // redundant upper edge ends. Its roots and host controls remain there.
@@ -2376,13 +2403,13 @@ impl ReleasedLiveStateStartup {
     ) -> anyhow::Result<Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        self.destination_join.get().context("actual State destination receiver absent")?
+        self.inner.destination_join.get().context("actual State destination receiver absent")?
             .require_original(factory, aggregate)?;
-        anyhow::ensure!(self.progress.operational.is_none()
-            && self.progress.operational_failure.is_none()
-            && self.progress.operational_closed.is_none(),
+        anyhow::ensure!(self.inner.progress.operational.is_none()
+            && self.inner.progress.operational_failure.is_none()
+            && self.inner.progress.operational_closed.is_none(),
             "State retains an untransferred Operational native frame");
-        match self.progress.operational_outside.as_mut() {
+        match self.inner.get_mut().progress.operational_outside.as_mut() {
             Some(outside) => unsafe { outside.take_original_sql_custody() }.map(Some),
             None => Ok(None), // Actual pre-acquisition path; no retirement claim.
         }
@@ -2400,15 +2427,15 @@ impl ReleasedLiveStateStartup {
     ) -> anyhow::Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        self.destination_join.get().context("actual State destination receiver absent")?
+        self.inner.destination_join.get().context("actual State destination receiver absent")?
             .require_original(factory, aggregate)?;
-        anyhow::ensure!(self.progress.operational.is_none()
-            && self.progress.operational_failure.is_none()
-            && self.progress.operational_closed.is_none(),
+        anyhow::ensure!(self.inner.progress.operational.is_none()
+            && self.inner.progress.operational_failure.is_none()
+            && self.inner.progress.operational_closed.is_none(),
             "State retains an untransferred Operational native frame");
         // Before Operational acquisition there is no such physical owner.
         // If one was acquired, close/recovery cached its actual outside frame.
-        let StartupCloseProgress { operational_outside, original: parent, .. } = &mut *self.progress;
+        let StartupCloseProgress { operational_outside, original: parent, .. } = &mut self.inner.get_mut().progress;
         if let Some(outside) = operational_outside.as_mut() {
             outside.normalize_live_context(factory, aggregate, parent, prepay)?;
             unsafe { outside.register_shared_roots(registry, prepay) }?;
@@ -2426,9 +2453,9 @@ impl ReleasedLiveStateStartup {
     ) -> anyhow::Result<()> {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        self.destination_join.get().context("actual State destination receiver absent")?
+        self.inner.destination_join.get().context("actual State destination receiver absent")?
             .require_original(factory, aggregate)?;
-        let StartupCloseProgress { operational_closed, operational_outside, original: parent, .. } = &mut *self.progress;
+        let StartupCloseProgress { operational_closed, operational_outside, original: parent, .. } = &mut self.inner.get_mut().progress;
 
         if let Some(outside) = operational_outside {
             return outside.advance_live_native_receipt(factory, aggregate, prepay);
@@ -2447,27 +2474,28 @@ impl ReleasedLiveStateStartup {
 
     fn advance_closed_schema_sources(&mut self,
         factory: &Arc<OriginalNativeFactory>, prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
-        let StartupCloseProgress { original, context, schema_admission_custody, .. } = &mut *self.progress;
+        let parts = self.inner.get_mut();
+        let StartupCloseProgress { original, context, schema_admission_custody, .. } = &mut parts.progress;
         let registered = match context.as_ref() {
             Some(context) => context.schema_references.try_lock().map_err(|_| anyhow::anyhow!("startup schema quote registry busy or poisoned"))?.len(),
             None => 0,
         };
         let incoming = registered.checked_add(schema_admission_custody.len()).context("startup schema incoming count overflow")?;
-        let count = incoming.checked_add(self.schema_pending.len()).context("startup schema source count overflow")?;
+        let count = incoming.checked_add(parts.schema_pending.len()).context("startup schema source count overflow")?;
         if count == 0 { return Ok(()); }
         let quote = quote_startup_closed_schema_sources(
-            self.schema_pending.len(), incoming,
-            self.schema_definitions.len(), self.projection_native.len(),
+            parts.schema_pending.len(), incoming,
+            parts.schema_definitions.len(), parts.projection_native.len(),
         )?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        self.schema_pending.try_reserve_exact(incoming)?;
-        self.schema_definitions.try_reserve_exact(count)?;
-        self.projection_native.try_reserve_exact(count)?;
+        parts.schema_pending.try_reserve_exact(incoming)?;
+        parts.schema_definitions.try_reserve_exact(count)?;
+        parts.projection_native.try_reserve_exact(count)?;
         if let Some(context) = context.as_mut() {
             let mut references = context.schema_references.try_lock().map_err(|_| anyhow::anyhow!("startup schema registry busy or poisoned"))?;
             anyhow::ensure!(references.len() <= registered, "startup schema registry changed after original quote");
-            self.schema_pending.append(&mut references);
+            parts.schema_pending.append(&mut references);
         }
         while let Some((reference, parent)) = schema_admission_custody.last() {
             anyhow::ensure!(matches!(parent, OriginalProjectionStateOwner::Live(parent) if Arc::ptr_eq(parent, original)), "startup schema admission belongs to another original State");
@@ -2475,23 +2503,23 @@ impl ReleasedLiveStateStartup {
             // parent alias retires; the retained original State remains here.
             let _ = reference;
             let (reference, parent) = schema_admission_custody.pop().expect("actual cached schema admission");
-            self.schema_pending.push(reference);
+            parts.schema_pending.push(reference);
             drop(parent);
         }
-        for index in (0..self.schema_pending.len()).rev() {
-            if self.schema_pending.iter().take(index).any(|reference| Arc::ptr_eq(reference, &self.schema_pending[index])) {
-                drop(self.schema_pending.remove(index));
+        for index in (0..parts.schema_pending.len()).rev() {
+            if parts.schema_pending.iter().take(index).any(|reference| Arc::ptr_eq(reference, &parts.schema_pending[index])) {
+                drop(parts.schema_pending.remove(index));
             }
         }
-        while let Some(reference) = self.schema_pending.pop() {
+        while let Some(reference) = parts.schema_pending.pop() {
             match Arc::try_unwrap(reference) {
                 Ok(reference) => {
                     let (definition, proof) = reference.into_original_parts();
-                    self.schema_definitions.push(definition);
-                    self.projection_native.push(proof);
+                    parts.schema_definitions.push(definition);
+                    parts.projection_native.push(proof);
                 }
                 Err(reference) => {
-                    self.schema_pending.push(reference);
+                    parts.schema_pending.push(reference);
                     anyhow::bail!("actual startup closed schema still has an external alias");
                 }
             }
@@ -2506,31 +2534,31 @@ impl ReleasedLiveStateStartup {
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         factory.require_original_process()?;
         terminal.require_original(factory)?;
-        self.destination_join.get().context("actual startup State receiver not prepared")?.require_original(factory, terminal)?;
-        if let Some(operational) = &mut self.progress.operational_closed {
+        self.inner.destination_join.get().context("actual startup State receiver not prepared")?.require_original(factory, terminal)?;
+        if let Some(operational) = &mut self.inner.get_mut().progress.operational_closed {
             operational.advance_live_schema_sources(factory, terminal, prepay)?;
         }
         self.advance_closed_schema_sources(factory, prepay)?;
-        let Some(released) = self.progress.schema_released.as_ref() else { return Ok(()); };
+        let Some(released) = self.inner.progress.schema_released.as_ref() else { return Ok(()); };
         released.terminal(factory)?;
         let quote = quote_startup_released_schema_source(
-            self.schema_definitions.len(), self.projection_native.len(), self.projection_refusals.len(),
+            self.inner.schema_definitions.len(), self.inner.projection_native.len(), self.inner.projection_refusals.len(),
         )?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
             prepay(quote.bytes, quote.steps))?;
-        self.schema_definitions.try_reserve_exact(1)?;
-        self.projection_native.try_reserve_exact(1)?;
-        self.projection_refusals.try_reserve_exact(1)?;
-        let released = self.progress.schema_released.take().expect("cached actual released schema source");
+        self.inner.get_mut().schema_definitions.try_reserve_exact(1)?;
+        self.inner.get_mut().projection_native.try_reserve_exact(1)?;
+        self.inner.get_mut().projection_refusals.try_reserve_exact(1)?;
+        let released = self.inner.get_mut().progress.schema_released.take().expect("cached actual released schema source");
         match released.into_original_parts(factory, terminal) {
             Ok((definition, proof, error)) => {
-                if let Some(definition) = definition { self.schema_definitions.push(definition); }
-                if let Some(proof) = proof { self.projection_native.push(proof); }
-                self.projection_refusals.push(error);
+                if let Some(definition) = definition { self.inner.get_mut().schema_definitions.push(definition); }
+                if let Some(proof) = proof { self.inner.get_mut().projection_native.push(proof); }
+                self.inner.get_mut().projection_refusals.push(error);
                 Ok(())
             }
             Err(released) => {
-                self.progress.schema_released = Some(released);
+                self.inner.get_mut().progress.schema_released = Some(released);
                 anyhow::bail!("original released schema source transfer refused")
             }
         }
@@ -2541,9 +2569,10 @@ impl ReleasedLiveStateStartup {
     pub fn advance_destination_input_sources(&mut self,
         factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
-        let join = self.destination_join.get().context("actual failed-start State receiver not prepared")?;
-        advance_destination_input_sources(self.progress.context.as_ref(),
-            &self.projection_native, &mut self.destination_inputs, join, factory, terminal, prepay)
+        let parts = self.inner.get_mut();
+        let join = parts.destination_join.get().context("actual failed-start State receiver not prepared")?;
+        advance_destination_input_sources(parts.progress.context.as_ref(),
+            &parts.projection_native, &mut parts.destination_inputs, join, factory, terminal, prepay)
     }
     /// Consume actual recovered projection sources while the whole unpublished
     /// State stays under its original Store supervisor. Native ACK and receiver
@@ -2551,11 +2580,12 @@ impl ReleasedLiveStateStartup {
     pub fn advance_projection_sources(&mut self,
         factory: &Arc<OriginalNativeFactory>, terminal: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let parts = self.inner.get_mut();
         factory.require_original_process()?;
         terminal.require_original(factory)?;
-        self.destination_join.get().context("actual failed-start State receiver not prepared")?.require_original(factory, terminal)?;
+        parts.destination_join.get().context("actual failed-start State receiver not prepared")?.require_original(factory, terminal)?;
         let StartupCloseProgress { context, projection_released, publication_custody,
-            lease_setup_custody, .. } = &mut *self.progress;
+            lease_setup_custody, .. } = &mut parts.progress;
         let retired_count = context.as_ref().map_or(0, |context| context.retired_selected.len());
         let lease_count = match context.as_ref() {
             Some(context) => context.generation_leases.try_lock().map_err(|_| anyhow::anyhow!("startup generation source busy or poisoned"))?.len(),
@@ -2566,14 +2596,14 @@ impl ReleasedLiveStateStartup {
             .and_then(|count| count.checked_add(lease_setup_custody.len()))
             .context("startup projection count overflow")?;
         if count == 0 && (self.projection_leases_retired || lease_count == 0) { return Ok(()); }
-        let memory = super::live_close::quote_startup_projection_source_transfer(count, lease_count, self.projection_files.len(), self.projection_native.len(), self.projection_refusals.len())?.bytes;
+        let memory = super::live_close::quote_startup_projection_source_transfer(count, lease_count, parts.projection_files.len(), parts.projection_native.len(), parts.projection_refusals.len())?.bytes;
         let work = u64::try_from(count)?.checked_mul(u64::try_from(count)?)
             .and_then(|work| work.checked_add(u64::try_from(lease_count).ok()?))
             .and_then(|work| work.checked_add(8)).context("startup projection source work overflow")?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(memory, work))?;
-        self.projection_files.try_reserve_exact(count)?;
-        self.projection_native.try_reserve_exact(count)?;
-        self.projection_refusals.try_reserve_exact(count)?;
+        parts.projection_files.try_reserve_exact(count)?;
+        parts.projection_native.try_reserve_exact(count)?;
+        parts.projection_refusals.try_reserve_exact(count)?;
         if let Some(context) = context.as_mut() {
             let leases = {
                 let retained = context.generation_leases.try_lock().map_err(|_| anyhow::anyhow!("startup generation source busy or poisoned"))?;
@@ -2585,9 +2615,9 @@ impl ReleasedLiveStateStartup {
         self.projection_leases_retired = true;
         if let Some(released) = projection_released.take() {
             let (files, proof, error) = released.into_outside_custody();
-            self.projection_files.push(files);
-            self.projection_native.push(proof);
-            self.projection_refusals.push(error);
+            parts.projection_files.push(files);
+            parts.projection_native.push(proof);
+            parts.projection_refusals.push(error);
         }
         while let Some((staged, _, _, _)) = publication_custody.last() {
             // The durable proof stays canonical in the startup context; only
@@ -2602,7 +2632,7 @@ impl ReleasedLiveStateStartup {
             match Arc::try_unwrap(staged) {
                 Ok(staged) => {
                     let (files, proof) = staged.into_outside_custody();
-                    self.projection_files.push(files);
+                    parts.projection_files.push(files);
                     drop(proof);
                     drop(recovery);
                     drop(instance_id);
@@ -2619,7 +2649,7 @@ impl ReleasedLiveStateStartup {
                 "generation lease setup belongs to another original factory");
             let (sidecar, directory, name, owner) =
                 lease_setup_custody.pop().expect("cached generation lease setup custody");
-            self.projection_files.push(crate::projection::OutsideOriginalProjectionCustody::lease_setup_directory(directory));
+            parts.projection_files.push(crate::projection::OutsideOriginalProjectionCustody::lease_setup_directory(directory));
             // The aggregate native terminal was verified above, so no native
             // owner can still depend on this creation descriptor's inode.
             drop(sidecar);
@@ -2635,8 +2665,8 @@ impl ReleasedLiveStateStartup {
                 match Arc::try_unwrap(owner) {
                     Ok(owner) => {
                         let (files, proof) = owner.into_outside_custody();
-                        self.projection_files.push(files);
-                        self.projection_native.push(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof));
+                        parts.projection_files.push(files);
+                        parts.projection_native.push(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(proof));
                     }
                     Err(owner) => {
                         previous.push(owner);
@@ -2649,7 +2679,7 @@ impl ReleasedLiveStateStartup {
     }
     pub fn require_original_store_parent(&self,
         store: &Arc<dyn OriginalNativeDestinationAuthority>, factory: &Arc<OriginalNativeFactory>) -> anyhow::Result<()> {
-        self.progress.original.require_original_store_parent(store, factory)
+        self.inner.progress.original.require_original_store_parent(store, factory)
     }
     /// The original failed-start State remains the canonical parent. Retain
     /// its same receiver before transferring actual destination leaf packets.
@@ -2658,15 +2688,15 @@ impl ReleasedLiveStateStartup {
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
         factory.require_original_process()?;
         terminal.require_original(factory)?;
-        if let Some(join) = self.destination_join.get() { return join.require_original(factory, terminal); }
-        let parent = OriginalProjectionStateOwner::Live(self.progress.original.clone());
+        if let Some(join) = self.inner.destination_join.get() { return join.require_original(factory, terminal); }
+        let parent = OriginalProjectionStateOwner::Live(self.inner.progress.original.clone());
         let join = parent.original_destination_join(factory, terminal, prepay)?;
-        let _ = self.destination_join.set(join);
-        self.destination_join.get().context("failed-start State receiver publication absent")?.require_original(factory, terminal)
+        let _ = self.inner.destination_join.set(join);
+        self.inner.destination_join.get().context("failed-start State receiver publication absent")?.require_original(factory, terminal)
     }
     fn generation_registry_snapshot(&self) -> anyhow::Result<Vec<Arc<crate::projection::OriginalGenerationLease>>> {
-        self.progress.original.factory().require_original_process()?;
-        let Some(context) = &self.progress.context else { return Ok(Vec::new()); };
+        self.inner.progress.original.factory().require_original_process()?;
+        let Some(context) = &self.inner.progress.context else { return Ok(Vec::new()); };
         let leases = context.generation_leases.try_lock()
             .map_err(|_| anyhow::anyhow!("startup generation registry busy or poisoned"))?;
         Ok(leases.clone())
@@ -2691,17 +2721,17 @@ impl ReleasedLiveStateStartup {
     pub fn native_terminals(&self, factory: &Arc<OriginalNativeFactory>)
         -> anyhow::Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>> {
         factory.require_original_process()?;
-        anyhow::ensure!(self.progress.operational_outside.is_none(), "Operational source already transferred after aggregate acknowledgement");
-        self.progress.original.require_original(factory)?;
+        anyhow::ensure!(self.inner.progress.operational_outside.is_none(), "Operational source already transferred after aggregate acknowledgement");
+        self.inner.progress.original.require_original(factory)?;
         let mut terminals = Vec::new();
-        if let Some(closed) = &self.progress.operational_closed { terminals.extend(closed.native_terminals()?); }
-        if let Some(released) = &self.progress.projection_released { terminals.push(released.terminal().clone()); }
-        for proof in self.projection_native.iter() { proof.require_original(factory)?; terminals.push(proof.clone()); }
-        for reference in self.schema_pending.iter() { reference.terminal().require_original(factory)?; terminals.push(reference.terminal().clone()); }
-        if let Some(released) = &self.progress.schema_released {
+        if let Some(closed) = &self.inner.progress.operational_closed { terminals.extend(closed.native_terminals()?); }
+        if let Some(released) = &self.inner.progress.projection_released { terminals.push(released.terminal().clone()); }
+        for proof in self.inner.projection_native.iter() { proof.require_original(factory)?; terminals.push(proof.clone()); }
+        for reference in self.inner.schema_pending.iter() { reference.terminal().require_original(factory)?; terminals.push(reference.terminal().clone()); }
+        if let Some(released) = &self.inner.progress.schema_released {
             if let Some(terminal) = released.terminal(factory)? { terminals.push(terminal.clone()); }
         }
-        if let Some(context) = &self.progress.context {
+        if let Some(context) = &self.inner.progress.context {
             anyhow::ensure!(Arc::ptr_eq(&context.factory, factory), "foreign startup projection context");
             for terminal in &context.terminals { terminals.push(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(Arc::clone(terminal))); }
             for closed in &context.retired_selected {
@@ -2715,7 +2745,7 @@ impl ReleasedLiveStateStartup {
                 .map_err(|_| anyhow::anyhow!("startup schema receipt custody busy"))?;
             for reference in references.iter() { terminals.push(reference.terminal().clone()); }
         }
-        for (reference, _) in &self.progress.schema_admission_custody {
+        for (reference, _) in &self.inner.progress.schema_admission_custody {
             let terminal = reference.terminal();
             let exists = terminals.iter().any(|actual| match (actual, terminal) {
                 (lillux_sqlite::OriginalNativeConnectionTerminal::Closed(a), lillux_sqlite::OriginalNativeConnectionTerminal::Closed(b)) => Arc::ptr_eq(a, b),
@@ -2737,12 +2767,12 @@ impl ReleasedLiveStateStartup {
         -> std::result::Result<super::LiveStateCensus, (Self, anyhow::Error)> {
         let collected = (|| -> anyhow::Result<super::LiveStateCensus> {
             factory.require_original_process()?;
-            anyhow::ensure!(Arc::ptr_eq(self.progress.original.factory(), factory),
+            anyhow::ensure!(Arc::ptr_eq(self.inner.progress.original.factory(), factory),
                 "failed-start State census selected a foreign factory");
-            let progress = &self.progress;
-            anyhow::ensure!(self.destination_join.get().is_none() && self.destination_inputs.is_empty()
-                && self.projection_files.is_empty() && self.projection_refusals.is_empty()
-                && self.schema_definitions.is_empty() && !self.projection_leases_retired
+            let progress = &self.inner.progress;
+            anyhow::ensure!(self.inner.destination_join.get().is_none() && self.inner.destination_inputs.is_empty()
+                && self.inner.projection_files.is_empty() && self.inner.projection_refusals.is_empty()
+                && self.inner.schema_definitions.is_empty() && !self.projection_leases_retired
                 && progress.operational_outside.is_none(),
                 "failed-start State began an outside source handoff");
             anyhow::ensure!(progress.operational.is_none() && progress.operational_failure.is_none()
@@ -2762,7 +2792,10 @@ impl ReleasedLiveStateStartup {
         };
         let ReleasedLiveStateStartupParts { schema_pending, schema_definitions, projection_files,
             projection_native, projection_refusals, destination_inputs, destination_join, progress } =
-            self.into_parts();
+            match self.into_parts() {
+                Ok(parts) => parts,
+                Err(this) => return Err((this, anyhow::anyhow!("foreign failed State startup"))),
+            };
         // Each vector is either checked empty above or carries terminals the
         // census now also holds.
         drop((schema_pending, schema_definitions, projection_files, projection_native,
@@ -2779,13 +2812,44 @@ impl ReleasedLiveStateStartup {
         census.prior_refusal = prior_refusal;
         Ok(census)
     }
-    pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.progress.prior_refusal.as_ref() }
+    pub fn prior_refusal(&self) -> Option<&anyhow::Error> { self.inner.progress.prior_refusal.as_ref() }
 }
 enum StartupRecoveryCustody {
     Opening(LiveStateDatabaseOpenFailure),
-    Closing { factory: Arc<OriginalNativeFactory>, progress: std::mem::ManuallyDrop<Mutex<StartupCloseProgress>> },
+    Closing { factory: Arc<OriginalNativeFactory>, progress: Mutex<StartupCloseProgress> },
 }
-pub struct LiveStateStartupRecoveryFailure { custody: StartupRecoveryCustody }
+const STATE_STARTUP_RECOVERY_KIND: &str = "ryeos-state::state-startup-recovery-failure";
+
+/// What a refused recovery owns. Constructible only in this module.
+struct LiveStateStartupRecoveryParts {
+    custody: StartupRecoveryCustody,
+}
+/// No drop settles a refused closing recovery: its progress stays retained
+/// whole, with its factory alias, until the process exits. An opening failure
+/// retains its own checkout through that checkout's Drop, so it releases
+/// normally here.
+fn state_recovery_failure_settled(parts: &LiveStateStartupRecoveryParts) -> bool {
+    matches!(parts.custody, StartupRecoveryCustody::Opening(_))
+}
+pub struct LiveStateStartupRecoveryFailure {
+    inner: Held<LiveStateStartupRecoveryParts>,
+}
+impl LiveStateStartupRecoveryFailure {
+    fn new(custody: StartupRecoveryCustody) -> Self {
+        Self {
+            inner: Held::new(
+                STATE_STARTUP_RECOVERY_KIND,
+                LiveStateStartupRecoveryParts { custody },
+                state_recovery_failure_settled,
+            ),
+        }
+    }
+    /// Move the whole custody out; a copy in another process is refused and
+    /// comes back still held.
+    fn into_custody(self) -> std::result::Result<StartupRecoveryCustody, Self> {
+        self.inner.take_whole().map(|parts| parts.custody).map_err(|inner| Self { inner })
+    }
+}
 impl std::fmt::Debug for LiveStateStartupRecoveryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveStateStartupRecoveryFailure").finish_non_exhaustive()
@@ -2798,7 +2862,7 @@ impl std::error::Error for LiveStateStartupRecoveryFailure {}
 impl LiveStateDatabaseOpenFailure {
     pub fn close_retained(self) -> std::result::Result<ReleasedLiveStateStartup, LiveStateStartupRecoveryFailure> {
         if self.factory.require_original_process().is_err() {
-            return Err(LiveStateStartupRecoveryFailure { custody: StartupRecoveryCustody::Opening(self) });
+            return Err(LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Opening(self)));
         }
         let Self { error, factory: _, _custody } = self;
         let mut custody = _custody.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2848,31 +2912,44 @@ impl LiveStateDatabaseOpenFailure {
 }
 impl LiveStateStartupRecoveryFailure {
     pub fn retry(self) -> std::result::Result<ReleasedLiveStateStartup, Self> {
-        match self.custody {
+        let custody = match self.into_custody() {
+            Ok(custody) => custody,
+            Err(this) => return Err(this),
+        };
+        match custody {
             StartupRecoveryCustody::Opening(failure) => failure.close_retained(),
             StartupRecoveryCustody::Closing { factory, progress } => {
                 if factory.require_original_process().is_err() {
-                    return Err(Self { custody: StartupRecoveryCustody::Closing { factory, progress } });
+                    return Err(Self::new(StartupRecoveryCustody::Closing { factory, progress }));
                 }
-                advance_startup_close(std::mem::ManuallyDrop::into_inner(progress)
-                    .into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+                advance_startup_close(progress.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
             }
         }
     }
 }
+/// Kind under which a startup close progress unwound mid-step is retained.
+const STARTUP_CLOSE_UNWIND: &str = "ryeos-state::state-startup-close-unwind";
 fn advance_startup_close(progress: StartupCloseProgress)
     -> std::result::Result<ReleasedLiveStateStartup, LiveStateStartupRecoveryFailure> {
-    // Unwind cannot implicitly drop active SQL or generation custody. Normal
-    // success/refusal explicitly transfers this one actual checkout.
-    let mut progress = std::mem::ManuallyDrop::new(progress);
-    let retain = |progress: std::mem::ManuallyDrop<StartupCloseProgress>| {
-        let progress = std::mem::ManuallyDrop::into_inner(progress);
-        LiveStateStartupRecoveryFailure {
-            custody: StartupRecoveryCustody::Closing { factory: Arc::clone(progress.original.factory()),
-                progress: std::mem::ManuallyDrop::new(Mutex::new(progress)) },
-        }
-    };
+    // Unwind cannot implicitly drop active SQL or generation custody: the
+    // progress is held from here on, so a panicking step retains this one
+    // actual checkout whole. Normal success/refusal explicitly transfers it.
     let factory = Arc::clone(progress.original.factory());
+    if factory.require_original_process().is_err() {
+        // Refused before any step: the progress goes back unchanged, still
+        // owned by the recovery failure, in this process or a copied one.
+        return Err(LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Closing {
+            factory: Arc::clone(&factory), progress: Mutex::new(progress) }));
+    }
+    let mut progress = lillux::custody::Held::until_taken(STARTUP_CLOSE_UNWIND, progress);
+    let retain = |progress: lillux::custody::Held<StartupCloseProgress>| {
+        // The progress was held only after the original process was confirmed,
+        // so a foreign copy here means a forked child resumed this frame; it
+        // is relinquished and the process aborts.
+        let progress = progress.take_or_abort();
+        LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Closing {
+            factory: Arc::clone(progress.original.factory()), progress: Mutex::new(progress) })
+    };
     let validated = (|| -> anyhow::Result<_> {
         factory.require_original_process()?;
         progress.original.require_original(&factory)?;
@@ -2881,43 +2958,42 @@ fn advance_startup_close(progress: StartupCloseProgress)
         Ok(guard)
     })();
     let guard = match validated { Ok(guard) => guard, Err(_) => return Err(retain(progress)) };
-    if let Some(operational) = progress.operational.take() {
+    if let Some(operational) = progress.get_mut().operational.take() {
         match operational.close_live(Arc::clone(&factory)) {
-            Ok(closed) => progress.operational_closed = Some(closed),
-            Err(failure) => progress.operational_failure = Some(failure),
+            Ok(closed) => progress.get_mut().operational_closed = Some(closed),
+            Err(failure) => progress.get_mut().operational_failure = Some(failure),
         }
-    } else if let Some(failure) = progress.operational_failure.take() {
+    } else if let Some(failure) = progress.get_mut().operational_failure.take() {
         match failure.retry_close() {
-            Ok(closed) => progress.operational_closed = Some(closed),
-            Err(failure) => progress.operational_failure = Some(failure),
+            Ok(closed) => progress.get_mut().operational_closed = Some(closed),
+            Err(failure) => progress.get_mut().operational_failure = Some(failure),
         }
     }
     if progress.operational_failure.is_some() { return Err(retain(progress)); }
-    if let Some(failure) = progress.projection_failure.take() {
+    if let Some(failure) = progress.get_mut().projection_failure.take() {
         match failure.retry_close(&factory) {
-            Ok(released) => progress.projection_released = Some(released),
-            Err(failure) => { progress.projection_failure = Some(failure); return Err(retain(progress)); }
+            Ok(released) => progress.get_mut().projection_released = Some(released),
+            Err(failure) => { progress.get_mut().projection_failure = Some(failure); return Err(retain(progress)); }
         }
     }
-    if let Some(failure) = progress.schema_failure.take() {
+    if let Some(failure) = progress.get_mut().schema_failure.take() {
         match failure.close_retained() {
-            Ok(released) => progress.schema_released = Some(released),
-            Err(failure) => { progress.schema_failure = Some(failure); return Err(retain(progress)); }
+            Ok(released) => progress.get_mut().schema_released = Some(released),
+            Err(failure) => { progress.get_mut().schema_failure = Some(failure); return Err(retain(progress)); }
         }
     }
     drop(guard);
-    let released = ReleasedLiveStateStartup {
-        schema_pending: std::mem::ManuallyDrop::new(Vec::new()),
-        schema_definitions: std::mem::ManuallyDrop::new(Vec::new()),
-        projection_leases_retired: false,
-        projection_files: std::mem::ManuallyDrop::new(Vec::new()),
-        projection_native: std::mem::ManuallyDrop::new(Vec::new()),
-        projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
-        destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
-        destination_join: std::sync::OnceLock::new(), progress };
+    let progress = match progress.take_whole() {
+        Ok(progress) => progress,
+        Err(foreign_copy) => return Err(retain(foreign_copy)),
+    };
+    let released = ReleasedLiveStateStartup::new(progress);
     if released.native_terminals(&factory).is_err() {
         // Only the progress carries owners; the other slots are still empty.
-        let progress = std::mem::ManuallyDrop::new(released.into_parts().progress);
+        // The startup was just issued in the original process, which this
+        // frame confirmed at its start.
+        let progress = lillux::custody::Held::until_taken(
+            STARTUP_CLOSE_UNWIND, released.into_parts_or_abort().progress);
         return Err(retain(progress));
     }
     Ok(released)
@@ -3044,7 +3120,7 @@ impl StateMetadataPinRetirement {
     }
 }
 
-impl LiveStatePhysicalParent {
+impl LiveStatePhysicalParentParts {
     pub(crate) fn require_exhausted(
         &self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
@@ -3067,11 +3143,71 @@ impl LiveStatePhysicalParent {
         self.recovery_registrations.require_exhausted_holders()
     }
 
-    /// Consumption after `require_exhausted`: the exhausted parts' own Drop
-    /// releases every slot normally. The RecoveryStore was already taken by
-    /// host-alias retirement, so its slot is empty.
-    pub(crate) fn exhaust(self) {
-        drop(self);
+}
+impl LiveStatePhysicalParent {
+    fn from_parts(parts: LiveStatePhysicalParentParts) -> Self {
+        Self { inner: Held::new(LIVE_STATE_PHYSICAL_PARENT_KIND, parts, live_state_physical_parent_exhausted) }
+    }
+    pub(crate) fn from_original(original: LiveStateNativeOwner) -> Self {
+        Self::from_parts(LiveStatePhysicalParentParts::from_original(original))
+    }
+    #[cfg(test)]
+    pub(crate) fn exhausted_for_test() -> Self {
+        Self::from_parts(LiveStatePhysicalParentParts::exhausted_for_test())
+    }
+    pub(crate) fn storage_bound() -> anyhow::Result<u64> {
+        u64::try_from(std::mem::size_of::<Self>())?
+            .checked_add(directory_wrapper_storage_bound(4)?)
+            .context("live State parent storage quote overflow")
+    }
+    pub(crate) fn retire_host_aliases(&mut self, factory: &Arc<OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        store: &Arc<dyn OriginalNativeDestinationAuthority>,
+        lease: &Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign live State host alias transfer");
+        self.inner.get_mut().retire_host_aliases(factory, aggregate, store, lease, registry, prepay)
+    }
+    pub(crate) fn require_completed_outside_parent(&self,
+        join: &Arc<super::destination_join::OriginalStateDestinationJoin>,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign live State parent completion");
+        self.inner.require_completed_outside_parent(join, registry)
+    }
+    /// # Safety
+    /// This whole parent remains cached in the same prepaid original outside
+    /// frame. Registration never closes sources or ends host/Store authority.
+    pub(crate) unsafe fn register_roots(&mut self,
+        registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign live State physical parent");
+        unsafe { self.inner.get_mut().register_roots(registry, prepay) }
+    }
+    pub(crate) fn consume_retired_root_sources(
+        &mut self,
+        registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign retired State parent roots");
+        self.inner.get_mut().consume_retired_root_sources(registry, prepay)
+    }
+    pub(crate) fn require_registered_with_prepay(&self,
+        registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign State parent registration census");
+        self.inner.require_registered_with_prepay(registry, prepay)
+    }
+    pub(crate) fn require_exhausted(
+        &self,
+        registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign State parent parts at exhaustion");
+        self.inner.require_exhausted(registry)
+    }
+    pub(crate) fn require_exhausted_holders(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign State parent parts at exhaustion");
+        self.inner.require_exhausted_holders()
     }
 }
 
@@ -3094,14 +3230,14 @@ impl ReleasedLiveStatePhysicalCustody {
     ) -> std::result::Result<(), (Self, anyhow::Error)> {
         let checked = (|| -> anyhow::Result<()> {
             self.require_exhausted_holders()?;
-            self.native_retired.as_ref()
+            self.inner.native_retired.as_ref()
                 .context("failed State native-source receipt absent at exhaustion")?
                 .require_retired(prepay)?;
-            (&*self.parent_parts).as_ref()
+            self.inner.parent_parts.as_ref()
                 .context("failed State parent parts absent at exhaustion")?
                 .require_exhausted(registry)?;
-            self.join.require_exhausted(registry)?;
-            if let Some(operational) = (&*self.operational).as_ref() {
+            self.inner.join.require_exhausted(registry)?;
+            if let Some(operational) = self.inner.operational.as_ref() {
                 operational.require_exhausted(registry)?;
             }
             Ok(())
@@ -3118,60 +3254,10 @@ impl ReleasedLiveStatePhysicalCustody {
     /// The registry- and funding-free part of final exhaustion. The dropped
     /// frame settles on exactly these checks.
     fn require_exhausted_holders(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.process == std::process::id(), "foreign failed State frame at exhaustion");
-        self.native_retired.as_ref()
-            .context("failed State native-source receipt absent at exhaustion")?
-            .require_retired_holders()?;
-        self.metadata_pins.require_exhausted()?;
-        self.projection_physical.require_exhausted()?;
-        anyhow::ensure!(self.parent.is_none(), "failed State parent body remains at exhaustion");
-        (&*self.parent_parts).as_ref()
-            .context("failed State parent parts absent at exhaustion")?
-            .require_exhausted_holders()?;
-        self.join.require_exhausted_holders()?;
-        anyhow::ensure!(self._context.is_none()
-            && self._schema.0.is_empty() && self._schema.1.is_empty() && self._schema.2.is_empty()
-            && self._projection.0.is_empty() && self._projection.1.is_empty()
-            && self._projection.2.is_empty() && self._refusal.is_none(),
-            "failed State frame retains a native, schema or projection owner");
-        if let Some(operational) = (&*self.operational).as_ref() {
-            operational.require_exhausted_holders()?;
-        }
-        Ok(())
+        anyhow::ensure!(!self.inner.is_foreign(), "foreign failed State frame at exhaustion");
+        self.inner.require_exhausted_holders()
     }
 }
-impl Drop for ReleasedLiveStatePhysicalCustody {
-    fn drop(&mut self) {
-        // Settled exactly when final exhaustion would accept the frame. Each
-        // retained slot is taken exactly once, here; otherwise every cached
-        // source, parent part, context, schema, projection and Operational
-        // owner stays retained together until the process exits.
-        let settled = self.require_exhausted_holders().is_ok();
-        let taken = unsafe {(
-            std::mem::ManuallyDrop::take(&mut self.projection_physical),
-            std::mem::ManuallyDrop::take(&mut self.parent),
-            std::mem::ManuallyDrop::take(&mut self.parent_parts),
-            std::mem::ManuallyDrop::take(&mut self._context),
-            std::mem::ManuallyDrop::take(&mut self._schema),
-            std::mem::ManuallyDrop::take(&mut self._projection),
-            std::mem::ManuallyDrop::take(&mut self.operational),
-            std::mem::ManuallyDrop::take(&mut self._refusal),
-        )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
-        if settled {
-            drop(taken);
-        } else {
-            let metadata_pins = std::mem::replace(&mut self.metadata_pins, StateMetadataPinRetirement::empty());
-            lillux::custody::abandon("ryeos-state::released-live-state-physical-custody",
-                (taken, metadata_pins));
-        }
-    }
-}
-
 #[cfg(test)]
 mod custody_drop_tests {
     use super::*;
@@ -3179,9 +3265,49 @@ mod custody_drop_tests {
     const PARENT: &str = "ryeos-state::live-state-physical-parent";
     const PHYSICAL: &str = "ryeos-state::released-live-state-physical-custody";
     const STARTUP: &str = "ryeos-state::released-live-state-startup";
+    const RECOVERY: &str = "ryeos-state::state-startup-recovery-failure";
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
+    }
+
+    /// Stands in for a startup close progress: records whether its
+    /// destructor ran.
+    struct ObservedProgress(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for ObservedProgress {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn held_close_progress_handed_on_is_not_retained() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let before = abandoned(super::STARTUP_CLOSE_UNWIND);
+        let held = lillux::custody::Held::until_taken(super::STARTUP_CLOSE_UNWIND, ObservedProgress(Arc::clone(&dropped)));
+        let progress = match held.take_whole() {
+            Ok(progress) => progress,
+            Err(_) => panic!("the issuing process takes its own close progress"),
+        };
+        drop(progress);
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(abandoned(super::STARTUP_CLOSE_UNWIND), before);
+    }
+
+    #[test]
+    fn held_close_progress_unwound_mid_step_is_retained_and_counted() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let before = abandoned(super::STARTUP_CLOSE_UNWIND);
+        let observed = Arc::clone(&dropped);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = lillux::custody::Held::until_taken(super::STARTUP_CLOSE_UNWIND, ObservedProgress(observed));
+            panic!("unwind through the held close step");
+        }));
+        assert!(unwound.is_err());
+        assert!(!dropped.load(std::sync::atomic::Ordering::Acquire), "the unwound progress was never dropped");
+        assert_eq!(abandoned(super::STARTUP_CLOSE_UNWIND), before + 1);
     }
 
     #[test]
@@ -3189,7 +3315,7 @@ mod custody_drop_tests {
         let _serial = crate::test_support::abandoned_custody_serial();
         let parts = LiveStatePhysicalParent::exhausted_for_test();
         parts.require_exhausted_holders().unwrap();
-        let trust = Arc::clone(&parts._trust);
+        let trust = Arc::clone(&parts.inner._trust);
         let before = abandoned(PARENT);
         drop(parts);
         assert_eq!(abandoned(PARENT), before);
@@ -3200,9 +3326,9 @@ mod custody_drop_tests {
     fn dropped_parent_parts_with_unconsumed_roots_are_retained() {
         let _serial = crate::test_support::abandoned_custody_serial();
         let mut parts = LiveStatePhysicalParent::exhausted_for_test();
-        parts.retired_root_sources_consumed = false;
+        parts.inner.get_mut().retired_root_sources_consumed = false;
         assert!(parts.require_exhausted_holders().is_err());
-        let trust = Arc::clone(&parts._trust);
+        let trust = Arc::clone(&parts.inner._trust);
         let before = abandoned(PARENT);
         drop(parts);
         assert_eq!(abandoned(PARENT), before + 1);
@@ -3211,18 +3337,23 @@ mod custody_drop_tests {
 
     fn physical_custody(native_retired: Option<StateNativeSourcesRetired>) -> ReleasedLiveStatePhysicalCustody {
         ReleasedLiveStatePhysicalCustody {
-            process: std::process::id(),
-            projection_physical: std::mem::ManuallyDrop::new(LiveProjectionPhysicalCustody::exhausted_for_test()),
-            parent: std::mem::ManuallyDrop::new(None),
-            parent_parts: std::mem::ManuallyDrop::new(Some(LiveStatePhysicalParent::exhausted_for_test())),
-            join: super::super::destination_join::OriginalStateDestinationJoin::exhausted_for_test(),
-            _context: std::mem::ManuallyDrop::new(None),
-            _schema: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
-            _projection: std::mem::ManuallyDrop::new((Vec::new(), Vec::new(), Vec::new())),
-            operational: std::mem::ManuallyDrop::new(None),
-            _refusal: std::mem::ManuallyDrop::new(None),
-            metadata_pins: StateMetadataPinRetirement::empty(),
-            native_retired,
+            inner: Held::new(
+                RELEASED_LIVE_STATE_PHYSICAL_KIND,
+                ReleasedLiveStatePhysicalParts {
+                    projection_physical: LiveProjectionPhysicalCustody::exhausted_for_test(),
+                    parent: None,
+                    parent_parts: Some(LiveStatePhysicalParent::exhausted_for_test()),
+                    join: super::super::destination_join::OriginalStateDestinationJoin::exhausted_for_test(),
+                    _context: None,
+                    _schema: (Vec::new(), Vec::new(), Vec::new()),
+                    _projection: (Vec::new(), Vec::new(), Vec::new()),
+                    operational: None,
+                    _refusal: None,
+                    metadata_pins: StateMetadataPinRetirement::empty(),
+                    native_retired,
+                },
+                released_state_physical_settled,
+            ),
         }
     }
 
@@ -3249,6 +3380,43 @@ mod custody_drop_tests {
     }
 
     #[test]
+    fn dropped_recovery_failure_while_closing_is_retained_whole() {
+        let _serial = crate::test_support::abandoned_custody_serial();
+        const TEST: &str = concat!(module_path!(), "::dropped_recovery_failure_while_closing_is_retained_whole");
+        // The retained progress keeps the live State parent and its namespace
+        // exclusion, which only the process end releases, so the scenario
+        // runs in its own child process.
+        if !lillux_sqlite::test_host::is_isolated_child(TEST) {
+            let outcome = lillux_sqlite::test_host::run_isolated(TEST);
+            assert_eq!(outcome, "recovery +1; parent retained", "{outcome}");
+            return;
+        }
+        let host = crate::test_support::shared_test_host();
+        let runtime = tempfile::tempdir().unwrap();
+        let state = crate::test_support::open_live_state(&host, runtime.path(), Arc::new(TrustStore::new())).unwrap();
+        let original = state.live_native_owner_for_test();
+        let parent = Arc::downgrade(&original);
+        let failure = LiveStateStartupRecoveryFailure::new(StartupRecoveryCustody::Closing {
+            factory: Arc::clone(original.factory()),
+            progress: Mutex::new(StartupCloseProgress {
+                original, context: None, operational: None, operational_failure: None,
+                operational_closed: None, operational_outside: None, projection_failure: None,
+                projection_released: None, schema_failure: None, schema_released: None,
+                schema_admission_custody: Vec::new(), publication_custody: Vec::new(),
+                lease_setup_custody: Vec::new(), prior_refusal: None,
+            }),
+        });
+        let before = abandoned(RECOVERY);
+        drop(failure);
+        let delta = abandoned(RECOVERY) - before;
+        let retained = if parent.upgrade().is_some() { "parent retained" } else { "parent released" };
+        lillux_sqlite::test_host::end_isolated_process(
+            (state, runtime, host),
+            &format!("recovery +{delta}; {retained}"),
+        )
+    }
+
+    #[test]
     fn dropped_released_startup_is_retained_with_its_state_parent() {
         let _serial = crate::test_support::abandoned_custody_serial();
         const TEST: &str = concat!(module_path!(), "::dropped_released_startup_is_retained_with_its_state_parent");
@@ -3269,23 +3437,13 @@ mod custody_drop_tests {
         };
         let parent = Arc::downgrade(&original);
         let aliases = Arc::strong_count(&original);
-        let released = ReleasedLiveStateStartup {
-            schema_pending: std::mem::ManuallyDrop::new(Vec::new()),
-            schema_definitions: std::mem::ManuallyDrop::new(Vec::new()),
-            projection_leases_retired: false,
-            projection_files: std::mem::ManuallyDrop::new(Vec::new()),
-            projection_native: std::mem::ManuallyDrop::new(Vec::new()),
-            projection_refusals: std::mem::ManuallyDrop::new(Vec::new()),
-            destination_inputs: std::mem::ManuallyDrop::new(Vec::new()),
-            destination_join: std::sync::OnceLock::new(),
-            progress: std::mem::ManuallyDrop::new(StartupCloseProgress {
-                original, context: None, operational: None, operational_failure: None,
-                operational_closed: None, operational_outside: None, projection_failure: None,
-                projection_released: None, schema_failure: None, schema_released: None,
-                schema_admission_custody: Vec::new(), publication_custody: Vec::new(),
-                lease_setup_custody: Vec::new(), prior_refusal: None,
-            }),
-        };
+        let released = ReleasedLiveStateStartup::new(StartupCloseProgress {
+            original, context: None, operational: None, operational_failure: None,
+            operational_closed: None, operational_outside: None, projection_failure: None,
+            projection_released: None, schema_failure: None, schema_released: None,
+            schema_admission_custody: Vec::new(), publication_custody: Vec::new(),
+            lease_setup_custody: Vec::new(), prior_refusal: None,
+        });
         let before = abandoned(STARTUP);
         drop(released);
         let delta = abandoned(STARTUP) - before;

@@ -61,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
@@ -91,14 +92,12 @@ COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
+COPY --from=builder /build/bundles/environment-qualification /opt/ryeos/environment-qualification
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
-COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
-COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
-COPY --from=builder /build/bundles/local-inference /opt/ryeos/local-inference
 
 # Entrypoint runs ryeos init --non-interactive every boot (idempotent) then starts daemon.
 # /data/app persists across redeploys.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-29T05:24:20Z:98d9f91aadb1ffc18fc28ea2a59ed817973e04b748f504ea854b2aba935e36bb:UBkYxW9DlwU8uYxnq5DMtRvGi/cA8xOWuBtDL/3ynTLxRSGwrxlzYRMyBu8Xd9aHjWULZ6ZUoQl6YHGRknCYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:47:07Z:462466d8c6b674b25b4eeb0055b2b8dbd1fe62a41339537bfbb3dee5e84100b7:sVGdSLsKP82qgqU/0xRZj7gY87MRnla11kZ7kXqtKwS8iLln8Jv7el30hi6p6rnUzsBXR544ZUZIkIT8YFlVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -8,8 +8,7 @@
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (full = core, central-auth, scheduling,
-#     standard, web, browser, ryeos-ui, hosted-node, codex, render-sandbox,
-#     opencode; the lean sets are subsets).
+#     standard, web, browser, ryeos-ui, codex, opencode; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -30,8 +29,8 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, scheduling, standard, web, browser, ryeos-ui, hosted-node, codex,
-render-sandbox, opencode). The release-authority set additionally installs the
+central-auth, scheduling, standard, web, browser, ryeos-ui, codex,
+opencode). The release-authority set additionally installs the
 standalone publisher measurement executable; it does not start the separately
 operated key-bearing publisher service.
 
@@ -59,7 +58,7 @@ Options:
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: RyeOS Development)
   --bundle-set SET      Bundle set to populate/install: full, central-host,
-                        standard, standard-central-auth, local-inference, hosted-node,
+                        standard, standard-central-auth, local-inference,
                         hosted-workflow,
                         bundle-source, core, core-scheduling, or release-authority.
                         Each set
@@ -70,6 +69,10 @@ Options:
                         exact_bundles match --bundle-set. For example,
                         development selects enforced hosted-development policy
                         over the full bundle set without creating another set.
+  --host-class NAME     Host class this host is declared as at first init; the
+                        selected profile must declare it. A direct install
+                        runs the node on this host itself.
+                        (default: local)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
   --cargo-target-dir DIR
@@ -197,13 +200,15 @@ build_install_init_profile_args() {
     local policy_generation_path="$1"
     local mapped_profile="$2"
     local replace_generation="$3"
+    local host_class="$4"
 
-    [[ -n "$mapped_profile" ]] || return 1
+    [[ -n "$mapped_profile" && -n "$host_class" ]] || return 1
     INSTALL_INIT_PROFILE_ARGS=()
     INSTALL_PUBLISH_INITIAL_POLICY=0
     if [[ "$replace_generation" == "1" ]]; then
         INSTALL_INIT_PROFILE_ARGS=(
             --node-profile "$mapped_profile"
+            --host-class "$host_class"
             --replace-node-policy-generation
             --confirm-node-policy-generation-replacement
         )
@@ -213,7 +218,7 @@ build_install_init_profile_args() {
         # pass this installer boundary.
         INSTALL_PUBLISH_INITIAL_POLICY=1
     elif [[ ! -e "$policy_generation_path" && ! -L "$policy_generation_path" ]]; then
-        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile")
+        INSTALL_INIT_PROFILE_ARGS=(--node-profile "$mapped_profile" --host-class "$host_class")
         INSTALL_PUBLISH_INITIAL_POLICY=1
     fi
 }
@@ -549,6 +554,7 @@ key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="RyeOS Development"
 bundle_set="full"
 node_profile_override=""
+init_host_class="local"
 jobs=""            # forwarded to populate as cargo -j N
 cargo_target_root="$repo_root/target"
 crates=""          # forwarded to populate to rebuild only these Cargo packages
@@ -610,6 +616,11 @@ while [[ $# -gt 0 ]]; do
         --node-profile)
             [[ $# -ge 2 ]] || die "--node-profile requires a value"
             node_profile_override="$2"
+            shift 2
+            ;;
+        --host-class)
+            [[ $# -ge 2 ]] || die "--host-class requires a value"
+            init_host_class="$2"
             shift 2
             ;;
         --jobs)
@@ -879,7 +890,8 @@ if [[ $run_init -eq 1 ]]; then
         die "--node-profile selects first publication only; use --reset-node-policy-generation to replace an existing generation explicitly"
     fi
     build_install_init_profile_args \
-        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" || \
+        "$policy_generation_path" "$node_init_profile" "$reset_node_policy_generation" \
+        "$init_host_class" || \
         die "could not resolve init-profile arguments"
     if ! preflight_existing_node_policy \
         "$policy_generation_path" "$reset_node_policy_generation" "${bundle_names[@]}"; then
@@ -1145,16 +1157,8 @@ if [[ $run_init -eq 1 ]]; then
         [[ -n "$actual_node_policies" ]] || \
             die "existing node-policy generation is empty: $node_policy_dir"
     fi
-    if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard ryeos-ui web browser; do
-            test ! -e "$state_root/.ai/bundles/$name" || \
-                die "initialized hosted-node state unexpectedly contains $name bundle"
-            test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
-                die "initialized hosted-node state unexpectedly contains $name registration"
-        done
-    fi
     if [[ "$bundle_set" == "standard" ]]; then
-        for name in hosted-node ryeos-ui web browser; do
+        for name in ryeos-ui web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -1163,8 +1167,8 @@ if [[ $run_init -eq 1 ]]; then
     fi
     if [[ "$bundle_set" == "central-host" ]]; then
         # central-host is standard + web; it must NOT drag in the ryeos-ui/browser
-        # UI bundles or the hosted-node control plane.
-        for name in hosted-node ryeos-ui browser; do
+        # UI bundles.
+        for name in ryeos-ui browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized central-host state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \

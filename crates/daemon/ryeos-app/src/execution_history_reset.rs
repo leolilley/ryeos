@@ -306,7 +306,7 @@ impl SchedulerResetPreview<'_> {
                 controller.retain_unproven_scheduler_terminal(factory, terminal);
                 let refusal = anyhow!("scheduler inspection terminal carries no copy proof");
                 let refusal = match accounting {
-                    Err(error) => error.context(refusal),
+                    Err(error) => lillux_sqlite::RefusalSupersedes::superseding(refusal, error),
                     Ok(_) => refusal,
                 };
                 return Err(refuse(
@@ -562,6 +562,55 @@ impl SchedulerResetRetirement<'_, '_> {
     }
 }
 
+/// Borrowed authority after State has acknowledged one exact reset
+/// operation. The offline State lock, the runtime namespace lock and the
+/// exclusive CAS guard are still held, and State records this operation as
+/// the last acknowledged discard with none active. It authorizes a
+/// participant to remove only its own evidence of completed work: nothing
+/// a resumed operation could still need survives that acknowledgement.
+pub struct SchedulerAcknowledgedReset<'a> {
+    state_lock: &'a StateLock,
+    app_root: &'a Path,
+    runtime_directory: &'a lillux::PinnedDirectory,
+    namespace_lock: &'a lillux::PinnedDirectoryLock,
+    state_authority: &'a ryeos_state::PinnedStateAuthority,
+    cas_guard: &'a ryeos_state::CasMutationGuard,
+    identity: &'a ryeos_node_runtime::identity::NodeIdentity,
+    operation: &'a OriginalOperation,
+}
+impl SchedulerAcknowledgedReset<'_> {
+    /// The held runtime namespace, once every lock and the acknowledgement
+    /// are revalidated.
+    pub fn runtime_directory(&self) -> Result<&lillux::PinnedDirectory> {
+        self.state_lock.ensure_protects_app_root(self.app_root)?;
+        self.namespace_lock.ensure_protects(self.runtime_directory)?;
+        ensure!(
+            self.cas_guard.is_exclusive(),
+            "acknowledged scheduler evidence retirement requires exclusive CAS exclusion"
+        );
+        self.state_authority.ensure_guard(self.cas_guard)?;
+        ensure!(
+            self.state_authority
+                .runtime_directory()
+                .is_same_directory(self.runtime_directory)?,
+            "acknowledged scheduler evidence retirement selects a different runtime generation"
+        );
+        let recovery = self.state_authority.require_recovery()?;
+        ensure!(
+            recovery.thread_history_discard_operation()?.is_none()
+                && recovery.last_acknowledged_thread_history_discard()?.as_ref()
+                    == Some(self.operation.reference()),
+            "scheduler evidence retirement requires State to have acknowledged this exact operation"
+        );
+        Ok(self.runtime_directory)
+    }
+
+    /// The selected node identity, the only signer of retirement records.
+    pub fn node_identity(&self) -> &ryeos_node_runtime::identity::NodeIdentity {
+        self.identity
+    }
+}
+
 pub trait SchedulerHistoryResetParticipant: Send + Sync {
     /// Authenticate the retained namespace and reserve its complete bounded
     /// journal path without inspecting/copying the scheduler database. Runs
@@ -583,6 +632,14 @@ pub trait SchedulerHistoryResetParticipant: Send + Sync {
         permit: &SchedulerResetRetirement<'_, '_>,
         retirement: &SchedulerHistoryRetirement,
     ) -> Result<usize>;
+
+    /// After State has acknowledged the operation, remove the participant's
+    /// own evidence of completed retirement work, so a completed reset
+    /// leaves no scheduler state. Runs on every acknowledged reset, so work
+    /// an earlier reset left unfinished settles here too. Returns how many
+    /// entries were removed.
+    fn retire_acknowledged_evidence(&self, permit: &SchedulerAcknowledgedReset<'_>)
+        -> Result<usize>;
 }
 
 /// A same-thread phase cursor for scheduler retirement. The attempt is
@@ -612,6 +669,60 @@ const SCHEDULER_SETTLEMENT_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 2 } else { 60 });
 /// Pause between retries of one refused scheduler retirement stage.
 const SCHEDULER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// End a scheduler retirement attempt in the reset factory's service scope,
+/// so the native frees of the stopped intake it owns run in this arena, and
+/// return that scope's refusal, if any. A refused scope ends the attempt by
+/// a plain drop. That is safe: a native free made outside a scope of this
+/// arena is not performed but kept as a deferred block, which the arena's
+/// supervised reclaim settles when the backend finishes, so no memory is
+/// freed outside the arena's accounting.
+fn end_scheduler_attempt(
+    factory: &lillux_sqlite::OriginalNativeFactory,
+    attempt: Box<dyn SchedulerHistoryRetirementAttempt + '_>,
+) -> Result<()> {
+    let mut attempt = Some(attempt);
+    let ended = factory.with_original_service_scope(|_| drop(attempt.take()));
+    drop(attempt);
+    ended.map_err(|failure| failure.into_parts().0)
+}
+
+/// `error` after ending the scheduler attempt it abandons, noting a refused
+/// native scope that ended the attempt by a plain drop.
+fn with_scheduler_attempt_ended(
+    error: anyhow::Error,
+    factory: &lillux_sqlite::OriginalNativeFactory,
+    attempt: Box<dyn SchedulerHistoryRetirementAttempt + '_>,
+) -> anyhow::Error {
+    match end_scheduler_attempt(factory, attempt) {
+        Ok(()) => error,
+        Err(refused) => error.context(format!(
+            "the scheduler retirement attempt ended by a plain drop after its native scope refused: {refused:#}"
+        )),
+    }
+}
+
+/// A scheduler participant refusal that no retry within the settlement
+/// window can change, such as a foreign entry the operator must remove by
+/// hand. The reset returns it at once instead of retrying; the discard
+/// operation stays Active, the refused entry stays in place, and the next
+/// reset resumes once the operator has acted. The message names the entry.
+#[derive(Debug)]
+pub struct SchedulerPermanentRefusal(pub String);
+impl std::fmt::Display for SchedulerPermanentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for SchedulerPermanentRefusal {}
+
+/// Whether `error` carries a [`SchedulerPermanentRefusal`] anywhere in its
+/// chain.
+fn is_scheduler_permanent_refusal(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<SchedulerPermanentRefusal>().is_some())
+}
 
 /// The refusal of a scheduler stage still refused after its window. The
 /// State discard marker stays Active and every durable record of the
@@ -2456,7 +2567,8 @@ fn run_execution_history_reset_owned(
                     Err(error) => {
                         previous_ok = false;
                         if window.has_elapsed() {
-                            return Err(scheduler_settlement_pending(error, "advance scheduler retirement"));
+                            let error = scheduler_settlement_pending(error, "advance scheduler retirement");
+                            return Err(with_scheduler_attempt_ended(error, &native_factory, attempt));
                         }
                         if last_retry_notice
                             .as_ref()
@@ -2499,8 +2611,21 @@ fn run_execution_history_reset_owned(
                     break;
                 }
                 Err(error) => {
-                    if window.has_elapsed() {
-                        return Err(scheduler_settlement_pending(error, "complete scheduler retirement"));
+                    let permanent = is_scheduler_permanent_refusal(&error);
+                    if permanent || window.has_elapsed() {
+                        let error = if permanent {
+                            error.context(
+                                "execution-history reset stopped on a scheduler refusal no retry can \
+                                 change; the operation stays Active and the next `ryeos node reset \
+                                 execution-history` resumes it once the named entry is resolved",
+                            )
+                        } else {
+                            scheduler_settlement_pending(error, "complete scheduler retirement")
+                        };
+                        return Err(match scheduler_retirement_attempt.take() {
+                            Some(attempt) => with_scheduler_attempt_ended(error, &native_factory, attempt),
+                            None => error,
+                        });
                     }
                     eprintln!(
                         "execution-history reset retains its original State/CAS authority and scheduler attempt while retrying terminal completion: {error:#}"
@@ -2513,8 +2638,19 @@ fn run_execution_history_reset_owned(
     // End every borrowed scheduler frame before consuming the actual Runtime.
     // Its own terminal completion succeeded above; a completion refused past
     // its window returned there, ending the attempt before the permit just
-    // as this handoff does.
-    drop(scheduler_retirement_attempt);
+    // as this handoff does. The attempt owns the stopped scheduler intake,
+    // whose native context is freed only inside a scope of this arena: it
+    // ends in a service scope, so the arena's binding census is empty before
+    // the backend finishes. A scope refused before it ran leaves the attempt
+    // here, where the refusal returns and ends it.
+    {
+        // Moved into this block so the attempt's borrows end here.
+        let ending = scheduler_retirement_attempt;
+        if let Some(attempt) = ending {
+            end_scheduler_attempt(&native_factory, attempt)
+                .context("end the scheduler retirement attempt in the reset's native service scope")?;
+        }
+    }
     drop(permit);
     operational_db.close(Arc::clone(&native_factory))
         .context("close original Operational mutation before terminal census")?;
@@ -2661,6 +2797,28 @@ fn run_execution_history_reset_owned(
     operation.release_source_lease();
     let (released_sha256, durability_pins) = settle_reservation_release(inspection_custody, &inspection_settlement)
         .context("history reset applied; settlement pending; the next reset settles it")?;
+    // The scheduler journals were the only evidence a resumed operation had
+    // that its scheduler roles were retired; with the operation
+    // acknowledged they are no longer needed, and a completed reset leaves
+    // no scheduler state. The same locks and exclusive guard are held.
+    if let Some(participant) = participant {
+        participant
+            .retire_acknowledged_evidence(&SchedulerAcknowledgedReset {
+                state_lock: &state_lock,
+                app_root: &config.app_root,
+                runtime_directory: &runtime_directory,
+                namespace_lock: &runtime_directory_lock,
+                state_authority: &state_authority,
+                cas_guard: &cas_guard,
+                identity: &identity,
+                operation: &operation,
+            })
+            .context(
+                "history reset applied and acknowledged; scheduler evidence removal pending; \
+                 the next `ryeos node reset execution-history` from a scheduling-enabled build \
+                 finishes it",
+            )?;
+    }
 
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
     publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
@@ -2838,6 +2996,57 @@ fn open_inspection_runtime_db(
         .with_context(|| format!("inspect runtime database {}", config.db_path.display()))
 }
 
+/// How an operator retires scheduler state a node's composition no longer
+/// selects. Every refusal of such state names this same remedy, so following
+/// it from any refusal converges: the node first switches to a publisher-signed
+/// profile whose composition includes the scheduling bundle (the stopped-node
+/// policy-generation reset installs that bundle and grants its command
+/// registration in one locked transaction; a bare bundle install would be
+/// refused by the Core command-registration policy), signed schedule sources
+/// are retired by the scheduler itself, fire history and scheduler journals by
+/// a scheduling-enabled reset, and only then does the node switch back to its
+/// scheduler-free profile, which removes the scheduling bundle.
+pub const SCHEDULER_STATE_REMEDY: &str = "this node's installed composition (or this build) does not select the scheduler, so retire that state through the scheduler participant. Run steps 1-3 from a scheduling-enabled build whose --source holds the scheduling bundle (the core-scheduling package or image), with <host-class> as recorded in .ai/node/substrate-identity.json: 1) with the daemon stopped, switch to a publisher-signed profile that includes the scheduling bundle (`ryeos node reset policy-generation --node-profile core-scheduling --host-class <host-class> --source <source> --confirm` for a Core node); 2) start the daemon and deregister every signed schedule under .ai/node/schedules (`ryeos scheduler deregister <schedule_id>`); 3) stop it and run `ryeos node reset execution-history`; 4) switch back the same way to the node's own scheduler-free profile, which removes the scheduling bundle (`ryeos node reset policy-generation --node-profile core --host-class <host-class> --source <source> --confirm` for a Core node). Each switch replaces the whole node policy generation: sections changed with `ryeos node policy-apply` revert to the profile's defaults and must be re-applied. A hosted container follows the same steps from a shell, with a scheduling-enabled build and the scheduling bundle as --source; its image is not swapped";
+
+/// Prove the node configuration namespace holds no signed schedule source.
+///
+/// Only an entry inside `.ai/node/schedules` is a schedule source. The
+/// directory itself carries no schedule: earlier scheduling builds created it
+/// unconditionally, and deregistering every schedule leaves it behind empty,
+/// so an empty directory is accepted. Any entry at all, whatever its name or
+/// type, is refused unread, and a `schedules` entry that is not a real
+/// directory (a regular file, a symlink, anything else) is refused too, each
+/// naming the remedy.
+pub fn require_no_signed_schedule_sources(node: &lillux::PinnedDirectory) -> Result<()> {
+    let name = std::ffi::OsStr::new("schedules");
+    let not_a_directory = || {
+        anyhow::anyhow!(
+            "signed scheduler sources cannot be proved absent: {} is not a directory; {}",
+            node.path().join(name).display(),
+            SCHEDULER_STATE_REMEDY
+        )
+    };
+    // Classify the entry without following it, so a symlink refuses with
+    // the remedy rather than as an opaque open failure.
+    let Some(entry) = node.entry_no_follow(name)? else {
+        return Ok(());
+    };
+    if !matches!(entry.entry_type, lillux::PinnedEntryType::Directory) {
+        return Err(not_a_directory());
+    }
+    let schedules = match node.open_entry(name, false)? {
+        Some(lillux::PinnedDirectoryEntry::Directory(schedules)) => schedules,
+        Some(lillux::PinnedDirectoryEntry::Regular(_)) | None => return Err(not_a_directory()),
+    };
+    if !schedules.entry_names_bounded(1)?.is_empty() {
+        anyhow::bail!(
+            "signed scheduler sources require their selected reset participant; {}",
+            SCHEDULER_STATE_REMEDY
+        );
+    }
+    Ok(())
+}
+
 /// Absence is proved from held namespaces, never a zero-row fallback DB.
 fn require_absent_scheduler_history(
     config: &Config,
@@ -2848,15 +3057,14 @@ fn require_absent_scheduler_history(
             anyhow::bail!("cannot interpret runtime namespace without scheduler participant");
         };
         if name.starts_with("scheduler") || name == "schedules" {
-            anyhow::bail!("scheduler history requires its selected reset participant");
+            anyhow::bail!(
+                "scheduler history requires its selected reset participant; {}",
+                SCHEDULER_STATE_REMEDY
+            );
         }
     }
     if let Some(node) = lillux::PinnedDirectory::open(&config.runtime_node_dir())? {
-        for name in node.entry_names()? {
-            if name == std::ffi::OsStr::new("schedules") {
-                anyhow::bail!("signed scheduler sources require their selected reset participant");
-            }
-        }
+        require_no_signed_schedule_sources(&node)?;
     }
     Ok(())
 }
@@ -3069,6 +3277,8 @@ mod tests {
                 serde_json::Value::Null;
         }
         let generation = profile
+            .for_host_class("local")
+            .unwrap()
             .validated_generation(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &source)
             .unwrap();
         let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
@@ -3601,6 +3811,7 @@ mod tests {
     fn reset_acknowledges_scheduler_before_removing_cross_store_marker() {
         struct Participant {
             completed: std::sync::atomic::AtomicBool,
+            retired: std::sync::atomic::AtomicBool,
             preflights: std::sync::atomic::AtomicUsize,
         }
         struct Attempt;
@@ -3682,6 +3893,26 @@ mod tests {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(0)
             }
+            fn retire_acknowledged_evidence(
+                &self,
+                permit: &SchedulerAcknowledgedReset<'_>,
+            ) -> Result<usize> {
+                let recovery = ryeos_state::RecoveryStore::from_refs_root(
+                    &permit.runtime_directory()?.path().join("refs"),
+                )?;
+                assert!(
+                    self.completed.load(std::sync::atomic::Ordering::SeqCst),
+                    "evidence retirement must follow terminal scheduler acknowledgement"
+                );
+                assert!(
+                    !recovery.thread_history_discard_in_progress()?
+                        && recovery.last_acknowledged_thread_history_discard()?.is_some(),
+                    "evidence retirement must follow the State acknowledgement"
+                );
+                self.retired
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(0)
+            }
         }
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
@@ -3697,6 +3928,7 @@ mod tests {
         let _serial = lillux_sqlite::test_host::serial();
         let participant = Participant {
             completed: std::sync::atomic::AtomicBool::new(false),
+            retired: std::sync::atomic::AtomicBool::new(false),
             preflights: std::sync::atomic::AtomicUsize::new(0),
         };
         let report = run_execution_history_reset(
@@ -3712,6 +3944,12 @@ mod tests {
             participant
                 .completed
                 .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            participant
+                .retired
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a completed reset must retire the participant's acknowledged evidence"
         );
         let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(
             &config.runtime_state_dir(),
@@ -3771,6 +4009,13 @@ mod tests {
         ) -> Result<usize> {
             permit.runtime_directory()?;
             anyhow::ensure!(!self.refuse, "scheduler terminal journal refused");
+            Ok(0)
+        }
+        fn retire_acknowledged_evidence(
+            &self,
+            permit: &SchedulerAcknowledgedReset<'_>,
+        ) -> Result<usize> {
+            permit.runtime_directory()?;
             Ok(0)
         }
     }
@@ -3902,8 +4147,59 @@ mod tests {
         require_absent_scheduler_history(&config, &directory).unwrap();
         let file = config.runtime_state_dir().join("scheduler.sqlite3");
         std::fs::write(&file, b"unknown schema").unwrap();
-        assert!(require_absent_scheduler_history(&config, &directory).is_err());
+        let refusal = require_absent_scheduler_history(&config, &directory)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains(SCHEDULER_STATE_REMEDY), "{refusal}");
         assert_eq!(std::fs::read(file).unwrap(), b"unknown schema");
+    }
+
+    #[test]
+    fn absent_scheduler_participant_accepts_only_an_empty_node_schedules_directory() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::create_dir_all(config.runtime_state_dir()).unwrap();
+        let directory = lillux::PinnedDirectory::open(&config.runtime_state_dir())
+            .unwrap()
+            .unwrap();
+        let schedules = config.runtime_node_dir().join("schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        require_absent_scheduler_history(&config, &directory).unwrap();
+
+        let source = schedules.join("nightly.yaml");
+        std::fs::write(&source, b"signed schedule").unwrap();
+        let refusal = require_absent_scheduler_history(&config, &directory)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains(SCHEDULER_STATE_REMEDY), "{refusal}");
+        assert_eq!(std::fs::read(&source).unwrap(), b"signed schedule");
+
+        std::fs::remove_file(&source).unwrap();
+        std::fs::remove_dir(&schedules).unwrap();
+        std::fs::write(&schedules, b"not a directory").unwrap();
+        let refusal = require_absent_scheduler_history(&config, &directory)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains(SCHEDULER_STATE_REMEDY), "{refusal}");
+
+        // A symlink, even to an empty directory, is not the schedules
+        // directory and refuses with the remedy without being followed.
+        std::fs::remove_file(&schedules).unwrap();
+        let target = tmp.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        lillux::PinnedDirectory::open(&config.runtime_node_dir())
+            .unwrap()
+            .unwrap()
+            .create_symlink(std::ffi::OsStr::new("schedules"), target.as_os_str().as_encoded_bytes())
+            .unwrap();
+        let refusal = require_absent_scheduler_history(&config, &directory)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains(SCHEDULER_STATE_REMEDY), "{refusal}");
     }
     /// Every entry of the State recovery tree beneath `root`, sorted.
     fn recovery_entries(root: &Path) -> Vec<PathBuf> {
@@ -5056,5 +5352,31 @@ mod tests {
             assert!(!tmp.path().join("scheduler.sqlite3").exists());
             assert_eq!(recovery_entries(tmp.path()), recovery_before, "refusal records no recovery state");
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_layer_tests {
+    use super::SchedulerCopyRefusal;
+    use lillux_sqlite::original_host_owner::FixedHostRefusal;
+    use lillux_sqlite::{native_refusal_is_fact, NativeCheckContended, RefusalSupersedes};
+
+    /// A terminal that carries no copy proof is a later refusal over the
+    /// inspection's own accounting refusal: the copy refusal that carries
+    /// both is classified by the later refusal, and still names the earlier.
+    #[test]
+    fn a_missing_copy_proof_classifies_over_the_accounting_refusal() {
+        let wrap = |error: anyhow::Error| anyhow::Error::new(SchedulerCopyRefusal {
+            error,
+            _sql: None,
+            _namespace: None,
+        });
+        let accounting = || anyhow::Error::new(FixedHostRefusal::Contended).context("scheduler accounting read");
+        let refusal = || anyhow::anyhow!("scheduler inspection terminal carries no copy proof");
+        let fact = wrap(refusal().superseding(accounting()));
+        assert!(native_refusal_is_fact(&fact), "{fact:#}");
+        assert!(format!("{fact:#}").contains("scheduler accounting read"), "{fact:#}");
+        let contention = wrap(anyhow::Error::new(NativeCheckContended).superseding(refusal()));
+        assert!(!native_refusal_is_fact(&contention), "{contention:#}");
     }
 }

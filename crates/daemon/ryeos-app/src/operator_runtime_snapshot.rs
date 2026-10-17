@@ -2527,6 +2527,15 @@ fn produce_checked(
         upload.bytes() <= binding.maximum_upload_bytes(),
         "snapshot upload exceeds its signed byte budget"
     );
+    // The adapter repeats this check on the descriptor it inherits, but a
+    // failure there arrives after the attempt is claimed and is recorded as
+    // uncertain provider contact. Refusing here, before any reservation,
+    // keeps a credential-home source a plain refusal with nothing to
+    // reconcile.
+    crate::external_lifecycle_adapter::refuse_credential_home_upload(
+        &crate::private_artifact_home::root(&state.config.runtime_state_dir()),
+        upload.descriptor(),
+    )?;
 
     // Credential and exact installed adapter existence are checked before the
     // irreversible journal claim. The following attempt is never retried after

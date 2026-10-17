@@ -10,7 +10,7 @@ fn bundled_qualification_policies_match_the_current_reader() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut policies = 0;
     for directory in [
-        "bundles/standard/.ai/config/ryeos/environments/qualification",
+        "bundles/environment-qualification/.ai/config/ryeos/environments/qualification",
         "bundles/bundle-release/.ai/config/bundle-release",
     ] {
         for entry in std::fs::read_dir(root.join(directory)).unwrap() {

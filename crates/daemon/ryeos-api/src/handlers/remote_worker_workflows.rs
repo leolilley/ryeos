@@ -1985,8 +1985,11 @@ fn validate_recorded_owner(state: &AppState, operation: &Operation) -> Result<()
         .next()
         .flatten()
         .context("recorded remote-worker workflow root is absent")?;
+    let placement = state
+        .state_store
+        .recorded_thread_placement(&operation.source_invocation_id)?;
     if root.thread_id != operation.source_invocation_id
-        || root.chain_root_id != operation.source_invocation_id
+        || !recorded_invocation_placement_admitted(&root.thread_id, &root.chain_root_id, &placement)
         || root.item_ref != "service:remote-worker-workflows/start"
         || root.requested_by.as_deref() != Some(operator_principal.as_str())
     {
@@ -2017,6 +2020,28 @@ fn validate_recorded_owner(state: &AppState, operation: &Operation) -> Result<()
     Ok(())
 }
 
+/// A recorded remote-worker invocation is either a direct invocation (its
+/// own chain root) or an inline callback child whose in-process lineage is
+/// proven in the chain it was born into. No caller names a parent chain for
+/// these services, so the expected chain is the one the subject's own birth
+/// lineage proves; a member without that proof, or one whose snapshot names
+/// a different chain, is refused.
+fn recorded_invocation_placement_admitted(
+    thread_id: &str,
+    chain_root_id: &str,
+    placement: &ryeos_app::state_store::RecordedThreadPlacement,
+) -> bool {
+    use ryeos_app::state_store::RecordedThreadPlacement;
+    match placement {
+        RecordedThreadPlacement::Root => chain_root_id == thread_id,
+        RecordedThreadPlacement::InProcessMember {
+            chain_root_id: born_in,
+            upstream_thread_id: _,
+        } => born_in == chain_root_id && chain_root_id != thread_id,
+        RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
+    }
+}
+
 fn validate_recorded_invocation(
     state: &AppState,
     invocation_root: &str,
@@ -2031,8 +2056,9 @@ fn validate_recorded_invocation(
         .next()
         .flatten()
         .context("recorded remote-worker invocation root is absent")?;
+    let placement = state.state_store.recorded_thread_placement(invocation_root)?;
     if root.thread_id != invocation_root
-        || root.chain_root_id != invocation_root
+        || !recorded_invocation_placement_admitted(&root.thread_id, &root.chain_root_id, &placement)
         || root.item_ref != service_ref
         || root.requested_by.as_deref() != Some(operator_principal.as_str())
     {
@@ -2974,6 +3000,47 @@ pub const RESUME_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn recorded_invocation_admits_roots_and_proven_inline_children_only() {
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
+            chain_root_id: chain.to_owned(),
+            upstream_thread_id: "T-parent".to_owned(),
+        };
+        // A direct invocation is its own chain root.
+        assert!(recorded_invocation_placement_admitted(
+            "T-svc",
+            "T-svc",
+            &RecordedThreadPlacement::Root
+        ));
+        // An inline child with proven lineage in the chain it names.
+        assert!(recorded_invocation_placement_admitted(
+            "T-svc",
+            "T-graph",
+            &member("T-graph")
+        ));
+        // A chain other than the one its lineage proves.
+        assert!(!recorded_invocation_placement_admitted(
+            "T-svc",
+            "T-unrelated",
+            &member("T-graph")
+        ));
+        // A member without in-process lineage.
+        assert!(!recorded_invocation_placement_admitted(
+            "T-svc",
+            "T-graph",
+            &RecordedThreadPlacement::OtherMember {
+                chain_root_id: "T-graph".to_owned()
+            }
+        ));
+        // A root classification that contradicts the subject's chain.
+        assert!(!recorded_invocation_placement_admitted(
+            "T-svc",
+            "T-graph",
+            &RecordedThreadPlacement::Root
+        ));
+    }
     use super::*;
     use base64::Engine as _;
     use ryeos_state::signer::Signer;

@@ -1591,7 +1591,11 @@ fn validate_hosted_contact_deadlines(
     Ok(())
 }
 
-fn ensure_hosted_contact_deadline(
+/// The session's absolute deadline, its own bounded lifetime or its
+/// aggregate budget's deadline, whichever comes first, refused once passed.
+/// It is fixed for the session: a placement measures it against the lease it
+/// would get, and each route against the lease it holds.
+pub(crate) fn ensure_hosted_contact_deadline(
     state: &AppState,
     session: &DedicatedSessionRecord,
 ) -> Result<Option<i64>> {
@@ -2835,7 +2839,7 @@ pub async fn execute_command(
         // service and cannot be smuggled through a generic route command.
         bail!("bounded worker route requires an approval-free idle session");
     }
-    ensure_hosted_contact_deadline(state, &session)?;
+    let session_deadline_at_ms = ensure_hosted_contact_deadline(state, &session)?;
     validate_bounded_command_admission(
         state,
         &session,
@@ -2844,6 +2848,24 @@ pub async fn execute_command(
         &payload,
         None,
     )?;
+    // Only a route can start model work on the guest. The other admitted
+    // kind, the daemon's fixed `reattach` recovery, runs exactly the resume
+    // and inspect routes the admission compiler froze, which reattach to and
+    // read the existing upstream session and start no turn, so it is not
+    // measured against the lease.
+    if command_kind == "route" {
+        // Placement already refused a session whose deadline plus the node's
+        // turn-end margin passes the lease's end; this repeats that measure
+        // against the lease actually held, before any command is reserved.
+        // Only an idle session's lease is fenced on refusal: a turn in
+        // progress keeps its lease.
+        crate::external_placement::admit_turn_on_external_lease(
+            state,
+            placement_thread_id,
+            session_deadline_at_ms,
+            session.state == "idle" && session.current_turn_id.is_none(),
+        )?;
+    }
     let worker_boot_epoch = session
         .worker_boot_epoch
         .ok_or_else(|| anyhow!("dedicated session has no attached worker"))?;

@@ -1113,6 +1113,18 @@ pub enum ReserveOutcome {
     },
 }
 
+/// The launch credentials as they stand when a reserved attempt is issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueCredentialBinding<'a> {
+    /// The binding derived from the credentials read now, or `None` when a
+    /// sealed credential is missing. A binding that differs from the one
+    /// sealed at launch releases the reservation.
+    Current(Option<&'a str>),
+    /// Delivery of the sealed credentials was refused at issue. The
+    /// reservation is released: no provider contact can follow.
+    Refused,
+}
+
 /// Outcome of an issue-marker request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueOutcome {
@@ -7107,7 +7119,7 @@ impl AccountingDb {
             launch_generation,
             attempt_id,
             request_hash,
-            None,
+            IssueCredentialBinding::Current(None),
             now_ms,
             acceptance_window_ms,
         )
@@ -7120,7 +7132,7 @@ impl AccountingDb {
         launch_generation: &str,
         attempt_id: &str,
         request_hash: &str,
-        current_credential_binding_digest: Option<&str>,
+        current_credential_binding: IssueCredentialBinding<'_>,
         now_ms: i64,
         acceptance_window_ms: i64,
     ) -> Result<IssueOutcome> {
@@ -7195,9 +7207,13 @@ impl AccountingDb {
                 let authority: ProviderAccountingAuthority =
                     serde_json::from_str(&row.authority_json)
                         .context("decode stored accounting authority")?;
-                let release_reason = if gate.credential_binding_digest.as_deref()
-                    != current_credential_binding_digest
-                {
+                let credential_unavailable = match current_credential_binding {
+                    IssueCredentialBinding::Current(digest) => {
+                        gate.credential_binding_digest.as_deref() != digest
+                    }
+                    IssueCredentialBinding::Refused => true,
+                };
+                let release_reason = if credential_unavailable {
                     Some(ReconciliationReason::CredentialUnavailableBeforeIssue)
                 } else if certificate_expiry_ms(&authority).is_some_and(|expires_at_ms| {
                     expires_at_ms <= now_ms.saturating_add(acceptance_window_ms)
@@ -14716,7 +14732,7 @@ mod tests {
                 GENERATION,
                 &attempt_id,
                 "h1",
-                Some("rotated-credential-binding"),
+                IssueCredentialBinding::Current(Some("rotated-credential-binding")),
                 NOW + 5,
                 WINDOW,
             )
@@ -14739,7 +14755,7 @@ mod tests {
                 GENERATION,
                 &attempt_id,
                 "h1",
-                Some("launch-credential-binding"),
+                IssueCredentialBinding::Current(Some("launch-credential-binding")),
                 NOW + 6,
                 WINDOW,
             )
@@ -14775,7 +14791,7 @@ mod tests {
                 GENERATION,
                 &attempt_id,
                 "h1",
-                Some("launch-credential-binding"),
+                IssueCredentialBinding::Current(Some("launch-credential-binding")),
                 NOW + 5,
                 WINDOW,
             )

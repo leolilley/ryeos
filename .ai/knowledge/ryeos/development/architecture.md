@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-22T00:31:25Z:dc38ecdc59a65ccd376abea72b3b7076a6492d7f5be9101aa3b9e93ff0d6dd70:VLhq2dE7kJ1QgSMZnlXxusJNaGldvhO1gPJcc4271lvwr/0qThXn8b0+R3wJgNxUisMZ2/lGg0ncEvBHhGIcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T00:59:19Z:1d0d9b13a2a1d0fa1ba7e6789e83be320e820859f28451664964dc9c821307e7:qqgeYv3uLHofUiGnDV1IhL3aqNaO+edWiJM10n/JVOZJIHsmtbnfhNDm2Tquqkgcx/H8upVIiOWskz++9k0KDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -30,7 +30,8 @@ full design document.
 | Daemon | `crates/bin/daemon/` | HTTP/UDS server and execution API |
 | API services | `crates/daemon/ryeos-api/` | service handlers, route dispatch, remote sync, project deploy reconciliation |
 | Scheduler | `crates/state/ryeos-scheduler/` | schedule projection, planning, timer dispatch, fire history rebuild |
-| Handler bins | `crates/tools/handler-bins/` | parser/composer subprocesses |
+| Handler bins | `crates/tools/handler-bins/` | composer, launch-preparer and evidence subprocesses |
+| Parser bins | `crates/tools/parser-bins/` | document parser subprocesses, built without the engine |
 | Runtimes | `crates/runtimes/{directive,graph,knowledge}/` | bundled execution runtimes |
 | TUI model | `crates/clients/base/` | platform-agnostic UI state/update/views |
 | TUI terminal | `crates/clients/terminal/` | `ryeos-tui` binary |

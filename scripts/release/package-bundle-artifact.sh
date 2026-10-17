@@ -250,7 +250,8 @@ ryeos_term_update "verifying staged node init profile" "$node_init_profile"
     --source "$stage" \
     --substrate-image-digest "$verification_substrate_digest" \
     --substrate-protocol "$verification_substrate_protocol" \
-    --node-profile "$node_init_profile" >/dev/null
+    --node-profile "$node_init_profile" \
+    --host-class local >/dev/null
 
 selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
 expected_node_policies="$(

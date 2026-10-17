@@ -258,6 +258,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                 .clone(),
             trust_epoch: self.policy.release_proof_policy().trust_epoch,
         };
+        // Each release input's ownership is resolved from the fetched CAS by
+        // the hash the input commits to; no bundle-release install is needed.
         let proof = self.policy.fetched_cas_release_proof(cas.clone())?;
         let verified = consumer::verify_curated_set(
             &coordinate.set_attestation_hash,

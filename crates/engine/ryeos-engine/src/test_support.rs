@@ -105,7 +105,7 @@ pub fn live_trust_store() -> TrustStore {
     ])
 }
 
-/// Load the signed kind schemas from the live Core and Standard bundles.
+/// Load the signed kind schemas from the live Core, Standard and ryeos-ui bundles.
 pub fn load_live_kind_registry() -> KindRegistry {
     let trust_store = live_trust_store();
     KindRegistry::load_base(
@@ -116,10 +116,14 @@ pub fn load_live_kind_registry() -> KindRegistry {
             standard_bundle_root()
                 .join(crate::AI_DIR)
                 .join(crate::KIND_SCHEMAS_DIR),
+            workspace_root()
+                .join("bundles/ryeos-ui")
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
         ],
         &trust_store,
     )
-    .expect("live kind registry must load from bundles/{core,standard}")
+    .expect("live kind registry must load from bundles/{core,standard,ryeos-ui}")
 }
 
 /// Load the live `HandlerRegistry` from both `bundles/core/` and

@@ -48,7 +48,7 @@ impl FetchedCasReleaseProof {
             bail!("fetched-CAS verifier policy differs from current consumer binding");
         }
         Ok(Self {
-            inner: super::standalone_publisher::StandalonePublisherProof::new(cas, policy)?,
+            inner: super::standalone_publisher::StandalonePublisherProof::new_resolving(cas, policy)?,
         })
     }
 }

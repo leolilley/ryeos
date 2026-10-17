@@ -6477,6 +6477,45 @@ metadata:
     }
 
     #[test]
+    fn bundle_provided_release_candidate_kind_loads_from_its_own_bundle_only() {
+        use crate::test_support::{
+            core_bundle_root, live_trust_store, standard_bundle_root, workspace_root,
+        };
+        let kinds_of = |bundle: PathBuf| bundle.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
+        let release_root = kinds_of(workspace_root().join("bundles/bundle-release"));
+        let trust = live_trust_store();
+
+        // Core and Standard do not provide the kind.
+        let base = KindRegistry::load_base(
+            &[kinds_of(core_bundle_root()), kinds_of(standard_bundle_root())],
+            &trust,
+        )
+        .expect("core and standard kinds load");
+        assert!(!base.contains("release_candidate"));
+
+        // Adding the bundle-release root provides it, as an opaque signed
+        // document with its own directory and no execution block.
+        let registry = KindRegistry::load_base(
+            &[
+                kinds_of(core_bundle_root()),
+                kinds_of(standard_bundle_root()),
+                release_root.clone(),
+            ],
+            &trust,
+        )
+        .expect("bundle-provided kind schema must verify and load");
+        let schema = registry
+            .get("release_candidate")
+            .expect("release_candidate kind provided by bundle-release");
+        assert_eq!(schema.directory, "release-candidates");
+        assert!(schema.execution().is_none());
+        assert!(registry.contains("tool") && registry.contains("service"));
+
+        // An untrusted trust store refuses the whole load.
+        assert!(KindRegistry::load_base(&[release_root], &TrustStore::from_signers(vec![])).is_err());
+    }
+
+    #[test]
     fn inventory_policy_renders_capabilities_without_kind_branches() {
         let policy = InventoryPolicy {
             admission: Some(InventoryAdmissionPolicy {

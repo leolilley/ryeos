@@ -1,4 +1,5 @@
 pub mod browser_launch_mode;
+pub mod channel_stream_mode;
 pub mod event_stream_mode;
 pub mod execute_mode;
 pub mod handler_mode;
@@ -72,6 +73,7 @@ impl ResponseModeRegistry {
             kinds,
         }));
         r.register(Arc::new(execute_mode::ExecuteMode));
+        r.register(Arc::new(channel_stream_mode::ChannelStreamMode));
         r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
         r
     }
@@ -121,6 +123,10 @@ mod tests {
             "handler mode must be registered"
         );
         assert!(r.get("json").is_some(), "json mode must be registered");
+        assert!(
+            r.get("channel_stream").is_some(),
+            "channel_stream mode must be registered"
+        );
         assert!(
             r.get("accepted").is_some(),
             "accepted alias must be registered"

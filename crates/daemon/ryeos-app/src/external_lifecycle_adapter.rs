@@ -1,5 +1,8 @@
 //! Closed executable runner for signed external occurrence lifecycle adapters.
 
+pub(crate) mod lease_admission;
+pub(crate) mod lease_ready;
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result, ensure};
@@ -36,16 +39,18 @@ use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
+    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
+    LIFECYCLE_HOSTS_FD_ENV,
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LEASE_ADMISSION_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
     LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
-    LifecycleRuntimeProbeSource, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    LifecycleRuntimeProbeSource, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
     SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 use ryeos_state::objects::RetainedLifecycleExecutableRole;
@@ -135,8 +140,154 @@ fn capture_lifecycle_network_inputs(
     })
 }
 
+/// How many entries the credential-home identity check reads, the homes
+/// under the root and the top-level entries of each, before it refuses the
+/// upload rather than admit it unchecked. Files deeper in a home are not
+/// read, so session state accumulating inside homes never exhausts it.
+const MAX_CREDENTIAL_HOME_CHECK_ENTRIES: usize = 65_536;
+
+/// Refuse an upload whose opened source file is a file of the node's
+/// private artifact homes. Three checks run on the exact descriptor the
+/// adapter will inherit. First, the kernel's current pathname for the open
+/// file is compared with the homes root: a file linked anywhere under it,
+/// or last linked there and since unlinked (a credential file replaced by
+/// writing a new file and renaming it over the old one), is refused. That
+/// pathname names only one of a file's links, so second, the file's device
+/// and inode are compared with every regular file at the top level of each
+/// home, where a credential profile keeps its credential files; this names
+/// the credential file when the upload is a hard link to one. Files deeper
+/// in a home are not compared, so third, a file with more than one link is
+/// refused outright: a hard link outside the homes to any file inside them
+/// therefore never passes. A symlink is resolved when the file is opened,
+/// so the open file is the home's own file and the first check sees it.
+pub(crate) fn refuse_credential_home_upload(
+    credential_home_root: &std::path::Path,
+    upload: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    let identity = upload.file_identity()?;
+    let Some(root) = lillux::PinnedDirectory::open(credential_home_root)
+        .context("open the node's credential-profile homes to check an upload")?
+    else {
+        return Ok(());
+    };
+    let canonical_root = lillux::canonicalize_existing_path(credential_home_root)
+        .context("resolve the node's credential-profile homes to check an upload")?;
+    let opened = upload
+        .opened_path()
+        .context("upload refused: read where its source file is linked")?;
+    if opened.path.starts_with(&canonical_root) || opened.path.starts_with(credential_home_root) {
+        anyhow::bail!(
+            "upload refused: its source is {}{}, under the node's credential-profile homes; \
+             a credential home never leaves this node",
+            opened.path.display(),
+            if opened.unlinked { " (since unlinked)" } else { "" }
+        );
+    }
+    if let Some(found) =
+        find_home_credential_file(&root, (identity.device(), identity.inode()))?
+    {
+        anyhow::bail!(
+            "upload refused: its source is {}, a file of the node's credential-profile homes; \
+             a credential home never leaves this node",
+            credential_home_root.join(found).display()
+        );
+    }
+    let links = identity.link_count();
+    if links > 1 {
+        anyhow::bail!(
+            "upload refused: its source file has {links} hard links; an upload must have \
+             exactly one, so that it cannot be another name for a file of the node's \
+             credential-profile homes"
+        );
+    }
+    Ok(())
+}
+
+/// The path, relative to the homes root, of the regular file with
+/// `identity` at the top level of any home, reading without following
+/// links and within [`MAX_CREDENTIAL_HOME_CHECK_ENTRIES`].
+fn find_home_credential_file(
+    root: &lillux::PinnedDirectory,
+    identity: (u64, u64),
+) -> Result<Option<std::path::PathBuf>> {
+    let homes = credential_home_entries(root, MAX_CREDENTIAL_HOME_CHECK_ENTRIES)?;
+    let mut remaining = MAX_CREDENTIAL_HOME_CHECK_ENTRIES
+        .checked_sub(homes.len())
+        .ok_or_else(credential_home_check_exhausted)?;
+    for home in homes {
+        let at_root = std::path::Path::new(&home.name);
+        match home.entry_type {
+            lillux::PinnedEntryType::Regular
+                if (home.containing_device, home.inode) == identity =>
+            {
+                return Ok(Some(at_root.to_path_buf()));
+            }
+            lillux::PinnedEntryType::Directory => {
+                let Some(directory) = root.open_child_directory(&home.name)? else {
+                    continue;
+                };
+                let entries = credential_home_entries(&directory, remaining)?;
+                remaining = remaining
+                    .checked_sub(entries.len())
+                    .ok_or_else(credential_home_check_exhausted)?;
+                if let Some(entry) = entries.into_iter().find(|entry| {
+                    entry.entry_type == lillux::PinnedEntryType::Regular
+                        && (entry.containing_device, entry.inode) == identity
+                }) {
+                    return Ok(Some(at_root.join(entry.name)));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+fn credential_home_check_exhausted() -> anyhow::Error {
+    anyhow::anyhow!(
+        "upload refused: the node's credential-profile homes hold more homes and top-level \
+         entries than the upload check reads ({MAX_CREDENTIAL_HOME_CHECK_ENTRIES})"
+    )
+}
+
+/// The entries of one directory of the homes, at most `max_entries` of them,
+/// read without following links. An entry renamed or removed between the
+/// listing and its inspection is skipped. That loses nothing the upload
+/// check relies on: if the upload is that file, its own pathname still names
+/// the homes when the file stayed under them, the file is no longer a home's
+/// file when it left them, and a second link to it is refused by the
+/// link-count check.
+fn credential_home_entries(
+    directory: &lillux::PinnedDirectory,
+    max_entries: usize,
+) -> Result<Vec<lillux::PinnedDirectoryEntryMetadata>> {
+    let read_failed = || {
+        format!(
+            "upload refused: read the node's credential-profile homes within the upload \
+             check's bound of {MAX_CREDENTIAL_HOME_CHECK_ENTRIES} entries"
+        )
+    };
+    // One name past the bound tells a full directory from an oversized one.
+    let names = directory
+        .entry_names_bounded(max_entries.saturating_add(1))
+        .with_context(read_failed)?;
+    if names.len() > max_entries {
+        return Err(credential_home_check_exhausted());
+    }
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        if let Some(entry) = directory.entry_no_follow(&name).with_context(read_failed)? {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
 #[derive(Debug)]
 pub(crate) struct ExecutableExternalPlacementBackend {
+    /// Root of the node's credential-profile homes; no upload this backend
+    /// hands its adapter may be a file under it.
+    credential_home_root: std::path::PathBuf,
     declaration: ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration,
     bundle_manifest_digest: String,
     signer_fingerprint: String,
@@ -158,7 +309,10 @@ pub(crate) struct ExecutableExternalPlacementBackend {
 }
 
 impl ExecutableExternalPlacementBackend {
-    pub(crate) fn new(artifacts: ResolvedExternalLifecycleArtifacts) -> Result<Self> {
+    pub(crate) fn new(
+        artifacts: ResolvedExternalLifecycleArtifacts,
+        credential_home_root: std::path::PathBuf,
+    ) -> Result<Self> {
         let adapter_bytes = artifact_bytes(&artifacts.adapter)?;
         let supervisor_bytes = artifact_bytes(&artifacts.supervisor)?;
         let launcher_bytes = artifact_bytes(&artifacts.launcher)?;
@@ -277,6 +431,7 @@ impl ExecutableExternalPlacementBackend {
         let inspection = decode_inspection_response(&response.bytes, &request)?;
 
         Ok(Self {
+            credential_home_root,
             declaration: artifacts.declaration,
             bundle_manifest_digest: artifacts.bundle_manifest_digest,
             signer_fingerprint: artifacts.signer_fingerprint,
@@ -322,6 +477,7 @@ impl ExecutableExternalPlacementBackend {
         guest_package: Option<&lillux::InheritedDescriptorAuthority>,
         signed_import: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization>,
         signed_assignment: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment>,
+        admitted_adapter_request: Option<&[u8]>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -465,6 +621,9 @@ impl ExecutableExternalPlacementBackend {
             }
         }
         if let Some(package) = guest_package {
+            // The guest package crosses to the lease like any upload, so it
+            // takes the same credential-home identity check.
+            refuse_credential_home_upload(&self.credential_home_root, package)?;
             envs.push((
                 LIFECYCLE_GUEST_PACKAGE_FD_ENV.into(),
                 package
@@ -507,6 +666,11 @@ impl ExecutableExternalPlacementBackend {
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
             ));
+            inherited.push(handle);
+        }
+        if let Some(bytes) = admitted_adapter_request {
+            let (handle, env) = sealed_admitted_adapter_request(bytes)?;
+            envs.push(env);
             inherited.push(handle);
         }
         drop(descriptors);
@@ -679,6 +843,9 @@ impl ExecutableExternalPlacementBackend {
                     && intent.expected_bytes == Some(bytes.len() as u64),
                 "claimed relay upload changed its committed bytes"
             );
+            // The relay upload is a memfd sealed here from the journal's
+            // committed bytes, never a file on disk, so it cannot be a
+            // credential-home file and takes no identity check.
             let handle =
                 lillux::sealed_memfd(c"ryeos-relay-upload", bytes).map_err(anyhow::Error::msg)?;
             envs.push((LIFECYCLE_RELAY_UPLOAD_FD_ENV.into(), fd(&handle)?));
@@ -796,6 +963,7 @@ impl ExecutableExternalPlacementBackend {
             network_inputs.hosts.authority().clone(),
         ];
         if let Some(upload) = upload {
+            refuse_credential_home_upload(&self.credential_home_root, upload)?;
             inherited.push(upload.clone());
         }
         let environment = vec![
@@ -918,11 +1086,28 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         &self.declaration.id
     }
 
+    fn admit_lease(
+        &self,
+        inputs: &lease_admission::LeaseAdmissionInputs,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lease_admission::AdmittedLease> {
+        self.invoke_admit_lease(inputs, deadline)
+    }
+
+    fn await_lease_ready(
+        &self,
+        request: &[u8],
+        ready_frame: &[u8],
+        report_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        self.invoke_await_lease_ready(request, ready_frame, report_frame, deadline)
+    }
+
     fn artifact_hash(&self) -> &str {
         &self.adapter_hash
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn artifact_bytes(&self) -> u64 {
         self.adapter_bytes
     }
@@ -935,7 +1120,6 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         (&self.launcher_hash, self.launcher_bytes)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn settings_schema_digest(&self) -> &str {
         &self.declaration.settings_schema_digest
     }
@@ -1957,6 +2141,152 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
 }
 
 impl ExecutableExternalPlacementBackend {
+    /// Stage-one lease admission. The adapter receives the sealed request and
+    /// the captured signed provider spec, nothing else: no credential,
+    /// settings, network inputs or activation material, so its verdict can
+    /// cost no provider contact.
+    fn invoke_admit_lease(
+        &self,
+        inputs: &lease_admission::LeaseAdmissionInputs,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lease_admission::AdmittedLease> {
+        let request = lease_admission::canonical_request(
+            &self.declaration.id,
+            &self.provider_spec.sha256,
+            inputs,
+        )?;
+        let request_handle = lillux::sealed_memfd(c"ryeos-lease-admission-request", &request)
+            .map_err(anyhow::Error::msg)?;
+        let envs = vec![
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                self.provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
+            ),
+        ];
+        let response = run_lifecycle_adapter(
+            &self.adapter,
+            LifecycleAdapterInvocation::AdmitLease,
+            &request_handle,
+            vec![self.provider_spec.authority.clone()],
+            envs,
+            deadline,
+        )
+        .with_context(|| {
+            format!(
+                "lease admission refused: lifecycle adapter `{}` gave no verdict on workload `{}`",
+                self.declaration.id, inputs.workload
+            )
+        })?;
+        let budget_weight = lease_admission::require_admitted(
+            &response.bytes,
+            &request,
+            &self.provider_spec.sha256,
+            &self.declaration.id,
+        )?;
+        Ok(lease_admission::AdmittedLease {
+            request,
+            budget_weight,
+        })
+    }
+
+    /// Lease readiness judgement. The adapter receives the sealed readiness
+    /// request, the captured signed provider spec and one inherited duplex
+    /// descriptor carrying exactly the guest's Ready and capability report,
+    /// each length-prefixed, then end of input. It holds no credential,
+    /// settings or activation material and the enclosure denies it process
+    /// creation. Returns the adapter's raw verdict bytes for the caller to
+    /// read against the lease record; a failure to obtain any verdict is an
+    /// error, never a verdict.
+    fn invoke_await_lease_ready(
+        &self,
+        request: &[u8],
+        ready_frame: &[u8],
+        report_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Vec<u8>> {
+        let ready = ryeos_external_execution_contract::length_prefixed::encode(
+            ready_frame,
+            MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+        )?;
+        let report = ryeos_external_execution_contract::length_prefixed::encode(
+            report_frame,
+            MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
+        )?;
+        let request_handle = lillux::sealed_memfd(c"ryeos-lease-ready-request", request)
+            .map_err(anyhow::Error::msg)?;
+        let (mut frames, child) =
+            lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+        let mut inherited = vec![self.provider_spec.authority.clone()];
+        child.retain_for_child(&mut inherited);
+        let envs = vec![
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                self.provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
+            ),
+            (
+                LIFECYCLE_REMAINING_TIMEOUT_MS_ENV.into(),
+                u64::try_from(deadline.remaining().as_millis())?.to_string(),
+            ),
+            (
+                LIFECYCLE_GUEST_FRAMES_FD_ENV.into(),
+                child.inherited_descriptor().map_err(anyhow::Error::msg)?.to_string(),
+            ),
+        ];
+        // The child's copy travels in `inherited`; dropping the parent's copy
+        // leaves the adapter the only reader of its end.
+        drop(child);
+        let result = std::thread::scope(|scope| {
+            // The writer runs beside the adapter so neither waits on the
+            // other: it writes both frames, then closes its direction so the
+            // adapter sees end of input. A write error after the adapter has
+            // answered and gone is not a failure; only the verdict counts.
+            scope.spawn(move || {
+                use std::io::Write as _;
+                let mut stream = frames.with_deadline(deadline);
+                if stream.write_all(&ready).is_ok() && stream.write_all(&report).is_ok() {
+                    let _ = stream.flush();
+                }
+                let _ = frames.shutdown_write();
+            });
+            run_lifecycle_adapter(
+                &self.adapter,
+                LifecycleAdapterInvocation::AwaitLeaseReady,
+                &request_handle,
+                inherited,
+                envs,
+                deadline,
+            )
+        });
+        let response = result.with_context(|| {
+            format!(
+                "lease readiness refused: lifecycle adapter `{}` gave no verdict",
+                self.declaration.id
+            )
+        })?;
+        ensure!(
+            !response.deadline_exceeded,
+            "lease readiness refused: lifecycle adapter `{}` answered after its deadline",
+            self.declaration.id
+        );
+        Ok(response.bytes)
+    }
+
     fn common(
         contract: &ExternalPlacementBackendContract,
         binding_hash: &str,
@@ -2003,8 +2333,18 @@ impl ExecutableExternalPlacementBackend {
                 reservation: reservation_wire,
             }
         };
+        let admitted_adapter_request = reservation.admitted_adapter_request()?;
         let response = self.invoke(
-            contract, credential, &request, None, None, None, None, None, deadline,
+            contract,
+            credential,
+            &request,
+            None,
+            None,
+            None,
+            None,
+            None,
+            admitted_adapter_request.as_deref(),
+            deadline,
         )?;
         let value = match response.value {
             LifecycleAdapterResponse::AllocationBound {
@@ -2166,6 +2506,7 @@ impl ExecutableExternalPlacementBackend {
             activation_authority
                 .map(ExternalSupervisorActivation::signed_assignment)
                 .transpose()?,
+            reservation.admitted_adapter_request()?.as_deref(),
             deadline,
         )?;
         let value = match response.value {
@@ -2229,10 +2570,20 @@ impl ExecutableExternalPlacementBackend {
         let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
             u64::from(contract.cleanup_timeout_seconds),
         ));
+        let admitted_adapter_request = reservation.admitted_adapter_request()?;
         // Late terminal evidence may settle cleanup, never start execution.
         match self
             .invoke(
-                contract, credential, &request, None, None, None, None, None, deadline,
+                contract,
+                credential,
+                &request,
+                None,
+                None,
+                None,
+                None,
+                None,
+                admitted_adapter_request.as_deref(),
+                deadline,
             )?
             .value
         {
@@ -2248,6 +2599,28 @@ impl ExecutableExternalPlacementBackend {
             _ => anyhow::bail!("lifecycle adapter returned a non-termination response"),
         }
     }
+}
+
+/// Seal the admitted adapter request a placement retains for one `operate`
+/// contact. Every `operate` contact for that placement (allocation,
+/// activation, termination and their reconciliations) receives the exact
+/// bytes the adapter admitted, so every provider contact for the placement
+/// works from the same admitted request; the controller never interprets them.
+fn sealed_admitted_adapter_request(
+    bytes: &[u8],
+) -> Result<(lillux::InheritedDescriptorAuthority, (String, String))> {
+    ensure!(
+        !bytes.is_empty()
+            && bytes.len() <= ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+        "admitted adapter request is empty or exceeds its bound"
+    );
+    let handle = lillux::sealed_memfd(c"ryeos-lifecycle-admitted-request", bytes)
+        .map_err(anyhow::Error::msg)?;
+    let descriptor = handle
+        .inherited_descriptor()
+        .map_err(anyhow::Error::msg)?
+        .to_string();
+    Ok((handle, (LEASE_ADMISSION_FD_ENV.into(), descriptor)))
 }
 
 fn decode_inspection_response(
@@ -2307,6 +2680,133 @@ fn artifact_bytes(artifact: &ryeos_engine::binary_resolver::CapturedExecutable) 
 mod tests {
     use super::*;
 
+    fn opened(path: &std::path::Path) -> lillux::InheritedDescriptorAuthority {
+        let resolved = lillux::canonicalize_existing_path(path).unwrap();
+        lillux::secure_fs::open_pinned_regular_file_no_follow(&resolved)
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_upload_from_a_credential_home_is_refused_by_file_identity() {
+        let state = tempfile::tempdir().unwrap();
+        let home = crate::private_artifact_home::create(
+            state.path(),
+            "credential-fixture",
+            &BTreeMap::from([("auth.json".to_owned(), b"credential".to_vec())]),
+        )
+        .unwrap();
+        let root = crate::private_artifact_home::root(state.path());
+        let credential = home.join("auth.json");
+
+        // Directly, through a symlink outside the homes, and through a hard
+        // link outside them: each opens the same credential file.
+        let outside = state.path().join("outside");
+        let outside_directory = lillux::PinnedDirectory::open_or_create(&outside).unwrap();
+        outside_directory
+            .create_symlink(
+                std::ffi::OsStr::new("link.json"),
+                credential.as_os_str().as_encoded_bytes(),
+            )
+            .unwrap();
+        std::fs::hard_link(&credential, outside.join("hard.json")).unwrap();
+        for path in [credential.clone(), outside.join("link.json"), outside.join("hard.json")] {
+            let error = refuse_credential_home_upload(&root, &opened(&path)).unwrap_err();
+            let text = format!("{error:#}");
+            assert!(text.starts_with("upload refused: its source is "), "{text}");
+            assert!(text.contains("credential-fixture/auth.json"), "{text}");
+        }
+
+        // A workload file elsewhere, and sealed relay bytes, pass.
+        std::fs::write(outside.join("workload.json"), b"workload").unwrap();
+        refuse_credential_home_upload(&root, &opened(&outside.join("workload.json"))).unwrap();
+        // Session state accumulating below a home's top level is never
+        // read by the inode comparison, so it never exhausts its bound.
+        let sessions = home.join("sessions").join("2026").join("10");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for index in 0..64 {
+            std::fs::write(sessions.join(format!("rollout-{index}.jsonl")), b"log").unwrap();
+        }
+        refuse_credential_home_upload(&root, &opened(&outside.join("workload.json"))).unwrap();
+        // A file below a home's top level is refused by where it is linked.
+        let error =
+            refuse_credential_home_upload(&root, &opened(&sessions.join("rollout-0.jsonl")))
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("rollout-0.jsonl"), "{error:#}");
+        let error = refuse_credential_home_upload(&root, &opened(&credential)).unwrap_err();
+        assert!(format!("{error:#}").contains("credential-fixture/auth.json"), "{error:#}");
+        // A hard link outside the homes to a file below a home's top level
+        // is named by neither the pathname nor the inode comparison; its
+        // extra link refuses it.
+        std::fs::hard_link(sessions.join("rollout-1.jsonl"), outside.join("rollout.jsonl"))
+            .unwrap();
+        let error = refuse_credential_home_upload(&root, &opened(&outside.join("rollout.jsonl")))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("upload refused: its source file has 2 hard links"),
+            "{error:#}"
+        );
+        // So is any other multiply linked file, wherever its links are.
+        std::fs::hard_link(outside.join("workload.json"), outside.join("workload-2.json"))
+            .unwrap();
+        let error = refuse_credential_home_upload(&root, &opened(&outside.join("workload.json")))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("2 hard links"), "{error:#}");
+        let sealed = lillux::sealed_memfd(c"ryeos-relay-upload", b"envelope").unwrap();
+        refuse_credential_home_upload(&root, &sealed).unwrap();
+        // A node with no homes root has nothing to protect.
+        refuse_credential_home_upload(&state.path().join("absent"), &sealed).unwrap();
+    }
+
+    #[test]
+    fn a_credential_home_file_replaced_or_moved_after_opening_is_still_refused() {
+        let state = tempfile::tempdir().unwrap();
+        let home = crate::private_artifact_home::create(
+            state.path(),
+            "credential-fixture",
+            &BTreeMap::from([("auth.json".to_owned(), b"credential".to_vec())]),
+        )
+        .unwrap();
+        let root = crate::private_artifact_home::root(state.path());
+        let credential = home.join("auth.json");
+
+        // Opened, then replaced by a new file renamed over it: the opened
+        // inode is in no home any more, and the kernel marks its name unlinked.
+        let replaced = opened(&credential);
+        std::fs::write(home.join("auth.json.new"), b"rotated").unwrap();
+        std::fs::rename(home.join("auth.json.new"), &credential).unwrap();
+        let error = refuse_credential_home_upload(&root, &replaced).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.starts_with("upload refused: its source is "), "{text}");
+        assert!(text.contains("credential-fixture/auth.json (since unlinked)"), "{text}");
+
+        // Opened, then renamed below the home's top level, where the inode
+        // comparison does not read.
+        let moved = opened(&credential);
+        std::fs::create_dir(home.join("archive")).unwrap();
+        std::fs::rename(&credential, home.join("archive").join("auth.json")).unwrap();
+        let error = refuse_credential_home_upload(&root, &moved).unwrap_err();
+        assert!(format!("{error:#}").contains("archive/auth.json"), "{error:#}");
+    }
+
+    #[test]
+    fn credential_home_listing_refuses_past_its_bound_and_reads_up_to_it() {
+        let state = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(state.path().join(name), b"x").unwrap();
+        }
+        let directory = lillux::PinnedDirectory::open(state.path()).unwrap().unwrap();
+        let entries = credential_home_entries(&directory, 2).unwrap();
+        assert_eq!(entries.len(), 2);
+        std::fs::write(state.path().join("c"), b"x").unwrap();
+        let error = credential_home_entries(&directory, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("hold more homes and top-level entries"),
+            "{error:#}"
+        );
+    }
+
     fn require_private_decode_error(error: anyhow::Error) {
         let error = error.context("lifecycle dispatch failed");
         for rendered in [
@@ -2321,6 +2821,27 @@ mod tests {
             2,
             "decoder source must not escape closed boundary"
         );
+    }
+
+    #[test]
+    fn admitted_adapter_request_reaches_its_descriptor_exactly_and_bounded() {
+        let bytes = br#"{"admitted":"opaque"}"#;
+        let (handle, (name, descriptor)) = sealed_admitted_adapter_request(bytes).unwrap();
+        assert_eq!(name, LEASE_ADMISSION_FD_ENV);
+        assert_eq!(
+            descriptor,
+            handle.inherited_descriptor().unwrap().to_string()
+        );
+        let read = lillux::read_sealed_inherited_descriptor(
+            descriptor.parse().unwrap(),
+            ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+        )
+        .unwrap();
+        assert_eq!(read, bytes);
+
+        assert!(sealed_admitted_adapter_request(&[]).is_err());
+        let over = vec![b'x'; ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES + 1];
+        assert!(sealed_admitted_adapter_request(&over).is_err());
     }
 
     #[test]

@@ -24,7 +24,24 @@ pub struct CoreSeedBuildRequest {
 }
 
 impl CoreSeedBuildRequest {
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Validate the request and require its release input to be exactly the
+    /// selection the signed payload ownership makes for Core, payload
+    /// features included.
+    pub fn validate_with_ownership(
+        &self,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<()> {
+        self.validate_wire()?;
+        super::admitted_build::AdmittedReleaseInput::from_core_seed_value_with_ownership(
+            &self.release_input,
+            ownership,
+        )?;
+        Ok(())
+    }
+
+    /// Wire-form checks only. They do not attest the payload features, so
+    /// nothing may treat a request as admitted on this alone.
+    pub(crate) fn validate_wire(&self) -> anyhow::Result<()> {
         super::recipe::validate_child_product_selections(&self.child_product_selections)?;
         anyhow::ensure!(
             !self.catalog_namespace.is_empty()
@@ -85,8 +102,19 @@ impl CoreSeedRecipeRequest {
             Self::Capture(capture) => &capture.build,
         }
     }
-    pub fn validate(&self) -> anyhow::Result<()> {
-        self.build().validate()?;
+    pub fn validate_with_ownership(
+        &self,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<()> {
+        self.build().validate_with_ownership(ownership)?;
+        self.validate_stage()
+    }
+    /// Wire-form checks only; see `CoreSeedBuildRequest::validate_wire`.
+    pub(crate) fn validate_wire(&self) -> anyhow::Result<()> {
+        self.build().validate_wire()?;
+        self.validate_stage()
+    }
+    fn validate_stage(&self) -> anyhow::Result<()> {
         if let Self::Capture(capture) = self {
             for value in [
                 &capture.materialization_result_hash,
@@ -121,8 +149,14 @@ impl CoreSeedRecipeRequest {
                 "manifest_item_hash":capture.manifest_item_hash,"signed_manifest":capture.signed_manifest}),
         }
     }
-    pub fn require_policy(&self, namespace: &str, digest: &str, epoch: u64) -> anyhow::Result<()> {
-        self.validate()?;
+    pub fn require_policy(
+        &self,
+        namespace: &str,
+        digest: &str,
+        epoch: u64,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<()> {
+        self.validate_with_ownership(ownership)?;
         let build = self.build();
         anyhow::ensure!(
             build.catalog_namespace == namespace
@@ -132,8 +166,11 @@ impl CoreSeedRecipeRequest {
         );
         Ok(())
     }
-    pub fn config_body(&self) -> anyhow::Result<String> {
-        self.validate()?;
+    pub fn config_body(
+        &self,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<String> {
+        self.validate_with_ownership(ownership)?;
         let (producer, product, path, relationship, consumer, slot, qualification) = match self {
             Self::Build(_) => (
                 BUILD_GRAPH,
@@ -210,7 +247,12 @@ impl CoreSeedRecipeRequest {
         .runtime_fact_value()?;
         Ok(body)
     }
-    pub fn validate_response(&self, value: &Value, publisher: &str) -> anyhow::Result<()> {
+    pub fn validate_response(
+        &self,
+        value: &Value,
+        publisher: &str,
+        ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<()> {
         let signed = value["signed_config"]
             .as_str()
             .context("Core seed recipe omitted signed Config")?;
@@ -223,7 +265,7 @@ impl CoreSeedRecipeRequest {
             value["schema"] == "ryeos.core_seed_recipe_authorization.v1"
                 && value["canonical_ref"] == self.canonical_ref()
                 && value["publisher_fingerprint"] == publisher
-                && body == self.config_body()?
+                && body == self.config_body(ownership)?
                 && value["body_hash"] == lillux::sha256_hex(body.as_bytes())
                 && value["signed_blob_hash"] == lillux::sha256_hex(signed.as_bytes())
                 && header.signer_fingerprint == publisher
@@ -249,7 +291,19 @@ fn require_hash(value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn build() -> CoreSeedBuildRequest {
+    fn ownership(features: &[&str]) -> ryeos_bundle_publication_contract::BundlePayloadOwnership {
+        ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(&json!({
+            "schema":"ryeos.bundle_payload_ownership.v2","kind":"bundle_payload_ownership",
+            "host_packages":[],"no_default_features_packages":["ryeos-core-tools"],
+            "feature_implications":{},"data_only_bundles":[],"host_only_bundles":[],
+            "bundles":[{"bundle_name":"core","bundle_sets":["core"],"host_features":[],
+                "payloads":[{"binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools",
+                    "build_class":"release","cargo_features":features}]}]
+        }))
+        .unwrap()
+    }
+
+    fn build_with(features: &[&str]) -> CoreSeedBuildRequest {
         CoreSeedBuildRequest {
             catalog_namespace: "official".into(),
             bundle_publication_policy_section_digest: "a".repeat(64),
@@ -258,25 +312,31 @@ mod tests {
                 "authored_manifest":{"name":"core","version":"1.0.0","provides_kinds":[],"requires_kinds":[]},
                 "source_snapshot_hash":"b".repeat(64),"predecessor_generation_hash":null,
                 "target":{"kind":"triple","triple":"x86_64-unknown-linux-gnu"},"build_profile":"release",
-                "payload_ownership_item_ref":"config:bundle-release/payload-ownership","payload_ownership_content_hash":"c".repeat(64),
-                "payloads":[{"bundle":"core","binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools","build_class":"release","bundle_sets":["core"],"required_features":[]}],
-                "cargo_packages":["ryeos-core-tools"],"cargo_feature_selections":[{"cargo_package":"ryeos-core-tools","features":[]}],"build_classes":["release"],"requires_binary_build":true,
+                "payload_ownership_item_ref":"config:bundle-release/payload-ownership",
+                "payload_ownership_content_hash":ownership(&["granted"]).content_hash().unwrap(),
+                "payloads":[{"bundle":"core","binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools","build_class":"release","bundle_sets":["core"],"required_features":features}],
+                "cargo_packages":["ryeos-core-tools"],"cargo_feature_selections":[{"cargo_package":"ryeos-core-tools","features":features}],"build_classes":["release"],"requires_binary_build":true,
                 "clean_output_required":true,"ambient_target_reuse_allowed":false}),
             child_product_selections: vec![],
         }
     }
 
+    fn build() -> CoreSeedBuildRequest {
+        build_with(&["granted"])
+    }
+
     #[test]
     fn core_seed_is_explicit_and_does_not_require_an_image_or_receipt() {
         let request = build();
-        request.validate().unwrap();
+        let owner = ownership(&["granted"]);
+        request.validate_with_ownership(&owner).unwrap();
         assert!(
             super::super::admitted_build::AdmittedReleaseInput::from_value(&request.release_input)
                 .is_err()
         );
         let body: Value = serde_json::from_str(
             &CoreSeedRecipeRequest::Build(request.clone())
-                .config_body()
+                .config_body(&owner)
                 .unwrap(),
         )
         .unwrap();
@@ -294,14 +354,40 @@ mod tests {
     }
 
     #[test]
+    fn core_seed_refuses_features_the_ownership_does_not_grant() {
+        let owner = ownership(&["granted"]);
+        // Structurally valid, but "forged" is not granted to the payload.
+        let forged = build_with(&["forged"]);
+        assert!(forged.validate_wire().is_ok());
+        assert!(forged.validate_with_ownership(&owner).is_err());
+        let recipe = CoreSeedRecipeRequest::Build(forged);
+        assert!(recipe.validate_with_ownership(&owner).is_err());
+        assert!(recipe.config_body(&owner).is_err());
+        assert!(
+            recipe
+                .require_policy("official", &"a".repeat(64), 1, &owner)
+                .is_err()
+        );
+        // The same request is admitted by an ownership that grants it.
+        let wider = ownership(&["forged"]);
+        let mut granted = build_with(&["forged"]);
+        granted.release_input["payload_ownership_content_hash"] =
+            json!(wider.content_hash().unwrap());
+        assert!(granted.validate_with_ownership(&wider).is_ok());
+        // Dropping a granted feature is also refused.
+        assert!(build_with(&[]).validate_with_ownership(&owner).is_err());
+    }
+
+    #[test]
     fn core_seed_refuses_successor_and_noncore_inputs() {
+        let owner = ownership(&["granted"]);
         let mut successor = build();
         successor.release_input["predecessor_generation_hash"] = json!("d".repeat(64));
-        assert!(successor.validate().is_err());
+        assert!(successor.validate_with_ownership(&owner).is_err());
         let mut other = build();
         other.release_input["bundle_name"] = json!("web");
         other.release_input["authored_manifest"]["name"] = json!("web");
-        assert!(other.validate().is_err());
+        assert!(other.validate_with_ownership(&owner).is_err());
     }
 
     #[test]
@@ -314,7 +400,8 @@ mod tests {
             manifest_item_hash: lillux::sha256_hex(signed.as_bytes()),
             signed_manifest: signed,
         });
-        let body: Value = serde_json::from_str(&recipe.config_body().unwrap()).unwrap();
+        let body: Value =
+            serde_json::from_str(&recipe.config_body(&ownership(&["granted"])).unwrap()).unwrap();
         let relation = &body["product_relationships"]["relationships"][0];
         assert_eq!(relation["producer"]["canonical_ref"], CAPTURE_GRAPH);
         assert_eq!(

@@ -4451,15 +4451,14 @@ impl ThreadLifecycleService {
         let params = admission.child_thread_create_params(thread_id.to_string(), parent)?;
         let admitted =
             self.admitted_inline_child_create_params(&params, &admission.root, parent)?;
-        let persisted = self.publish_recorded_service_child_birth(
+        let (persisted, unspawned) = self.publish_recorded_service_child_birth(
             &recorded_service_thread_record(&admitted),
             recorded_service_birth_events(admission),
             launch_metadata,
             owner,
         )?;
         self.publish_records(&persisted);
-        self.state_store
-            .record_child_link(&parent.thread_id, thread_id, "dispatch")
+        self.state_store.link_unspawned_in_process_child(unspawned)
     }
 
     /// The in-process child birth is one store commit: the child's
@@ -4473,7 +4472,7 @@ impl ThreadLifecycleService {
         initial_events: Vec<NewEventRecord>,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         owner: &crate::state_store::InProcessHandlerControl,
-    ) -> Result<Vec<PersistedEventRecord>> {
+    ) -> Result<(Vec<PersistedEventRecord>, crate::state_store::UnspawnedInProcessChild)> {
         if owner.has_committed_birth() {
             bail!(
                 "in-process owner of `{}` already committed a birth",

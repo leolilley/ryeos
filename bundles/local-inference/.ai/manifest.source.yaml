@@ -1,9 +1,13 @@
+# ryeos:signed:2026-10-15T23:13:27Z:f3bb409227f43a7b5f16b07af0d287b9b66aa7381ef4bd80cff627d001c31048:s7N6AD+1dHI1NqPc++QcXPoIgo+P/ASrlaMQVhfwSDnPfU/Pcglpa5+hzvZWMYlIMa5xDWwY09wMOD0dEYUiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: local-inference
 version: "0.1.0"
 description: "Optional admitted local-model workers and provider routes"
 requires_kinds:
   - config
   - directive
+  - graph
   - knowledge
+  - protocol
+  - tool
   - worker
 uses_kinds: []

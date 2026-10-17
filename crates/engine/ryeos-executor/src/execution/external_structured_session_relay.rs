@@ -14,8 +14,7 @@ use ryeos_app::external_placement::{
     advance_external_session_relay_step,
 };
 use ryeos_app::persistent_session::{
-    PersistentSessionRelayFailure, PersistentSessionRelayHealthCell,
-    PersistentSessionRelayOwner,
+    PersistentSessionRelayFailure, PersistentSessionRelayHealthCell, PersistentSessionRelayOwner,
 };
 
 const MAXIMUM_SLOT_READS: u32 = 128;
@@ -93,9 +92,9 @@ impl ExternalStructuredSessionRelayCursor {
         state: &ryeos_app::state::AppState,
         placement: &str,
     ) -> Result<()> {
-        let step = self
-            .step
-            .context("ordinary relay exhausted its signed frame allowance before owner settlement")?;
+        let step = self.step.context(
+            "ordinary relay exhausted its signed frame allowance before owner settlement",
+        )?;
         if !self.next_contact.has_elapsed() {
             return Ok(());
         }
@@ -238,8 +237,11 @@ impl ExternalStructuredSessionRelayPump {
 
     pub(crate) fn ensure_running(&self) -> Result<()> {
         ensure!(
-            matches!(self.health.snapshot(), ryeos_app::persistent_session::PersistentSessionRelayHealth::Live)
-                && self.thread
+            matches!(
+                self.health.snapshot(),
+                ryeos_app::persistent_session::PersistentSessionRelayHealth::Live
+            ) && self
+                .thread
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
@@ -302,36 +304,42 @@ mod tests {
             poll_interval_ms: 1_000,
             poll_deadline_ms: 30_000,
         };
-        assert!(schedule
-            .pending_delay(
-                ExternalSessionRelayPending {
-                    read_attempts: 1,
-                    deadline_ms: 20_000,
-                    poll_interval_ms: 1_000,
-                },
-                1_000,
-            )
-            .is_ok());
-        assert!(schedule
-            .pending_delay(
-                ExternalSessionRelayPending {
-                    read_attempts: 0,
-                    deadline_ms: 20_000,
-                    poll_interval_ms: 1_000,
-                },
-                1_000,
-            )
-            .is_err());
-        assert!(schedule
-            .pending_delay(
-                ExternalSessionRelayPending {
-                    read_attempts: 1,
-                    deadline_ms: 20_000,
-                    poll_interval_ms: 2_000,
-                },
-                1_000,
-            )
-            .is_err());
+        assert!(
+            schedule
+                .pending_delay(
+                    ExternalSessionRelayPending {
+                        read_attempts: 1,
+                        deadline_ms: 20_000,
+                        poll_interval_ms: 1_000,
+                    },
+                    1_000,
+                )
+                .is_ok()
+        );
+        assert!(
+            schedule
+                .pending_delay(
+                    ExternalSessionRelayPending {
+                        read_attempts: 0,
+                        deadline_ms: 20_000,
+                        poll_interval_ms: 1_000,
+                    },
+                    1_000,
+                )
+                .is_err()
+        );
+        assert!(
+            schedule
+                .pending_delay(
+                    ExternalSessionRelayPending {
+                        read_attempts: 1,
+                        deadline_ms: 20_000,
+                        poll_interval_ms: 2_000,
+                    },
+                    1_000,
+                )
+                .is_err()
+        );
     }
 
     #[test]

@@ -15,8 +15,6 @@ pub mod bundle_events;
 pub mod bundle_outbox;
 pub mod capability;
 pub mod chain;
-#[cfg(test)]
-mod custody_drop_gate;
 pub mod event_types;
 pub mod external_content;
 pub mod external_execution;
@@ -49,6 +47,13 @@ pub mod state_db;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+/// Whether an owner recorded in process `process` is only a copy here: this
+/// is a forked child, supervised or not, or another process altogether. Reads
+/// one atomic and the process id; no lock and no allocation.
+pub(crate) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
 pub mod verify;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};

@@ -236,6 +236,110 @@
       "/type"
     ]
   },
+  "requires": {
+    "workload_class": "codex.authoring.remote",
+    "controller": [
+      {
+        "any_of": [
+          "accounting",
+          "residency:swap_absent"
+        ]
+      },
+      {
+        "any_of": [
+          "recovery:enclosure",
+          "recovery:enclosure_trusted_init"
+        ],
+        "accept": [
+          "measured",
+          "trusted"
+        ]
+      },
+      {
+        "any_of": [
+          "termination:enclosure",
+          "termination:enclosure_trusted_init"
+        ],
+        "accept": [
+          "measured",
+          "trusted"
+        ]
+      },
+      {
+        "name": "persistence:durable_state",
+        "accept": [
+          "measured",
+          "provider_attested",
+          "trusted"
+        ]
+      },
+      "time"
+    ],
+    "credential_kinds": {
+      "credential_profile": [
+        {
+          "name": "credential:private_home",
+          "accept": [
+            "measured",
+            "provider_attested",
+            "trusted"
+          ]
+        }
+      ]
+    },
+    "lease": [
+      {
+        "name": "export.frozen_candidate",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "guest.ready_authenticated",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.create_bound",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.lifetime_bound",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.network_policy",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.terminate_observed",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "remote_lease:render-sandbox",
+        "accept": [
+          "provider_attested"
+        ]
+      }
+    ],
+    "guest": [
+      {
+        "name": "guest.exec_route_closed",
+        "accept": [
+          "provider_attested"
+        ]
+      }
+    ]
+  },
   "initialization": [
     {
       "method": "initialize",

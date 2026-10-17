@@ -17,7 +17,7 @@ use ryeos_external_execution_contract::{
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::provider_spec::{NetworkPolicyDefault, PlanValue, ProviderSpec, RouteName};
+use crate::provider_spec::{EgressPolicy, PlanValue, ProviderSpec, RouteName};
 use crate::{RenderApiSettings, RenderPlan, RenderSandboxPlan, RenderSandboxStatus};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -129,7 +129,7 @@ pub(crate) fn create_source_sandbox(adapter: &lillux::InheritedDescriptorAuthori
         request.intent.maximum_lifetime_seconds,
     )?;
     ensure!(
-        projection.network_policy_default == NetworkPolicyDefault::DenyAll,
+        projection.network_policy == EgressPolicy::deny_all(),
         "bootstrap profile changed deny-all policy"
     );
     let route = spec
@@ -147,9 +147,7 @@ pub(crate) fn create_source_sandbox(adapter: &lillux::InheritedDescriptorAuthori
         plan: settings.plan,
         region: projection.region.clone(),
         timeout_seconds: projection.timeout_seconds,
-        network_policy: crate::NetworkPolicy {
-            default: crate::RenderNetworkPolicyDefault::DenyAll,
-        },
+        network_policy: crate::NetworkPolicy::requested(&projection.network_policy),
         snapshot_id: None,
     };
     let body = canonical_json(&body)?;
@@ -924,7 +922,7 @@ fn response_matches(
         && sandbox.plan == expected_plan
         && sandbox.region == projection.region
         && sandbox.timeout_seconds == projection.timeout_seconds
-        && sandbox.network_policy.default == crate::RenderNetworkPolicyDefault::DenyAll
+        && sandbox.network_policy.matches(&projection.network_policy)
         && sandbox.terminated_at.is_none()
 }
 
@@ -967,7 +965,7 @@ mod tests {
             plan: PlanValue::Standard,
             region: "oregon".into(),
             timeout_seconds: 600,
-            network_policy_default: NetworkPolicyDefault::DenyAll,
+            network_policy: EgressPolicy::deny_all(),
         };
         assert!(response_matches(&sandbox, &projection));
         let mut changed = projection;
@@ -999,7 +997,7 @@ mod tests {
             plan: PlanValue::Standard,
             region: "oregon".into(),
             timeout_seconds: 600,
-            network_policy_default: NetworkPolicyDefault::DenyAll,
+            network_policy: EgressPolicy::deny_all(),
         };
         let source =
             occurrence_from_create(sandbox, body, &projection, &"a".repeat(64), "owner-fixture");

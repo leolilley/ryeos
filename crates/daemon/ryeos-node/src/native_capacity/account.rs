@@ -1148,9 +1148,10 @@ pub(super) struct RetainedCapacityAccount {
 }
 
 /// Exact account and redo source pins after durable settlement. Every field is
-/// retained with `ManuallyDrop` until the consuming node finalizer registers
-/// it in the already prepared physical inventory; ordinary Drop is not close
-/// evidence for this post-settlement phase.
+/// held in lillux custody (`Held`) until the consuming node finalizer
+/// registers it in the already prepared physical inventory; an unsupervised
+/// end retains and counts the source rather than closing it, so ordinary Drop
+/// is not close evidence for this post-settlement phase.
 pub(super) struct RetainedCapacityFinalizationSources {
     pub(super) account_parent: Option<super::FinalizerDirectorySource>,
     pub(super) account_file: Option<super::FinalizerControlSource>,

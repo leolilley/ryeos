@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ryeos-client-base = { workspace = true }
-ryeos-cli = { workspace = true }
+ryeos-client-transport = { workspace = true }
 lillux = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }

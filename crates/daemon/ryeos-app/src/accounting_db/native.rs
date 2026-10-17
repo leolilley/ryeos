@@ -4,8 +4,6 @@
 //! ledger aliases refuse SQL, and every native owner stays inside it until
 //! the node finalizer takes its acknowledged outside sources.
 
-use std::mem::ManuallyDrop;
-
 use lillux::time::{Duration, MonotonicDeadline};
 use lillux_sqlite::{
     OriginalNativeBoundInputs, OriginalNativeCloseFailure, OriginalNativeConnection,
@@ -44,9 +42,43 @@ enum LedgerReference {
     OutsideCustody(OriginalNativeOutsideConnectionCustody),
     Parts {
         parts: Option<OriginalNativeOutsideConnectionParts>,
-        unused: Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+        unused: UnusedLedgerReference,
     },
     Taken,
+}
+
+/// An unused schema reference input waiting in the ledger's parts phase. It
+/// leaves only through `into_outside`, which hands it to the outside
+/// sources. Dropped while still holding it, wherever its reference slot is
+/// dropped or replaced, it retains the input for the life of the process,
+/// counted.
+struct UnusedLedgerReference {
+    inner: lillux::custody::Held<UnusedLedgerReferenceParts>,
+}
+const UNUSED_LEDGER_REFERENCE_KIND: &str = "ryeos-app::accounting-unused-reference";
+
+/// The one input slot. Constructible only in this module.
+struct UnusedLedgerReferenceParts {
+    inputs: Option<OriginalNativeTransientInputs>,
+}
+fn unused_ledger_reference_taken(parts: &UnusedLedgerReferenceParts) -> bool {
+    parts.inputs.is_none()
+}
+impl UnusedLedgerReference {
+    fn new(inputs: Option<OriginalNativeTransientInputs>) -> Self {
+        Self {
+            inner: lillux::custody::Held::new(
+                UNUSED_LEDGER_REFERENCE_KIND,
+                UnusedLedgerReferenceParts { inputs },
+                unused_ledger_reference_taken,
+            ),
+        }
+    }
+    /// Hand the input on, for a caller that already established the original
+    /// process; a foreign copy is relinquished and the process aborts.
+    fn into_outside(self) -> Option<OriginalNativeTransientInputs> {
+        self.inner.take_or_abort().inputs
+    }
 }
 
 struct LedgerNativeState {
@@ -55,39 +87,45 @@ struct LedgerNativeState {
     reference: LedgerReference,
 }
 
-/// The ledger's native owners. Dropping this value releases nothing: the
-/// inner state is retained inertly so a discarded alias can never close
-/// SQLite or end a ticket outside the node finalizer.
-pub struct AccountingNativeLedger {
-    process: u32,
-    state: ManuallyDrop<Mutex<LedgerNativeState>>,
+const LEDGER_KIND: &str = "ryeos-app::accounting-native-ledger";
+
+/// The ledger's one state, behind the lock every transition takes.
+/// Constructible only in this module.
+struct AccountingNativeLedgerParts {
+    state: Mutex<LedgerNativeState>,
 }
-impl AccountingNativeLedger {
-    /// Move the custody state out exactly once; the emptied shell is never
-    /// dropped.
-    fn into_state(self) -> Mutex<LedgerNativeState> {
-        let mut ledger = ManuallyDrop::new(self);
-        unsafe { ManuallyDrop::take(&mut ledger.state) }
+/// Settled exactly when every native owner has left for the node finalizer.
+/// A busy lock is unsettled; a poisoned one is read through, since a panic in
+/// ledger SQL leaves the custody slots intact.
+fn ledger_holders_taken(parts: &AccountingNativeLedgerParts) -> bool {
+    match parts.state.try_lock() {
+        Ok(state) => holders_taken(&state),
+        Err(TryLockError::Poisoned(poisoned)) => holders_taken(&poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => false,
     }
 }
-impl Drop for AccountingNativeLedger {
-    fn drop(&mut self) {
-        // Settled exactly when sources_taken holds: the factory alias is gone
-        // and both legs left for the node finalizer. The state is taken
-        // exactly once, here; otherwise its live, closing, terminal or
-        // refused owners stay retained together until the process exits.
-        let state = unsafe { ManuallyDrop::take(&mut self.state) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(state);
-            return;
+
+/// The ledger's native owners. Dropping this value releases nothing unless
+/// every owner has already left: the inner state is retained otherwise, so a
+/// discarded alias can never close SQLite or end a ticket outside the node
+/// finalizer.
+pub struct AccountingNativeLedger {
+    inner: lillux::custody::Held<AccountingNativeLedgerParts>,
+}
+impl AccountingNativeLedger {
+    fn from_state(state: LedgerNativeState) -> Self {
+        Self {
+            inner: lillux::custody::Held::new(
+                LEDGER_KIND,
+                AccountingNativeLedgerParts { state: Mutex::new(state) },
+                ledger_holders_taken,
+            ),
         }
-        let settled = holders_taken(&state.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-        if settled {
-            drop(state);
-        } else {
-            lillux::custody::abandon("ryeos-app::accounting-native-ledger", state);
-        }
+    }
+    /// Move the custody state out whole; a copy in another process is refused
+    /// and comes back still held.
+    fn into_state(self) -> std::result::Result<Mutex<LedgerNativeState>, Self> {
+        self.inner.take_whole().map(|parts| parts.state).map_err(|inner| Self { inner })
     }
 }
 
@@ -102,41 +140,48 @@ fn holders_taken(state: &LedgerNativeState) -> bool {
 /// Store's physical inventory. Each present owner must reach that join.
 #[must_use = "accounting ledger sources must join the Store outside graph"]
 pub struct AccountingNativeOutsideSources {
-    pub connection: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
-    pub reference: Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
-    pub unused_reference: Option<ManuallyDrop<OriginalNativeTransientInputs>>,
+    inner: lillux::custody::Held<AccountingNativeOutsideSourceSlots>,
+}
+const OUTSIDE_SOURCES_KIND: &str = "ryeos-app::accounting-native-outside-sources";
+
+/// The three source slots, in slot order. Constructible only in this module.
+struct AccountingNativeOutsideSourceSlots {
+    connection: Option<OriginalNativeOutsideConnectionParts>,
+    reference: Option<OriginalNativeOutsideConnectionParts>,
+    unused_reference: Option<OriginalNativeTransientInputs>,
+}
+/// Settled exactly when every slot is empty: each present owner joined the
+/// Store graph and was taken from here. Otherwise the terminals and unused
+/// inputs stay retained together until the process exits.
+fn outside_sources_empty(slots: &AccountingNativeOutsideSourceSlots) -> bool {
+    slots.connection.is_none() && slots.reference.is_none() && slots.unused_reference.is_none()
 }
 impl AccountingNativeOutsideSources {
-    /// Move every present owner out, in slot order, for the node finalizer's
-    /// cached source slots. Each slot is left empty, so the emptied owner
-    /// settles and releases nothing.
-    pub fn into_parts(mut self) -> (
-        Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
-        Option<ManuallyDrop<OriginalNativeOutsideConnectionParts>>,
-        Option<ManuallyDrop<OriginalNativeTransientInputs>>,
-    ) {
-        (self.connection.take(), self.reference.take(), self.unused_reference.take())
-    }
-}
-impl Drop for AccountingNativeOutsideSources {
-    fn drop(&mut self) {
-        // Settled exactly when every slot is empty: each present owner joined
-        // the Store graph and was taken from here. Each slot is taken exactly
-        // once, here; otherwise the terminals and unused inputs stay retained
-        // together until the process exits.
-        let taken = unsafe {(
-            self.connection.as_mut().map(|parts| ManuallyDrop::take(parts)),
-            self.reference.as_mut().map(|parts| ManuallyDrop::take(parts)),
-            self.unused_reference.as_mut().map(|inputs| ManuallyDrop::take(inputs)),
-        )};
-        self.connection = None;
-        self.reference = None;
-        self.unused_reference = None;
-        if taken.0.is_none() && taken.1.is_none() && taken.2.is_none() {
-            drop(taken);
-        } else {
-            lillux::custody::abandon("ryeos-app::accounting-native-outside-sources", taken);
+    fn new(
+        connection: Option<OriginalNativeOutsideConnectionParts>,
+        reference: Option<OriginalNativeOutsideConnectionParts>,
+        unused_reference: Option<OriginalNativeTransientInputs>,
+    ) -> Self {
+        Self {
+            inner: lillux::custody::Held::new(
+                OUTSIDE_SOURCES_KIND,
+                AccountingNativeOutsideSourceSlots { connection, reference, unused_reference },
+                outside_sources_empty,
+            ),
         }
+    }
+    /// Move every present owner out, in slot order, for the node finalizer's
+    /// cached source slots. The caller has taken these sources in the
+    /// original process; a foreign copy is relinquished and the process
+    /// aborts.
+    pub fn into_parts(self) -> (
+        Option<OriginalNativeOutsideConnectionParts>,
+        Option<OriginalNativeOutsideConnectionParts>,
+        Option<OriginalNativeTransientInputs>,
+    ) {
+        let AccountingNativeOutsideSourceSlots { connection, reference, unused_reference } =
+            self.inner.take_or_abort();
+        (connection, reference, unused_reference)
     }
 }
 
@@ -170,25 +215,19 @@ impl AccountingNativeLedger {
         // Validate the role before the owner exists, so a refusal leaves the
         // inputs in a named slot rather than an empty checked-out one.
         if inputs.domain() != OriginalNativeDomain::NodeAccounting {
-            let ledger = Arc::new(Self {
-                process: std::process::id(),
-                state: ManuallyDrop::new(Mutex::new(LedgerNativeState {
-                    factory: Some(Arc::clone(&factory)),
-                    connection: LedgerConnection::Unissued { _retained: inputs },
-                    reference: LedgerReference::Unused(reference),
-                })),
-            });
+            let ledger = Arc::new(Self::from_state(LedgerNativeState {
+                factory: Some(Arc::clone(&factory)),
+                connection: LedgerConnection::Unissued { _retained: inputs },
+                reference: LedgerReference::Unused(reference),
+            }));
             return (ledger, Err(anyhow::anyhow!(
                 "accounting ledger input selects another native role; inputs retained")));
         }
-        let ledger = Arc::new(Self {
-            process: std::process::id(),
-            state: ManuallyDrop::new(Mutex::new(LedgerNativeState {
-                factory: Some(Arc::clone(&factory)),
-                connection: LedgerConnection::CheckedOut,
-                reference: LedgerReference::Unused(reference),
-            })),
-        });
+        let ledger = Arc::new(Self::from_state(LedgerNativeState {
+            factory: Some(Arc::clone(&factory)),
+            connection: LedgerConnection::CheckedOut,
+            reference: LedgerReference::Unused(reference),
+        }));
         let result = (|| -> Result<()> {
             // The owner is fresh in this process, so this lock cannot refuse.
             let mut state = ledger.lock_custody_state()?;
@@ -227,11 +266,8 @@ impl AccountingNativeLedger {
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, LedgerNativeState>> {
-        anyhow::ensure!(
-            self.process == std::process::id(),
-            "inherited accounting ledger owner"
-        );
-        self.state
+        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
+        self.inner.state
             .lock()
             .map_err(|_| anyhow::anyhow!("accounting ledger owner mutex poisoned"))
     }
@@ -241,11 +277,8 @@ impl AccountingNativeLedger {
     /// custody state intact and a poisoned mutex is recovered here. SQL
     /// admission itself keeps refusing on a poisoned mutex.
     fn lock_custody_state(&self) -> Result<MutexGuard<'_, LedgerNativeState>> {
-        anyhow::ensure!(
-            self.process == std::process::id(),
-            "inherited accounting ledger owner"
-        );
-        Ok(self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
+        Ok(self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     /// Ledger SQL in the live owner's native scope, serialized on this owner.
@@ -269,15 +302,12 @@ impl AccountingNativeLedger {
         deadline: MonotonicDeadline,
         operation: impl for<'c> FnOnce(&'c Connection) -> Result<T>,
     ) -> Result<T> {
-        anyhow::ensure!(
-            self.process == std::process::id(),
-            "inherited accounting ledger owner"
-        );
+        anyhow::ensure!(!self.inner.is_foreign(), "inherited accounting ledger owner");
         let mut state = loop {
             if deadline.has_elapsed() {
                 bail!("original funding deadline expired waiting for ledger");
             }
-            match self.state.try_lock() {
+            match self.inner.state.try_lock() {
                 Ok(state) => break state,
                 Err(TryLockError::Poisoned(_)) => bail!("accounting ledger owner mutex poisoned"),
                 Err(TryLockError::WouldBlock) => {
@@ -465,8 +495,13 @@ impl AccountingNativeLedger {
                 return Err((shared, anyhow::anyhow!("accounting ledger still has aliases")));
             }
         };
-        let LedgerNativeState { factory: _, connection, reference } = owner
-            .into_state()
+        let state = match owner.into_state() {
+            Ok(state) => state,
+            Err(owner) => {
+                return Err((Arc::new(owner), anyhow::anyhow!("accounting ledger belongs to another process")));
+            }
+        };
+        let LedgerNativeState { factory: _, connection, reference } = state
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut terminals = Vec::with_capacity(2);
@@ -588,7 +623,10 @@ impl AccountingNativeLedger {
             },
             LedgerReference::Released(released) => {
                 match released.into_outside_parts(&factory, aggregate) {
-                    Ok((parts, unused, _prior_refusal)) => LedgerReference::Parts { parts, unused },
+                    Ok((parts, unused, _prior_refusal)) => LedgerReference::Parts {
+                        parts,
+                        unused: UnusedLedgerReference::new(unused.map(|inputs| inputs.take_or_abort())),
+                    },
                     Err((released, error)) => {
                         state.reference = LedgerReference::Released(released);
                         return Err(error.context("accounting released schema reference retained"));
@@ -597,7 +635,7 @@ impl AccountingNativeLedger {
             }
             LedgerReference::Unused(inputs) => LedgerReference::Parts {
                 parts: None,
-                unused: Some(ManuallyDrop::new(inputs)),
+                unused: UnusedLedgerReference::new(Some(inputs)),
             },
             other => other,
         };
@@ -606,7 +644,7 @@ impl AccountingNativeLedger {
             LedgerReference::OutsideCustody(custody) => match custody.into_original_parts() {
                 Ok(parts) => LedgerReference::Parts {
                     parts: Some(parts),
-                    unused: None,
+                    unused: UnusedLedgerReference::new(None),
                 },
                 Err(custody) => {
                     state.reference = LedgerReference::OutsideCustody(custody);
@@ -639,11 +677,11 @@ impl AccountingNativeLedger {
         // The terminals moved into sources whose authority edges are weak; no
         // later stage may consult resident factory state through this owner.
         drop(state.factory.take());
-        Ok(AccountingNativeOutsideSources {
-            connection: Some(ManuallyDrop::new(connection)),
-            reference: reference.map(ManuallyDrop::new),
-            unused_reference: unused,
-        })
+        Ok(AccountingNativeOutsideSources::new(
+            Some(connection),
+            reference,
+            unused.into_outside(),
+        ))
     }
 
     /// True once every native owner has left for the node finalizer.
@@ -819,8 +857,8 @@ mod tests {
         assert_eq!(host.ticket_census(), (2, 2));
     }
 
-    const LEDGER: &str = "ryeos-app::accounting-native-ledger";
-    const SOURCES: &str = "ryeos-app::accounting-native-outside-sources";
+    const LEDGER: &str = LEDGER_KIND;
+    const SOURCES: &str = OUTSIDE_SOURCES_KIND;
 
     fn abandoned(kind: &str) -> usize {
         lillux::custody::abandoned_custody().count(kind)
@@ -878,15 +916,45 @@ mod tests {
         }
         .unwrap();
         let before = abandoned(SOURCES);
-        let sources = AccountingNativeOutsideSources {
-            connection: None,
-            reference: None,
-            unused_reference: Some(ManuallyDrop::new(reference)),
-        };
+        let sources = AccountingNativeOutsideSources::new(None, None, Some(reference));
         let (connection, reference, unused_reference) = sources.into_parts();
         assert!(connection.is_none() && reference.is_none() && unused_reference.is_some());
         assert_eq!(abandoned(SOURCES), before);
-        drop(unused_reference.map(ManuallyDrop::into_inner));
+        drop(unused_reference);
+        ryeos_state::test_support::release_shared_test_host(host);
+    }
+
+    const UNUSED_REFERENCE: &str = UNUSED_LEDGER_REFERENCE_KIND;
+
+    #[test]
+    fn dropped_parts_reference_retains_its_unused_input() {
+        let _serial = ryeos_state::test_support::abandoned_custody_serial();
+        let host = ryeos_state::test_support::shared_test_host();
+        let issue = || {
+            // SAFETY: test-only issuance under the shared host's own funded factory.
+            unsafe {
+                OriginalNativeTransientInputs::issued(
+                    OriginalNativeDomain::NodeAccountingSchemaReference,
+                    host.destination(),
+                )
+            }
+            .unwrap()
+        };
+        // A parts-phase reference dropped with its unused input still in it,
+        // outside any ledger, retains the input, counted.
+        let before = abandoned(UNUSED_REFERENCE);
+        drop(LedgerReference::Parts {
+            parts: None,
+            unused: UnusedLedgerReference::new(Some(issue())),
+        });
+        assert_eq!(abandoned(UNUSED_REFERENCE), before + 1);
+        // Handed to the outside sources, it leaves without being retained.
+        let unused = UnusedLedgerReference::new(Some(issue()));
+        let before = abandoned(UNUSED_REFERENCE);
+        let outside = unused.into_outside();
+        assert!(outside.is_some());
+        assert_eq!(abandoned(UNUSED_REFERENCE), before);
+        drop(outside);
         ryeos_state::test_support::release_shared_test_host(host);
     }
 
@@ -894,7 +962,7 @@ mod tests {
     fn dropped_empty_outside_sources_settle_without_abandoning() {
         let _serial = ryeos_state::test_support::abandoned_custody_serial();
         let before = abandoned(SOURCES);
-        drop(AccountingNativeOutsideSources { connection: None, reference: None, unused_reference: None });
+        drop(AccountingNativeOutsideSources::new(None, None, None));
         assert_eq!(abandoned(SOURCES), before);
     }
 
@@ -913,11 +981,7 @@ mod tests {
         }
         .unwrap();
         let before = abandoned(SOURCES);
-        drop(AccountingNativeOutsideSources {
-            connection: None,
-            reference: None,
-            unused_reference: Some(ManuallyDrop::new(reference)),
-        });
+        drop(AccountingNativeOutsideSources::new(None, None, Some(reference)));
         assert_eq!(abandoned(SOURCES), before + 1);
         ryeos_state::test_support::release_shared_test_host(host);
     }

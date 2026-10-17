@@ -10,11 +10,13 @@
     "bootstrap_settings_schema_digest",
     "qualification_settings_schema_digest",
     "origin_profile",
+    "budget_weight",
+    "network_policy",
     "routes",
     "operations"
   ],
   "properties": {
-    "schema": { "const": 5 },
+    "schema": { "const": 8 },
     "provider_profile": { "const": "render_sandbox_v1" },
     "settings_schema_digest": {
       "type": "string",
@@ -29,6 +31,39 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "origin_profile": { "const": "render_api_v1" },
+    "budget_weight": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "network_policy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["creatable_types"],
+          "properties": {
+            "creatable_types": { "const": ["deny-all"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["creatable_types", "allow_list"],
+          "properties": {
+            "creatable_types": { "const": ["deny-all", "allow-list"] },
+            "allow_list": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rule_protocol", "max_rules", "host_syntax"],
+              "properties": {
+                "rule_protocol": { "const": "https" },
+                "max_rules": { "type": "integer", "minimum": 1, "maximum": 32 },
+                "host_syntax": {
+                  "enum": ["exact_dns_name", "exact_dns_name_or_leftmost_wildcard"]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
     "routes": {
       "type": "object",
       "additionalProperties": false,
@@ -61,6 +96,7 @@
         "activate_supervisor",
         "reconcile_supervisor_activation",
         "relay_file",
+        "guest_channel",
         "terminate",
         "reconcile_termination",
         "bootstrap_terminated_list"
@@ -76,6 +112,7 @@
           "$ref": "#/$defs/pending_operation"
         },
         "relay_file": { "$ref": "#/$defs/relay_file_operation" },
+        "guest_channel": { "$ref": "#/$defs/guest_channel_operation" },
         "terminate": { "$ref": "#/$defs/terminate_operation" },
         "reconcile_termination": { "$ref": "#/$defs/reconcile_termination_operation" },
         "bootstrap_terminated_list": { "$ref": "#/$defs/bootstrap_terminated_list_operation" }
@@ -332,15 +369,8 @@
         "networkPolicy": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["literal"],
-          "properties": {
-            "literal": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["default"],
-              "properties": { "default": { "const": "deny-all" } }
-            }
-          }
+          "required": ["source"],
+          "properties": { "source": { "const": "lease.guest_network_allow" } }
         },
         "snapshotId": { "$ref": "#/$defs/settings_snapshot_source" }
       }
@@ -350,6 +380,17 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": { "kind": { "const": "unsupported_pending" } }
+    },
+    "guest_channel_operation": {
+      "oneOf": [
+        { "$ref": "#/$defs/pending_operation" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "controller_relayed_guest_frames" } }
+        }
+      ]
     },
     "relay_file_operation": {
       "oneOf": [
@@ -381,7 +422,7 @@
             "plan": { "$ref": "#/$defs/settings_plan_source" },
             "region": { "$ref": "#/$defs/settings_region_source" },
             "timeoutSeconds": { "$ref": "#/$defs/qualification_lifetime_source" },
-            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["default"], "properties": { "default": { "const": "deny-all" } } } } },
+            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "deny-all" } } } } },
             "snapshotId": { "$ref": "#/$defs/qualification_snapshot_source" }
           }
         },
@@ -404,7 +445,7 @@
             "plan": { "$ref": "#/$defs/settings_plan_source" },
             "region": { "$ref": "#/$defs/settings_region_source" },
             "timeoutSeconds": { "$ref": "#/$defs/bootstrap_lifetime_source" },
-            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["default"], "properties": { "default": { "const": "deny-all" } } } } }
+            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "deny-all" } } } } }
           }
         },
         "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },

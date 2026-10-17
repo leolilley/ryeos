@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use ryeos_app::execution_history_reset::{
-    SchedulerHistoryResetParticipant, SchedulerHistoryRetirement,
+    SchedulerAcknowledgedReset, SchedulerHistoryResetParticipant, SchedulerHistoryRetirement,
     SchedulerHistoryRetirementAttempt, SchedulerResetPreview, SchedulerResetRetirement,
     SqliteInspectionOutcome,
 };
@@ -103,7 +103,7 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
                 Vec::new(),
             )
         };
-        RetirementJournal::reserve_pre_effect_capacity(runtime, new_generation)?;
+        RetirementJournal::reserve_pre_effect_capacity(runtime, permit.node_identity(), new_generation)?;
         validate_preview_source_continuity(permit, &interrupted)?;
         Ok(())
     }
@@ -172,6 +172,20 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
         // every interrupted owner must join the actual activated App permit.
         for observed in &interrupted {
             RetirementJournal::validate_for_permit(&observed.generation_intent, permit)?;
+        }
+        // Before any native stopped intake, finish what an earlier
+        // acknowledged operation left: that intake admits only this plan's
+        // own journal names and refuses a retired lineage's records or an
+        // earlier fire-retirement intent as unknown.
+        {
+            let operation = permit.operation_reference()?;
+            RetirementJournal::finish_acknowledged_leftovers(
+                authority_runtime,
+                permit.node_identity(),
+                &operation.operation_id,
+                &operation.sha256,
+            )
+            .context("finish an earlier acknowledged operation's scheduler cleanup")?;
         }
         if !interrupted.is_empty() {
             let (parent, child) = interrupted_recovery_pair(&interrupted)?;
@@ -255,27 +269,85 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
         permit: &SchedulerResetRetirement<'_, '_>,
         retirement: &SchedulerHistoryRetirement,
     ) -> Result<usize> {
-        let _scope = ResetNativeReadScope::enter(permit.native_factory()?);
-        let runtime = permit.runtime_directory()?;
-        let Some(generation) = retirement.generation else {
-            ensure!(
-                permit
-                    .original_scheduler_sources()?
-                    .iter()
-                    .all(|source| source.current.is_none()),
-                "scheduler completion omitted generation for a present original source"
-            );
-            return retry_while_held("validate scheduler retirement completion", || {
+        let factory = reset_factory(permit)?;
+        let _scope = ResetNativeReadScope::enter(Some(factory));
+        // Fire history is retired first, under the same Active operation:
+        // its intent is gone before `Complete` is published, so the State
+        // acknowledgement never precedes it. A refusal here (a foreign
+        // entry, kept and named) leaves the operation Active, and the next
+        // reset finishes a begun retirement. No native scope is needed: no
+        // SQLite role is read or moved.
+        {
+            let runtime = permit.runtime_directory()?;
+            let operation = permit.operation_reference()?;
+            crate::retirement_journal::retire_fire_history(
+                runtime,
+                permit.node_identity(),
+                &operation.operation_id,
+                &operation.sha256,
+            )
+            .context("retire scheduler fire history before terminal completion")?;
+        }
+        in_service_scope(factory, || {
+            let runtime = permit.runtime_directory()?;
+            let Some(generation) = retirement.generation else {
+                ensure!(
+                    permit
+                        .original_scheduler_sources()?
+                        .iter()
+                        .all(|source| source.current.is_none()),
+                    "scheduler completion omitted generation for a present original source"
+                );
+                return retry_while_held("validate scheduler retirement completion", || {
+                    permit.runtime_directory()?;
+                    RetirementJournal::validate_admission(runtime, permit.node_identity())
+                });
+            };
+            retry_while_held("publish scheduler retirement terminal completion", || {
                 permit.runtime_directory()?;
-                RetirementJournal::validate_admission(runtime, permit.node_identity())
-            });
-        };
-        retry_while_held("publish scheduler retirement terminal completion", || {
-            permit.runtime_directory()?;
-            RetirementJournal::complete_generation(permit, generation)
-                .context("verify scheduler role cleanup and publish terminal completion")
+                RetirementJournal::complete_generation(permit, generation)
+                    .context("verify scheduler role cleanup and publish terminal completion")
+            })
         })
     }
+
+    fn retire_acknowledged_evidence(
+        &self,
+        permit: &SchedulerAcknowledgedReset<'_>,
+    ) -> Result<usize> {
+        let runtime = permit.runtime_directory()?;
+        let journals = RetirementJournal::retire_acknowledged_evidence(
+            runtime,
+            permit.node_identity(),
+        )
+        .context("remove the acknowledged scheduler retirement journals")?;
+        permit.runtime_directory()?;
+        let fires_root = remove_empty_fires_root(runtime)
+            .context("remove the empty scheduler fires root")?;
+        Ok(journals + usize::from(fires_root))
+    }
+}
+
+/// Remove the runtime namespace's `schedules` fires root when it holds no
+/// entry, returning whether it was removed. A scheduling boot creates it
+/// even when no schedule ever fires; an empty root is no history. A root
+/// that holds fire journals is left as it is. The caller holds the runtime
+/// namespace lock, which excludes every cooperating writer of the root.
+fn remove_empty_fires_root(runtime: &lillux::PinnedDirectory) -> Result<bool> {
+    let name = std::ffi::OsStr::new("schedules");
+    if runtime.entry_no_follow(name)?.is_none() {
+        return Ok(false);
+    }
+    let Some(fires_root) = runtime.open_child_directory(name)? else {
+        anyhow::bail!(
+            "scheduler fires root {} is not a directory",
+            runtime.path().join(name).display()
+        );
+    };
+    if !fires_root.entry_names_bounded(1)?.is_empty() {
+        return Ok(false);
+    }
+    Ok(runtime.remove_empty_child_if_same(name, &fires_root)?.is_some())
 }
 
 fn verify_source_identity(
@@ -683,6 +755,7 @@ fn begin_original_stopped<'a>(
     existing: Option<AuthenticatedInterruptedGeneration>,
     prior_artifacts: usize,
 ) -> Result<Box<dyn SchedulerHistoryRetirementAttempt + 'a>> {
+    let factory = reset_factory(permit)?;
     let generation = permit.initial_scheduler_generation()?;
     let plan = if let Some(evidence) = &existing {
         evidence
@@ -737,15 +810,13 @@ fn begin_original_stopped<'a>(
             None => RetirementJournal::begin(permit, plan.clone()),
         }
     })?;
-    let db =
-        match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
-            Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit).map_err(intake_owners_end)?,
-        };
+    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit).map_err(intake_owners_end)?;
     let drained = retry_while_held("acknowledge original stopped scheduler intake", || {
         permit.runtime_directory()?;
-        db.retry_stopped_projection(&native_plan)
-            .map_err(anyhow::Error::new)
+        in_service_scope(factory, || {
+            db.retry_stopped_projection(&native_plan)
+                .map_err(anyhow::Error::new)
+        })
     })
     .map_err(intake_owners_end)?;
     retry_while_held("sync original stopped scheduler intake", || {
@@ -769,6 +840,7 @@ fn begin_stopped_recovery<'a>(
         (9..=26).contains(&parent.phase_records.len()),
         "interrupted scheduler generation lacks authenticated SQL-drained restart evidence"
     );
+    let factory = reset_factory(permit)?;
     let generation = if let Some(child) = &child {
         parse_generation(&child.generation_intent.generation)?
     } else {
@@ -835,14 +907,12 @@ fn begin_stopped_recovery<'a>(
         RetirementJournal::begin_recovery(permit, &parent, contract_plan.clone())
     })?;
     let native_plan = native_stopped_plan(&runtime, &contract_plan)?;
-    let db =
-        match SchedulerDb::capture_stopped_projection(Arc::clone(&runtime), native_plan.clone()) {
-            Ok(db) => db,
-            Err(failure) => retry_stopped_intake(failure, &native_plan, permit).map_err(intake_owners_end)?,
-        };
+    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit).map_err(intake_owners_end)?;
     let drained = retry_while_held("acknowledge stopped scheduler recovery intake", || {
-        db.retry_stopped_projection(&native_plan)
-            .map_err(anyhow::Error::new)
+        in_service_scope(factory, || {
+            db.retry_stopped_projection(&native_plan)
+                .map_err(anyhow::Error::new)
+        })
     })
     .map_err(intake_owners_end)?;
 
@@ -916,35 +986,112 @@ fn intake_owners_end(error: anyhow::Error) -> anyhow::Error {
     )
 }
 
-/// Retry the exact stopped intake on its retained failure owner. After
-/// [`HELD_RETRY_ATTEMPTS`] the refusal carries that same owner.
-fn retry_stopped_intake(
-    mut failure: SchedulerDbOpenFailure,
+/// The reset's native factory, which the scheduler's native steps run in.
+/// A permit issued without one cannot run them.
+fn reset_factory<'a>(
+    permit: &'a SchedulerResetRetirement<'_, '_>,
+) -> Result<&'a Arc<lillux_sqlite::OriginalNativeFactory>> {
+    permit
+        .native_factory()?
+        .context("scheduler retirement native steps require the reset's native factory")
+}
+
+/// Capture the stopped scheduler intake, retrying a held intake on its
+/// retained owner up to [`HELD_RETRY_ATTEMPTS`] times. Each native attempt
+/// runs alone in the factory's stopped-intake scope, the cleanup allocator
+/// scope the native stopped create requires. The permit check before each
+/// retry runs outside that scope: its guarded reads enter a service scope,
+/// which refuses inside the intake scope. The owner is borrowed into each
+/// scope, so a scope refused before its attempt keeps it for the next one,
+/// and a scope refused after its attempt hands it back. After the last
+/// attempt the refusal carries the retained failed owner.
+fn capture_stopped_intake(
+    factory: &lillux_sqlite::OriginalNativeFactory,
+    runtime: &Arc<lillux::PinnedDirectory>,
     plan: &lillux_sqlite::StoppedSqliteProjectionPlan,
     permit: &SchedulerResetRetirement<'_, '_>,
 ) -> Result<SchedulerDb> {
-    for _ in 0..HELD_RETRY_ATTEMPTS {
-        if let Err(error) = permit.runtime_directory() {
-            retry_notice(
-                "revalidate stopped scheduler intake authority while retaining owner",
-                &error,
-            );
-            continue;
-        }
-        match failure.retry_stopped_projection(plan) {
-            Ok(db) => return Ok(db),
-            Err(next) => {
+    let mut held: Option<std::result::Result<SchedulerDb, SchedulerDbOpenFailure>> = None;
+    let mut last_refusal = None;
+    for attempt in 0..=HELD_RETRY_ATTEMPTS {
+        if attempt > 0 {
+            if let Err(error) = permit.runtime_directory() {
                 retry_notice(
-                    "retry the exact stopped scheduler intake",
-                    &anyhow::Error::msg(next.to_string()),
+                    "revalidate stopped scheduler intake authority while retaining owner",
+                    &error,
                 );
-                failure = next;
+                last_refusal = Some(error);
+                continue;
             }
         }
+        let refusal = match factory.with_original_stopped_intake(|_| match held.take() {
+            None => SchedulerDb::capture_stopped_projection(Arc::clone(runtime), plan.clone()),
+            Some(Err(failure)) => failure.retry_stopped_projection(plan),
+            Some(Ok(db)) => Ok(db),
+        }) {
+            Ok(Ok(db)) => return Ok(db),
+            Ok(Err(failure)) => {
+                let refusal = anyhow::Error::msg(failure.to_string());
+                held = Some(Err(failure));
+                refusal
+            }
+            Err(failure) => {
+                let (refusal, owner) = failure.into_parts();
+                if let Some(owner) = owner {
+                    held = Some(owner);
+                }
+                refusal
+            }
+        };
+        retry_notice("retry the exact stopped scheduler intake", &refusal);
+        last_refusal = Some(refusal);
     }
-    Err(anyhow::Error::new(failure).context(format!(
-        "scheduler history reset refused the stopped intake after {HELD_RETRY_ATTEMPTS} attempts; its owner is retained"
-    )))
+    let refused = format!(
+        "scheduler history reset refused the stopped intake after its first attempt and {HELD_RETRY_ATTEMPTS} retries"
+    );
+    match held {
+        Some(Err(failure)) => {
+            Err(anyhow::Error::new(failure).context(format!("{refused}; its owner is retained")))
+        }
+        Some(Ok(db)) => {
+            // Captured, but every later intake scope refused around it. The
+            // owner ends here, in a service scope so its native frees run in
+            // this arena; a refused scope ends it all the same.
+            let ended = factory.with_original_service_scope(move |_| drop(db));
+            let refusal = last_refusal.unwrap_or_else(|| anyhow::anyhow!("stopped intake scope refused"));
+            Err(match ended {
+                Ok(()) => refusal.context(refused),
+                Err(failure) => refusal.context(format!(
+                    "{refused}; its captured owner ended outside a native scope: {}",
+                    failure.error()
+                )),
+            })
+        }
+        None => Err(last_refusal
+            .unwrap_or_else(|| anyhow::anyhow!("stopped intake scope refused"))
+            .context(refused)),
+    }
+}
+
+/// Run one scheduler native step in the reset factory's service allocator
+/// scope, where its allocations and frees run in that arena. A scope refused
+/// after the step ran drops the step's value: every step this runs keeps its
+/// progress in the owner it mutated and returns only data, so the caller
+/// retries it.
+fn in_service_scope<T>(
+    factory: &lillux_sqlite::OriginalNativeFactory,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    match factory.with_original_service_scope(|_| operation()) {
+        Ok(result) => result,
+        Err(failure) => {
+            let (refusal, completed) = failure.into_parts();
+            Err(match completed {
+                Some(Err(error)) => refusal.context(format!("the scheduler native step also refused: {error:#}")),
+                Some(Ok(_)) | None => refusal,
+            })
+        }
+    }
 }
 
 fn validate_reset_admission(
@@ -1091,10 +1238,9 @@ impl SchedulerHistoryRetirementAttempt for ServiceRetirementAttempt<'_> {
         &mut self,
         permit: &SchedulerResetRetirement<'_, '_>,
     ) -> Result<Option<SchedulerHistoryRetirement>> {
-        let _scope = ResetNativeReadScope::enter(permit.native_factory()?);
-        Ok(self
-            .attempt
-            .advance(permit)?
+        let factory = reset_factory(permit)?;
+        let _scope = ResetNativeReadScope::enter(Some(factory));
+        Ok(in_service_scope(factory, || self.attempt.advance(permit))?
             .map(|retirement| SchedulerHistoryRetirement {
                 journal_artifacts: self.prior_artifacts + retirement.journal_artifacts,
                 ..retirement

@@ -1,0 +1,19 @@
+[package]
+name = "ryeos-remote-lease-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license.workspace = true
+description = "Provider-neutral lease admission, guest Ready verification and lease operation entry points for remote lifecycle adapters"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+serde_json = { workspace = true }

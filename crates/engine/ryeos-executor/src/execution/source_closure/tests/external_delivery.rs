@@ -385,7 +385,6 @@ fn external_source_delivery_retains_original_generation_lease_until_drop() {
     assert!(!cache.cache_dir(records.content_manifest_hash()).exists());
 }
 
-
 // Local export controls reuse actual signed source records and State/CAS
 // redemption. They prove neither a born capsule nor local launch admission.
 #[cfg(target_os = "linux")]
@@ -401,8 +400,8 @@ fn retained_runtime_source(
             Path::new("/workspace"),
             SourceMountPlacement::ExecutionRuntime,
         )
-            .unwrap()
-            .unwrap(),
+        .unwrap()
+        .unwrap(),
     )
 }
 
@@ -412,13 +411,19 @@ fn local_source_records_preserve_canonical_identity_seals_and_same_arc() {
     let (_root, _store_owner, state, records, source_bytes) = state_and_source();
     let original = retained_runtime_source(&state, &records);
     let weak = std::sync::Arc::downgrade(&original);
-    let exported = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
-        .unwrap();
+    let exported =
+        LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original)).unwrap();
     assert!(std::sync::Arc::ptr_eq(&original, &exported.source));
     drop(original);
     assert!(weak.upgrade().is_some());
-    assert_eq!(exported.runtime_destination(), records.runtime_destination());
-    assert_eq!(exported.execution_entry_path(), records.runtime_entry_path());
+    assert_eq!(
+        exported.runtime_destination(),
+        records.runtime_destination()
+    );
+    assert_eq!(
+        exported.execution_entry_path(),
+        records.runtime_entry_path()
+    );
     for (observed, expected, independently_retained_hash, maximum) in [
         (
             exported.binding(),
@@ -436,15 +441,20 @@ fn local_source_records_preserve_canonical_identity_seals_and_same_arc() {
         let canonical = lillux::canonical_json(&expected).unwrap();
         assert!(observed.bytes() > 0 && observed.bytes() <= maximum as u64);
         assert_eq!(observed.raw_sha256(), independently_retained_hash);
-        observed.descriptor().require_write_sealed_regular().unwrap();
-        let (bytes, _) = observed.descriptor()
+        observed
+            .descriptor()
+            .require_write_sealed_regular()
+            .unwrap();
+        let (bytes, _) = observed
+            .descriptor()
             .read_regular_file_stable_bounded(maximum as u64)
             .unwrap();
         assert_eq!(bytes, canonical.as_bytes());
         assert_eq!(bytes.len() as u64, observed.bytes());
         assert_eq!(lillux::sha256_hex(&bytes), independently_retained_hash);
     }
-    let member = exported.source_directory()
+    let member = exported
+        .source_directory()
         .open_pinned_regular_descendant(Path::new("runtime.yaml"), false)
         .unwrap()
         .unwrap();
@@ -462,10 +472,13 @@ fn local_source_records_preserve_canonical_identity_seals_and_same_arc() {
 fn local_source_records_keep_actual_generation_lease_after_original_arc_drop() {
     let (_root, _store_owner, state, records, _) = state_and_source();
     let original = retained_runtime_source(&state, &records);
-    let exported = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
-        .unwrap();
+    let exported =
+        LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original)).unwrap();
     let cache = super::super::super::cache::MaterializationCache::new(
-        state.config.runtime_state_dir().join("cache/source-closures"),
+        state
+            .config
+            .runtime_state_dir()
+            .join("cache/source-closures"),
     );
     drop(original);
     assert!(!cache._evict(records.content_manifest_hash()).unwrap());
@@ -492,7 +505,8 @@ fn local_source_records_refuse_changed_runtime_destination_or_entry() {
             "exact runtime entry"
         };
         let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&original))
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(refusal.to_string().contains(diagnostic), "{refusal}");
         assert_eq!(std::sync::Arc::strong_count(&original), 1);
         records.verify_tree(original.source_directory()).unwrap();
@@ -516,9 +530,12 @@ fn local_source_records_refuse_actual_project_placement() {
     );
     assert!(project.private_workspace_identity().is_none());
     let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&project))
-        .err().unwrap();
+        .err()
+        .unwrap();
     assert!(
-        refusal.to_string().contains("isolation-mounted runtime source"),
+        refusal
+            .to_string()
+            .contains("isolation-mounted runtime source"),
         "{refusal}"
     );
     records.verify_tree(project.source_directory()).unwrap();
@@ -542,19 +559,22 @@ fn local_source_records_refuse_actual_private_workspace_delivery() {
     assert!(private.private_workspace_identity().is_some());
     assert!(private.mounts().is_empty());
     let refusal = LocalSourceRecordCustody::from_bound_source(std::sync::Arc::clone(&private))
-        .err().unwrap();
+        .err()
+        .unwrap();
     assert!(
-        refusal.to_string().contains("isolation-mounted runtime source"),
+        refusal
+            .to_string()
+            .contains("isolation-mounted runtime source"),
         "{refusal}"
     );
     records.verify_tree(private.source_directory()).unwrap();
     assert!(
-        workspace.join(private.records.logical_project_mount())
+        workspace
+            .join(private.records.logical_project_mount())
             .join("runtime.yaml")
             .is_file()
     );
 }
-
 
 // Association metadata controls reuse actual signed-source State/CAS redemption.
 // No exports, original funding/device owners or applied-copy proof are built.
@@ -567,11 +587,26 @@ fn source_runtime_association_borrows_same_arc_and_only_exact_metadata() {
     assert!(std::ptr::eq(association.source, &original));
     assert_eq!(std::sync::Arc::strong_count(&original), 1);
     assert_eq!(association.binding_hash(), records.binding_hash());
-    assert_eq!(association.content_manifest_hash(), records.content_manifest_hash());
-    assert_eq!(association.runtime_destination(), records.runtime_destination());
-    assert_eq!(association.execution_entry_path(), records.runtime_entry_path());
-    assert_eq!(association.file_count(), records.manifest().totals.file_count);
-    assert_eq!(association.total_bytes(), records.manifest().totals.total_bytes);
+    assert_eq!(
+        association.content_manifest_hash(),
+        records.content_manifest_hash()
+    );
+    assert_eq!(
+        association.runtime_destination(),
+        records.runtime_destination()
+    );
+    assert_eq!(
+        association.execution_entry_path(),
+        records.runtime_entry_path()
+    );
+    assert_eq!(
+        association.file_count(),
+        records.manifest().totals.file_count
+    );
+    assert_eq!(
+        association.total_bytes(),
+        records.manifest().totals.total_bytes
+    );
 }
 
 #[test]
@@ -588,7 +623,9 @@ fn source_runtime_association_refuses_root_and_entry_substitution() {
             actual.execution_entry_path = records.runtime_destination().join("foreign.yaml");
             "exact runtime entry"
         };
-        let error = BoundSourceClosure::runtime_association(&original).err().unwrap();
+        let error = BoundSourceClosure::runtime_association(&original)
+            .err()
+            .unwrap();
         assert!(error.to_string().contains(diagnostic), "{error}");
         records.verify_tree(original.source_directory()).unwrap();
     }
@@ -599,22 +636,43 @@ fn source_runtime_association_refuses_root_and_entry_substitution() {
 fn source_runtime_association_refuses_actual_project_and_private_placement() {
     let (root, _store_owner, state, records, _) = state_and_source();
     let (_, resolution) = capsule(&records);
-    let project = std::sync::Arc::new(bind_source(
-        &state, &resolution, Path::new("/workspace"), SourceMountPlacement::Project,
-    ).unwrap().unwrap());
-    let error = BoundSourceClosure::runtime_association(&project).err().unwrap();
-    assert!(error.to_string().contains("requires isolation-mounted runtime source"));
+    let project = std::sync::Arc::new(
+        bind_source(
+            &state,
+            &resolution,
+            Path::new("/workspace"),
+            SourceMountPlacement::Project,
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    let error = BoundSourceClosure::runtime_association(&project)
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("requires isolation-mounted runtime source")
+    );
     let workspace = root.path().join("private-source-association-control");
     std::fs::create_dir(&workspace).unwrap();
     let budget = super::super::super::external_content::PrivateMaterializationBudget::new(
         records.manifest().totals.total_bytes,
     );
-    let private = std::sync::Arc::new(bind_source_in_private_workspace_with_budget(
-        &state, &resolution, &workspace, &budget,
-    ).unwrap().unwrap());
+    let private = std::sync::Arc::new(
+        bind_source_in_private_workspace_with_budget(&state, &resolution, &workspace, &budget)
+            .unwrap()
+            .unwrap(),
+    );
     assert!(private.private_workspace_identity().is_some());
-    let error = BoundSourceClosure::runtime_association(&private).err().unwrap();
-    assert!(error.to_string().contains("requires isolation-mounted runtime source"));
+    let error = BoundSourceClosure::runtime_association(&private)
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("requires isolation-mounted runtime source")
+    );
 }
 
 #[test]
@@ -623,7 +681,10 @@ fn source_runtime_association_original_arc_retains_actual_generation_lease() {
     let (_root, _store_owner, state, records, _) = state_and_source();
     let original = retained_runtime_source(&state, &records);
     let cache = super::super::super::cache::MaterializationCache::new(
-        state.config.runtime_state_dir().join("cache/source-closures"),
+        state
+            .config
+            .runtime_state_dir()
+            .join("cache/source-closures"),
     );
     {
         let association = BoundSourceClosure::runtime_association(&original).unwrap();
@@ -651,14 +712,27 @@ fn source_runtime_association_refuses_missing_and_replaced_named_generation() {
             std::fs::write(named_path.join("runtime.yaml"), b"foreign replacement").unwrap();
         }
         assert!(BoundSourceClosure::runtime_association(&original).is_err());
-        assert_eq!(original.source_directory().identity().unwrap(), original_identity);
-        let member = original.source_directory()
-            .open_pinned_regular_descendant(Path::new("runtime.yaml"), false).unwrap().unwrap();
+        assert_eq!(
+            original.source_directory().identity().unwrap(),
+            original_identity
+        );
+        let member = original
+            .source_directory()
+            .open_pinned_regular_descendant(Path::new("runtime.yaml"), false)
+            .unwrap()
+            .unwrap();
         assert_eq!(member.read_bounded(bytes.len() as u64).unwrap(), bytes);
         // Restore only this fixture's own directories; no production cleanup.
         if replacement {
-            assert_eq!(std::fs::read(named_path.join("runtime.yaml")).unwrap(), b"foreign replacement");
-            std::fs::rename(&named_path, root.path().join("retained-replacement-generation")).unwrap();
+            assert_eq!(
+                std::fs::read(named_path.join("runtime.yaml")).unwrap(),
+                b"foreign replacement"
+            );
+            std::fs::rename(
+                &named_path,
+                root.path().join("retained-replacement-generation"),
+            )
+            .unwrap();
         }
         std::fs::rename(&retained_path, &named_path).unwrap();
         BoundSourceClosure::runtime_association(&original).unwrap();

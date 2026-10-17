@@ -57,7 +57,10 @@ pub use exec::{
     fork_exclusions_held_until_exit, in_forked_child, retain_fork_sensitive_descriptors_until,
     try_retain_fork_sensitive_descriptors,
 };
-pub use custody::{AbandonedCustodyReport, abandon, abandoned_custody, relinquish_in_foreign_process};
+pub use custody::{
+    Abandoned, AbandonedCustodyReport, Held, Settled, abandon, abandoned_custody, foreign_process,
+    relinquish_in_foreign_process,
+};
 pub use environment::take_environment_values;
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
@@ -132,8 +135,9 @@ pub use secure_fs::{
     AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
     ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
     NoFollowDirectoryTree, OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation,
-    PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
-    PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, PinnedRegularFileIdentity,
+    OpenedPath, PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata,
+    PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile,
+    PinnedRegularFileIdentity,
     ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
     collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,
     collect_regular_files_no_follow, current_user_home,

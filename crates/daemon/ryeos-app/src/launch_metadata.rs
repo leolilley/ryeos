@@ -629,7 +629,12 @@ impl ResumeContext {
             ryeos_state::objects::EnvironmentAuthority::None
             | ryeos_state::objects::EnvironmentAuthority::Vault { .. }
             | ryeos_state::objects::EnvironmentAuthority::Delegated { .. }
-            | ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment { .. } => {
+            | ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                declared_names: _,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: _,
+            } => {
                 if self.local_overlay_root.is_some() {
                     anyhow::bail!(
                         "launch authority without a project overlay carries a local overlay root"

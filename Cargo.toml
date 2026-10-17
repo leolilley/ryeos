@@ -12,6 +12,7 @@ members = [
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
     "crates/clients/terminal",
+    "crates/clients/transport",
     "crates/clients/web",
     "crates/kinds/directive-definition",
     "crates/runtimes/directive",
@@ -27,6 +28,7 @@ members = [
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
     "crates/tools/handler-bins",
+    "crates/tools/parser-bins",
     "crates/tools/gpu-loader-owner-contract",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
@@ -54,6 +56,8 @@ members = [
     "crates/tools/codex-runtime-verifier",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
+    "crates/host-adapters/remote-lease-core",
+    "crates/host-adapters/modal-sandbox-adapter",
     "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
@@ -102,6 +106,7 @@ ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
+ryeos-client-transport = { path = "crates/clients/transport" }
 ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
 ryeos-graph-definition = { path = "crates/kinds/graph-definition" }
@@ -122,6 +127,7 @@ ryeos-gpu-loader-owner-contract = { path = "crates/tools/gpu-loader-owner-contra
 ryeos-structured-session = { path = "crates/tools/structured-session" }
 ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
 ryeos-lillux-oci-hook = { path = "crates/host-adapters/lillux-oci-hook" }
+ryeos-remote-lease-core = { path = "crates/host-adapters/remote-lease-core" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
@@ -173,6 +179,11 @@ thiserror = "2"
 tiktoken-rs = "0.12"
 tokio = "1"
 tokio-stream = "0.1"
+# WebSocket framing for the external channel stream: the controller side rides
+# axum's `ws` feature (tokio-tungstenite 0.24); the guest side drives the same
+# tungstenite release synchronously over its Lillux network stream and rustls.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"

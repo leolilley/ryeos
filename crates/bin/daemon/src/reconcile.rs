@@ -2359,6 +2359,60 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
         .state_store
         .resume_closed_worker_scope_retirements()
         .context("resume exactly journaled closed-worker scope retirement")?;
+    terminate_predecessor_external_leases(state).await?;
+    Ok(())
+}
+
+/// Terminate, by occurrence id, every remote lease held for a worker of a
+/// previous daemon incarnation; none is reattached. The workers were fenced
+/// above, so each session bound to such a lease is interrupted and imports
+/// nothing from its interrupted turn. A lease whose terminal is not yet
+/// observed stays quarantined and charged, and the periodic cleanup pass
+/// keeps observing it; the node lease budget is released only by the
+/// settlement that records the observed terminal. Provider operations run on
+/// a Lillux host task so they do not hold an async worker. This runs only
+/// here, before the node is ready: a lease is judged a predecessor's by its
+/// worker row alone, which is sound only while no worker of this incarnation
+/// can have started.
+async fn terminate_predecessor_external_leases(state: &AppState) -> Result<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let owner = state.clone();
+    let task = lillux::task::spawn_host_task("external-lease-restart", move || {
+        let _ = sender.send(
+            ryeos_app::external_placement::terminate_predecessor_external_leases(&owner),
+        );
+    })
+    .context("start Lillux predecessor lease termination owner")?;
+    task.detach();
+    let report = receiver
+        .await
+        .context("predecessor lease termination owner stopped without a result")?
+        .context("discover remote leases of previous daemon incarnations")?;
+    if report.discovered != 0 {
+        tracing::warn!(
+            discovered = report.discovered,
+            terminated = report.terminated.len(),
+            pending = report.pending.len(),
+            failures = report.failures.len(),
+            "terminated remote leases of previous daemon incarnations; none is reattached"
+        );
+    }
+    for placement in report.terminated.iter().chain(&report.pending) {
+        tracing::warn!(
+            placement = %placement,
+            reason = ryeos_app::external_placement::PREDECESSOR_LEASE_INTERRUPTION,
+            "session interrupted by a controller restart"
+        );
+    }
+    for (placement, error) in &report.failures {
+        tracing::error!(
+            placement = %placement,
+            error = %error,
+            reason = ryeos_app::external_placement::PREDECESSOR_LEASE_INTERRUPTION,
+            "remote lease of a previous daemon incarnation remains quarantined after a failed \
+             termination attempt"
+        );
+    }
     Ok(())
 }
 

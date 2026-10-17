@@ -18,6 +18,9 @@
 //! it is walked are all recorded rather than hidden. None of them aborts the
 //! walk, and none of the affected directories is reported complete.
 //!
+//! A child directory on a different mount than its parent is reported but
+//! never read.
+//!
 //! Strict whole-directory enumeration remains
 //! [`PinnedDirectory::entries_no_follow_bounded`], which refuses a directory
 //! over its limit instead of returning a prefix.
@@ -33,7 +36,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::{
     PinnedDirectory, PinnedDirectoryEntryMetadata, PinnedEntryType, entry_type_from_mode,
-    read_directory_names,
+    mount_id_of_open_descriptor, read_directory_names,
 };
 
 /// Directory levels one walk may read. Each level being walked retains one
@@ -99,6 +102,9 @@ pub enum PrefixDirectoryCoverage {
     NotVisited,
     /// When opened, the name no longer led to the inspected directory inode.
     Replaced,
+    /// The directory is a different mount than its parent. It was not read,
+    /// so the walk never descends into another filesystem.
+    MountBoundary,
     /// Opening or reading the directory failed.
     Failed,
 }
@@ -319,6 +325,11 @@ impl PinnedDirectory {
                     walk.directories[frame.record].changed = true;
                     continue;
                 }
+                ChildOpen::MountBoundary => {
+                    walk.directories[child_record].coverage =
+                        PrefixDirectoryCoverage::MountBoundary;
+                    continue;
+                }
                 ChildOpen::Failed(error) => {
                     let record = &mut walk.directories[child_record];
                     record.coverage = PrefixDirectoryCoverage::Failed;
@@ -518,6 +529,7 @@ fn inspect_entry(directory: &File, name: &OsStr) -> Result<Inspection> {
 enum ChildOpen {
     Opened(File),
     Replaced,
+    MountBoundary,
     Failed(String),
 }
 
@@ -562,6 +574,14 @@ fn open_child_directory(
     };
     if metadata.dev() != expected.containing_device || metadata.ino() != expected.inode {
         return Ok(ChildOpen::Replaced);
+    }
+    match (
+        mount_id_of_open_descriptor(parent),
+        mount_id_of_open_descriptor(&child),
+    ) {
+        (Ok(parent_mount), Ok(child_mount)) if parent_mount == child_mount => {}
+        (Ok(_), Ok(_)) => return Ok(ChildOpen::MountBoundary),
+        (Err(error), _) | (_, Err(error)) => return Ok(ChildOpen::Failed(format!("{error:#}"))),
     }
     Ok(ChildOpen::Opened(child))
 }
@@ -823,6 +843,32 @@ mod tests {
         assert_eq!(walk.root().excluded, 1);
         assert_eq!(walk.directories.len(), 1);
         assert!(walk.is_complete());
+    }
+
+    #[test]
+    fn mounted_directory_is_reported_but_never_entered() {
+        let root = PinnedDirectory::open(Path::new("/"))
+            .expect("open the filesystem root")
+            .expect("the filesystem root exists");
+        assert!(
+            Path::new("/proc/self").exists(),
+            "/proc is mounted on every Linux host this test runs on"
+        );
+        let walk = root
+            .walk_prefix_no_follow(budget(3, 100, 10_000), |relative, _| {
+                if relative == Path::new("proc") {
+                    PrefixWalkDecision::Include
+                } else {
+                    PrefixWalkDecision::Exclude
+                }
+            })
+            .expect("walk");
+        assert_eq!(paths(&walk), ["proc"]);
+        assert_eq!(
+            record(&walk, "proc").coverage,
+            PrefixDirectoryCoverage::MountBoundary
+        );
+        assert!(!walk.is_complete());
     }
 
     #[test]

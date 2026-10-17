@@ -1,11 +1,9 @@
-# ryeos:signed:2026-10-13T23:52:06Z:3085f28eca9fc55646aa446e3af7ed36e495c20a2815618bc98afd18c3b3aded:2ChIr3zamAW6L7vF0XJUqmJcxkABRFxnuZhxTsx/A42Pa+X0U75zwpjWFCsi8Q7OczF1M7GGQTQ7Poh+2WZxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:14:22Z:558e56a43ac37cc4cdb40de47f6dfe1c4f7bda62bf7db1085fb5da0cd6a06ef8:Oplm1es+cfxnUPjf1GQPnnyQjRVs0VLv69m3jpo14ZkBStecANRaZP6UaU9/2t2zt/STqkyRkbYisNqs7Ud1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
   - core
-  - hosted-node
   - opencode
-  - render-sandbox
   - scheduling
   - standard
 policies:
@@ -139,8 +137,6 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
-      hosted-node: []
-      render-sandbox: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       standard:
@@ -260,29 +256,38 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, isolation:namespaces, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, isolation:namespaces, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # The protected host-runtime binding supplies the opaque qualified
+            # Lillux provider. Policy never contains native cgroup coordinates.
+            mode: required
+            control_timeout_ms: 5000
+          # This profile requires qualified Lillux scopes. It must never select the
+          # weaker trusted direct-process-group worker lifecycle.
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace_nested
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        # The protected host-runtime binding supplies the opaque qualified
-        # Lillux provider. Policy never contains native cgroup coordinates.
-        mode: required
-        control_timeout_ms: 5000
-      # This profile requires qualified Lillux scopes. It must never select the
-      # weaker trusted direct-process-group worker lifecycle.
-      trusted_process_group_sessions: false
-      mode: enforce
-      backend:
-        bundle: core
-        implementation: linux-lillux
       filesystem:
-        proc_filesystem: pid_namespace_nested
         live_project:
           mode: fixed_parents
           limits:
@@ -383,7 +388,7 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

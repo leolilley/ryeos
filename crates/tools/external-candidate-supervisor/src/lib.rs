@@ -13,6 +13,7 @@ mod http_transport;
 pub mod native_host;
 pub mod relay_transport;
 pub mod runtime;
+pub mod stream_transport;
 
 use anyhow::{Context as _, Result, ensure};
 use http_transport::{BoundedHttpClient, HttpResponse};
@@ -55,6 +56,16 @@ pub struct AttachedExternalExecutionChannel {
 pub enum AttachedExternalExecutionTransport {
     HttpJson(AttachedExternalExecutionChannel),
     ControllerFileRelay(relay_transport::AttachedFileRelayChannel),
+    /// One WebSocket to the same HTTPS origin, carrying the same exchange.
+    ChannelStream(stream_transport::AttachedExternalExecutionStream),
+}
+
+impl From<stream_transport::AttachedExternalExecutionStream>
+    for AttachedExternalExecutionTransport
+{
+    fn from(value: stream_transport::AttachedExternalExecutionStream) -> Self {
+        Self::ChannelStream(value)
+    }
 }
 
 impl From<AttachedExternalExecutionChannel> for AttachedExternalExecutionTransport {
@@ -74,6 +85,7 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
         match self {
             Self::HttpJson(http) => http.fresh_idle_poll_interval(),
             Self::ControllerFileRelay(relay) => relay.fresh_idle_poll_interval(),
+            Self::ChannelStream(stream) => stream.fresh_idle_poll_interval(),
         }
     }
 
@@ -81,6 +93,7 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
         match self {
             Self::HttpJson(http) => http.exchange(canonical_supervisor_frame),
             Self::ControllerFileRelay(relay) => relay.exchange(canonical_supervisor_frame),
+            Self::ChannelStream(stream) => stream.exchange(canonical_supervisor_frame),
         }
     }
 
@@ -93,6 +106,9 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
             Self::HttpJson(http) => http.exchange_until(canonical_supervisor_frame, deadline),
             Self::ControllerFileRelay(relay) => {
                 relay.exchange_until(canonical_supervisor_frame, deadline)
+            }
+            Self::ChannelStream(stream) => {
+                stream.exchange_until(canonical_supervisor_frame, deadline)
             }
         }
     }
@@ -173,6 +189,38 @@ pub fn reconnect_external_execution_channel(
         )?,
     )?;
     attached_channel(bootstrap, build_client(bootstrap, network_inputs)?)
+}
+
+/// The exchange transport the signed controller contract selects for an
+/// attached binding. A contract that names the channel stream gets only the
+/// stream; the request/response channel, when one was already built for the
+/// attachment, is dropped unused rather than kept as a fallback.
+pub fn select_exchange_transport(
+    bootstrap: &ExternalSupervisorBootstrap,
+    supervisor_signing_key: &lillux::crypto::SigningKey,
+    binding: &ExecutionChannelBinding,
+    network_inputs: &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs,
+    request_response: Option<AttachedExternalExecutionChannel>,
+) -> Result<AttachedExternalExecutionTransport> {
+    if bootstrap.controller.http()?.exchanges_on_stream() {
+        return Ok(stream_transport::connect_external_execution_stream(
+            bootstrap,
+            supervisor_signing_key,
+            binding,
+            network_inputs,
+        )?
+        .into());
+    }
+    Ok(match request_response {
+        Some(channel) => channel,
+        None => reconnect_external_execution_channel(
+            bootstrap,
+            supervisor_signing_key,
+            binding,
+            network_inputs,
+        )?,
+    }
+    .into())
 }
 
 fn attached_channel(
@@ -259,25 +307,32 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionChannel {
             deadline.min(lillux::time::MonotonicDeadline::after(self.request_timeout)),
         )?;
         let response = decode_exchange_response(response, self.maximum_response_bytes)?;
-        Ok(ExternalTransportExchange {
-            schema: response.schema,
-            incoming_new: response.incoming_new,
-            incoming_sequence: response.incoming_sequence,
-            incoming_frame_digest: response.incoming_frame_digest,
-            acknowledgement_frame_digest: response.acknowledgement_frame_digest,
-            outbound_frames: response
-                .outbound_frames
-                .into_iter()
-                .map(decode_frame)
-                .collect::<Result<Vec<_>>>()
-                .map_err(ExternalTransportStepFailure::Fatal)?,
-            urgent_revocation_frame: response
-                .urgent_revocation_frame
-                .map(decode_frame)
-                .transpose()
-                .map_err(ExternalTransportStepFailure::Fatal)?,
-        })
+        exchange_from_response(response).map_err(ExternalTransportStepFailure::Fatal)
     }
+}
+
+/// The driver's view of one shape-checked exchange response, with every
+/// carried frame decoded from its canonical base64.
+pub(crate) fn exchange_from_response(
+    response: ExternalChannelExchangeResponse,
+) -> Result<ExternalTransportExchange> {
+    response.validate_shape()?;
+    Ok(ExternalTransportExchange {
+        schema: response.schema,
+        incoming_new: response.incoming_new,
+        incoming_sequence: response.incoming_sequence,
+        incoming_frame_digest: response.incoming_frame_digest,
+        acknowledgement_frame_digest: response.acknowledgement_frame_digest,
+        outbound_frames: response
+            .outbound_frames
+            .into_iter()
+            .map(decode_frame)
+            .collect::<Result<Vec<_>>>()?,
+        urgent_revocation_frame: response
+            .urgent_revocation_frame
+            .map(decode_frame)
+            .transpose()?,
+    })
 }
 
 fn decode_exchange_response(
@@ -489,6 +544,7 @@ mod tests {
                 cleanup_millis: 120_000,
                 cleanup_steps: 3_000_000,
             },
+            report_capabilities: false,
         }
     }
 
@@ -1280,5 +1336,117 @@ mod tests {
             &test_network_inputs(&bootstrap),
         )
         .unwrap();
+    }
+
+    fn stream_binding(
+        bootstrap: &ExternalSupervisorBootstrap,
+        supervisor: &lillux::crypto::SigningKey,
+        issued_at_ms: i64,
+    ) -> ExecutionChannelBinding {
+        ExecutionChannelBinding {
+            schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
+            placement_thread_id: bootstrap.placement_thread_id.clone(),
+            allocation_request_digest: bootstrap.allocation_request_digest.clone(),
+            occurrence_id: bootstrap.occurrence_id.clone(),
+            admitted_capsule_hash: bootstrap.admitted_capsule_hash.clone(),
+            base_snapshot_hash: bootstrap.base_snapshot_hash.clone(),
+            execution_binding_hash: bootstrap.execution_binding_hash.clone(),
+            supervisor_runtime_hash: bootstrap.supervisor_runtime_hash.clone(),
+            candidate_program_digest: bootstrap.candidate_program.digest().unwrap(),
+            channel_nonce: "f".repeat(64),
+            owner_public_key: bootstrap.owner_public_key.clone(),
+            supervisor_public_key: encode_channel_public_key(&supervisor.verifying_key()).unwrap(),
+            issued_at_ms,
+            execution_deadline_ms: issued_at_ms
+                + i64::from(bootstrap.execution_timeout_seconds) * 1_000,
+            expires_at_ms: issued_at_ms
+                + i64::from(
+                    bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
+                ) * 1_000,
+            candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
+            max_frames: bootstrap.binding_max_frames().unwrap(),
+            max_bytes: bootstrap.channel_max_bytes,
+        }
+    }
+
+    #[test]
+    fn the_signed_contract_selects_the_stream_and_never_falls_back() {
+        let mut bootstrap = bootstrap(
+            "https://localhost:8443".into(),
+            vec![TEST_CA_DER.to_owned()],
+        );
+        let inputs = test_network_inputs(&bootstrap);
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
+        let binding = stream_binding(&bootstrap, &supervisor, lillux::time::timestamp_millis());
+        let selected =
+            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, None).unwrap();
+        assert!(matches!(
+            selected,
+            AttachedExternalExecutionTransport::HttpJson(_)
+        ));
+
+        bootstrap.controller.http_mut().unwrap().route_contract =
+            ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_STREAM_CONTRACT.into();
+        let http = reconnect_external_execution_channel(&bootstrap, &supervisor, &binding, &inputs)
+            .unwrap();
+        let selected =
+            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, Some(http))
+                .unwrap();
+        assert!(matches!(
+            selected,
+            AttachedExternalExecutionTransport::ChannelStream(_)
+        ));
+
+        // A stream contract whose binding is not this supervisor's opens
+        // nothing, not even the request/response channel.
+        let other = lillux::crypto::SigningKey::from_bytes(&[44; 32]);
+        assert!(select_exchange_transport(&bootstrap, &other, &binding, &inputs, None).is_err());
+    }
+
+    #[test]
+    fn channel_stream_requires_the_exact_live_attached_binding() {
+        let bootstrap = bootstrap(
+            "https://localhost:8443".into(),
+            vec![TEST_CA_DER.to_owned()],
+        );
+        let inputs = test_network_inputs(&bootstrap);
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let now = lillux::time::timestamp_millis();
+        let binding = stream_binding(&bootstrap, &supervisor, now);
+        stream_transport::connect_external_execution_stream(
+            &bootstrap,
+            &supervisor,
+            &binding,
+            &inputs,
+        )
+        .unwrap();
+
+        let other = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+        assert!(
+            stream_transport::connect_external_execution_stream(
+                &bootstrap, &other, &binding, &inputs,
+            )
+            .is_err(),
+            "a binding attached to another supervisor key must not open a stream"
+        );
+
+        let lifetime_ms = i64::from(
+            bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
+        ) * 1_000;
+        let expired = stream_binding(&bootstrap, &supervisor, now - lifetime_ms - 1_000);
+        let refusal = stream_transport::connect_external_execution_stream(
+            &bootstrap,
+            &supervisor,
+            &expired,
+            &inputs,
+        )
+        .err()
+        .expect("an expired binding must not open a stream");
+        assert!(
+            format!("{refusal:#}").contains("already expired"),
+            "{refusal:#}"
+        );
     }
 }

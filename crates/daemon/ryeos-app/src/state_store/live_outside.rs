@@ -3,7 +3,7 @@
 //! it is not a physical-disposal receipt or durable account settlement.
 use super::{ClosedLiveStateStore, ReleasedLiveStateStoreStartup};
 use anyhow::{Context, Result, ensure};
-use std::mem::ManuallyDrop;
+use lillux::custody::Held;
 use std::sync::Arc;
 use lillux_sqlite::original_physical_custody::OutsideWork;
 
@@ -223,54 +223,54 @@ fn producer_metadata_pin_phase(
 // Exact original packet components, retained before any later destination,
 // inspection or descriptor continuation. This is not a retirement receipt.
 struct OriginalPacketBoundResources {
-    _root: ManuallyDrop<Option<std::sync::Arc<lillux::PinnedDirectory>>>,
+    held: Held<OriginalPacketBoundParts>,
+}
+/// Everything a bound-resources owner retains, in the order it ends.
+struct OriginalPacketBoundParts {
+    root: Option<std::sync::Arc<lillux::PinnedDirectory>>,
+    inspection: Option<(lillux_sqlite::SqliteCopyLease,
+        std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>,
     registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
     _name: lillux_sqlite::OriginalNativeOutsideBoundCoordinate,
     _mode: lillux_sqlite::OriginalNativeBoundMode,
     _domain: lillux_sqlite::OriginalNativeDomain,
-    _inspection: ManuallyDrop<Option<(lillux_sqlite::SqliteCopyLease,
-        std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>>,
 }
-impl OriginalPacketBoundResources {
+impl OriginalPacketBoundParts {
     /// No root, inspection or registration remains: the retired source
     /// evidence left nothing behind.
     fn holders_retired(&self) -> bool {
-        self._root.is_none() && self._inspection.is_none() && self.registration.is_none()
+        self.root.is_none() && self.inspection.is_none() && self.registration.is_none()
     }
 }
-impl Drop for OriginalPacketBoundResources {
-    fn drop(&mut self) {
-        // Settled exactly when no root, inspection or registration remains.
-        // Each slot is taken exactly once, here; otherwise the bound root and
-        // inspection lease stay retained together until the process exits.
-        let settled = self.holders_retired();
-        let taken = unsafe {(
-            ManuallyDrop::take(&mut self._root),
-            ManuallyDrop::take(&mut self._inspection),
-        )};
-        if settled {
-            drop(taken);
-        } else {
-            let registration = self.registration.take();
-            lillux::custody::abandon("ryeos-app::packet-bound-resources", (taken, registration));
+/// Settled exactly when no root, inspection or registration remains;
+/// otherwise the bound root and inspection lease stay retained together until
+/// the process exits.
+fn packet_bound_settled(parts: &OriginalPacketBoundParts) -> bool {
+    parts.holders_retired()
+}
+impl OriginalPacketBoundResources {
+    fn new(
+        root: Option<std::sync::Arc<lillux::PinnedDirectory>>,
+        inspection: Option<(lillux_sqlite::SqliteCopyLease,
+            std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>,
+        name: lillux_sqlite::OriginalNativeOutsideBoundCoordinate,
+        mode: lillux_sqlite::OriginalNativeBoundMode,
+        domain: lillux_sqlite::OriginalNativeDomain,
+    ) -> Self {
+        Self {
+            held: Held::new(
+                "ryeos-app::packet-bound-resources",
+                OriginalPacketBoundParts {
+                    root, inspection, registration: None, _name: name, _mode: mode, _domain: domain,
+                },
+                packet_bound_settled,
+            ),
         }
     }
 }
 pub(super) struct OriginalPacketPartsProgress {
-    process: u32,
+    held: Held<OriginalPacketProgressParts>,
     source_kind: OriginalPacketSourceKind,
-    optional_source_census: Option<PacketOptionalSourceCensus>,
-    source_parts_consumed: bool,
-    scheduler_handoff: Option<(ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
-        ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
-    // Producer domain copied when an auxiliary packet joins; it selects the
-    // per-domain bound inside the shared Scheduler/accounting collection.
-    native_domain: Option<lillux_sqlite::OriginalNativeDomain>,
-    bound: ManuallyDrop<Option<OriginalPacketBoundResources>>,
-    authority: ManuallyDrop<Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>>,
-    destination: ManuallyDrop<Option<lillux_sqlite::OriginalDestinationOutsideCustody>>,
-    destination_retirement: ManuallyDrop<Option<lillux_sqlite::OriginalDestinationRetirement>>,
-    refusal: Option<lillux_sqlite::OriginalDestinationCustodyFailure>,
     destination_retries: u8,
     destination_started: bool,
     requires_destination: bool,
@@ -279,11 +279,43 @@ pub(super) struct OriginalPacketPartsProgress {
     destination_consumed: bool,
     bound_root_receipt_consumed: bool,
     metadata_pin_phase: PacketMetadataPinPhase,
+}
+/// Everything a packet progress retains, in the order it ends.
+struct OriginalPacketProgressParts {
+    bound: Option<OriginalPacketBoundResources>,
+    authority: Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>,
+    destination: Option<lillux_sqlite::OriginalDestinationOutsideCustody>,
+    destination_retirement: Option<lillux_sqlite::OriginalDestinationRetirement>,
+    metadata_pin_inputs: Option<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>,
+    metadata_pin_receipts: [Option<Arc<lillux_sqlite::RetiredOriginalMetadataPin>>; 2],
+    raw: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
+    parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    refusal: Option<lillux_sqlite::OriginalDestinationCustodyFailure>,
+    source_parts_consumed: bool,
+    optional_source_census: Option<PacketOptionalSourceCensus>,
+    scheduler_handoff: Option<(ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
+        ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
+    // Producer domain copied when an auxiliary packet joins; it selects the
+    // per-domain bound inside the shared Scheduler/accounting collection.
+    native_domain: Option<lillux_sqlite::OriginalNativeDomain>,
     metadata_pin_registry_identity: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistryIdentity>,
-    metadata_pin_inputs: ManuallyDrop<Option<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>>,
-    metadata_pin_receipts: ManuallyDrop<[Option<Arc<lillux_sqlite::RetiredOriginalMetadataPin>>; 2]>,
-    raw: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
-    parts: ManuallyDrop<Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+}
+impl OriginalPacketProgressParts {
+    /// Source parts consumed and no source, destination, root or pin owner
+    /// left.
+    fn exhausted(&self) -> bool {
+        self.source_parts_consumed
+            && self.raw.is_none() && self.parts.is_none() && self.bound.is_none()
+            && self.authority.is_none() && self.destination.is_none()
+            && self.destination_retirement.is_none() && self.refusal.is_none()
+            && self.metadata_pin_inputs.is_none()
+            && self.metadata_pin_receipts.iter().all(Option::is_none)
+    }
+}
+/// Settled exactly when exhaustion would accept the packet; otherwise every
+/// owner stays retained together until the process exits.
+fn packet_progress_settled(parts: &OriginalPacketProgressParts) -> bool {
+    parts.exhausted()
 }
 
 fn register_bound_root_source(
@@ -323,27 +355,41 @@ fn register_bound_root_source(
 }
 
 impl OriginalPacketPartsProgress {
+    fn new_progress(
+        raw: Option<lillux_sqlite::OriginalNativeOutsideConnectionCustody>,
+        parts: Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+        scheduler_handoff: Option<(ryeos_scheduler::db::SchedulerNativeStoreHandoffId,
+            ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
+        source_kind: OriginalPacketSourceKind,
+        native_domain: Option<lillux_sqlite::OriginalNativeDomain>,
+        metadata_pin_phase: PacketMetadataPinPhase,
+    ) -> Self {
+        Self {
+            held: Held::new(
+                "ryeos-app::packet-parts-progress",
+                OriginalPacketProgressParts {
+                    bound: None, authority: None, destination: None,
+                    destination_retirement: None, metadata_pin_inputs: None,
+                    metadata_pin_receipts: [None, None], raw, parts, refusal: None,
+                    source_parts_consumed: false,
+                    optional_source_census: None, scheduler_handoff, native_domain,
+                    metadata_pin_registry_identity: None,
+                },
+                packet_progress_settled,
+            ),
+            source_kind,
+            destination_retries: 0, destination_started: false, requires_destination: false,
+            destination_roots_registered: false,
+            destination_native_references_retired: false, destination_consumed: false,
+            bound_root_receipt_consumed: false, metadata_pin_phase,
+        }
+    }
     fn from_original(
         raw: lillux_sqlite::OriginalNativeOutsideConnectionCustody,
         source_kind: OriginalPacketSourceKind,
     ) -> Self {
-        Self { process: std::process::id(), source_kind, optional_source_census: None,
-            source_parts_consumed: false,
-            scheduler_handoff: None,
-            native_domain: None,
-            raw: ManuallyDrop::new(Some(raw)),
-            parts: ManuallyDrop::new(None), bound: ManuallyDrop::new(None),
-            authority: ManuallyDrop::new(None), destination: ManuallyDrop::new(None),
-            destination_retirement: ManuallyDrop::new(None),
-            refusal: None, destination_retries: 0,
-            destination_started: false, requires_destination: false,
-            destination_roots_registered: false,
-            destination_native_references_retired: false, destination_consumed: false,
-            bound_root_receipt_consumed: false,
-            metadata_pin_phase: PacketMetadataPinPhase::Unclassified,
-            metadata_pin_registry_identity: None,
-            metadata_pin_inputs: ManuallyDrop::new(None),
-            metadata_pin_receipts: ManuallyDrop::new([None, None]) }
+        Self::new_progress(Some(raw), None, None, source_kind, None,
+            PacketMetadataPinPhase::Unclassified)
     }
     pub(super) fn from_parts(
         parts: lillux_sqlite::OriginalNativeOutsideConnectionParts,
@@ -353,30 +399,15 @@ impl OriginalPacketPartsProgress {
     ) -> Self {
         let metadata_pin_phase = producer_metadata_pin_phase(&parts);
         let native_domain = parts.domain;
-        Self { process: std::process::id(), source_kind, optional_source_census: None,
-            source_parts_consumed: false,
-            scheduler_handoff,
-            native_domain,
-            raw: ManuallyDrop::new(None),
-            parts: ManuallyDrop::new(Some(parts)), bound: ManuallyDrop::new(None),
-            authority: ManuallyDrop::new(None), destination: ManuallyDrop::new(None),
-            destination_retirement: ManuallyDrop::new(None),
-            refusal: None, destination_retries: 0,
-            destination_started: false, requires_destination: false,
-            destination_roots_registered: false,
-            destination_native_references_retired: false, destination_consumed: false,
-            bound_root_receipt_consumed: false,
-            metadata_pin_phase,
-            metadata_pin_registry_identity: None,
-            metadata_pin_inputs: ManuallyDrop::new(None),
-            metadata_pin_receipts: ManuallyDrop::new([None, None]) }
+        Self::new_progress(None, Some(parts), scheduler_handoff, source_kind,
+            native_domain, metadata_pin_phase)
     }
 
     pub(super) fn source_parts_consumed(&self) -> bool {
-        self.source_parts_consumed
+        self.held.source_parts_consumed
     }
     fn record_optional_source_census(&mut self) -> Result<()> {
-        let parts = self.parts.as_ref()
+        let parts = self.held.parts.as_ref()
             .context("actual packet parts absent before optional-source census")?;
         ensure!(parts.inspection.is_none(),
             "selected live Store packet unexpectedly contains a Closed inspection owner");
@@ -396,11 +427,11 @@ impl OriginalPacketPartsProgress {
             }),
             failure_fact_recorded: false,
         };
-        if let Some(existing) = self.optional_source_census {
+        if let Some(existing) = self.held.optional_source_census {
             ensure!(existing == census,
                 "selected live Store packet optional-source census changed");
         } else {
-            self.optional_source_census = Some(census);
+            self.held.get_mut().optional_source_census = Some(census);
         }
         Ok(())
     }
@@ -408,23 +439,23 @@ impl OriginalPacketPartsProgress {
     /// Factory-free census of this packet's pre-seal joins: source handoff,
     /// destination permit and metadata-pin retirement with no retained inputs.
     fn require_pre_seal_complete(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign packet pre-seal census");
-        ensure!(self.raw.is_none() && self.authority.is_none() && self.refusal.is_none()
+        ensure!(!self.held.is_foreign(), "foreign packet pre-seal census");
+        ensure!(self.held.raw.is_none() && self.held.authority.is_none() && self.held.refusal.is_none()
             && self.destination_started,
             "packet source handoff is incomplete before the region seal");
         if self.requires_destination {
             ensure!(self.destination_roots_registered && self.destination_native_references_retired
-                && self.destination.is_none()
-                && (self.destination_retirement.is_some() || self.destination_consumed),
+                && self.held.destination.is_none()
+                && (self.held.destination_retirement.is_some() || self.destination_consumed),
                 "packet destination lacks its retirement permit before the region seal");
         } else {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "packet without destination retains destination state");
         }
         ensure!(matches!(self.metadata_pin_phase,
                 PacketMetadataPinPhase::Absent | PacketMetadataPinPhase::Retired(_))
-            && self.metadata_pin_inputs.is_none(),
+            && self.held.metadata_pin_inputs.is_none(),
             "packet metadata pins are not retired before the region seal");
         Ok(())
     }
@@ -432,29 +463,29 @@ impl OriginalPacketPartsProgress {
     fn require_optional_source_census(&self, expected: OriginalPacketSourceKind) -> Result<()> {
         ensure!(self.source_kind == expected,
             "original packet moved to another selected live producer collection");
-        let census = self.optional_source_census
+        let census = self.held.optional_source_census
             .context("selected live Store packet lacks its producer-qualified optional-source census")?;
         ensure!(census.producer == expected && census.closed_inspection_absent
             && census.released_inspection_absent && census.scheduler_retirement_absent,
             "selected live Store packet optional-source absence proof changed");
-        if self.source_parts_consumed {
-            ensure!(census.failure_fact_recorded && self.parts.is_none() && self.raw.is_none()
-                && self.authority.is_none() && self.destination.is_none()
-                && self.destination_retirement.is_none() && self.refusal.is_none()
-                && self.bound.is_none() && (&*self.metadata_pin_inputs).is_none()
-                && (&*self.metadata_pin_receipts).iter().all(Option::is_none)
+        if self.held.source_parts_consumed {
+            ensure!(census.failure_fact_recorded && self.held.parts.is_none() && self.held.raw.is_none()
+                && self.held.authority.is_none() && self.held.destination.is_none()
+                && self.held.destination_retirement.is_none() && self.held.refusal.is_none()
+                && self.held.bound.is_none() && (&self.held.metadata_pin_inputs).is_none()
+                && (&self.held.metadata_pin_receipts).iter().all(Option::is_none)
                 && self.bound_root_receipt_consumed
                 && (!self.requires_destination && !self.destination_consumed
                     || self.requires_destination && self.destination_consumed)
                 && matches!(self.metadata_pin_phase,
                     PacketMetadataPinPhase::ConsumedAbsent | PacketMetadataPinPhase::Consumed(_))
-                && self.metadata_pin_registry_identity.is_some(),
+                && self.held.metadata_pin_registry_identity.is_some(),
                 "consumed packet source regained native custody or lost its terminal fact");
             return Ok(());
         }
         ensure!(!census.failure_fact_recorded,
             "packet failure fact was recorded before source evidence reached its terminal stage");
-        let parts = self.parts.as_ref()
+        let parts = self.held.parts.as_ref()
             .context("actual packet parts absent during optional-source census check")?;
         ensure!(parts.inspection.is_none() && parts.released_inspection.is_none()
             && parts.scheduler_retirement.is_none(),
@@ -476,7 +507,7 @@ impl OriginalPacketPartsProgress {
     ) -> Result<()> {
         self.normalize(factory, aggregate)?;
         if !self.destination_started {
-            let parts = self.parts.as_mut().expect("cached original packet parts");
+            let parts = self.held.get_mut().parts.as_mut().expect("cached original packet parts");
             ensure!(parts.bound_inputs.is_none() || parts.transient.is_none(),
                 "actual packet retains conflicting original destination owners");
             if let Some(bound) = parts.bound_inputs.take() {
@@ -489,43 +520,41 @@ impl OriginalPacketPartsProgress {
                 };
                 let lillux_sqlite::OriginalNativeOutsideBoundParts {
                     root, name, mode, domain, authority, inspection } = bound;
-                *self.bound = Some(OriginalPacketBoundResources {
-                    _root: ManuallyDrop::new(Some(root)), registration: None,
-                    _name: name, _mode: mode,
-                    _domain: domain, _inspection: ManuallyDrop::new(inspection) });
-                *self.authority = Some(authority);
-            } else { *self.authority = parts.transient.take(); }
-            self.requires_destination = self.authority.is_some();
+                self.held.get_mut().bound = Some(OriginalPacketBoundResources::new(
+                    Some(root), inspection, name, mode, domain));
+                self.held.get_mut().authority = Some(authority);
+            } else { self.held.get_mut().authority = parts.transient.take(); }
+            self.requires_destination = self.held.authority.is_some();
             self.destination_started = true;
         }
-        if self.destination_retirement.is_some() {
-            ensure!(self.authority.is_none() && self.refusal.is_none()
+        if self.held.destination_retirement.is_some() {
+            ensure!(self.held.authority.is_none() && self.held.refusal.is_none()
                 && self.destination_roots_registered && self.destination_native_references_retired,
                 "retirement permit precedes complete packet destination join");
             return Ok(());
         }
-        if self.destination.is_some() {
-            ensure!(self.authority.is_none() && self.refusal.is_none(),
+        if self.held.destination.is_some() {
+            ensure!(self.held.authority.is_none() && self.held.refusal.is_none(),
                 "original packet retains conflicting destination phases");
             return Ok(());
         }
-        if self.refusal.is_some() {
+        if self.held.refusal.is_some() {
             let next_retry = next_destination_retry(self.destination_retries)?;
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
                 prepay(0, destination_retry_attempt_quote().steps))?;
-            ensure!(self.process == std::process::id(), "foreign Store packet after retry funding");
+            ensure!(!self.held.is_foreign(), "foreign Store packet after retry funding");
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
             self.destination_retries = next_retry;
-            let refusal = self.refusal.take().expect("retained original destination refusal");
+            let refusal = self.held.get_mut().refusal.take().expect("retained original destination refusal");
             match refusal.into_original_inputs() {
                 Ok((original_factory, authority, error)) => {
                     if !std::sync::Arc::ptr_eq(&original_factory, factory) {
-                        self.refusal = Some(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
+                        self.held.get_mut().refusal = Some(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
                             original_factory, authority, error));
                         anyhow::bail!("retained destination refusal changed original factory");
                     }
-                    *self.authority = Some(authority);
+                    self.held.get_mut().authority = Some(authority);
                     // The lower failure keeps its factory and actual authority
                     // in separate fields. Once those exact owners return here,
                     // an earlier diagnostic error is not custody and retaining
@@ -535,20 +564,20 @@ impl OriginalPacketPartsProgress {
                     drop(original_factory);
                 }
                 Err(refusal) => {
-                    self.refusal = Some(refusal);
+                    self.held.get_mut().refusal = Some(refusal);
                     anyhow::bail!("actual destination refusal extraction refused");
                 }
             }
         }
-        let Some(authority) = self.authority.take() else {
+        let Some(authority) = self.held.get_mut().authority.take() else {
             ensure!(!self.requires_destination, "actual original destination authority absent");
             return Ok(()); // Genuine packet has no destination; no retirement inferred.
         };
-        let leaf = &self.parts.as_ref().expect("retained actual original parts").leaf_evidence;
+        let leaf = &self.held.parts.as_ref().expect("retained actual original parts").leaf_evidence;
         match authority.into_outside_custody(factory, aggregate, leaf, prepay) {
-            Ok(destination) => *self.destination = Some(destination),
+            Ok(destination) => self.held.get_mut().destination = Some(destination),
             Err(refusal) => {
-                self.refusal = Some(refusal);
+                self.held.get_mut().refusal = Some(refusal);
                 anyhow::bail!("actual packet destination handoff refused; original retained");
             }
         }
@@ -561,24 +590,27 @@ impl OriginalPacketPartsProgress {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign Store packet root custody");
+        ensure!(!self.held.is_foreign(), "foreign Store packet root custody");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        ensure!(self.destination_started && self.authority.is_none() && self.refusal.is_none()
-            && (!self.requires_destination || self.destination.is_some()),
+        ensure!(self.destination_started && self.held.authority.is_none() && self.held.refusal.is_none()
+            && (!self.requires_destination || self.held.destination.is_some()),
             "packet destination must transfer before bound-root registration");
-        self.parts.as_ref().ok_or_else(|| anyhow::anyhow!("actual Store packet parts absent"))?
+        self.held.parts.as_ref().ok_or_else(|| anyhow::anyhow!("actual Store packet parts absent"))?
             .leaf_evidence.require_original(factory, aggregate)?;
-        let Some(bound) = self.bound.as_ref() else { return Ok(()); };
+        let Some(bound) = self.held.bound.as_ref() else { return Ok(()); };
         // The actual inspection/SQL lease is still an independent obligation.
         // Never dispose it or infer retirement from a directory registration.
-        ensure!(bound._inspection.is_none(),
+        ensure!(bound.held.inspection.is_none(),
             "original bound inspection context still needs consuming custody join");
         // Completed transfer revalidates its exact membership without charging
         // again; only the first owner transfer consumes the registration quote.
-        let bound = self.bound.as_mut().expect("retained actual bound-root source");
-        register_bound_root_source(&mut *bound._root, &mut bound.registration, registry, prepay)?;
-        ensure!(self.process == std::process::id(), "foreign Store packet after root funding");
+        let bound = self.held.get_mut().bound.as_mut().expect("retained actual bound-root source");
+        {
+            let bound = bound.held.get_mut();
+            register_bound_root_source(&mut bound.root, &mut bound.registration, registry, prepay)?;
+        }
+        ensure!(!self.held.is_foreign(), "foreign Store packet after root funding");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         Ok(())
@@ -589,22 +621,22 @@ impl OriginalPacketPartsProgress {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         if !self.requires_destination {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "packet without destination retains a destination token");
             return Ok(());
         }
         if self.destination_consumed {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none(),
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none(),
                 "consumed packet destination token reappeared");
             return Ok(());
         }
-        if self.destination_retirement.is_some() {
+        if self.held.destination_retirement.is_some() {
             ensure!(self.destination_roots_registered && self.destination_native_references_retired,
                 "destination retirement permit lost its completed joins");
             return Ok(());
         }
-        let destination = self.destination.as_mut()
+        let destination = self.held.get_mut().destination.as_mut()
             .context("actual packet destination token absent before root registration")?;
         // SAFETY: this is the exact pre-mapping registry retained by the
         // Store supervisor, and `prepay` debits the same original reservation.
@@ -619,17 +651,17 @@ impl OriginalPacketPartsProgress {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         if !self.requires_destination {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "packet without destination retains a destination token");
             return Ok(());
         }
         if self.destination_consumed {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none(),
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none(),
                 "consumed packet destination token reappeared");
             return Ok(());
         }
-        if self.destination_retirement.is_some() {
+        if self.held.destination_retirement.is_some() {
             ensure!(self.destination_roots_registered,
                 "destination permit lost its completed root registration");
             return Ok(());
@@ -637,7 +669,7 @@ impl OriginalPacketPartsProgress {
         ensure!(self.destination_roots_registered,
             "packet destination roots must join before native-reference retirement");
         if self.destination_native_references_retired { return Ok(()); }
-        let destination = self.destination.as_mut()
+        let destination = self.held.get_mut().destination.as_mut()
             .context("actual packet destination token absent before native-reference retirement")?;
         destination.retire_native_references(factory, aggregate, prepay)?;
         self.destination_native_references_retired = true;
@@ -655,7 +687,7 @@ impl OriginalPacketPartsProgress {
             &[Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 2],
         ) -> Result<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>>,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id() && self.raw.is_none(),
+        ensure!(!self.held.is_foreign() && self.held.raw.is_none(),
             "foreign or unnormalized original packet metadata pins");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
@@ -665,9 +697,12 @@ impl OriginalPacketPartsProgress {
                 "packet metadata pins precede destination and native-reference joins");
         }
 
-        let Self { parts, metadata_pin_inputs, metadata_pin_receipts, metadata_pin_phase,
-            metadata_pin_registry_identity, .. } = self;
-        let parts = parts.as_mut().context("actual packet parts absent before metadata-pin retirement")?;
+        let metadata_pin_phase = &mut self.metadata_pin_phase;
+        let held = self.held.get_mut();
+        let metadata_pin_inputs = &mut held.metadata_pin_inputs;
+        let metadata_pin_receipts = &mut held.metadata_pin_receipts;
+        let metadata_pin_registry_identity = &mut held.metadata_pin_registry_identity;
+        let parts = held.parts.as_mut().context("actual packet parts absent before metadata-pin retirement")?;
         parts.leaf_evidence.require_original(factory, aggregate)?;
         ensure!(parts.ticket == parts.leaf_evidence.native_ticket()?
             && parts.domain == parts.leaf_evidence.domain()?,
@@ -685,8 +720,8 @@ impl OriginalPacketPartsProgress {
                 anyhow::bail!("original packet metadata-pin census was not recorded at normalization"),
             PacketMetadataPinPhase::Absent => {
                 ensure!(mask == 0, "producer-qualified packet metadata-pin absence changed");
-                ensure!((&**metadata_pin_inputs).is_none()
-                    && (&**metadata_pin_receipts).iter().all(Option::is_none),
+                ensure!(metadata_pin_inputs.is_none()
+                    && metadata_pin_receipts.iter().all(Option::is_none),
                     "absent packet metadata pins retain retirement inputs or receipts");
                 return Ok(());
             }
@@ -699,7 +734,7 @@ impl OriginalPacketPartsProgress {
         }
         if let PacketMetadataPinPhase::Retired(expected) = *metadata_pin_phase {
             ensure!(expected == mask, "retired packet metadata-pin census changed");
-            let receipts = &**metadata_pin_receipts;
+            let receipts = &*metadata_pin_receipts;
             for (index, pin) in parts.durable_pins.iter().enumerate() {
                 match (pin, receipts[index].as_ref()) {
                     (Some(pin), Some(receipt)) => receipt.require_original(pin)?,
@@ -707,7 +742,7 @@ impl OriginalPacketPartsProgress {
                     _ => anyhow::bail!("retired packet metadata-pin receipt census changed"),
                 }
             }
-            ensure!((&**metadata_pin_inputs).is_none(),
+            ensure!(metadata_pin_inputs.is_none(),
                 "completed packet metadata retirement retains native factory inputs");
             return Ok(());
         }
@@ -717,14 +752,14 @@ impl OriginalPacketPartsProgress {
         ensure!(expected_mask == mask && mask != 0,
             "packet metadata-pin retirement lost its producer census");
 
-        let inputs_slot = &mut **metadata_pin_inputs;
+        let inputs_slot = &mut *metadata_pin_inputs;
         if inputs_slot.is_none() {
             // The issuer charges exact authority and backing from the original
             // late owner before allocating this one-shot input.
             *inputs_slot = Some(issue_inputs(&parts.leaf_evidence, &parts.durable_pins)?);
         }
         let inputs = inputs_slot.as_ref().expect("packet metadata retirement input cached");
-        let receipts = &mut **metadata_pin_receipts;
+        let receipts = &mut *metadata_pin_receipts;
         for (index, pin) in parts.durable_pins.iter().enumerate() {
             let Some(pin) = pin else { continue; };
             if let Some(receipt) = receipts[index].as_ref() {
@@ -757,33 +792,33 @@ impl OriginalPacketPartsProgress {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         if !self.requires_destination {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "packet without destination retains retirement state");
             return Ok(());
         }
         if self.destination_consumed {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none(),
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none(),
                 "consumed packet destination retirement state reappeared");
             return Ok(());
         }
-        if self.destination_retirement.is_some() {
-            ensure!(self.destination.is_none() && self.destination_roots_registered
+        if self.held.destination_retirement.is_some() {
+            ensure!(self.held.destination.is_none() && self.destination_roots_registered
                 && self.destination_native_references_retired,
                 "cached destination permit has conflicting packet state");
             return Ok(());
         }
         ensure!(self.destination_roots_registered && self.destination_native_references_retired,
             "destination permit requires successful root and native-reference joins");
-        let destination = self.destination.take()
+        let destination = self.held.get_mut().destination.take()
             .context("actual packet destination absent before retirement permit")?;
         match destination.prepare_retirement(factory, aggregate, registry, prepay) {
             Ok(permit) => {
-                *self.destination_retirement = Some(permit);
+                self.held.get_mut().destination_retirement = Some(permit);
                 Ok(())
             }
             Err((destination, error)) => {
-                *self.destination = Some(destination);
+                self.held.get_mut().destination = Some(destination);
                 Err(error)
             }
         }
@@ -794,25 +829,25 @@ impl OriginalPacketPartsProgress {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         if !self.requires_destination {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "packet without destination retains a destination token");
             return Ok(());
         }
         if self.destination_consumed {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none(),
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none(),
                 "consumed packet destination token reappeared");
             return Ok(());
         }
         ensure!(self.destination_roots_registered && self.destination_native_references_retired
-            && self.destination.is_none(),
+            && self.held.destination.is_none(),
             "packet destination permit cannot be consumed before its native and registry joins");
-        let permit = self.destination_retirement.take()
+        let permit = self.held.get_mut().destination_retirement.take()
             .context("actual packet destination retirement permit absent")?;
         match permit.into_retired(registry, prepay) {
             Ok(()) => { self.destination_consumed = true; Ok(()) }
             Err((permit, error)) => {
-                *self.destination_retirement = Some(permit);
+                self.held.get_mut().destination_retirement = Some(permit);
                 Err(error)
             }
         }
@@ -822,29 +857,29 @@ impl OriginalPacketPartsProgress {
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<bool> {
-        ensure!(self.process == std::process::id(), "foreign retired packet bound-root receipt");
+        ensure!(!self.held.is_foreign(), "foreign retired packet bound-root receipt");
         if self.bound_root_receipt_consumed {
-            ensure!(self.bound.as_ref().is_none_or(|bound| bound.registration.is_none()),
+            ensure!(self.held.bound.as_ref().is_none_or(|bound| bound.held.registration.is_none()),
                 "consumed packet bound-root receipt regained a registration");
             return Ok(false);
         }
-        ensure!(self.raw.is_none() && self.parts.is_some()
-            && self.destination.is_none() && self.destination_retirement.is_none()
+        ensure!(self.held.raw.is_none() && self.held.parts.is_some()
+            && self.held.destination.is_none() && self.held.destination_retirement.is_none()
             && (!self.requires_destination || self.destination_consumed),
             "packet bound-root receipt precedes destination and source normalization");
-        let Some(bound) = self.bound.as_mut() else {
+        let Some(bound) = self.held.get_mut().bound.as_mut() else {
             self.bound_root_receipt_consumed = true;
             return Ok(false);
         };
-        ensure!((&*bound._root).is_none() && (&*bound._inspection).is_none(),
+        ensure!(bound.held.root.is_none() && bound.held.inspection.is_none(),
             "retired packet bound-root receipt precedes actual root/inspection transfer");
-        let registration = bound.registration.as_ref()
+        let registration = bound.held.registration.as_ref()
             .context("actual packet bound root lacks its retired-registry registration")?;
         ensure!(matches!(registration.observed_source_identity()?,
             lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
             "retired packet bound-root registration changed its Directory role");
         drop(registration.receipt_in(registry)?);
-        bound.registration = None;
+        bound.held.get_mut().registration = None;
         self.bound_root_receipt_consumed = true;
         Ok(true)
     }
@@ -854,36 +889,36 @@ impl OriginalPacketPartsProgress {
         expected: OriginalPacketSourceKind,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<bool> {
-        ensure!(self.process == std::process::id(),
+        ensure!(!self.held.is_foreign(),
             "foreign retired packet source evidence");
         self.require_optional_source_census(expected)?;
-        let registry_identity = self.metadata_pin_registry_identity.as_ref()
+        let registry_identity = self.held.metadata_pin_registry_identity.as_ref()
             .context("retired packet source evidence lacks its pre-disposal registry identity")?;
         registry.require_same_registry(registry_identity)?;
-        if self.source_parts_consumed {
-            let census = self.optional_source_census.as_ref()
+        if self.held.source_parts_consumed {
+            let census = self.held.optional_source_census.as_ref()
                 .expect("checked consumed packet census");
             return Ok(census.acquisition_failure.is_some());
         }
-        ensure!(self.raw.is_none() && self.parts.is_some(),
+        ensure!(self.held.raw.is_none() && self.held.parts.is_some(),
             "retired packet source evidence is not normalized");
         ensure!(self.bound_root_receipt_consumed
-            && self.destination.is_none() && self.destination_retirement.is_none()
+            && self.held.destination.is_none() && self.held.destination_retirement.is_none()
             && (!self.requires_destination && !self.destination_consumed
                 || self.requires_destination && self.destination_consumed),
             "retired packet source evidence precedes exact destination and bound-root receipts");
-        ensure!(self.refusal.is_none() && self.authority.is_none()
-            && self.bound.as_ref().is_none_or(|bound| bound.registration.is_none()
-                && (&*bound._root).is_none() && (&*bound._inspection).is_none()),
+        ensure!(self.held.refusal.is_none() && self.held.authority.is_none()
+            && self.held.bound.as_ref().is_none_or(|bound| bound.held.registration.is_none()
+                && bound.held.root.is_none() && bound.held.inspection.is_none()),
             "retired packet still retains a destination, refusal, root, or inspection owner");
         ensure!(matches!(self.metadata_pin_phase,
             PacketMetadataPinPhase::ConsumedAbsent | PacketMetadataPinPhase::Consumed(_)),
             "retired packet source evidence precedes metadata-pin receipts");
-        ensure!((&*self.metadata_pin_inputs).is_none()
-            && (&*self.metadata_pin_receipts).iter().all(Option::is_none),
+        ensure!((&self.held.metadata_pin_inputs).is_none()
+            && (&self.held.metadata_pin_receipts).iter().all(Option::is_none),
             "retired packet source evidence retains metadata-pin retirement custody");
 
-        let parts = self.parts.as_ref()
+        let parts = self.held.parts.as_ref()
             .context("retired packet source evidence lost its original parts")?;
         ensure!(parts.bound_inputs.is_none() && parts.transient.is_none()
             && parts.scheduler_retirement.is_none() && parts.inspection.is_none()
@@ -895,31 +930,31 @@ impl OriginalPacketPartsProgress {
         // acquisition error is diagnostic data, not a cleanup owner. The
         // producer keeps native owners in separate typed fields, all checked
         // above, so this fact is the retained terminal disposition.
-        let mut parts = std::mem::replace(&mut *self.parts, None)
+        let mut parts = std::mem::replace(&mut self.held.get_mut().parts, None)
             .expect("validated retired packet parts remain present");
-        let failure = self.optional_source_census.as_ref()
+        let failure = self.held.optional_source_census.as_ref()
             .expect("validated retired packet census remains present")
             .acquisition_failure;
         drop(parts.original_error.take());
         drop(parts);
 
-        let mut bound = std::mem::replace(&mut *self.bound, None);
+        let mut bound = std::mem::replace(&mut self.held.get_mut().bound, None);
         if let Some(bound) = bound.as_mut() {
-            drop(std::mem::replace(&mut *bound._root, None));
-            drop(std::mem::replace(&mut *bound._inspection, None));
+            drop(std::mem::replace(&mut bound.held.get_mut().root, None));
+            drop(std::mem::replace(&mut bound.held.get_mut().inspection, None));
         }
         drop(bound);
-        drop(std::mem::replace(&mut *self.authority, None));
-        drop(std::mem::replace(&mut *self.destination, None));
-        drop(std::mem::replace(&mut *self.destination_retirement, None));
-        drop(std::mem::replace(&mut *self.metadata_pin_inputs, None));
-        drop(std::mem::replace(&mut *self.metadata_pin_receipts, [None, None]));
-        drop(std::mem::replace(&mut *self.raw, None));
-        self.scheduler_handoff = None;
-        self.optional_source_census.as_mut()
+        drop(std::mem::replace(&mut self.held.get_mut().authority, None));
+        drop(std::mem::replace(&mut self.held.get_mut().destination, None));
+        drop(std::mem::replace(&mut self.held.get_mut().destination_retirement, None));
+        drop(std::mem::replace(&mut self.held.get_mut().metadata_pin_inputs, None));
+        drop(std::mem::replace(&mut self.held.get_mut().metadata_pin_receipts, [None, None]));
+        drop(std::mem::replace(&mut self.held.get_mut().raw, None));
+        self.held.get_mut().scheduler_handoff = None;
+        self.held.get_mut().optional_source_census.as_mut()
             .expect("validated retired packet census remains present")
             .failure_fact_recorded = true;
-        self.source_parts_consumed = true;
+        self.held.get_mut().source_parts_consumed = true;
         Ok(failure.is_some())
     }
 
@@ -927,26 +962,26 @@ impl OriginalPacketPartsProgress {
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original Store packet progress");
+        ensure!(!self.held.is_foreign(), "foreign original Store packet progress");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if self.parts.is_none() {
-            let raw = self.raw.take().ok_or_else(|| anyhow::anyhow!("actual original packet source absent"))?;
+        if self.held.parts.is_none() {
+            let raw = self.held.get_mut().raw.take().ok_or_else(|| anyhow::anyhow!("actual original packet source absent"))?;
             match raw.into_original_parts() {
                 Ok(parts) => {
                     self.metadata_pin_phase = producer_metadata_pin_phase(&parts);
-                    *self.parts = Some(parts);
+                    self.held.get_mut().parts = Some(parts);
                 }
                 Err(raw) => {
-                    *self.raw = Some(raw);
+                    self.held.get_mut().raw = Some(raw);
                     anyhow::bail!("actual original packet extraction refused; source retained");
                 }
             }
         }
-        ensure!(self.raw.is_none(), "original packet retains conflicting source phases");
+        ensure!(self.held.raw.is_none(), "original packet retains conflicting source phases");
         // The complete payload is cached before any identity refusal. Bound
         // inputs, transient authority, inspections, pins and errors stay intact.
-        self.parts.as_ref().expect("cached original packet parts")
+        self.held.parts.as_ref().expect("cached original packet parts")
             .leaf_evidence.require_original(factory, aggregate)?;
         self.record_optional_source_census()
     }
@@ -959,32 +994,32 @@ impl OriginalPacketPartsProgress {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id() && self.raw.is_none()
-            && self.destination_started && self.authority.is_none() && self.refusal.is_none(),
+        ensure!(!self.held.is_foreign() && self.held.raw.is_none()
+            && self.destination_started && self.held.authority.is_none() && self.held.refusal.is_none(),
             "Scheduler Store handoff packet is not retained in a normalized source phase");
-        let (recorded_id, recorded_role) = self.scheduler_handoff.as_ref()
+        let (recorded_id, recorded_role) = self.held.scheduler_handoff.as_ref()
             .context("Scheduler Store handoff packet lacks its source marker")?;
         ensure!(recorded_id.same_handoff(handoff_id) && *recorded_role == role,
             "Scheduler Store handoff packet belongs to another source role");
         if self.requires_destination {
-            ensure!(self.destination.is_some() || self.destination_retirement.is_some()
+            ensure!(self.held.destination.is_some() || self.held.destination_retirement.is_some()
                 || self.destination_consumed,
                 "Scheduler Store handoff packet lost its retained destination phase");
         } else {
-            ensure!(self.destination.is_none() && self.destination_retirement.is_none()
+            ensure!(self.held.destination.is_none() && self.held.destination_retirement.is_none()
                 && !self.destination_consumed,
                 "Scheduler packet without a destination retains a conflicting phase");
         }
-        let parts = self.parts.as_ref()
+        let parts = self.held.parts.as_ref()
             .context("Scheduler Store handoff packet lost its actual connection parts")?;
         self.require_optional_source_census(OriginalPacketSourceKind::Scheduler)?;
         ensure!(parts.bound_inputs.is_none() && parts.transient.is_none(),
             "Scheduler Store handoff packet retains an unprocessed input authority");
         parts.leaf_evidence.require_original(factory, aggregate)?;
-        if let Some(bound) = self.bound.as_ref() {
-            ensure!(bound._root.is_none() && bound._inspection.is_none(),
+        if let Some(bound) = self.held.bound.as_ref() {
+            ensure!(bound.held.root.is_none() && bound.held.inspection.is_none(),
                 "Scheduler Store handoff packet retains an unregistered bound owner");
-            let registration = bound.registration.as_ref()
+            let registration = bound.held.registration.as_ref()
                 .context("Scheduler Store handoff packet lacks its bound-root registration")?;
             registry.require_membership(registration)?;
             ensure!(matches!(registration.observed_source_identity()?,
@@ -996,7 +1031,7 @@ impl OriginalPacketPartsProgress {
 }
 
 pub(super) fn packet_source_parts_consumed(
-    packets: Option<&ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: Option<&Vec<OriginalPacketPartsProgress>>,
 ) -> bool {
     packets.is_none_or(|packets| packets.iter().all(OriginalPacketPartsProgress::source_parts_consumed))
 }
@@ -1005,19 +1040,32 @@ pub(super) fn packet_source_parts_consumed(
 /// There is no fabricated native leaf: the actual bound root and the exact
 /// Store-issued authority alias join the Store's existing physical inventory.
 pub(super) struct UnopenedSchedulerDatabaseProgress {
-    process: u32,
+    held: Held<UnopenedSchedulerDatabaseParts>,
+    root_identity_checked: bool,
+}
+/// Everything an unopened Scheduler database progress retains, in the order
+/// it ends.
+struct UnopenedSchedulerDatabaseParts {
+    root: Option<std::sync::Arc<lillux::PinnedDirectory>>,
+    authority: Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>,
+    inspection: Option<(lillux_sqlite::SqliteCopyLease,
+        std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>,
+    registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
     handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
-    root: ManuallyDrop<Option<std::sync::Arc<lillux::PinnedDirectory>>>,
     name: Option<lillux_sqlite::OriginalNativeOutsideBoundCoordinate>,
     mode: Option<lillux_sqlite::OriginalNativeBoundMode>,
     domain: Option<lillux_sqlite::OriginalNativeDomain>,
-    authority: ManuallyDrop<Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>>,
-    inspection: ManuallyDrop<Option<(lillux_sqlite::SqliteCopyLease,
-        std::sync::Arc<dyn lillux_sqlite::SqliteInspectionSqlWork>)>>,
-    registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
-    root_identity_checked: bool,
     authority_joined: bool,
     registration_consumed: bool,
+}
+/// Settled exactly when exhaustion would accept the source: authority
+/// joined, registration consumed and no root, authority, inspection or
+/// coordinate owner left. Otherwise the bound root, authority alias and
+/// inspection lease stay retained together until the process exits.
+fn unopened_scheduler_database_settled(parts: &UnopenedSchedulerDatabaseParts) -> bool {
+    parts.authority_joined && parts.registration_consumed && parts.registration.is_none()
+        && parts.root.is_none() && parts.authority.is_none() && parts.inspection.is_none()
+        && parts.name.is_none() && parts.mode.is_none() && parts.domain.is_none()
 }
 
 impl UnopenedSchedulerDatabaseProgress {
@@ -1029,14 +1077,17 @@ impl UnopenedSchedulerDatabaseProgress {
             root, name, mode, domain, authority, inspection,
         } = parts;
         Self {
-            process: std::process::id(),
-            handoff_id,
-            root: ManuallyDrop::new(Some(root)),
-            name: Some(name), mode: Some(mode), domain: Some(domain),
-            authority: ManuallyDrop::new(Some(authority)),
-            inspection: ManuallyDrop::new(inspection),
-            registration: None, root_identity_checked: false, authority_joined: false,
-            registration_consumed: false,
+            held: Held::new(
+                "ryeos-app::unopened-scheduler-database",
+                UnopenedSchedulerDatabaseParts {
+                    root: Some(root), authority: Some(authority), inspection,
+                    registration: None, handoff_id,
+                    name: Some(name), mode: Some(mode), domain: Some(domain),
+                    authority_joined: false, registration_consumed: false,
+                },
+                unopened_scheduler_database_settled,
+            ),
+            root_identity_checked: false,
         }
     }
 
@@ -1048,36 +1099,39 @@ impl UnopenedSchedulerDatabaseProgress {
         registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!self.held.is_foreign(),
             "foreign unopened scheduler source");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        if self.authority_joined {
-            anyhow::ensure!(self.root.is_none() && (&*self.authority).is_none()
-                && (&*self.inspection).is_none() && self.registration.is_some(),
+        if self.held.authority_joined {
+            anyhow::ensure!(self.held.root.is_none() && (&self.held.authority).is_none()
+                && (&self.held.inspection).is_none() && self.held.registration.is_some(),
                 "completed unopened scheduler source retains conflicting custody");
             return Ok(());
         }
 
-        let authority = (&*self.authority).as_ref()
+        // A short-lived alias of the retained authority, so the slot itself
+        // can change while the checks below read it.
+        let authority_alias = self.held.authority.clone()
             .context("unopened scheduler Store authority absent")?;
-        anyhow::ensure!(self.name.as_ref().is_some_and(|name|
+        let authority = &authority_alias;
+        anyhow::ensure!(self.held.name.as_ref().is_some_and(|name|
                 name.as_os_str() == std::ffi::OsStr::new("scheduler.sqlite3"))
-            && self.mode == Some(lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate)
-            && self.domain == Some(lillux_sqlite::OriginalNativeDomain::NodeScheduler)
-            && (&*self.inspection).is_none(),
+            && self.held.mode == Some(lillux_sqlite::OriginalNativeBoundMode::OpenOrCreate)
+            && self.held.domain == Some(lillux_sqlite::OriginalNativeDomain::NodeScheduler)
+            && (&self.held.inspection).is_none(),
             "unopened scheduler source changed its fixed live coordinate");
         expected_store.require_unopened_native_authority(authority, factory)?;
-        if let Some(root) = (&*self.root).as_ref() {
+        if let Some(root) = (&self.held.root).as_ref() {
             expected_store.require_unopened_scheduler_bound_input(root, authority, factory)?;
             self.root_identity_checked = true;
         } else {
-            anyhow::ensure!(self.registration.is_some() && self.root_identity_checked,
+            anyhow::ensure!(self.held.registration.is_some() && self.root_identity_checked,
                 "unopened scheduler source lost its root before Store membership");
         }
 
-        if let Some(binding) = self.registration.as_ref() {
-            anyhow::ensure!(self.root.is_none() && self.root_identity_checked,
+        if let Some(binding) = self.held.registration.as_ref() {
+            anyhow::ensure!(self.held.root.is_none() && self.root_identity_checked,
                 "registered unopened scheduler root retains its source alias");
             let quote = registry.membership_work_bound(1, 0)?;
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
@@ -1096,19 +1150,19 @@ impl UnopenedSchedulerDatabaseProgress {
             factory.require_original_process()?;
             aggregate.require_original(factory)?;
             expected_store.require_unopened_scheduler_bound_input(
-                (&*self.root).as_ref().context("unopened scheduler root disappeared after funding")?,
+                (&self.held.root).as_ref().context("unopened scheduler root disappeared after funding")?,
                 authority, factory,
             )?;
-            let root = (&mut *self.root).take()
+            let root = self.held.get_mut().root.take()
                 .context("unopened scheduler root absent before registration")?;
             match unsafe { registry.register_directory(root, prepay) } {
-                Ok(binding) => self.registration = Some(binding),
+                Ok(binding) => self.held.get_mut().registration = Some(binding),
                 Err((root, error)) => {
-                    *self.root = Some(root);
+                    self.held.get_mut().root = Some(root);
                     return Err(error);
                 }
             }
-            let binding = self.registration.as_ref().expect("cached scheduler root membership");
+            let binding = self.held.registration.as_ref().expect("cached scheduler root membership");
             registry.require_membership(binding)?;
             anyhow::ensure!(matches!(binding.observed_source_identity()?,
                 lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
@@ -1122,21 +1176,21 @@ impl UnopenedSchedulerDatabaseProgress {
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         expected_store.require_unopened_native_authority(authority, factory)?;
-        let authority = (&mut *self.authority).take()
+        let authority = (&mut self.held.get_mut().authority).take()
             .context("unopened scheduler Store authority disappeared")?;
         drop(authority);
-        self.name.take();
-        self.mode.take();
-        self.domain.take();
-        self.authority_joined = true;
+        self.held.get_mut().name.take();
+        self.held.get_mut().mode.take();
+        self.held.get_mut().domain.take();
+        self.held.get_mut().authority_joined = true;
         Ok(())
     }
 
     pub(super) fn is_joined(&self) -> bool {
-        self.process == std::process::id() && self.authority_joined
-            && self.root.is_none() && self.name.is_none() && self.mode.is_none()
-            && self.domain.is_none() && (&*self.authority).is_none()
-            && (&*self.inspection).is_none() && self.registration.is_some()
+        !self.held.is_foreign() && self.held.authority_joined
+            && self.held.root.is_none() && self.held.name.is_none() && self.held.mode.is_none()
+            && self.held.domain.is_none() && (&self.held.authority).is_none()
+            && (&self.held.inspection).is_none() && self.held.registration.is_some()
     }
 }
 
@@ -1147,73 +1201,50 @@ impl UnopenedSchedulerDatabaseProgress {
         &mut self,
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign retired unopened Scheduler source");
-        if self.registration_consumed {
+        ensure!(!self.held.is_foreign(), "foreign retired unopened Scheduler source");
+        if self.held.registration_consumed {
             return self.require_exhausted();
         }
         ensure!(self.is_joined(), "unopened Scheduler root did not join the Store inventory");
-        let binding = self.registration.as_ref().expect("checked joined Scheduler registration");
+        let binding = self.held.registration.as_ref().expect("checked joined Scheduler registration");
         ensure!(matches!(binding.observed_source_identity()?,
             lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
             "retired unopened Scheduler registration changed role");
         drop(binding.receipt_in(registry)?);
-        self.registration = None;
-        self.registration_consumed = true;
+        self.held.get_mut().registration = None;
+        self.held.get_mut().registration_consumed = true;
         Ok(())
     }
 
     pub(super) fn require_exhausted(&self) -> Result<()> {
-        ensure!(self.process == std::process::id() && self.authority_joined
-            && self.registration_consumed && self.registration.is_none()
-            && self.root.is_none() && (&*self.authority).is_none()
-            && (&*self.inspection).is_none()
-            && self.name.is_none() && self.mode.is_none() && self.domain.is_none(),
+        ensure!(!self.held.is_foreign() && unopened_scheduler_database_settled(&self.held),
             "unopened Scheduler source retains an owner or unconsumed registration");
         Ok(())
     }
 
-    /// End an exhausted source. Its Drop settles on the exhaustion check the
+    /// End an exhausted source. Its held custody settles on the exhaustion check the
     /// caller already passed, so every slot is released normally.
     pub(super) fn exhaust(self) {
         drop(self);
     }
 }
-impl Drop for UnopenedSchedulerDatabaseProgress {
-    fn drop(&mut self) {
-        // Settled exactly when exhaustion would accept the source: authority
-        // joined, registration consumed and no root, authority or inspection
-        // owner left. Each slot is taken exactly once, here; otherwise the
-        // bound root, authority alias and inspection lease stay retained
-        // together until the process exits.
-        let settled = self.require_exhausted().is_ok();
-        let taken = unsafe {(
-            ManuallyDrop::take(&mut self.root),
-            ManuallyDrop::take(&mut self.authority),
-            ManuallyDrop::take(&mut self.inspection),
-        )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
-        if settled {
-            drop(taken);
-        } else {
-            let registration = self.registration.take();
-            lillux::custody::abandon("ryeos-app::unopened-scheduler-database", (taken, registration));
-        }
-    }
-}
-
 /// Retained unused native schema input after its one-use admission failed
 /// before native issuance. It has no ticket or physical source; only its exact
 /// Store-authority alias remains to join and retire.
 pub(super) struct UnopenedNativeTransientProgress {
-    process: u32,
+    held: Held<UnopenedNativeTransientParts>,
     expected_domain: lillux_sqlite::OriginalNativeDomain,
+}
+/// Everything an unused native schema input retains, in the order it ends.
+struct UnopenedNativeTransientParts {
+    authority: Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>,
     domain: Option<lillux_sqlite::OriginalNativeDomain>,
-    authority: ManuallyDrop<Option<std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>>,
     joined: bool,
+}
+/// Settled exactly when the authority alias joined the inventory and left
+/// its slot; otherwise the alias stays retained until the process exits.
+fn unopened_native_transient_settled(parts: &UnopenedNativeTransientParts) -> bool {
+    parts.joined && parts.domain.is_none() && parts.authority.is_none()
 }
 
 impl UnopenedNativeTransientProgress {
@@ -1222,8 +1253,16 @@ impl UnopenedNativeTransientProgress {
         expected_domain: lillux_sqlite::OriginalNativeDomain,
         authority: std::sync::Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
     ) -> Self {
-        Self { process: std::process::id(), expected_domain, domain: Some(domain),
-            authority: ManuallyDrop::new(Some(authority)), joined: false }
+        Self {
+            held: Held::new(
+                "ryeos-app::unopened-native-transient",
+                UnopenedNativeTransientParts {
+                    authority: Some(authority), domain: Some(domain), joined: false,
+                },
+                unopened_native_transient_settled,
+            ),
+            expected_domain,
+        }
     }
 
     fn advance(
@@ -1234,37 +1273,37 @@ impl UnopenedNativeTransientProgress {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
+        anyhow::ensure!(!self.held.is_foreign(),
             "foreign unused native schema input");
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         anyhow::ensure!(self.expected_domain == expected_domain,
             "unused native schema progress changed its fixed caller purpose");
-        if self.joined {
-            anyhow::ensure!(self.domain.is_none() && (&*self.authority).is_none(),
+        if self.held.joined {
+            anyhow::ensure!(self.held.domain.is_none() && (&self.held.authority).is_none(),
                 "joined unused native schema input retains source custody");
             return Ok(());
         }
-        let authority = (&*self.authority).as_ref()
+        let authority = (&self.held.authority).as_ref()
             .context("unused native schema authority absent")?;
-        anyhow::ensure!(self.domain == Some(expected_domain),
+        anyhow::ensure!(self.held.domain == Some(expected_domain),
             "unused native schema input changed its fixed native role");
         expected_store.require_unopened_native_authority(authority, factory)?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| prepay(0, 4))?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
         expected_store.require_unopened_native_authority(authority, factory)?;
-        let authority = (&mut *self.authority).take()
+        let authority = (&mut self.held.get_mut().authority).take()
             .context("unused native schema authority disappeared")?;
         drop(authority);
-        self.domain.take();
-        self.joined = true;
+        self.held.get_mut().domain.take();
+        self.held.get_mut().joined = true;
         Ok(())
     }
 
     pub(super) fn is_joined(&self) -> bool {
-        self.process == std::process::id() && self.joined
-            && self.domain.is_none() && (&*self.authority).is_none()
+        !self.held.is_foreign() && self.held.joined
+            && self.held.domain.is_none() && (&self.held.authority).is_none()
     }
 }
 
@@ -1274,85 +1313,29 @@ impl UnopenedNativeTransientProgress {
         Ok(())
     }
 
-    /// End a joined input. Its Drop settles on the joined check the caller
+    /// End a joined input. Its held custody settles on the joined check the caller
     /// already passed, so the authority slot is released normally.
     pub(super) fn exhaust(self) {
         drop(self);
     }
 }
-impl Drop for UnopenedNativeTransientProgress {
-    fn drop(&mut self) {
-        // Settled exactly when is_joined holds: the authority alias joined
-        // the inventory and left this slot. The slot is taken exactly once,
-        // here; otherwise the alias stays retained until the process exits.
-        let settled = self.is_joined();
-        let authority = unsafe { ManuallyDrop::take(&mut self.authority) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(authority);
-            return;
-        }
-        if settled {
-            drop(authority);
-        } else {
-            lillux::custody::abandon("ryeos-app::unopened-native-transient", authority);
-        }
-    }
-}
-
 impl OriginalPacketPartsProgress {
     fn require_exhausted(&self) -> Result<()> {
-        ensure!(self.process == std::process::id() && self.source_parts_consumed
-            && self.raw.is_none() && self.parts.is_none() && self.bound.is_none()
-            && self.authority.is_none() && self.destination.is_none()
-            && self.destination_retirement.is_none() && self.refusal.is_none()
-            && (&*self.metadata_pin_inputs).is_none()
-            && (&*self.metadata_pin_receipts).iter().all(Option::is_none),
+        ensure!(!self.held.is_foreign() && self.held.exhausted(),
             "Store packet retains a source, destination, root or pin owner at exhaustion");
         Ok(())
     }
 
-    /// End an exhausted packet. Its Drop settles on the exhaustion check the
+    /// End an exhausted packet. Its held custody settles on the exhaustion check the
     /// caller already passed, so every slot is released normally.
     fn exhaust(self) {
         drop(self);
     }
 }
-impl Drop for OriginalPacketPartsProgress {
-    fn drop(&mut self) {
-        // Settled exactly when exhaustion would accept the packet: source
-        // parts consumed and no source, destination, root or pin owner left.
-        // Each slot is taken exactly once, here; otherwise every owner stays
-        // retained together until the process exits.
-        let settled = self.require_exhausted().is_ok();
-        let taken = unsafe {(
-            ManuallyDrop::take(&mut self.bound),
-            ManuallyDrop::take(&mut self.authority),
-            ManuallyDrop::take(&mut self.destination),
-            ManuallyDrop::take(&mut self.destination_retirement),
-            ManuallyDrop::take(&mut self.metadata_pin_inputs),
-            ManuallyDrop::take(&mut self.metadata_pin_receipts),
-            ManuallyDrop::take(&mut self.raw),
-            ManuallyDrop::take(&mut self.parts),
-        )};
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(taken);
-            return;
-        }
-        if settled {
-            drop(taken);
-        } else {
-            let refusal = self.refusal.take();
-            lillux::custody::abandon("ryeos-app::packet-parts-progress", (taken, refusal));
-        }
-    }
-}
-
 /// Every packet in the slot has consumed its source parts and holds no
 /// owner. Absence is accepted; it carries no owner.
 pub(super) fn require_original_packets_exhausted(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
 ) -> Result<()> {
     if let Some(packets) = packets {
         for packet in packets.iter() {
@@ -1372,7 +1355,7 @@ pub(super) fn exhaust_original_packets(packets: Option<Vec<OriginalPacketPartsPr
 
 /// A drained producer packet vector holds no owner.
 pub(super) fn require_sql_custody_exhausted(
-    packets: &Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
+    packets: &Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
 ) -> Result<()> {
     ensure!(packets.as_ref().is_none_or(|packets| packets.is_empty()),
         "Store retains an undrained native packet vector at exhaustion");
@@ -1405,7 +1388,7 @@ impl StoreExhausted {
 
 pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
     store: &'store Store,
-    packets: Option<&ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: Option<&Vec<OriginalPacketPartsProgress>>,
     unopened_database: Option<&UnopenedSchedulerDatabaseProgress>,
     unopened_schema: Option<&UnopenedNativeTransientProgress>,
     admission_sources: Option<&super::live_native::LiveSchedulerNativeAdmissionOutsideSources>,
@@ -1422,9 +1405,9 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
 
     if let Some(packets) = packets {
         require_packet_count_within_source_bound(packets.len(), OriginalPacketSourceKind::Scheduler)?;
-        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.native_domain))?;
+        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.held.native_domain))?;
         for packet in packets.iter() {
-            let Some((packet_id, role)) = packet.scheduler_handoff.as_ref() else { continue; };
+            let Some((packet_id, role)) = packet.held.scheduler_handoff.as_ref() else { continue; };
             ensure!(packet_id.same_handoff(handoff_id),
                 "Store retains a Scheduler packet from another handoff");
             packet.require_scheduler_store_acceptance(handoff_id, *role, factory, aggregate, registry)?;
@@ -1440,12 +1423,12 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
     }
 
     if let Some(unopened) = unopened_database {
-        if let Some(recorded_id) = unopened.handoff_id.as_ref() {
+        if let Some(recorded_id) = unopened.held.handoff_id.as_ref() {
             ensure!(recorded_id.same_handoff(handoff_id),
                 "Store retains an unopened Scheduler database from another handoff");
             ensure!(unopened.is_joined(),
                 "unopened Scheduler database is not joined to the exact Store inventory");
-            let registration = unopened.registration.as_ref()
+            let registration = unopened.held.registration.as_ref()
                 .context("joined unopened Scheduler database lacks its root registration")?;
             registry.require_membership(registration)?;
             ensure!(matches!(registration.observed_source_identity()?,
@@ -1478,7 +1461,7 @@ pub(super) fn issue_scheduler_store_handoff_receipt<'store, Store: ?Sized>(
 }
 
 pub(super) fn advance_unopened_scheduler_transient(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
     destination: &mut Option<UnopenedNativeTransientProgress>,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -1491,7 +1474,7 @@ pub(super) fn advance_unopened_scheduler_transient(
 }
 
 pub(super) fn advance_unopened_native_transient(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
     destination: &mut Option<UnopenedNativeTransientProgress>,
     expected_domain: lillux_sqlite::OriginalNativeDomain,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
@@ -1509,12 +1492,11 @@ pub(super) fn advance_unopened_native_transient(
         aggregate.require_original(factory)?;
         // SAFETY: this exact mutable source slot is taken once and cleared
         // before conversion; a foreign-process refusal restores the same owner.
-        let raw = unsafe { ManuallyDrop::take(source.as_mut().expect("checked Scheduler transient input")) };
-        *source = None;
+        let raw = source.take().expect("checked Scheduler transient input");
         let (domain, authority) = match raw.into_original_parts() {
             Ok(parts) => parts,
             Err(raw) => {
-                *source = Some(ManuallyDrop::new(raw));
+                *source = Some(raw);
                 anyhow::bail!("unused native transient input belongs to another process");
             }
         };
@@ -1537,8 +1519,8 @@ pub(super) fn advance_unopened_native_transient(
 /// its retained parts. The bounded scheduler vector is allocated before the
 /// caller's owner moves, then every retry resumes the same packet progress.
 pub(super) fn prepare_scheduler_packet_parts(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1555,7 +1537,7 @@ pub(super) fn prepare_scheduler_packet_parts(
         aggregate.require_original(factory)?;
         let mut packets = Vec::new();
         packets.try_reserve_exact(MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES)?;
-        *destination = Some(ManuallyDrop::new(packets));
+        *destination = Some(packets);
     }
     if source.is_some() {
         let packets = destination.as_mut().context("scheduler packet progress absent after reservation")?;
@@ -1564,22 +1546,22 @@ pub(super) fn prepare_scheduler_packet_parts(
         require_packet_count_within_source_bound(next_count, OriginalPacketSourceKind::Scheduler)?;
         let incoming = source.as_ref().expect("checked scheduler packet source").domain;
         require_auxiliary_packet_domains_within_bounds(
-            packets.iter().map(|packet| packet.native_domain).chain(std::iter::once(incoming)))?;
+            packets.iter().map(|packet| packet.held.native_domain).chain(std::iter::once(incoming)))?;
         let source = source.take().expect("checked scheduler packet source");
-        let parts = ManuallyDrop::into_inner(source);
+        let parts = source;
         packets.push(OriginalPacketPartsProgress::from_parts(
             parts, handoff, OriginalPacketSourceKind::Scheduler));
     }
     if let Some(packets) = destination.as_mut() {
         require_packet_count_within_source_bound(packets.len(), OriginalPacketSourceKind::Scheduler)?;
-        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.native_domain))?;
+        require_auxiliary_packet_domains_within_bounds(packets.iter().map(|packet| packet.held.native_domain))?;
         for packet in packets.iter_mut() { packet.advance_destination(factory, aggregate, prepay)?; }
     }
     Ok(())
 }
 
 pub(super) fn advance_unopened_scheduler_database(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
     destination: &mut Option<UnopenedSchedulerDatabaseProgress>,
     expected_store: Option<&std::sync::Arc<super::live_native::LiveStateOpen>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
@@ -1592,7 +1574,7 @@ pub(super) fn advance_unopened_scheduler_database(
     aggregate.require_original(factory)?;
     if source.is_some() && destination.is_none() {
         let raw = source.as_ref().expect("checked unopened scheduler source");
-        (&**raw).require_scheduler_coordinate()?;
+        raw.require_scheduler_coordinate()?;
         let bytes = std::mem::size_of::<UnopenedSchedulerDatabaseProgress>()
             .checked_add(std::mem::size_of::<lillux_sqlite::OriginalNativeOutsideBoundCoordinate>())
             .context("unopened scheduler source transfer quote overflow")?;
@@ -1603,12 +1585,11 @@ pub(super) fn advance_unopened_scheduler_database(
         // SAFETY: this branch has exactly one mutable source slot. Take it
         // once and clear the slot before any fallible conversion; the exact
         // owner is restored below if process validation refuses the move.
-        let raw = unsafe { ManuallyDrop::take(source.as_mut().expect("checked source")) };
-        *source = None;
+        let raw = source.take().expect("checked source");
         let parts = match raw.into_original_parts() {
             Ok(parts) => parts,
             Err(raw) => {
-                *source = Some(ManuallyDrop::new(raw));
+                *source = Some(raw);
                 anyhow::bail!("unopened scheduler bound input belongs to another process");
             }
         };
@@ -1628,8 +1609,8 @@ pub(super) fn advance_unopened_scheduler_database(
 /// Mechanical packet normalization shared by normal and failed Store paths.
 /// It moves complete genuine components; it supplies no native/physical grant.
 pub(super) fn prepare_original_packet_parts(
-    source: &mut Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1654,7 +1635,7 @@ pub(super) fn prepare_original_packet_parts(
         aggregate.require_original(factory)?;
         let mut slots = Vec::new();
         slots.try_reserve_exact(count)?;
-        *destination = Some(ManuallyDrop::new(slots));
+        *destination = Some(slots);
         let slots = destination.as_mut().expect("cached original packet progress vector");
         // Capacity is reserved and the destination is retained before source
         // transfer. This loop invokes no host operation or external callback.
@@ -1676,9 +1657,9 @@ pub(super) fn prepare_original_packet_parts(
 /// been prepaid and reserved; after transfer every retry resumes the packet
 /// progress in the same Store frame.
 pub(super) fn prepare_original_packet_parts_from_owner(
-    source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
-    raw: &mut Option<ManuallyDrop<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>>,
-    destination: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
+    raw: &mut Option<Vec<lillux_sqlite::OriginalNativeOutsideConnectionCustody>>,
+    destination: &mut Option<Vec<OriginalPacketPartsProgress>>,
     expected_domain: lillux_sqlite::OriginalNativeDomain,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
@@ -1692,7 +1673,6 @@ pub(super) fn prepare_original_packet_parts_from_owner(
             "retained original packet marker lost its matching source phase");
         return Ok(());
     };
-    let actual = &**actual;
     ensure!(actual.domain == Some(expected_domain),
         "retained original packet changed its fixed native purpose");
     ensure!(actual.leaf_evidence.domain()? == Some(expected_domain),
@@ -1718,15 +1698,14 @@ pub(super) fn prepare_original_packet_parts_from_owner(
     if destination.is_none() {
         let mut slots = Vec::new();
         slots.try_reserve_exact(1)?;
-        *destination = Some(ManuallyDrop::new(slots));
+        *destination = Some(slots);
     }
-    if raw.is_none() { *raw = Some(ManuallyDrop::new(Vec::new())); }
+    if raw.is_none() { *raw = Some(Vec::new()); }
     let slots = destination.as_mut().expect("reserved original packet progress");
     if slots.capacity() < 1 { slots.try_reserve_exact(1)?; }
     // SAFETY: the same original Store progress retains this exact parts owner;
     // destination capacity is reserved before its one-time extraction.
-    let actual = unsafe { ManuallyDrop::take(source.as_mut().expect("checked actual outside parts")) };
-    *source = None;
+    let actual = source.take().expect("checked actual outside parts");
     slots.push(OriginalPacketPartsProgress::from_parts(actual, None, source_kind));
     for packet in slots.iter_mut() { packet.advance_destination(factory, aggregate, prepay)?; }
     Ok(())
@@ -1735,7 +1714,7 @@ pub(super) fn prepare_original_packet_parts_from_owner(
 /// Join selected packet roots to the SAME open physical inventory. This
 /// transfers actual owners only; the complete inventory is not sealed here.
 pub(super) fn register_original_packet_bound_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1754,7 +1733,7 @@ pub(super) fn register_original_packet_bound_roots(
 }
 
 pub(super) fn register_original_packet_destination_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1770,7 +1749,7 @@ pub(super) fn register_original_packet_destination_roots(
 /// Check actual selected packet handoff phases. This observes retained
 /// components only and does not imply native-reference or physical retirement.
 pub(super) fn require_original_packet_root_handoffs(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1780,21 +1759,21 @@ pub(super) fn require_original_packet_root_handoffs(
     let packets = packets.as_ref().ok_or_else(|| anyhow::anyhow!("actual packet handoff inventory absent"))?;
     require_packet_count_within_source_bound(packets.len(), source_kind)?;
     for packet in packets.iter() {
-        ensure!(packet.process == std::process::id() && packet.raw.is_none()
-            && packet.destination_started && packet.authority.is_none() && packet.refusal.is_none()
-            && (packet.destination.is_none() || packet.destination_retirement.is_none())
+        ensure!(!packet.held.is_foreign() && packet.held.raw.is_none()
+            && packet.destination_started && packet.held.authority.is_none() && packet.held.refusal.is_none()
+            && (packet.held.destination.is_none() || packet.held.destination_retirement.is_none())
             && (!packet.requires_destination || (packet.destination_roots_registered
-                && (((packet.destination.is_some() || packet.destination_retirement.is_some())
+                && (((packet.held.destination.is_some() || packet.held.destination_retirement.is_some())
                     && !packet.destination_consumed)
-                    || (packet.destination.is_none() && packet.destination_retirement.is_none()
+                    || (packet.held.destination.is_none() && packet.held.destination_retirement.is_none()
                         && packet.destination_consumed
                         && packet.destination_native_references_retired)))),
             "actual original packet root handoff incomplete");
-        packet.parts.as_ref().ok_or_else(|| anyhow::anyhow!("genuine original packet parts absent"))?
+        packet.held.parts.as_ref().ok_or_else(|| anyhow::anyhow!("genuine original packet parts absent"))?
             .leaf_evidence.require_original(factory, aggregate)?;
         packet.require_optional_source_census(source_kind)?;
-        if let Some(bound) = packet.bound.as_ref() {
-            ensure!(bound._root.is_none() && bound.registration.is_some() && bound._inspection.is_none(),
+        if let Some(bound) = packet.held.bound.as_ref() {
+            ensure!(bound.held.root.is_none() && bound.held.registration.is_some() && bound.held.inspection.is_none(),
                 "actual packet bound/inspection custody handoff incomplete");
         }
     }
@@ -1802,7 +1781,7 @@ pub(super) fn require_original_packet_root_handoffs(
 }
 
 pub(super) fn require_original_packet_sources_transferred(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1812,14 +1791,14 @@ pub(super) fn require_original_packet_sources_transferred(
     let packets = packets.as_ref().ok_or_else(|| anyhow::anyhow!("actual packet source inventory absent"))?;
     require_packet_count_within_source_bound(packets.len(), source_kind)?;
     for packet in packets.iter() {
-        ensure!(packet.process == std::process::id() && packet.raw.is_none()
-            && packet.destination_started && packet.authority.is_none() && packet.refusal.is_none()
-            && (packet.destination.is_none() || packet.destination_retirement.is_none())
-            && (!packet.requires_destination || packet.destination.is_some()
-                || packet.destination_retirement.is_some()
+        ensure!(!packet.held.is_foreign() && packet.held.raw.is_none()
+            && packet.destination_started && packet.held.authority.is_none() && packet.held.refusal.is_none()
+            && (packet.held.destination.is_none() || packet.held.destination_retirement.is_none())
+            && (!packet.requires_destination || packet.held.destination.is_some()
+                || packet.held.destination_retirement.is_some()
                 || (packet.destination_consumed && packet.destination_native_references_retired)),
             "actual original packet source transfer incomplete");
-        let parts = packet.parts.as_ref()
+        let parts = packet.held.parts.as_ref()
             .ok_or_else(|| anyhow::anyhow!("genuine original packet parts absent"))?;
         parts.leaf_evidence.require_original(factory, aggregate)?;
         packet.require_optional_source_census(source_kind)?;
@@ -1842,7 +1821,7 @@ pub(super) fn require_original_packet_sources_transferred(
 /// Pre-seal census of one retained packet vector. An absent vector was
 /// already qualified by the parent join that would have produced it.
 pub(super) fn require_original_packet_pre_seal_complete(
-    packets: &Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
 ) -> Result<()> {
     let Some(packets) = packets else { return Ok(()); };
@@ -1855,7 +1834,7 @@ pub(super) fn require_original_packet_pre_seal_complete(
 }
 
 pub(super) fn retire_original_packet_native_references(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1870,7 +1849,7 @@ pub(super) fn retire_original_packet_native_references(
 }
 
 pub(super) fn retire_original_packet_metadata_pins(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &Arc<lillux_sqlite::OriginalNativeTerminal>,
     source_kind: OriginalPacketSourceKind,
@@ -1895,7 +1874,7 @@ pub(super) fn retire_original_packet_metadata_pins(
 }
 
 pub(super) fn prepare_original_packet_destination_retirements(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
     aggregate: &lillux_sqlite::OriginalNativeTerminal,
     source_kind: OriginalPacketSourceKind,
@@ -1911,7 +1890,7 @@ pub(super) fn prepare_original_packet_destination_retirements(
 }
 
 pub(super) fn consume_retired_original_packet_destinations(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     source_kind: OriginalPacketSourceKind,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1925,7 +1904,7 @@ pub(super) fn consume_retired_original_packet_destinations(
 }
 
 pub(super) fn consume_retired_original_packet_bound_roots(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     source_kind: OriginalPacketSourceKind,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1933,7 +1912,7 @@ pub(super) fn consume_retired_original_packet_bound_roots(
     let Some(packets) = packets else { return Ok(()); };
     require_packet_count_within_source_bound(packets.len(), source_kind)?;
     let pending = packets.iter().filter(|packet|
-        !packet.bound_root_receipt_consumed && packet.bound.is_some()).count();
+        !packet.bound_root_receipt_consumed && packet.held.bound.is_some()).count();
     let quote = quote_retired_packet_bound_roots(pending)?;
     if quote.steps > 0 {
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
@@ -1946,7 +1925,7 @@ pub(super) fn consume_retired_original_packet_bound_roots(
 }
 
 pub(super) fn consume_retired_original_packet_metadata_pins(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -1961,23 +1940,24 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
             prepay(0, quote.steps))?;
     }
     for packet in packets.iter_mut() {
-        ensure!(packet.process == std::process::id() && packet.raw.is_none(),
+        ensure!(!packet.held.is_foreign() && packet.held.raw.is_none(),
             "foreign or unnormalized retired packet metadata pins");
-        ensure!(packet.destination.is_none() && packet.destination_retirement.is_none()
+        ensure!(packet.held.destination.is_none() && packet.held.destination_retirement.is_none()
             && (!packet.requires_destination || packet.destination_consumed)
             && packet.bound_root_receipt_consumed,
             "packet metadata-pin receipts precede retired destination and root receipts");
         packet.require_optional_source_census(source_kind)?;
-        let original_registry = packet.metadata_pin_registry_identity.as_ref()
+        let original_registry = packet.held.metadata_pin_registry_identity.as_ref()
             .context("packet metadata pins lack their pre-disposal registry identity")?;
         registry.require_same_registry(original_registry)?;
-        let parts = packet.parts.as_mut()
+        let held = packet.held.get_mut();
+        let parts = held.parts.as_mut()
             .context("packet parts absent at metadata-pin receipt consumption")?;
         match packet.metadata_pin_phase {
             PacketMetadataPinPhase::Absent => {
                 ensure!(parts.durable_pins.iter().all(Option::is_none)
-                    && (&*packet.metadata_pin_inputs).is_none()
-                    && (&*packet.metadata_pin_receipts).iter().all(Option::is_none),
+                    && held.metadata_pin_inputs.is_none()
+                    && held.metadata_pin_receipts.iter().all(Option::is_none),
                     "producer-qualified absent packet pins acquired a retirement owner");
                 packet.metadata_pin_phase = PacketMetadataPinPhase::ConsumedAbsent;
             }
@@ -1986,7 +1966,7 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
                     let expected = mask & (1 << index) != 0;
                     ensure!(pin.is_some() == expected,
                         "packet metadata-pin source disagrees with its pre-disposal census");
-                    match (pin, (&*packet.metadata_pin_receipts)[index].as_ref()) {
+                    match (pin, held.metadata_pin_receipts[index].as_ref()) {
                         (Some(pin), Some(receipt)) => {
                             receipt.require_original(pin)?;
                         }
@@ -1994,10 +1974,10 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
                         _ => anyhow::bail!("packet metadata-pin close receipt mismatch"),
                     }
                 }
-                ensure!((&*packet.metadata_pin_inputs).is_none(),
+                ensure!(held.metadata_pin_inputs.is_none(),
                     "post-disposal packet pin consumer retains native-bound inputs");
                 parts.durable_pins = [None, None];
-                *packet.metadata_pin_receipts = [None, None];
+                held.metadata_pin_receipts = [None, None];
                 packet.metadata_pin_phase = PacketMetadataPinPhase::Consumed(mask);
             }
             PacketMetadataPinPhase::ConsumedAbsent => {
@@ -2006,8 +1986,8 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
             }
             PacketMetadataPinPhase::Consumed(mask) => {
                 ensure!(mask != 0 && parts.durable_pins.iter().all(Option::is_none)
-                    && (&*packet.metadata_pin_receipts).iter().all(Option::is_none)
-                    && (&*packet.metadata_pin_inputs).is_none(),
+                    && held.metadata_pin_receipts.iter().all(Option::is_none)
+                    && held.metadata_pin_inputs.is_none(),
                     "consumed packet metadata-pin receipts regained custody");
             }
             PacketMetadataPinPhase::Unclassified | PacketMetadataPinPhase::Retiring(_) => {
@@ -2019,7 +1999,7 @@ pub(super) fn consume_retired_original_packet_metadata_pins(
 }
 
 pub(super) fn consume_retired_original_packet_source_parts(
-    packets: &mut Option<ManuallyDrop<Vec<OriginalPacketPartsProgress>>>,
+    packets: &mut Option<Vec<OriginalPacketPartsProgress>>,
     source_kind: OriginalPacketSourceKind,
     registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2045,36 +2025,40 @@ pub(super) fn consume_retired_original_packet_source_parts(
 }
 
 pub struct LiveStateStoreOutsideCustody {
-    process: u32,
     // The whole concrete original graph remains here until typed, owner-specific
     // physical transfers finish. Dropping this wrapper supplies no cleanup.
-    _source: ManuallyDrop<LiveStateStoreOutsideSource>,
+    held: Held<LiveStateStoreOutsideParts>,
+}
+/// The whole closed or failed-start Store graph the wrapper retains.
+struct LiveStateStoreOutsideParts {
+    source: LiveStateStoreOutsideSource,
 }
 pub enum LiveStateStoreOutsideSource {
     Closed(ClosedLiveStateStore),
     FailedStartup(ReleasedLiveStateStoreStartup),
 }
 impl LiveStateStoreOutsideCustody {
-    /// Move the process id and the whole source out exactly once; the
-    /// emptied shell is never dropped.
-    fn into_parts(self) -> (u32, LiveStateStoreOutsideSource) {
-        let mut custody = ManuallyDrop::new(self);
-        (custody.process, unsafe { ManuallyDrop::take(&mut custody._source) })
-    }
-}
-impl Drop for LiveStateStoreOutsideCustody {
-    fn drop(&mut self) {
-        // No drop settles this wrapper: it always holds the whole closed or
-        // failed-start Store graph, which only the typed physical transfers
-        // or the final exhaustion consume. The source is taken exactly once,
-        // here, and stays retained until the process exits.
-        let source = unsafe { ManuallyDrop::take(&mut self._source) };
-        if self.process != std::process::id() {
-            // A copy in another process holds none of these owners.
-            lillux::custody::relinquish_in_foreign_process(source);
-            return;
+    /// Hold a whole source. No drop settles this wrapper: it always holds the
+    /// whole closed or failed-start Store graph, which only the typed
+    /// physical transfers or the final exhaustion consume, so a dropped
+    /// wrapper keeps the graph retained until the process exits and a copy in
+    /// another process is relinquished.
+    fn from_source(source: LiveStateStoreOutsideSource) -> Self {
+        Self {
+            held: Held::until_taken(
+                "ryeos-app::store-outside-custody",
+                LiveStateStoreOutsideParts { source },
+            ),
         }
-        lillux::custody::abandon("ryeos-app::store-outside-custody", source);
+    }
+
+    /// Move the whole source out. A copy in another process is refused and
+    /// comes back still held.
+    fn into_source(self) -> std::result::Result<LiveStateStoreOutsideSource, Self> {
+        match self.held.take_whole() {
+            Ok(LiveStateStoreOutsideParts { source }) => Ok(source),
+            Err(held) => Err(Self { held }),
+        }
     }
 }
 impl LiveStateStoreOutsideSource {
@@ -2250,9 +2234,18 @@ impl LiveStateStoreOutsideCustody {
         // SAFETY: each taken value is held locally, moved into this exact
         // Store progress frame, or restored to the wrapper on refusal.
         if let Some(database) = unsafe { sources.take_database()? } {
-            match database.into_taken() {
+            let taken = match database.into_taken() {
+                Ok(taken) => taken,
+                Err(database) => {
+                    // SAFETY: the refused source is the exact one just taken
+                    // from this wrapper; the Store progress never saw it.
+                    unsafe { sources.restore_database(database); }
+                    anyhow::bail!("foreign Scheduler database source");
+                }
+            };
+            match taken {
                 ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::Connection(parts) => {
-                    let mut source = Some(ManuallyDrop::new(parts));
+                    let mut source = Some(parts);
                     let result = self.advance_scheduler_packet_parts_with_handoff(
                         &mut source, factory, aggregate, prepay,
                         Some((handoff_id.clone(), ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Database)));
@@ -2260,21 +2253,23 @@ impl LiveStateStoreOutsideCustody {
                         // SAFETY: these are the exact source parts just taken
                         // from this wrapper; the Store progress did not accept them.
                         unsafe { sources.restore_database(
-                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::Connection(parts)); }
+                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_connection(
+                                parts)); }
                         true
                     } else { false };
                     result?;
                     ensure!(!unaccepted, "Scheduler database packet was not accepted by Store progress");
                 }
                 ryeos_scheduler::db::TakenSchedulerNativeDatabaseSource::NeverOpened(inputs) => {
-                    let mut source = Some(ManuallyDrop::new(inputs));
+                    let mut source = Some(inputs);
                     let result = self.advance_unopened_scheduler_database_with_handoff(
                         &mut source, factory, aggregate, prepay, Some(handoff_id.clone()));
                     let unaccepted = if let Some(inputs) = source.take() {
                         // SAFETY: these are the exact unopened inputs just taken
                         // from this wrapper; Store progress did not accept them.
                         unsafe { sources.restore_database(
-                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::NeverOpened(inputs)); }
+                            ryeos_scheduler::db::SchedulerNativeDatabaseSource::from_never_opened(
+                                inputs)); }
                         true
                     } else { false };
                     result?;
@@ -2286,14 +2281,14 @@ impl LiveStateStoreOutsideCustody {
         // SAFETY: the schema value remains local until accepted by the tagged
         // Store packet progress or restored to this wrapper on refusal.
         if let Some(schema) = unsafe { sources.take_schema()? } {
-            let mut source = Some(ManuallyDrop::new(schema));
+            let mut source = Some(schema);
             let result = self.advance_scheduler_packet_parts_with_handoff(
                 &mut source, factory, aggregate, prepay,
                 Some((handoff_id, ryeos_scheduler::db::SchedulerNativeStoreSourceRole::Schema)));
             let unaccepted = if let Some(schema) = source.take() {
                 // SAFETY: these are the exact schema parts just taken from
                 // this wrapper; Store progress did not accept them.
-                unsafe { sources.restore_schema(ManuallyDrop::into_inner(schema)); }
+                unsafe { sources.restore_schema(schema); }
                 true
             } else { false };
             result?;
@@ -2306,7 +2301,7 @@ impl LiveStateStoreOutsideCustody {
     /// graph. Source movement is cached before any fallible lower transition.
     pub fn advance_scheduler_packet_parts(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2316,7 +2311,7 @@ impl LiveStateStoreOutsideCustody {
 
     fn advance_scheduler_packet_parts_with_handoff(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2324,7 +2319,7 @@ impl LiveStateStoreOutsideCustody {
             ryeos_scheduler::db::SchedulerNativeStoreSourceRole)>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let source = std::cell::RefCell::new(source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
@@ -2342,7 +2337,7 @@ impl LiveStateStoreOutsideCustody {
     /// inventory without manufacturing a native terminal receipt.
     pub fn advance_unopened_scheduler_database(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2353,14 +2348,14 @@ impl LiveStateStoreOutsideCustody {
 
     fn advance_unopened_scheduler_database_with_handoff(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeBoundInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeBoundInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
         handoff_id: Option<ryeos_scheduler::db::SchedulerNativeStoreHandoffId>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let source = std::cell::RefCell::new(source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
@@ -2379,7 +2374,7 @@ impl LiveStateStoreOutsideCustody {
     /// movement is cached before any fallible lower transition.
     pub fn advance_accounting_packet_parts(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeOutsideConnectionParts>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeOutsideConnectionParts>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
@@ -2398,13 +2393,13 @@ impl LiveStateStoreOutsideCustody {
     /// after the live Store opened, so a failed-startup Store has none.
     pub fn advance_unopened_accounting_transient(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let source = std::cell::RefCell::new(source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
@@ -2423,13 +2418,13 @@ impl LiveStateStoreOutsideCustody {
     /// authority has joined this Store source graph.
     pub fn advance_unopened_scheduler_transient(
         &mut self,
-        source: &mut Option<ManuallyDrop<lillux_sqlite::OriginalNativeTransientInputs>>,
+        source: &mut Option<lillux_sqlite::OriginalNativeTransientInputs>,
         factory: &std::sync::Arc<lillux_sqlite::OriginalNativeFactory>,
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let source = std::cell::RefCell::new(source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
@@ -2452,7 +2447,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let store_source = std::cell::RefCell::new(&mut *self._source);
+        let store_source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let source = std::cell::RefCell::new(source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **store_source.borrow_mut() {
@@ -2474,7 +2469,7 @@ impl LiveStateStoreOutsideCustody {
         aggregate: &lillux_sqlite::OriginalNativeTerminal,
     ) -> Result<ryeos_scheduler::db::SchedulerNativeStoreHandoffReceipt<'store>> {
         self.require_original_process()?;
-        match &*self._source {
+        match &self.held.source {
             LiveStateStoreOutsideSource::Closed(store) =>
                 store.scheduler_native_store_handoff_receipt(handoff_id, factory, aggregate),
             LiveStateStoreOutsideSource::FailedStartup(store) =>
@@ -2485,7 +2480,7 @@ impl LiveStateStoreOutsideCustody {
     /// Observation of retained preparation only; this is not native/physical
     /// evidence or permission to construct another inventory.
     pub fn has_prepared_physical_registry(&mut self) -> bool {
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) => source.physical_registry_slot().is_some(),
             LiveStateStoreOutsideSource::FailedStartup(source) => source.physical_registry_slot().is_some(),
         }
@@ -2499,7 +2494,7 @@ impl LiveStateStoreOutsideCustody {
         &mut self,
     ) -> Result<lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry> {
         self.require_original_process()?;
-        let slot = match &mut *self._source {
+        let slot = match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) => source.physical_registry_slot(),
             LiveStateStoreOutsideSource::FailedStartup(source) => source.physical_registry_slot(),
         };
@@ -2528,7 +2523,7 @@ impl LiveStateStoreOutsideCustody {
         self.require_original_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let slot = match &mut *self._source {
+        let slot = match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) => source.physical_registry_slot(),
             LiveStateStoreOutsideSource::FailedStartup(source) => source.physical_registry_slot(),
         };
@@ -2553,7 +2548,7 @@ impl LiveStateStoreOutsideCustody {
         owner.require_original_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) => unsafe {
@@ -2584,7 +2579,7 @@ impl LiveStateStoreOutsideCustody {
         self.require_original_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) =>
@@ -2613,7 +2608,7 @@ impl LiveStateStoreOutsideCustody {
         self.require_original_process()?;
         factory.require_original_process()?;
         terminal.require_original(factory)?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) =>
@@ -2630,7 +2625,7 @@ impl LiveStateStoreOutsideCustody {
     /// caller's release of the factory and reservation follows only this.
     pub fn require_pre_seal_complete(&self) -> Result<()> {
         self.require_original_process()?;
-        match &*self._source {
+        match &self.held.source {
             LiveStateStoreOutsideSource::Closed(source) => source.require_pre_seal_complete(),
             LiveStateStoreOutsideSource::FailedStartup(source) => source.require_pre_seal_complete(),
         }
@@ -2646,7 +2641,7 @@ impl LiveStateStoreOutsideCustody {
         self.require_original_process()?;
         factory.require_original_process()?;
         aggregate.require_original(factory)?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) => {
@@ -2671,7 +2666,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| match &mut **source
             .borrow_mut()
         {
@@ -2693,7 +2688,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) =>
@@ -2712,7 +2707,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) =>
@@ -2732,7 +2727,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             match &mut **source.borrow_mut() {
                 LiveStateStoreOutsideSource::Closed(source) =>
@@ -2752,7 +2747,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<u8> {
         self.require_original_process()?;
-        let source = std::cell::RefCell::new(&mut *self._source);
+        let source = std::cell::RefCell::new(&mut self.held.get_mut().source);
         let consumed = std::cell::Cell::new(0u8);
         lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
             consumed.set(match &mut **source.borrow_mut() {
@@ -2775,7 +2770,7 @@ impl LiveStateStoreOutsideCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_auxiliary_sources(registry),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2792,7 +2787,7 @@ impl LiveStateStoreOutsideCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_parent_finalization_parts(registry),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2809,7 +2804,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_state_projection_sources(registry, prepay),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2825,7 +2820,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_state_root_sources(registry, prepay),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2842,7 +2837,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_runtime_shared_roots(registry, prepay),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2857,7 +2852,7 @@ impl LiveStateStoreOutsideCustody {
         registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_scheduler_sources(registry),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2873,7 +2868,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        match &mut *self._source {
+        match &mut self.held.get_mut().source {
             LiveStateStoreOutsideSource::Closed(source) =>
                 source.consume_retired_owner_frames(registry, prepay),
             LiveStateStoreOutsideSource::FailedStartup(source) =>
@@ -2891,14 +2886,17 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((self, error));
         }
-        let (process, source) = self.into_parts();
+        let source = match self.into_source() {
+            Ok(source) => source,
+            Err(owner) => {
+                return Err((owner, anyhow::anyhow!("foreign live Store outside custody")));
+            }
+        };
         match source {
             LiveStateStoreOutsideSource::Closed(source) => source.into_exhausted(registry)
-                .map_err(|(source, error)| (Self { process,
-                    _source: ManuallyDrop::new(LiveStateStoreOutsideSource::Closed(source)) }, error)),
+                .map_err(|(source, error)| (Self::closed(source), error)),
             LiveStateStoreOutsideSource::FailedStartup(source) => source.into_exhausted(registry)
-                .map_err(|(source, error)| (Self { process,
-                    _source: ManuallyDrop::new(LiveStateStoreOutsideSource::FailedStartup(source)) }, error)),
+                .map_err(|(source, error)| (Self::failed_startup(source), error)),
         }
     }
 
@@ -2912,7 +2910,7 @@ impl LiveStateStoreOutsideCustody {
     ) -> Result<()> {
         self.require_original_process()?;
         lillux_sqlite::original_physical_custody::retain_callback_refusal(
-            &|| match &*self._source {
+            &|| match &self.held.source {
                 LiveStateStoreOutsideSource::Closed(source) => {
                     source.prepare_destination_join(factory, terminal, prepay)
                 }
@@ -2923,27 +2921,17 @@ impl LiveStateStoreOutsideCustody {
         )
     }
     pub(super) fn closed(original: ClosedLiveStateStore) -> Self {
-        Self {
-            process: std::process::id(),
-            _source: ManuallyDrop::new(LiveStateStoreOutsideSource::Closed(original)),
-        }
+        Self::from_source(LiveStateStoreOutsideSource::Closed(original))
     }
     pub(super) fn failed_startup(original: ReleasedLiveStateStoreStartup) -> Self {
-        Self {
-            process: std::process::id(),
-            _source: ManuallyDrop::new(LiveStateStoreOutsideSource::FailedStartup(original)),
-        }
+        Self::from_source(LiveStateStoreOutsideSource::FailedStartup(original))
     }
     /// Recover the SAME complete concrete graph for a consuming physical
     /// continuation. This moves existing owners without reopening databases,
     /// renewing admission, closing descriptors, or acknowledging an account.
     /// A foreign process keeps the whole outside owner on refusal.
     pub fn into_original_source(self) -> std::result::Result<LiveStateStoreOutsideSource, Self> {
-        if self.require_original_process().is_err() {
-            return Err(self);
-        }
-        let (_process, source) = self.into_parts();
-        Ok(source)
+        self.into_source()
     }
 
     /// # Safety
@@ -2962,7 +2950,7 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((owner, error));
         }
-        unsafe { (&mut *self._source).register_finalizer_directory_source(owner, prepay) }
+        unsafe { (&mut self.held.get_mut().source).register_finalizer_directory_source(owner, prepay) }
     }
 
     /// # Safety
@@ -2980,7 +2968,7 @@ impl LiveStateStoreOutsideCustody {
         if let Err(error) = self.require_original_process() {
             return Err((owner, error));
         }
-        unsafe { (&mut *self._source).register_finalizer_control_record_source(owner, prepay) }
+        unsafe { (&mut self.held.get_mut().source).register_finalizer_control_record_source(owner, prepay) }
     }
 
     pub fn require_finalizer_source_membership(
@@ -2989,7 +2977,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity> {
         self.require_original_process()?;
-        (&mut *self._source).require_finalizer_source_membership(registration, prepay)
+        (&mut self.held.get_mut().source).require_finalizer_source_membership(registration, prepay)
     }
 
     /// # Safety
@@ -2998,7 +2986,7 @@ impl LiveStateStoreOutsideCustody {
     /// bounded registry transition.
     pub unsafe fn seal_finalizer_physical_inventory(&mut self) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).seal_finalizer_physical_inventory() }
+        unsafe { (&mut self.held.get_mut().source).seal_finalizer_physical_inventory() }
     }
 
     /// # Safety
@@ -3009,12 +2997,12 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).prepare_finalizer_descriptor_owners(prepay) }
+        unsafe { (&mut self.held.get_mut().source).prepare_finalizer_descriptor_owners(prepay) }
     }
 
     pub fn finalizer_non_account_descriptors_retired(&mut self) -> Result<bool> {
         self.require_original_process()?;
-        (&mut *self._source).finalizer_non_account_descriptors_retired()
+        (&mut self.held.get_mut().source).finalizer_non_account_descriptors_retired()
     }
 
     /// # Safety
@@ -3030,7 +3018,7 @@ impl LiveStateStoreOutsideCustody {
         ) -> Result<Arc<lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).retire_finalizer_non_account_descriptors(prepay, issue_inputs) }
+        unsafe { (&mut self.held.get_mut().source).retire_finalizer_non_account_descriptors(prepay, issue_inputs) }
     }
 
     /// # Safety
@@ -3042,7 +3030,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).retire_settled_store_exclusion_alias(admission_alias, prepay) }
+        unsafe { (&mut self.held.get_mut().source).retire_settled_store_exclusion_alias(admission_alias, prepay) }
     }
 
     #[cfg(target_os = "linux")]
@@ -3052,7 +3040,7 @@ impl LiveStateStoreOutsideCustody {
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).retire_finalizer_operator_targets(deadline, prepay) }
+        unsafe { (&mut self.held.get_mut().source).retire_finalizer_operator_targets(deadline, prepay) }
     }
 
     #[cfg(target_os = "linux")]
@@ -3065,16 +3053,13 @@ impl LiveStateStoreOutsideCustody {
         ) -> Result<Arc<lillux_sqlite::OriginalOutsideFinalizerFileRetirementInputs>>,
     ) -> Result<()> {
         self.require_original_process()?;
-        unsafe { (&mut *self._source).retire_finalizer_operator_parent_descriptor(prepay, issue_inputs) }
+        unsafe { (&mut self.held.get_mut().source).retire_finalizer_operator_parent_descriptor(prepay, issue_inputs) }
     }
 
     /// Checks only original-process custody. It does not authorize physical
     /// effects, prove zero native affinity, or release any namespace/account.
     pub fn require_original_process(&self) -> Result<()> {
-        ensure!(
-            self.process == std::process::id(),
-            "foreign live Store outside custody"
-        );
+        ensure!(!self.held.is_foreign(), "foreign live Store outside custody");
         Ok(())
     }
 }
@@ -3270,11 +3255,7 @@ mod custody_drop_tests {
         let lillux_sqlite::OriginalNativeOutsideBoundParts { root, name, mode, domain, authority, inspection } =
             inputs.into_original_parts().ok().expect("fresh inputs split in their own process");
         drop((authority, inspection));
-        OriginalPacketBoundResources {
-            _root: ManuallyDrop::new(keep_root.then_some(root)),
-            registration: None, _name: name, _mode: mode, _domain: domain,
-            _inspection: ManuallyDrop::new(None),
-        }
+        OriginalPacketBoundResources::new(keep_root.then_some(root), None, name, mode, domain)
     }
 
     #[test]
@@ -3283,7 +3264,7 @@ mod custody_drop_tests {
         let host = ryeos_state::test_support::shared_test_host();
         let (_dir, root) = pinned_tempdir();
         let bound = bound_resources(&host, Arc::clone(&root), false);
-        assert!(bound.holders_retired());
+        assert!(bound.held.holders_retired());
         let before = abandoned(BOUND);
         drop(bound);
         assert_eq!(abandoned(BOUND), before);
@@ -3297,7 +3278,7 @@ mod custody_drop_tests {
         let host = ryeos_state::test_support::shared_test_host();
         let (_dir, root) = pinned_tempdir();
         let bound = bound_resources(&host, Arc::clone(&root), true);
-        assert!(!bound.holders_retired());
+        assert!(!bound.held.holders_retired());
         let before = abandoned(BOUND);
         drop(bound);
         assert_eq!(abandoned(BOUND), before + 1);
@@ -3307,20 +3288,13 @@ mod custody_drop_tests {
 
     fn packet(authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>)
         -> OriginalPacketPartsProgress {
-        OriginalPacketPartsProgress {
-            process: std::process::id(), source_kind: OriginalPacketSourceKind::Runtime,
-            optional_source_census: None, source_parts_consumed: true, scheduler_handoff: None,
-            native_domain: None, bound: ManuallyDrop::new(None),
-            authority: ManuallyDrop::new(authority), destination: ManuallyDrop::new(None),
-            destination_retirement: ManuallyDrop::new(None), refusal: None, destination_retries: 0,
-            destination_started: false, requires_destination: false,
-            destination_roots_registered: false, destination_native_references_retired: false,
-            destination_consumed: false, bound_root_receipt_consumed: true,
-            metadata_pin_phase: PacketMetadataPinPhase::ConsumedAbsent,
-            metadata_pin_registry_identity: None, metadata_pin_inputs: ManuallyDrop::new(None),
-            metadata_pin_receipts: ManuallyDrop::new([None, None]), raw: ManuallyDrop::new(None),
-            parts: ManuallyDrop::new(None),
-        }
+        let mut packet = OriginalPacketPartsProgress::new_progress(
+            None, None, None, OriginalPacketSourceKind::Runtime, None,
+            PacketMetadataPinPhase::ConsumedAbsent);
+        packet.held.get_mut().source_parts_consumed = true;
+        packet.held.get_mut().authority = authority;
+        packet.bound_root_receipt_consumed = true;
+        packet
     }
 
     #[test]
@@ -3349,10 +3323,16 @@ mod custody_drop_tests {
 
     fn unopened_database(root: Option<Arc<lillux::PinnedDirectory>>) -> UnopenedSchedulerDatabaseProgress {
         UnopenedSchedulerDatabaseProgress {
-            process: std::process::id(), handoff_id: None, root: ManuallyDrop::new(root),
-            name: None, mode: None, domain: None, authority: ManuallyDrop::new(None),
-            inspection: ManuallyDrop::new(None), registration: None, root_identity_checked: true,
-            authority_joined: true, registration_consumed: true,
+            held: Held::new(
+                "ryeos-app::unopened-scheduler-database",
+                UnopenedSchedulerDatabaseParts {
+                    root, authority: None, inspection: None, registration: None,
+                    handoff_id: None, name: None, mode: None, domain: None,
+                    authority_joined: true, registration_consumed: true,
+                },
+                unopened_scheduler_database_settled,
+            ),
+            root_identity_checked: true,
         }
     }
 
@@ -3381,9 +3361,14 @@ mod custody_drop_tests {
     fn unopened_transient(authority: Option<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>>)
         -> UnopenedNativeTransientProgress {
         UnopenedNativeTransientProgress {
-            process: std::process::id(),
+            held: Held::new(
+                "ryeos-app::unopened-native-transient",
+                UnopenedNativeTransientParts {
+                    joined: authority.is_none(), domain: None, authority,
+                },
+                unopened_native_transient_settled,
+            ),
             expected_domain: lillux_sqlite::OriginalNativeDomain::NodeSchedulerSchemaReference,
-            domain: None, joined: authority.is_none(), authority: ManuallyDrop::new(authority),
         }
     }
 

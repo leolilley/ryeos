@@ -17,7 +17,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_FACTS_VERSION: u32 = 5;
+pub const HOST_FACTS_VERSION: u32 = 6;
 
 /// Provider id of every capability these host facts prove: the kernel as
 /// this process observes it, with no service or controller in between.
@@ -51,6 +51,13 @@ pub const RESIDENCY_CAPABILITIES: [&str; 4] =
 /// filesystem when the node runs in the host's initial pid namespace. A
 /// container's writable layer or a memory-backed filesystem never meets it.
 pub const STORAGE_DURABLE_ROOT: &str = "storage:durable_root";
+
+/// State written under the app root survives the observing process and is
+/// not ended by a declared host lifetime: the app root meets
+/// `STORAGE_DURABLE_ROOT` and no `HostLifetimeBound` is declared. The
+/// storage half is observed; the lifetime half is declared data, so a
+/// proof of this name is never graded above `trusted`.
+pub const PERSISTENCE_DURABLE_STATE: &str = "persistence:durable_state";
 
 /// How the node's resident native region is kept in physical memory.
 ///
@@ -973,6 +980,230 @@ pub fn decide_durable_root(facts: &RootStorageFacts) -> Result<CapabilityEvidenc
     Ok(CapabilityEvidence { source: ProofSource::Measured, provider: HOST_PROVIDER.to_owned(), basis })
 }
 
+/// A hard lifetime a hosting provider imposes on every host of its class,
+/// as signed policy declares it. Nothing inside a host can measure such a
+/// bound, so it is declared data, never an observation. A declared bound
+/// withholds `PERSISTENCE_DURABLE_STATE`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLifetimeBound {
+    /// Open id of the provider whose host class carries the bound.
+    pub provider: String,
+    /// Seconds after creation at which the provider ends the host.
+    pub seconds: u64,
+}
+
+impl HostLifetimeBound {
+    /// Why the declaration is malformed, or `None` when it is well formed:
+    /// the provider id is a non-empty printable token and the bound is
+    /// positive.
+    pub fn refusal(&self) -> Option<String> {
+        if self.provider.is_empty()
+            || self.provider.len() > 128
+            || !self.provider.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Some(format!(
+                "host lifetime bound provider {:?} is not a printable token",
+                self.provider
+            ));
+        }
+        if self.seconds == 0 {
+            return Some("host lifetime bound must be positive".to_owned());
+        }
+        None
+    }
+
+    /// The bound in the largest whole unit that states it exactly.
+    pub fn describe(&self) -> String {
+        match self.seconds {
+            seconds if seconds % 3600 == 0 => format!("{} h", seconds / 3600),
+            seconds if seconds % 60 == 0 => format!("{} min", seconds / 60),
+            seconds => format!("{seconds} s"),
+        }
+    }
+}
+
+/// Whether state under the app root outlives the observing process with no
+/// hard deadline. The storage half is `decide_durable_root` exactly, from
+/// the mount facts observed for the app root; the lifetime half is the
+/// bound signed policy declares, if any. A refusal leads with the plain
+/// reasons ("no persistent disk", "<bound> hard lifetime") and then gives
+/// the facts each rests on.
+///
+/// The absence of a declared bound is declared data, not a measurement: a
+/// host can be ended at a deadline nobody declared. A proof therefore never
+/// carries `measured`: measured storage with no declared bound is
+/// `trusted`, and a storage proof already weaker than that (provider
+/// attested under gVisor) keeps its own grade.
+pub fn decide_durable_state(
+    storage: &RootStorageFacts,
+    declared_lifetime: Option<&HostLifetimeBound>,
+) -> Result<CapabilityEvidence, String> {
+    let storage = decide_durable_root(storage);
+    let mut plain = Vec::new();
+    let mut detail = Vec::new();
+    if let Err(reason) = &storage {
+        plain.push("no persistent disk".to_owned());
+        detail.push(reason.clone());
+    }
+    if let Some(bound) = declared_lifetime {
+        plain.push(format!("{} hard lifetime", bound.describe()));
+        detail.push(format!(
+            "signed policy declares that provider {} ends this host {} ({} s) after it is created",
+            bound.provider,
+            bound.describe(),
+            bound.seconds
+        ));
+    }
+    match storage {
+        Ok(evidence) if plain.is_empty() => Ok(CapabilityEvidence {
+            source: match evidence.source {
+                ProofSource::Measured => ProofSource::Trusted,
+                weaker => weaker,
+            },
+            provider: evidence.provider,
+            basis: format!(
+                "{}; no hard lifetime is declared for this host, and that absence is declared \
+                 data, not measured",
+                evidence.basis
+            ),
+        }),
+        _ => Err(format!("{} ({})", plain.join("; "), detail.join("; "))),
+    }
+}
+
+/// Deepest walk `PrivateDirectoryFacts::observe` makes below its anchor, in
+/// directory names. A deeper path is refused rather than walked.
+pub const MAX_PRIVATE_DIRECTORY_DEPTH: usize = 16;
+
+/// One directory on the walk from an anchor down to a private directory,
+/// measured from a descriptor opened without following a symbolic link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryStepFacts {
+    pub path: String,
+    pub owner_uid: u32,
+    /// Permission bits, including the set-id and sticky bits.
+    pub mode: u32,
+    /// Mount identity, as numbered in `/proc/self/mountinfo`.
+    pub mount_id: u64,
+}
+
+/// A directory meant to be private to the observing account, and every
+/// directory between it and an anchor above it, as this process sees them.
+/// The caller passes both paths; nothing here knows what the directory
+/// holds.
+///
+/// The walk opens the anchor, then each name below it relative to the
+/// descriptor of the directory before, never following a symbolic link,
+/// and takes every fact from the opened descriptor. The facts therefore
+/// describe one chain of inodes, not whatever each path names when it is
+/// looked up again. Components above the anchor are resolved as the kernel
+/// resolves them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateDirectoryFacts {
+    /// The directory judged private.
+    pub path: String,
+    /// Where the walk starts; `path` lies beneath it or is it.
+    pub anchor: String,
+    /// Effective uid of the observing process.
+    pub process_uid: Option<u32>,
+    /// Each directory from the anchor down to `path`, in order. It ends at
+    /// `path` exactly when `walk_refusal` is `None`.
+    pub chain: Vec<DirectoryStepFacts>,
+    /// Why the walk stopped before measuring `path`.
+    pub walk_refusal: Option<String>,
+}
+
+impl PrivateDirectoryFacts {
+    /// Observe `path` and every directory from `anchor` down to it, without
+    /// changing anything. Never fails: a walk that cannot finish records
+    /// why in `walk_refusal`.
+    pub fn observe(anchor: &std::path::Path, path: &std::path::Path) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            linux::observe_private_directory(anchor, path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                path: path.display().to_string(),
+                anchor: anchor.display().to_string(),
+                process_uid: None,
+                chain: Vec::new(),
+                walk_refusal: Some("directory observation is unavailable on this OS".to_owned()),
+            }
+        }
+    }
+}
+
+/// Whether `facts` describe a directory private to the observing account.
+/// The directory itself must be owned by the process's effective uid with
+/// permission bits exactly 0700. Every directory from the anchor down to
+/// it must be owned by that uid or by root, must not be writable by group
+/// or other unless its sticky bit is set, and must be on the anchor's
+/// mount, so a bind mount anywhere on the walk is refused. No step is a
+/// symbolic link, because the walk never follows one. The result is the
+/// basis of a proof, or the reason there is none, naming the first
+/// directory that fails.
+pub fn decide_private_directory(facts: &PrivateDirectoryFacts) -> Result<String, String> {
+    let path = &facts.path;
+    if let Some(refusal) = &facts.walk_refusal {
+        return Err(refusal.clone());
+    }
+    let process = facts.process_uid.ok_or_else(|| "this process's uid is unreadable".to_owned())?;
+    let (Some(anchor), Some(target)) = (facts.chain.first(), facts.chain.last()) else {
+        return Err(format!("nothing on the walk to {path} was measured"));
+    };
+    if &target.path != path {
+        return Err(format!("the walk to {path} ended at {}", target.path));
+    }
+    for step in &facts.chain {
+        if step.mount_id != anchor.mount_id {
+            return Err(format!(
+                "{} is on mount {}, not the mount {} of {}",
+                step.path, step.mount_id, anchor.mount_id, anchor.path
+            ));
+        }
+    }
+    let ancestors = &facts.chain[..facts.chain.len() - 1];
+    for step in ancestors {
+        if step.owner_uid != process && step.owner_uid != 0 {
+            return Err(format!(
+                "{}, above {path}, is owned by uid {}, neither this process's uid {process} nor root",
+                step.path, step.owner_uid
+            ));
+        }
+        if step.mode & 0o022 != 0 && step.mode & 0o1000 == 0 {
+            return Err(format!(
+                "{}, above {path}, has mode {:04o}: writable by group or other without the sticky bit",
+                step.path, step.mode
+            ));
+        }
+    }
+    if target.owner_uid != process {
+        return Err(format!(
+            "{path} is owned by uid {}, not this process's uid {process}",
+            target.owner_uid
+        ));
+    }
+    if target.mode != 0o700 {
+        return Err(format!("{path} has mode {:04o}, not 0700", target.mode));
+    }
+    let (account, owners) = if process == 0 {
+        ("uid 0 (root)".to_owned(), "root".to_owned())
+    } else {
+        (format!("uid {process}"), format!("uid {process} or root"))
+    };
+    Ok(format!(
+        "{path} is private to {account}: a directory it owns with mode 0700 on mount {}; every \
+         directory from {} down to it was opened without following a symbolic link, is owned \
+         by {owners}, and is not writable by group or other without the sticky bit",
+        target.mount_id, anchor.path
+    ))
+}
+
 /// Raw host observations. Every field is a measurement as this process sees
 /// it, or the reason it could not be measured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1024,10 +1255,51 @@ pub struct HostFacts {
     pub residency_refusal: Option<String>,
     /// Where the node's app root is stored.
     pub app_root_storage: RootStorageFacts,
+    /// The hard host lifetime the node's signed policy declares, if any.
+    /// Declared data, not a measurement: observation leaves it `None` and
+    /// the node sets it from its policy before deciding capabilities.
+    pub declared_lifetime: Option<HostLifetimeBound>,
+}
+
+/// Most names one capability view may hold, provided and missing together.
+/// Every name a view holds is chosen by code, never by data, so the bound
+/// is kept by the producers and checked by their tests.
+pub const MAX_CAPABILITY_ENTRIES: usize = 32;
+/// Longest provider id a view keeps, in bytes. Capability names are code
+/// constants and are held to the same bound by their tests.
+pub const MAX_CAPABILITY_NAME_BYTES: usize = 128;
+/// Longest basis or refusal reason a view keeps, in bytes.
+pub const MAX_CAPABILITY_TEXT_BYTES: usize = 512;
+
+/// `text` as a view keeps it: printable ASCII with no character JSON must
+/// escape, so its encoded length is its length plus two quotes, cut to
+/// `limit` bytes with a visible mark when it is longer. A double quote
+/// becomes a single quote, a backslash a slash, and any other character
+/// outside printable ASCII a question mark.
+fn bounded_text(text: &str, limit: usize) -> String {
+    const CUT: &str = " [cut]";
+    let mut kept: String = text
+        .chars()
+        .map(|character| match character {
+            '"' => '\'',
+            '\\' => '/',
+            ' '..='~' => character,
+            _ => '?',
+        })
+        .collect();
+    if kept.len() > limit {
+        kept.truncate(limit.saturating_sub(CUT.len()));
+        kept.push_str(CUT);
+    }
+    kept
 }
 
 /// Host-level capability view derived from facts. Scope capabilities come
 /// from an opened process-scope provider and are added by its owner.
+///
+/// Every provider id, basis and reason is kept through `bounded_text`, so
+/// with at most `MAX_CAPABILITY_ENTRIES` names the encoded view has a fixed
+/// worst case that fits one guest channel frame with room for its envelope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostCapabilities {
@@ -1045,16 +1317,22 @@ impl HostCapabilities {
         provider: &str,
         basis: impl Into<String>,
     ) {
+        let basis: String = basis.into();
         self.missing.remove(name);
         self.provided.insert(
             name.to_owned(),
-            CapabilityEvidence { source, provider: provider.to_owned(), basis: basis.into() },
+            CapabilityEvidence {
+                source,
+                provider: bounded_text(provider, MAX_CAPABILITY_NAME_BYTES),
+                basis: bounded_text(&basis, MAX_CAPABILITY_TEXT_BYTES),
+            },
         );
     }
 
     pub fn refuse(&mut self, name: &str, reason: impl Into<String>) {
+        let reason: String = reason.into();
         if !self.provided.contains_key(name) {
-            self.missing.insert(name.to_owned(), reason.into());
+            self.missing.insert(name.to_owned(), bounded_text(&reason, MAX_CAPABILITY_TEXT_BYTES));
         }
     }
 
@@ -1118,6 +1396,7 @@ impl HostFacts {
                 residency: None,
                 residency_refusal: Some("resident memory proof is unavailable on this OS".to_owned()),
                 app_root_storage: RootStorageFacts::observe(app_root),
+                declared_lifetime: None,
             }
         }
     }
@@ -1313,6 +1592,12 @@ impl HostFacts {
                 view.provide(STORAGE_DURABLE_ROOT, evidence.source, &evidence.provider, evidence.basis)
             }
             Err(reason) => view.refuse(STORAGE_DURABLE_ROOT, reason),
+        }
+        match decide_durable_state(&self.app_root_storage, self.declared_lifetime.as_ref()) {
+            Ok(evidence) => {
+                view.provide(PERSISTENCE_DURABLE_STATE, evidence.source, &evidence.provider, evidence.basis)
+            }
+            Err(reason) => view.refuse(PERSISTENCE_DURABLE_STATE, reason),
         }
         if self.unshare_user_pid_mount.allowed() {
             view.provide(
@@ -1532,6 +1817,9 @@ mod linux {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("open {CGROUP_ROOT}: {error}")),
         };
+        // SAFETY: `libc::statfs` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstatfs(root.as_raw_fd(), &mut stat) } != 0 {
             return Err(format!("statfs {CGROUP_ROOT}: {}", std::io::Error::last_os_error()));
@@ -1540,6 +1828,9 @@ mod linux {
     }
 
     fn filesystem_name() -> String {
+        // SAFETY: `libc::statfs` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
         let Ok(path) = CString::new(CGROUP_ROOT) else { return "absent".to_owned() };
         if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
@@ -1881,6 +2172,7 @@ mod linux {
             residency_refusal: residency.as_ref().err().cloned(),
             residency: residency.ok(),
             app_root_storage: observe_root_storage(app_root),
+            declared_lifetime: None,
         }
     }
 
@@ -1895,6 +2187,9 @@ mod linux {
     }
 
     fn mount_identity(file: &File) -> Option<u64> {
+        // SAFETY: `libc::statx` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
         let mut observation: libc::statx = unsafe { std::mem::zeroed() };
         let empty = c"";
         let status = unsafe {
@@ -1910,6 +2205,9 @@ mod linux {
     }
 
     fn filesystem_magic(file: &File) -> Option<u64> {
+        // SAFETY: `libc::statfs` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
         (unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } == 0).then_some(stat.f_type as u64)
     }
@@ -1956,6 +2254,148 @@ mod linux {
                 unescape_mount_field(filesystem),
                 unescape_mount_field(source),
             ))
+        })
+    }
+
+    pub(super) fn observe_private_directory(anchor: &Path, path: &Path) -> super::PrivateDirectoryFacts {
+        // SAFETY: geteuid has no pointer arguments or caller-owned memory.
+        let process_uid = unsafe { libc::geteuid() };
+        let mut chain = Vec::new();
+        let walk_refusal = walk_without_links(anchor, path, &mut chain).err();
+        super::PrivateDirectoryFacts {
+            path: path.display().to_string(),
+            anchor: anchor.display().to_string(),
+            process_uid: Some(process_uid),
+            chain,
+            walk_refusal,
+        }
+    }
+
+    /// Open the anchor and then each name from it down to `path`, each
+    /// relative to the descriptor before it and never following a symbolic
+    /// link, recording each directory's facts from its own descriptor.
+    fn walk_without_links(
+        anchor: &Path,
+        path: &Path,
+        chain: &mut Vec<super::DirectoryStepFacts>,
+    ) -> Result<(), String> {
+        if !anchor.is_absolute() {
+            return Err(format!("{} is not an absolute path", anchor.display()));
+        }
+        let below = path
+            .strip_prefix(anchor)
+            .map_err(|_| format!("{} does not lie beneath {}", path.display(), anchor.display()))?;
+        let mut names = Vec::new();
+        for component in below.components() {
+            match component {
+                std::path::Component::Normal(name) => names.push(name),
+                _ => {
+                    return Err(format!(
+                        "{} is not reached from {} by plain directory names",
+                        path.display(),
+                        anchor.display()
+                    ));
+                }
+            }
+        }
+        if names.len() > super::MAX_PRIVATE_DIRECTORY_DEPTH {
+            return Err(format!(
+                "{} lies {} directories below {}, deeper than the {} this walk measures",
+                path.display(),
+                names.len(),
+                anchor.display(),
+                super::MAX_PRIVATE_DIRECTORY_DEPTH
+            ));
+        }
+        let mut at = anchor.to_path_buf();
+        let mut current = open_directory_without_link(None, anchor.as_os_str(), &at)?;
+        chain.push(directory_step(&current, &at)?);
+        for name in names {
+            at.push(name);
+            current = open_directory_without_link(Some(&current), name, &at)?;
+            chain.push(directory_step(&current, &at)?);
+        }
+        Ok(())
+    }
+
+    /// Open `name`, relative to `parent` or as given when there is none, as a
+    /// directory without following a symbolic link in its last component.
+    /// `shown` is the full path named in a refusal.
+    fn open_directory_without_link(
+        parent: Option<&File>,
+        name: &std::ffi::OsStr,
+        shown: &Path,
+    ) -> Result<File, String> {
+        use std::os::fd::FromRawFd as _;
+        let shown = shown.display();
+        let name = CString::new(name.as_encoded_bytes())
+            .map_err(|_| format!("{shown} contains a NUL byte"))?;
+        let directory = parent.map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        // SAFETY: `name` is NUL-terminated and outlives the call; `directory`
+        // is AT_FDCWD or a descriptor `parent` keeps open for the call.
+        let fd = unsafe {
+            libc::openat(
+                directory,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
+            // SAFETY: a non-negative return is a fresh descriptor owned here.
+            return Ok(unsafe { File::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENOENT) => Err(format!("{shown} is absent")),
+            Some(libc::ENOTDIR | libc::ELOOP) => {
+                // The open already refused; this look names what stands
+                // there for the refusal text and decides nothing.
+                // SAFETY: `libc::stat` is a plain C struct of integers and integer
+                // arrays, for which all-zero bytes are a valid value, so every field
+                // read is defined whether or not the call below fills it.
+                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `name` is NUL-terminated, `stat` is writable and
+                // sized for the call, and `directory` is open for it.
+                let looked =
+                    unsafe { libc::fstatat(directory, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+                if looked == 0 && stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    Err(format!("{shown} is a symbolic link"))
+                } else {
+                    Err(format!("{shown} is not a directory"))
+                }
+            }
+            _ => Err(format!("{shown} is unreadable ({error})")),
+        }
+    }
+
+    /// The type, owner, mode and mount of the directory `file` holds, read
+    /// from the descriptor itself.
+    fn directory_step(file: &File, shown: &Path) -> Result<super::DirectoryStepFacts, String> {
+        // SAFETY: `libc::statx` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
+        let mut observation: libc::statx = unsafe { std::mem::zeroed() };
+        let wanted = libc::STATX_TYPE | libc::STATX_MODE | libc::STATX_UID | libc::STATX_MNT_ID;
+        // SAFETY: the empty path with AT_EMPTY_PATH names the open
+        // descriptor, and `observation` is writable and sized for the call.
+        let status = unsafe {
+            libc::statx(file.as_raw_fd(), c"".as_ptr(), libc::AT_EMPTY_PATH, wanted, &mut observation)
+        };
+        if status != 0 {
+            return Err(format!("{} is unreadable ({})", shown.display(), std::io::Error::last_os_error()));
+        }
+        if observation.stx_mask & wanted != wanted {
+            return Err(format!("the owner, mode or mount of {} is unreadable", shown.display()));
+        }
+        let mode = u32::from(observation.stx_mode);
+        if mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(format!("{} is not a directory", shown.display()));
+        }
+        Ok(super::DirectoryStepFacts {
+            path: shown.display().to_string(),
+            owner_uid: observation.stx_uid,
+            mode: mode & 0o7777,
+            mount_id: observation.stx_mnt_id,
         })
     }
 
@@ -2119,6 +2559,7 @@ mod tests {
             residency: None,
             residency_refusal: Some("fixture".to_owned()),
             app_root_storage: storage("ext4", 0xef53, 40, 1, Some(true)),
+            declared_lifetime: None,
         }
     }
 
@@ -2248,6 +2689,266 @@ mod tests {
         let view = host.capabilities();
         assert!(view.missing[STORAGE_DURABLE_ROOT].contains("overlay"), "{view:?}");
         assert!(!view.provided.contains_key(STORAGE_DURABLE_ROOT));
+    }
+
+    fn bounded_day() -> HostLifetimeBound {
+        HostLifetimeBound { provider: "example-host".to_owned(), seconds: 24 * 3600 }
+    }
+
+    #[test]
+    fn durable_state_needs_durable_storage_and_no_declared_lifetime() {
+        let volume = storage("ext4", 0xef53, 40, 1, Some(true));
+        // The storage half is measured, but the absence of a lifetime bound
+        // is only declared, so the whole is trusted and says so.
+        assert_eq!(decide_durable_root(&volume).unwrap().source, ProofSource::Measured);
+        let held = decide_durable_state(&volume, None).unwrap();
+        assert_eq!((held.source, held.provider.as_str()), (ProofSource::Trusted, HOST_PROVIDER));
+        assert!(held.basis.contains("durable by mount"), "{}", held.basis);
+        assert!(
+            held.basis.contains("no hard lifetime is declared")
+                && held.basis.contains("that absence is declared data, not measured"),
+            "{}",
+            held.basis
+        );
+        // A disposable virtual machine: its root disk, and a declared 24 h bound.
+        let mut machine_root = storage("ext4", 0xef53, 1, 1, Some(false));
+        machine_root.hypervisor = Some(true);
+        machine_root.hypervisor_basis = "the firmware names a virtual machine (Firecracker)".to_owned();
+        let refused = decide_durable_state(&machine_root, Some(&bounded_day())).unwrap_err();
+        assert!(refused.starts_with("no persistent disk; 24 h hard lifetime ("), "{refused}");
+        assert!(refused.contains("virtual machine's root disk"), "{refused}");
+        assert!(refused.contains("provider example-host ends this host 24 h (86400 s)"), "{refused}");
+        // Either half alone refuses with its own plain reason.
+        let overlay = storage("overlay", 0x794c_7630, 1, 1, Some(true));
+        assert!(decide_durable_state(&overlay, None).unwrap_err().starts_with("no persistent disk ("));
+        let bounded = decide_durable_state(&volume, Some(&bounded_day())).unwrap_err();
+        assert!(bounded.starts_with("24 h hard lifetime ("), "{bounded}");
+        // Under gVisor the storage half is provider-attested, and the whole
+        // keeps that grade rather than rising to trusted.
+        let mut emulated = volume.clone();
+        emulated.kernel_kind = "gvisor".to_owned();
+        assert_eq!(decide_durable_state(&emulated, None).unwrap().source, ProofSource::ProviderAttested);
+        assert_eq!(HostLifetimeBound { provider: "p".to_owned(), seconds: 90 }.describe(), "90 s");
+        assert_eq!(HostLifetimeBound { provider: "p".to_owned(), seconds: 14_400 }.describe(), "4 h");
+        assert!(HostLifetimeBound { provider: "p".to_owned(), seconds: 0 }.refusal().is_some());
+        assert!(HostLifetimeBound { provider: "a b".to_owned(), seconds: 1 }.refusal().is_some());
+        assert_eq!(bounded_day().refusal(), None);
+    }
+
+    #[test]
+    fn host_capabilities_carry_the_durable_state_decision() {
+        let mut host = facts(Err("fixture".to_owned()), None);
+        let view = host.capabilities();
+        assert_eq!(view.provided[STORAGE_DURABLE_ROOT].source, ProofSource::Measured);
+        assert_eq!(view.provided[PERSISTENCE_DURABLE_STATE].source, ProofSource::Trusted);
+        host.declared_lifetime = Some(bounded_day());
+        let view = host.capabilities();
+        // The storage proof stands; the declared bound withholds durable state.
+        assert!(view.provided.contains_key(STORAGE_DURABLE_ROOT));
+        assert!(view.missing[PERSISTENCE_DURABLE_STATE].starts_with("24 h hard lifetime"), "{view:?}");
+        let value = serde_json::to_value(&host).unwrap();
+        assert_eq!(value["declared_lifetime"]["seconds"], 86_400);
+        assert_eq!(serde_json::from_value::<HostFacts>(value).unwrap(), host);
+    }
+
+    fn step(path: &str, owner: u32, mode: u32, mount: u64) -> DirectoryStepFacts {
+        DirectoryStepFacts { path: path.to_owned(), owner_uid: owner, mode, mount_id: mount }
+    }
+
+    /// A walk from `/data/app` down to `/data/app/state/homes` by uid 1000,
+    /// every step on mount 40.
+    fn private(home_mode: u32, home_owner: u32, home_mount: u64) -> PrivateDirectoryFacts {
+        PrivateDirectoryFacts {
+            path: "/data/app/state/homes".to_owned(),
+            anchor: "/data/app".to_owned(),
+            process_uid: Some(1000),
+            chain: vec![
+                step("/data/app", 1000, 0o755, 40),
+                step("/data/app/state", 0, 0o755, 40),
+                step("/data/app/state/homes", home_owner, home_mode, home_mount),
+            ],
+            walk_refusal: None,
+        }
+    }
+
+    #[test]
+    fn a_private_directory_is_owned_0700_on_the_anchor_mount_below_safe_ancestors() {
+        let basis = decide_private_directory(&private(0o700, 1000, 40)).unwrap();
+        assert!(
+            basis.contains("private to uid 1000") && basis.contains("mode 0700") && basis.contains("mount 40"),
+            "{basis}"
+        );
+        assert!(basis.contains("from /data/app down") && basis.contains("uid 1000 or root"), "{basis}");
+        assert!(decide_private_directory(&private(0o750, 1000, 40)).unwrap_err().contains("mode 0750"));
+        assert!(decide_private_directory(&private(0o1700, 1000, 40)).unwrap_err().contains("mode 1700"));
+        assert!(decide_private_directory(&private(0o700, 0, 40)).unwrap_err().contains("owned by uid 0"));
+        // A bind mount at the directory, or anywhere on the walk, is refused.
+        let bound = decide_private_directory(&private(0o700, 1000, 41)).unwrap_err();
+        assert_eq!(bound, "/data/app/state/homes is on mount 41, not the mount 40 of /data/app");
+        // The first failing ancestor is named: another account's directory,
+        // then a group-writable one without the sticky bit.
+        let mut foreign = private(0o700, 1000, 40);
+        foreign.chain[1].owner_uid = 1001;
+        let refused = decide_private_directory(&foreign).unwrap_err();
+        assert!(refused.starts_with("/data/app/state, above /data/app/state/homes, is owned by uid 1001"), "{refused}");
+        let mut shared = private(0o700, 1000, 40);
+        shared.chain[0].mode = 0o775;
+        shared.chain[1].mode = 0o777;
+        let refused = decide_private_directory(&shared).unwrap_err();
+        assert!(refused.starts_with("/data/app, above /data/app/state/homes, has mode 0775"), "{refused}");
+        // A sticky shared directory cannot have our entries replaced.
+        let mut sticky = private(0o700, 1000, 40);
+        sticky.chain[1].mode = 0o1777;
+        decide_private_directory(&sticky).unwrap();
+        // A walk that stopped is refused with its own reason.
+        let mut stopped = private(0o700, 1000, 40);
+        stopped.chain.truncate(1);
+        stopped.walk_refusal = Some("/data/app/state is a symbolic link".to_owned());
+        assert_eq!(decide_private_directory(&stopped).unwrap_err(), "/data/app/state is a symbolic link");
+        let mut short = private(0o700, 1000, 40);
+        short.chain.pop();
+        assert!(decide_private_directory(&short).unwrap_err().contains("ended at /data/app/state"));
+        // As root the directory is private to uid 0, and the basis says so.
+        let mut root = private(0o700, 0, 40);
+        root.process_uid = Some(0);
+        root.chain[0].owner_uid = 0;
+        let basis = decide_private_directory(&root).unwrap();
+        assert!(basis.starts_with("/data/app/state/homes is private to uid 0 (root):"), "{basis}");
+        assert!(basis.contains("is owned by root,"), "{basis}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn private_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = state.join("homes");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (root, home)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_directory_observes_a_real_walk() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (root, home) = private_tree();
+        let facts = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert_eq!(facts.walk_refusal, None, "{facts:?}");
+        assert_eq!(facts.chain.len(), 3, "{facts:?}");
+        assert_eq!(facts.chain[2].mode, 0o700);
+        assert_eq!(Some(facts.chain[2].owner_uid), facts.process_uid, "{facts:?}");
+        let storage = RootStorageFacts::observe(root.path());
+        assert_eq!(Some(facts.chain[0].mount_id), storage.mount_id, "{facts:?}");
+        decide_private_directory(&facts).unwrap();
+        // A group-writable ancestor is named.
+        let state = root.path().join("state");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let refused = decide_private_directory(&PrivateDirectoryFacts::observe(root.path(), &home)).unwrap_err();
+        assert!(refused.contains(&format!("{}, above", state.display())) && refused.contains("0775"), "{refused}");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let open = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert!(decide_private_directory(&open).unwrap_err().contains("0755"));
+        let missing = PrivateDirectoryFacts::observe(root.path(), &root.path().join("absent"));
+        assert_eq!(missing.walk_refusal, Some(format!("{} is absent", root.path().join("absent").display())));
+        assert!(decide_private_directory(&missing).is_err());
+        let outside = PrivateDirectoryFacts::observe(&state, root.path());
+        assert!(outside.walk_refusal.unwrap().contains("does not lie beneath"));
+        let climbing = PrivateDirectoryFacts::observe(root.path(), &state.join("..").join("state"));
+        assert!(climbing.walk_refusal.unwrap().contains("plain directory names"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_directory_walk_never_follows_a_symbolic_link() {
+        // The private directory itself is a link to a private directory.
+        let (root, home) = private_tree();
+        let real = root.path().join("state").join("homes-real");
+        std::fs::rename(&home, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &home).unwrap();
+        let facts = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", home.display())));
+        assert_eq!(facts.chain.len(), 2, "{facts:?}");
+        // An ancestor is a link.
+        let (root, home) = private_tree();
+        let state = root.path().join("state");
+        let moved = root.path().join("state-real");
+        std::fs::rename(&state, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &state).unwrap();
+        let facts = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", state.display())));
+        // The anchor itself is a link.
+        let (root, _home) = private_tree();
+        let linked_root = root.path().join("linked-root");
+        std::fs::create_dir(root.path().join("target")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("target"), &linked_root).unwrap();
+        let facts = PrivateDirectoryFacts::observe(&linked_root, &linked_root.join("homes"));
+        assert_eq!(facts.walk_refusal, Some(format!("{} is a symbolic link", linked_root.display())));
+        assert!(facts.chain.is_empty());
+        // A path swapped after a private observation is judged as it now
+        // stands: a link put where the directory was is refused even though
+        // it leads to the very directory that was private.
+        let (root, home) = private_tree();
+        decide_private_directory(&PrivateDirectoryFacts::observe(root.path(), &home)).unwrap();
+        let aside = root.path().join("state").join("aside");
+        std::fs::rename(&home, &aside).unwrap();
+        std::os::unix::fs::symlink(&aside, &home).unwrap();
+        let swapped = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert!(decide_private_directory(&swapped).unwrap_err().ends_with("is a symbolic link"));
+        // A regular file in its place is not a directory.
+        std::fs::remove_file(&home).unwrap();
+        std::fs::write(&home, b"").unwrap();
+        let file = PrivateDirectoryFacts::observe(root.path(), &home);
+        assert_eq!(file.walk_refusal, Some(format!("{} is not a directory", home.display())));
+    }
+
+    #[test]
+    fn a_view_keeps_bounded_printable_text_and_fits_a_guest_frame() {
+        let mut view = HostCapabilities::default();
+        view.provide("time", ProofSource::Measured, "p\u{e9}r \"x\"", "a\\b\nc\u{2014}d");
+        assert_eq!(view.provided["time"].provider, "p?r 'x'");
+        assert_eq!(view.provided["time"].basis, "a/b?c?d");
+        view.refuse("other", "r".repeat(2 * MAX_CAPABILITY_TEXT_BYTES));
+        let reason = &view.missing["other"];
+        assert_eq!(reason.len(), MAX_CAPABILITY_TEXT_BYTES);
+        assert!(reason.ends_with(" [cut]"));
+        // The worst view: every name at the name bound, every entry
+        // provided with the longest provider id, the longest known grade
+        // and the longest basis, every character one JSON would escape.
+        // A kept string encodes as its length plus two quotes, so a provided
+        // entry encodes in at most
+        //   (128 + 2) name + 1 colon + 10 `{"source":` + (17 + 2) grade
+        //   + 12 `,"provider":` + (128 + 2) provider + 9 `,"basis":`
+        //   + (512 + 2) basis + 1 `}` + 1 comma = 827 bytes,
+        // and a missing entry, (128 + 2) + 1 + (512 + 2) + 1 = 646, in less.
+        // 32 entries are at most 26,464 bytes, under half the 64 KiB guest
+        // frame, which leaves the rest for the frame envelope.
+        let mut worst = HostCapabilities::default();
+        for index in 0..MAX_CAPABILITY_ENTRIES {
+            let name = format!("{index:0>width$}", width = MAX_CAPABILITY_NAME_BYTES);
+            worst.provide(
+                &name,
+                ProofSource::ProviderAttested,
+                &"\"".repeat(2 * MAX_CAPABILITY_NAME_BYTES),
+                "\\".repeat(2 * MAX_CAPABILITY_TEXT_BYTES),
+            );
+        }
+        let encoded = serde_json::to_vec(&worst).unwrap();
+        let entry_bound = (MAX_CAPABILITY_NAME_BYTES + 2) + 1 + 10 + ("provider_attested".len() + 2) + 12
+            + (MAX_CAPABILITY_NAME_BYTES + 2) + 9 + (MAX_CAPABILITY_TEXT_BYTES + 2) + 1 + 1;
+        assert_eq!(entry_bound, 827);
+        assert!(encoded.len() <= MAX_CAPABILITY_ENTRIES * entry_bound + 32, "{}", encoded.len());
+        assert!(encoded.len() <= 32 * 1024, "{}", encoded.len());
+        // Every name the host view decides is within the name bound, and the
+        // host view alone is within the entry bound.
+        let host = facts(Err("fixture".to_owned()), None).capabilities();
+        let names: Vec<&String> = host.provided.keys().chain(host.missing.keys()).collect();
+        assert!(names.iter().all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES), "{names:?}");
+        assert!(names.len() <= MAX_CAPABILITY_ENTRIES, "{names:?}");
     }
 
     #[cfg(target_os = "linux")]

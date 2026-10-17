@@ -1361,7 +1361,6 @@ fn bundle_verify_dependency_roots(
     app_root: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut dependency_roots: Vec<PathBuf> = Vec::new();
-    let source_name = source_bundle_name(source_path)?;
     if !registry_roots.is_empty() {
         for root in registry_roots {
             let root = std::fs::canonicalize(&root)
@@ -1371,6 +1370,11 @@ fn bundle_verify_dependency_roots(
             }
         }
     } else {
+        // Only the installed-bundle fallback needs the source's name. Reading
+        // it here, not up front, lets a caller that names its registry roots
+        // reach its own manifest check, which reports an unparseable source
+        // manifest as a finding instead of this resolver aborting first.
+        let source_name = source_bundle_name(source_path)?;
         let installed_roots = ryeos_bundle::installed::load_installed_bundle_records(app_root)
             .context("bundle verify: load installed bundle registrations")?
             .into_iter()

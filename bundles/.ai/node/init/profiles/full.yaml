@@ -1,13 +1,12 @@
-# ryeos:signed:2026-10-13T23:52:06Z:d33c48fe95f95f2cbfc09e6d7c39d8f34dca91263165f83f3bee6ac5a4b28f29:RwiQE7xvb8eXDoOhSTx+0UEMAK97eRdayG3ThfEFr2dUlj1FcRwv6qvDo4l9pCyMIJDOpTmNj61dEptqYWtWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-17T00:24:16Z:6e170ed8bee851af0824a4efc4678c27c5c1b67ac2dcde338ed74208a68a8cfb:z1O0j1hvmK36nDzRGS3q3AQP3QuCtGQrLZEO50th7pf9PLxwv+WM9Eh6pmRdFXIfHczRr3kRZ4qqY/nckbAGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
   - central-auth
   - codex
   - core
-  - hosted-node
+  - environment-qualification
   - opencode
-  - render-sandbox
   - ryeos-ui
   - scheduling
   - standard
@@ -145,8 +144,7 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
-      hosted-node: []
-      render-sandbox: []
+      environment-qualification: []
       ryeos-ui: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
@@ -277,25 +275,34 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 9
-      # Capabilities this node must prove on its host before it starts.
-      # `ryeos node doctor` shows what the host proves and what is missing.
-      requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+      version: 10
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        local:
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # Resource-bearing launches require a Lillux-owned durable scope even
+            # when filesystem/network isolation is disabled.
+            mode: required
+            control_timeout_ms: 5000
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
       # the old one's jobs dead. A node that is pid 1 proves this itself.
       enclosure_inits: [catatonit, dumb-init, tini]
-      process_scopes:
-        # Resource-bearing launches require a Lillux-owned durable scope even
-        # when filesystem/network isolation is disabled.
-        mode: required
-        control_timeout_ms: 5000
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -381,7 +388,7 @@ policies:
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
   provider_environment:
-    schema: 1
+    schema: 2
     names: []
   ui_browser_sessions:
     schema: 1

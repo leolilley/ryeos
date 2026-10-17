@@ -23,6 +23,12 @@ pub enum EngineError {
     InvalidSuffix { input: String, reason: String },
 
     // ── Resolution ───────────────────────────────────────────────────
+    #[error("registered bundle `{name}` cannot be selected: {refusal}")]
+    RegisteredBundleSelectionRefused {
+        name: String,
+        refusal: crate::item_resolution::RegisteredBundleSelectionRefusal,
+    },
+
     #[error("item not found: `{canonical_ref}` (searched: {searched_spaces:?})")]
     ItemNotFound {
         canonical_ref: String,

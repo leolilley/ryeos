@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T06:43:34Z:c86f29ad8bf066573a7c460aad242253c07e7a5ab80302f39d17c1d2f81ef2d3:ZGwF8e+T55DrJppvrwRfLb3c7rr2TPgeOTmCZFdVsICtUzk5Iuon+KqBXGq1zZJBWg6mWWDyxMQEqqGIglqOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T09:32:15Z:9cfcd58fc4647787965af485117a25cc7475778658ed67c92a2616ff5fab4537:19Gqtrn0dFMqnjlDWXkWjEtY4BBtjOvkHsrco7vz1JumQRER/7bFvu0zO7KQC65whihR4xaCzfOAz1FxXQ+RAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/static-link-inputs
 #   version: "2.1.0"
@@ -15,8 +15,8 @@
 #     additionalProperties: false
 #   config_resolve:
 #     type: strict_signed_project_bundle
-#     bundle_name: standard
-#     config_path: bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml
+#     bundle_name: environment-qualification
+#     config_path: bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml
 #   external_content:
 #     - id: producer-python
 #       kind: tree
@@ -44,7 +44,7 @@ import sys
 SOURCE = Path("/ryeos/realizations/static-link-inputs")
 OUTPUT = Path("products/static-link-inputs")
 CONTRACT = Path(".ai/config/development/ryeos/static-link-inputs.yaml")
-INTENT_CONFIG = "bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml"
+INTENT_CONFIG = "bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml"
 HASH = re.compile(r"[0-9a-f]{64}")
 MAX_CONTRACT_BYTES = 65536
 
@@ -61,7 +61,7 @@ def admitted_contract_expectation(request):
     source = resolved["source"]
     if (not isinstance(source, dict) or set(source) != {
             "bundle_name", "config_path", "signer_fingerprint"} or
-            source["bundle_name"] != "standard" or source["config_path"] != INTENT_CONFIG or
+            source["bundle_name"] != "environment-qualification" or source["config_path"] != INTENT_CONFIG or
             not isinstance(source["signer_fingerprint"], str) or
             not HASH.fullmatch(source["signer_fingerprint"])):
         raise ValueError("static-input intent came from an unexpected source")

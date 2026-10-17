@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T04:06:11Z:cd9683b6a3358a268e09478754cb69948f72bc4fcbc141cddf201d3f2434a489:YW0nOnWBZxTwHmHpdnO1Ku6wcryz4O+mWWmjThq64qCmJ6GzBHi6VsOpNXkjufrh6CWJsvF0IYPuOUuBSmA8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-15T23:26:30Z:0f332fff97028a7c086f42dfe7c735c910da621f3054dd549971adbc3aa1006d:DOHsYw9bpCqHMV9d1yIXuL/mo9uSQJWpWo/NEK2aVei1Y7lZzpI3sG6uK5gmoX2EPb/R2GDeeWkqEUX+dsWUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -416,7 +416,7 @@ and tail attach, object upload, project HEAD publication, and live project
 publication.
 External-content services are local-only and must not be present. The separate
 source-node `remote_node` grant needs only
-`ryeos.attest.request.forwarded-operator`. The hosted-node policy rejects
+`ryeos.attest.request.forwarded-operator`. The hosted admission policy rejects
 wildcard grants; the feature does not broaden a client's authority.
 
 Profile homes are plaintext node-private state visible to the node operator.

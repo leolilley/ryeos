@@ -270,6 +270,15 @@ pub(crate) fn create_isolated_no_project_workspace(
     .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error}"))
 }
 
+/// The node's startup provider environment and the principal requesting
+/// execution. Fixed route principals and daemon-internal principals are
+/// passed here exactly like any authenticated caller.
+#[derive(Clone, Copy)]
+pub struct ProviderEnvironmentRecipient<'a> {
+    pub environment: &'a ryeos_app::vault::ProviderEnvironment,
+    pub principal: &'a str,
+}
+
 /// Resolve the portable policy and one already-selected project coordinate
 /// into the same persisted project authority used by ordinary execution.
 /// Callers must separately retain any selected CAS generation until that
@@ -282,7 +291,7 @@ pub fn resolve_execution_project_authority(
     project_site_id: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
-    provider_environment_names: &[String],
+    provider_environment: ProviderEnvironmentRecipient<'_>,
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -300,6 +309,29 @@ pub fn resolve_execution_project_authority(
     let mut capability_ceiling = capability_ceiling.to_vec();
     capability_ceiling.sort();
     capability_ceiling.dedup();
+
+    // The provider source is project-independent, so its recipient check
+    // runs once, here, before any project or environment authority is
+    // built. Only names the requesting principal may receive are sealed;
+    // a name in play that it may not receive refuses the whole admission.
+    let provider_environment_names = match &policy.environment {
+        ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+            let requested = match name_policy {
+                ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired => {
+                    None
+                }
+                ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::Exact { names } => {
+                    Some(names.as_slice())
+                }
+            };
+            provider_environment.environment.admit_recipient(
+                provider_environment.principal,
+                &capability_ceiling,
+                requested,
+            )?
+        }
+        _ => Vec::new(),
+    };
 
     let resolve_name_authority =
         |policy: &ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy| match policy {
@@ -358,10 +390,14 @@ pub fn resolve_execution_project_authority(
                     grant_id: grant_id.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
-                // Seal the node's signed declaration observed at admission.
+                // Seal the declared names admitted for this principal and
+                // the canonical scopes they were admitted under; every later
+                // delivery under this authority judges exactly these.
                 ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
                     EnvironmentAuthority::ProviderEnvironment {
-                        declared_names: provider_environment_names.to_vec(),
+                        declared_names: provider_environment_names.clone(),
+                        recipient_principal: provider_environment.principal.to_owned(),
+                        recipient_scopes: capability_ceiling.clone(),
                         name_authority: resolve_name_authority(name_policy),
                     }
                 }
@@ -577,7 +613,10 @@ pub fn resolve_execution_contract(
         state.threads.site_id(),
         &state.isolation,
         caller_scopes,
-        state.provider_env.declared_names(),
+        ProviderEnvironmentRecipient {
+            environment: &state.provider_env,
+            principal: acting_principal,
+        },
     )?;
     authorize_terminal_publication(
         policy,
@@ -1718,7 +1757,9 @@ async fn admit_execution_with_publication(
         }
         if let Err(err) = ryeos_app::vault::check_secret_availability(
             &state.secret_sources(),
-            &caller_principal_id,
+            ryeos_app::vault::SecretRecipient {
+                principal: &caller_principal_id,
+            },
             &accepted_preflight
                 .requested_subject
                 .resolved
@@ -2395,6 +2436,451 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
+    use ryeos_node_runtime::node_policy::sections::provider_environment::{
+        ProviderEnvironmentName, ProviderEnvironmentRecipients,
+    };
+
+    static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
+        ryeos_app::vault::ProviderEnvironment::none();
+
+    fn no_provider_environment() -> ProviderEnvironmentRecipient<'static> {
+        ProviderEnvironmentRecipient {
+            environment: &NO_PROVIDER_ENVIRONMENT,
+            principal: "fp:test",
+        }
+    }
+
+    const OPENAI_VALUE: &str = "sk-node-provider-value";
+    const ANTHROPIC_VALUE: &str = "sk-node-anthropic-value";
+    const RECEIVE_ANTHROPIC: &str = "ryeos.receive.provider_env.anthropic_api_key";
+
+    /// A node delivering `OPENAI_API_KEY` to the listed principals only, and
+    /// `ANTHROPIC_API_KEY` to holders of a dedicated receive capability.
+    fn recipient_bound_provider_environment() -> ryeos_app::vault::ProviderEnvironment {
+        let strings =
+            |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        ryeos_app::vault::ProviderEnvironment::captured(
+            vec![
+                ProviderEnvironmentName {
+                    name: "ANTHROPIC_API_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: Vec::new(),
+                        capabilities: strings(&[RECEIVE_ANTHROPIC]),
+                    },
+                },
+                ProviderEnvironmentName {
+                    name: "OPENAI_API_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: strings(&["fp:alice", "route:fixed-handler"]),
+                        capabilities: Vec::new(),
+                    },
+                },
+            ],
+            vec![
+                (
+                    "ANTHROPIC_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(ANTHROPIC_VALUE.to_owned()),
+                ),
+                (
+                    "OPENAI_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(OPENAI_VALUE.to_owned()),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn provider_policy(
+        name_policy: ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy,
+    ) -> ExecutionPolicy {
+        ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy },
+            project: ProjectExecutionPolicy::Projectless,
+        }
+    }
+
+    fn exact(names: &[&str]) -> ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy {
+        ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::Exact {
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    fn admit_provider(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        policy: &ExecutionPolicy,
+        principal: &str,
+        scopes: &[String],
+    ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+        resolve_execution_project_authority(
+            policy,
+            None,
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            scopes,
+            ProviderEnvironmentRecipient {
+                environment,
+                principal,
+            },
+        )
+    }
+
+    fn sealed_provider(
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> (Vec<String>, String) {
+        let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+            declared_names,
+            recipient_principal,
+            recipient_scopes: _,
+            name_authority: _,
+        } = authority.environment()
+        else {
+            panic!("expected provider-environment authority");
+        };
+        (declared_names.clone(), recipient_principal.clone())
+    }
+
+    fn assert_plain_refusal(error: &anyhow::Error, name: &str, principal: &str) {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("provider-environment name `{name}`"))
+                && message.contains(&format!("principal `{principal}`")),
+            "{message}"
+        );
+        assert!(
+            !message.contains(OPENAI_VALUE) && !message.contains(ANTHROPIC_VALUE),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn provider_environment_admission_seals_names_for_a_listed_principal() {
+        let environment = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        authority.validate().unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (vec!["OPENAI_API_KEY".to_owned()], "fp:alice".to_owned())
+        );
+        // A fixed route principal is a principal like any other.
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "route:fixed-handler",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(sealed_provider(&authority).1, "route:fixed-handler");
+    }
+
+    #[test]
+    fn provider_environment_admission_refuses_an_unlisted_principal_by_name() {
+        let environment = recipient_bound_provider_environment();
+        for principal in ["fp:mallory", "daemon:scheduler"] {
+            let error = admit_provider(
+                &environment,
+                &provider_policy(exact(&["OPENAI_API_KEY"])),
+                principal,
+                &["ryeos.execute.tool.*".to_owned()],
+            )
+            .unwrap_err();
+            assert_plain_refusal(&error, "OPENAI_API_KEY", principal);
+        }
+        // A wide operator grant does not make a principal a listed recipient.
+        let error = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:operator",
+            &["*".to_owned()],
+        )
+        .unwrap_err();
+        assert_plain_refusal(&error, "OPENAI_API_KEY", "fp:operator");
+    }
+
+    #[test]
+    fn provider_environment_admission_honours_capability_recipients() {
+        let environment = recipient_bound_provider_environment();
+        let policy = provider_policy(exact(&["ANTHROPIC_API_KEY"]));
+        let authority =
+            admit_provider(&environment, &policy, "fp:bob", &[RECEIVE_ANTHROPIC.to_owned()])
+                .unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (vec!["ANTHROPIC_API_KEY".to_owned()], "fp:bob".to_owned())
+        );
+        // Wildcard grants covering the listed capability are refused by name.
+        for wildcard in ["*", "ryeos.*", "ryeos.receive.*", "ryeos.receive.provider_env.*"] {
+            let error = admit_provider(&environment, &policy, "fp:bob", &[wildcard.to_owned()])
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!(
+                    "provider environment ANTHROPIC_API_KEY requires the exact recipient \
+                     capability {RECEIVE_ANTHROPIC}; wildcard grants do not satisfy it"
+                )),
+                "{wildcard}: {message}"
+            );
+            assert!(!message.contains(ANTHROPIC_VALUE), "{message}");
+        }
+        let error = admit_provider(&environment, &policy, "fp:bob", &[]).unwrap_err();
+        assert_plain_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+        // Holding the capability for one name does not reach another.
+        let error = admit_provider(
+            &environment,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])),
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap_err();
+        assert_plain_refusal(&error, "OPENAI_API_KEY", "fp:bob");
+    }
+
+    #[test]
+    fn provider_environment_admission_puts_every_name_in_play_for_declared_required() {
+        let environment = recipient_bound_provider_environment();
+        let policy = provider_policy(
+            ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+        );
+        let error = admit_provider(&environment, &policy, "fp:alice", &[]).unwrap_err();
+        assert_plain_refusal(&error, "ANTHROPIC_API_KEY", "fp:alice");
+        let authority = admit_provider(
+            &environment,
+            &policy,
+            "fp:alice",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (
+                vec!["ANTHROPIC_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()],
+                "fp:alice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn provider_environment_admitted_for_one_principal_is_not_delivered_to_another() {
+        let environment = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        let vault = ryeos_app::vault::EmptyVault;
+        let sources = ryeos_app::vault::SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+        };
+        let names = vec!["OPENAI_API_KEY".to_owned()];
+        // A child acting for another principal under the inherited authority.
+        let error =
+            ryeos_app::vault::authorize_secret_delivery(
+                &sources,
+                ryeos_app::vault::SecretRecipient {
+                    principal: "fp:child",
+                },
+                &names,
+                &authority,
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("OPENAI_API_KEY") && message.contains("principal `fp:child`"),
+            "{message}"
+        );
+        assert!(!message.contains(OPENAI_VALUE), "{message}");
+        let delivered =
+            ryeos_app::vault::authorize_secret_delivery(
+                &sources,
+                ryeos_app::vault::SecretRecipient {
+                    principal: "fp:alice",
+                },
+                &names,
+                &authority,
+            )
+            .unwrap();
+        assert_eq!(delivered.get("OPENAI_API_KEY"), Some(OPENAI_VALUE));
+    }
+
+    /// The same node declaration and values with different recipient
+    /// rules, as after an operator edits the policy and restarts.
+    fn provider_environment_with_recipients(
+        openai_principals: &[&str],
+        anthropic_capabilities: &[&str],
+    ) -> ryeos_app::vault::ProviderEnvironment {
+        let strings =
+            |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+        ryeos_app::vault::ProviderEnvironment::captured(
+            vec![
+                ProviderEnvironmentName {
+                    name: "ANTHROPIC_API_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: strings(&["fp:placeholder"]),
+                        capabilities: strings(anthropic_capabilities),
+                    },
+                },
+                ProviderEnvironmentName {
+                    name: "OPENAI_API_KEY".to_owned(),
+                    recipients: ProviderEnvironmentRecipients {
+                        principals: strings(openai_principals),
+                        capabilities: Vec::new(),
+                    },
+                },
+            ],
+            vec![
+                (
+                    "ANTHROPIC_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(ANTHROPIC_VALUE.to_owned()),
+                ),
+                (
+                    "OPENAI_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(OPENAI_VALUE.to_owned()),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn deliver(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        principal: &str,
+        name: &str,
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError>
+    {
+        let vault = ryeos_app::vault::EmptyVault;
+        ryeos_app::vault::authorize_secret_delivery(
+            &ryeos_app::vault::SecretSources {
+                vault: &vault,
+                provider_env: environment,
+            },
+            ryeos_app::vault::SecretRecipient { principal },
+            &[name.to_owned()],
+            authority,
+        )
+    }
+
+    fn assert_plain_delivery_refusal(
+        error: &ryeos_app::vault::VaultReadError,
+        name: &str,
+        principal: &str,
+    ) {
+        assert!(
+            matches!(error, ryeos_app::vault::VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(name) && message.contains(&format!("principal `{principal}`")),
+            "{message}"
+        );
+        assert!(
+            !message.contains(OPENAI_VALUE) && !message.contains(ANTHROPIC_VALUE),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn provider_environment_delivery_rejudges_the_current_recipient_rules() {
+        let admitted_under = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &admitted_under,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        // Still listed after a restart: the recovered launch is delivered.
+        let unchanged = provider_environment_with_recipients(&["fp:alice"], &[RECEIVE_ANTHROPIC]);
+        let delivered = deliver(&unchanged, "fp:alice", "OPENAI_API_KEY", &authority).unwrap();
+        assert_eq!(delivered.get("OPENAI_API_KEY"), Some(OPENAI_VALUE));
+        // The operator removed the principal and restarted: the recovered
+        // launch under the sealed authority receives nothing.
+        let removed = provider_environment_with_recipients(&["fp:bob"], &[RECEIVE_ANTHROPIC]);
+        let error = deliver(&removed, "fp:alice", "OPENAI_API_KEY", &authority).unwrap_err();
+        assert_plain_delivery_refusal(&error, "OPENAI_API_KEY", "fp:alice");
+
+        // A capability recipient removed after admission is refused alike.
+        let authority = admit_provider(
+            &admitted_under,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY"])),
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
+        let narrowed_rule = provider_environment_with_recipients(
+            &["fp:alice"],
+            &["ryeos.receive.provider_env.other_key"],
+        );
+        let error =
+            deliver(&narrowed_rule, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap_err();
+        assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+    }
+
+    #[test]
+    fn provider_environment_delivery_judges_the_scopes_sealed_at_admission() {
+        let environment = recipient_bound_provider_environment();
+        // Admission canonicalizes and seals the requesting principal's own
+        // scopes alongside the admitted names.
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY"])),
+            "fp:bob",
+            &[
+                RECEIVE_ANTHROPIC.to_owned(),
+                "ryeos.execute.tool.*".to_owned(),
+                RECEIVE_ANTHROPIC.to_owned(),
+            ],
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+            declared_names: _,
+            recipient_principal: _,
+            recipient_scopes,
+            name_authority: _,
+        } = authority.environment()
+        else {
+            panic!("expected provider-environment authority");
+        };
+        assert_eq!(
+            recipient_scopes,
+            &["ryeos.execute.tool.*".to_owned(), RECEIVE_ANTHROPIC.to_owned()]
+        );
+        // Delivery takes no scopes from the delivering execution: the root
+        // launch, a child narrowed away from the receive capability and a
+        // provider-attempt callback all deliver under the sealed set.
+        let delivered = deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap();
+        assert_eq!(delivered.get("ANTHROPIC_API_KEY"), Some(ANTHROPIC_VALUE));
+        // An authority whose sealed scopes lack the receive capability is
+        // refused by name, whoever presents it.
+        let unsealed = ryeos_state::objects::ExecutionProjectAuthority::projectless(
+            ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                declared_names: vec!["ANTHROPIC_API_KEY".to_owned()],
+                recipient_principal: "fp:bob".to_owned(),
+                recipient_scopes: vec!["ryeos.execute.tool.*".to_owned()],
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+        )
+        .unwrap();
+        let error =
+            deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &unsealed).unwrap_err();
+        assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+    }
 
     #[test]
     fn project_source_is_derived_only_from_execution_policy() {
@@ -2483,7 +2969,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
-            &[],
+            no_provider_environment(),
         )
         .unwrap();
 
@@ -2513,7 +2999,7 @@ mod tests {
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_owned(),
                 "*".to_owned(),
             ],
-            &[],
+            no_provider_environment(),
         )
         .unwrap();
 
@@ -2567,7 +3053,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
-            &[],
+            no_provider_environment(),
         )
         .unwrap();
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -2601,7 +3087,7 @@ mod tests {
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
-                &[],
+                no_provider_environment(),
             )
             .is_err()
         );
@@ -2618,7 +3104,7 @@ mod tests {
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
-                &[],
+                no_provider_environment(),
             )
             .is_err()
         );
@@ -2661,7 +3147,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
-            &[],
+            no_provider_environment(),
         )
         .unwrap();
 

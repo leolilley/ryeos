@@ -21,11 +21,34 @@ pub const MAX_OCCURRENCE_ID_BYTES: usize = 512;
 pub const EXTERNAL_CHANNEL_ROUTE_CONTRACT: &str = "ryeos.external-channel.http-json.v1";
 pub const EXTERNAL_CHANNEL_RELAY_CONTRACT: &str = "ryeos.external-channel.controller-file-relay.v1";
 pub const EXTERNAL_RELAY_RESPONSE_ENVELOPE_SCHEMA: u32 = 1;
-pub const EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA: u32 = 8;
-pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 9;
-pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 10;
+pub const EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA: u32 = 11;
+pub const EXTERNAL_SUPERVISOR_RELAY_BOOTSTRAP_SCHEMA: u32 = 12;
+pub const EXTERNAL_SUPERVISOR_ORDINARY_RELAY_BOOTSTRAP_SCHEMA: u32 = 13;
+/// Bootstrap schemas that predate the required `report_capabilities` field.
+/// They are refused by name rather than read: their bytes carry no answer to
+/// whether the supervisor reports host capabilities after Ready.
+pub const RETIRED_EXTERNAL_SUPERVISOR_BOOTSTRAP_SCHEMAS: [u32; 3] = [8, 9, 10];
 pub const EXTERNAL_CHANNEL_ATTACH_PATH: &str = "/external-execution/channel/attach";
 pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/exchange";
+/// Schema of the occurrence channel stream: one long-lived, bidirectional,
+/// message-framed connection per occurrence that carries the same exchange as
+/// the request/response route. Each inbound message is exactly one canonical
+/// `SignedExecutionFrame`; each outbound message is the canonical JSON of the
+/// `ExternalChannelExchangeResponse` that exchanging that frame returns. A
+/// guest's existing exchange driver therefore runs unchanged over the stream.
+pub const EXTERNAL_CHANNEL_STREAM_SCHEMA: u32 = 1;
+pub const EXTERNAL_CHANNEL_STREAM_CONTRACT: &str = "ryeos.external-channel.stream.v1";
+/// Bound on one inbound stream message: exactly one signed frame, so the
+/// frame bound of the request/response route. The stream carries what the
+/// exchange carries; a message is never split.
+pub const MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES: usize = super::MAX_FRAME_BYTES;
+/// Bound on one outbound stream message: one canonical exchange response,
+/// whose frames travel base64-encoded, so the route's response ceiling.
+/// This is only the transport ceiling. The negotiated bound is the
+/// controller transport contract's `maximum_response_bytes`: the controller
+/// refuses to send a stream message above it and the guest refuses to read
+/// one, exactly as each response of the request/response route is bounded.
+pub const MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
 pub const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
 pub const MAX_TLS_ROOT_BUNDLE_BYTES: usize = 256 * 1024;
@@ -228,7 +251,8 @@ impl ExternalControllerTransportContract {
             "external controller origin is not a canonical HTTPS origin"
         );
         ensure!(
-            self.route_contract == EXTERNAL_CHANNEL_ROUTE_CONTRACT,
+            self.route_contract == EXTERNAL_CHANNEL_ROUTE_CONTRACT
+                || self.route_contract == EXTERNAL_CHANNEL_STREAM_CONTRACT,
             "unsupported external controller route contract"
         );
         hash(&self.tls_root_bundle_digest)?;
@@ -242,6 +266,13 @@ impl ExternalControllerTransportContract {
             "external controller response bound is invalid"
         );
         Ok(())
+    }
+
+    /// Whether the signed route contract carries the exchange on the
+    /// occurrence channel stream rather than the request/response route.
+    /// Attachment uses the request/response route under either contract.
+    pub fn exchanges_on_stream(&self) -> bool {
+        self.route_contract == EXTERNAL_CHANNEL_STREAM_CONTRACT
     }
 
     pub fn attach_url(&self) -> Result<Url> {
@@ -440,6 +471,12 @@ pub struct ExternalSupervisorBootstrap {
     /// The signed `external-supervisor-journal` envelope that funds the
     /// supervisor's in-process native host for its journal.
     pub native_journal: ExternalSupervisorNativeEnvelope,
+    /// Whether the supervisor authors a host capability report as the frame
+    /// immediately after Ready, before any other channel traffic. The
+    /// controller decides this when it seals the bootstrap; the guest never
+    /// infers it. It is required and part of the canonical bytes, so the
+    /// bootstrap digest binds the choice.
+    pub report_capabilities: bool,
 }
 
 /// Native envelope of the protected supervisor's journal host, copied from
@@ -477,6 +514,11 @@ impl ExternalSupervisorNativeEnvelope {
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
+            !RETIRED_EXTERNAL_SUPERVISOR_BOOTSTRAP_SCHEMAS.contains(&self.schema),
+            "retired external supervisor bootstrap schema {}: it predates report_capabilities",
+            self.schema
+        );
+        ensure!(
             self.schema
                 == match &self.controller {
                     ExternalControllerTransportSelection::HttpJson(_) => EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
@@ -509,6 +551,15 @@ impl ExternalSupervisorBootstrap {
                 "external controller file relay requires a structured-session guest without TLS roots"
             ),
         }
+        // A leased guest's report is judged by an adapter the controller asks
+        // on the guest's own channel exchange; a file relay carries no such
+        // exchange, so the combination is refused when the bootstrap is
+        // sealed rather than discovered by the guest.
+        ensure!(
+            !(self.report_capabilities && self.controller.relay().is_ok()),
+            "a leased guest reports capabilities only over the HTTP or stream carrier, \
+             never over a controller file relay"
+        );
         bounded_text(
             &self.placement_thread_id,
             MAX_PLACEMENT_ID_BYTES,
@@ -982,6 +1033,49 @@ impl ExternalChannelExchangeResponse {
     }
 }
 
+/// The frame one inbound stream message carries, bounded but not yet
+/// authenticated: the caller verifies it against the occurrence binding
+/// exactly as the request/response exchange does.
+pub fn external_channel_stream_inbound_frame(message: &[u8]) -> Result<&[u8]> {
+    ensure!(
+        !message.is_empty() && message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES,
+        "external channel stream message is empty or exceeds its bound"
+    );
+    Ok(message)
+}
+
+/// Encode one exchange response as one outbound stream message.
+pub fn encode_external_channel_stream_response(
+    response: &ExternalChannelExchangeResponse,
+) -> Result<Vec<u8>> {
+    response.validate_shape()?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(response)?)?.into_bytes();
+    ensure!(
+        bytes.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES,
+        "external channel stream response exceeds its message bound"
+    );
+    Ok(bytes)
+}
+
+/// Decode one outbound stream message back into the exchange response it
+/// carries. Only the canonical encoding is accepted.
+pub fn decode_external_channel_stream_response(
+    message: &[u8],
+) -> Result<ExternalChannelExchangeResponse> {
+    ensure!(
+        !message.is_empty() && message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES,
+        "external channel stream message is empty or exceeds its bound"
+    );
+    let response: ExternalChannelExchangeResponse = serde_json::from_slice(message)
+        .context("decode external channel stream response")?;
+    response.validate_shape()?;
+    ensure!(
+        lillux::canonical_json(&serde_json::to_value(&response)?)?.as_bytes() == message,
+        "external channel stream response is not canonical"
+    );
+    Ok(response)
+}
+
 /// The controller signs the complete file-relay response, including transport
 /// metadata that is not covered by the signed channel frames. This envelope
 /// is distinct from the HTTP response: an uploaded file has no TLS peer.
@@ -1163,6 +1257,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_signed_route_contract_selects_the_exchange_carrier() {
+        let roots = vec![STANDARD.encode(b"fixture DER root")];
+        let request_response = controller(&roots);
+        request_response.validate().unwrap();
+        assert!(!request_response.exchanges_on_stream());
+        let mut stream = controller(&roots);
+        stream.route_contract = EXTERNAL_CHANNEL_STREAM_CONTRACT.into();
+        stream.validate().unwrap();
+        assert!(stream.exchanges_on_stream());
+        assert_eq!(
+            stream.attach_url().unwrap(),
+            request_response.attach_url().unwrap()
+        );
+        let mut unknown = controller(&roots);
+        unknown.route_contract = "ryeos.external-channel.other.v1".into();
+        assert!(unknown.validate().is_err());
+    }
+
     fn bootstrap() -> ExternalSupervisorBootstrap {
         let roots = vec![STANDARD.encode(b"fixture DER root")];
         let runtime_recipe = ExternalCandidateRuntimeRecipe {
@@ -1275,6 +1388,7 @@ mod tests {
                 cleanup_millis: 60_000,
                 cleanup_steps: 400_000,
             },
+            report_capabilities: false,
         }
     }
 
@@ -1571,6 +1685,58 @@ mod tests {
             ordinary.validate().is_err(),
             "ordinary guest cannot select Q file relay"
         );
+    }
+
+    #[test]
+    fn capability_reporting_is_a_required_digest_bound_choice() {
+        let silent = bootstrap();
+        silent.validate().unwrap();
+        let mut reporting = bootstrap();
+        reporting.report_capabilities = true;
+        reporting.validate().unwrap();
+        assert_ne!(silent.digest().unwrap(), reporting.digest().unwrap());
+        let canonical: Value = serde_json::from_slice(&reporting.canonical_bytes().unwrap()).unwrap();
+        assert_eq!(canonical["report_capabilities"], Value::Bool(true));
+
+        let mut missing = serde_json::to_value(&silent).unwrap();
+        missing.as_object_mut().unwrap().remove("report_capabilities");
+        let refusal = serde_json::from_value::<ExternalSupervisorBootstrap>(missing)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(refusal.contains("report_capabilities"), "{refusal}");
+        let mut untyped = serde_json::to_value(&silent).unwrap();
+        untyped["report_capabilities"] = serde_json::json!("true");
+        assert!(serde_json::from_value::<ExternalSupervisorBootstrap>(untyped).is_err());
+    }
+
+    #[test]
+    fn a_capability_report_over_a_file_relay_is_refused_at_sealing() {
+        let mut relay = relay_bootstrap();
+        relay.validate().unwrap();
+        relay.report_capabilities = true;
+        let refusal = relay.validate().unwrap_err().to_string();
+        assert!(refusal.contains("never over a controller file relay"), "{refusal}");
+        let mut ordinary = ordinary_relay_bootstrap();
+        ordinary.report_capabilities = true;
+        assert!(ordinary.validate().is_err());
+    }
+
+    #[test]
+    fn retired_bootstrap_schemas_are_refused_by_name() {
+        for (retired, current) in RETIRED_EXTERNAL_SUPERVISOR_BOOTSTRAP_SCHEMAS.into_iter().zip([
+            bootstrap(),
+            relay_bootstrap(),
+            ordinary_relay_bootstrap(),
+        ]) {
+            let mut value = current;
+            value.schema = retired;
+            let refusal = value.validate().err().unwrap().to_string();
+            assert!(
+                refusal.contains(&format!("retired external supervisor bootstrap schema {retired}")),
+                "{refusal}"
+            );
+        }
     }
 
     #[test]
@@ -1945,5 +2111,67 @@ mod tests {
                 .validate_attached_binding(&changed_binding, &supervisor_public_key)
                 .is_err()
         );
+    }
+
+    fn stream_response(frame_bytes: usize) -> ExternalChannelExchangeResponse {
+        let frame = vec![b'f'; frame_bytes];
+        ExternalChannelExchangeResponse {
+            schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+            incoming_new: true,
+            incoming_sequence: 1,
+            incoming_frame_digest: "1".repeat(64),
+            acknowledgement_frame_digest: Some("2".repeat(64)),
+            outbound_frames: vec![
+                ExternalChannelResponseFrame::new(1, lillux::sha256_hex(&frame), &frame).unwrap(),
+            ],
+            urgent_revocation_frame: None,
+        }
+    }
+
+    #[test]
+    fn stream_inbound_message_is_one_bounded_nonempty_frame() {
+        let full = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES];
+        assert_eq!(
+            external_channel_stream_inbound_frame(&full).unwrap().len(),
+            MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES
+        );
+        assert_eq!(MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES, super::super::MAX_FRAME_BYTES);
+        assert!(external_channel_stream_inbound_frame(&[]).is_err());
+        let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES + 1];
+        assert!(external_channel_stream_inbound_frame(&over).is_err());
+    }
+
+    #[test]
+    fn stream_response_round_trips_canonically_within_its_message_bound() {
+        let response = stream_response(1024);
+        let message = encode_external_channel_stream_response(&response).unwrap();
+        let decoded = decode_external_channel_stream_response(&message).unwrap();
+        assert_eq!(
+            encode_external_channel_stream_response(&decoded).unwrap(),
+            message
+        );
+        assert_eq!(decoded.outbound_frames[0].decode_frame().unwrap().len(), 1024);
+
+        let pretty = serde_json::to_vec_pretty(&response).unwrap();
+        assert!(decode_external_channel_stream_response(&pretty).is_err());
+        let mut unknown = serde_json::to_value(&response).unwrap();
+        unknown["extra"] = serde_json::json!(true);
+        let unknown = lillux::canonical_json(&unknown).unwrap().into_bytes();
+        assert!(decode_external_channel_stream_response(&unknown).is_err());
+        assert!(decode_external_channel_stream_response(&[]).is_err());
+    }
+
+    #[test]
+    fn stream_carries_large_route_responses_and_refuses_beyond_its_bound() {
+        // A response far above the old per-message cap still fits in one
+        // stream message: the stream does not narrow the exchange.
+        let response = stream_response(256 * 1024);
+        response.validate_shape().unwrap();
+        let message = encode_external_channel_stream_response(&response).unwrap();
+        assert!(message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES);
+        let decoded = decode_external_channel_stream_response(&message).unwrap();
+        assert_eq!(encode_external_channel_stream_response(&decoded).unwrap(), message);
+        let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES + 1];
+        assert!(decode_external_channel_stream_response(&over).is_err());
     }
 }

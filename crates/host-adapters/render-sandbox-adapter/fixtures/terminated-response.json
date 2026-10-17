@@ -1,7 +1,7 @@
 {
   "createdAt": "2026-09-24T00:00:00Z",
   "id": "sbx-fixture-001",
-  "networkPolicy": { "default": "deny-all" },
+  "networkPolicy": { "default": "deny-all", "type": "deny-all" },
   "plan": "standard",
   "region": "oregon",
   "status": "terminated",

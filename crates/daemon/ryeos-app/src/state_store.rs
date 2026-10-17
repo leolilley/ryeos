@@ -2390,6 +2390,19 @@ pub enum InProcessHandlerCompletion {
     BirthAborted,
 }
 
+/// A committed in-process child birth whose handler has not been spawned.
+/// Only the in-process child birth mints it, and only
+/// [`StateStore::link_unspawned_in_process_child`] consumes it: that link is
+/// the one place a parent stop landed after the birth is inherited onto the
+/// child, so the caller settles the child to it instead of starting the
+/// handler. Every other link request for the child is a non-inheriting replay.
+#[derive(Debug)]
+#[must_use = "an in-process child's handler starts only after its unspawned link reports no stop"]
+pub struct UnspawnedInProcessChild {
+    parent_thread_id: String,
+    thread_id: String,
+}
+
 enum RootBirthOwner<'a> {
     External,
     InProcess(&'a InProcessHandlerControl),
@@ -2876,6 +2889,153 @@ fn in_process_handler_chain_root_locked(g: &Inner, thread_id: &str) -> Result<St
         .ok_or_else(|| {
             anyhow!("in-process handler {thread_id} has no runtime row naming its chain")
         })
+}
+
+/// Where a recorded thread lives: its own chain root, an inline in-process
+/// child with proven lineage in another thread's chain, or any other member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedThreadPlacement {
+    Root,
+    InProcessMember {
+        chain_root_id: String,
+        upstream_thread_id: String,
+    },
+    OtherMember {
+        chain_root_id: String,
+    },
+}
+
+/// The chain an in-process handler thread is a non-root member of, or `None`
+/// when the thread is not an in-process handler or is its own chain root.
+fn in_process_chain_member_root_locked(g: &Inner, thread_id: &str) -> Result<Option<String>> {
+    let Some(runtime) = g.runtime_db.get_runtime_info(thread_id)? else {
+        return Ok(None);
+    };
+    let in_process = runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.launch_driver)
+        == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
+    if !in_process {
+        return Ok(None);
+    }
+    let chain_root_id = in_process_handler_chain_root_locked(g, thread_id)?;
+    Ok((chain_root_id != thread_id).then_some(chain_root_id))
+}
+
+/// Write the `dispatch` link from an in-process chain member to the upstream
+/// parent its authoritative snapshot names, in one runtime transaction with
+/// the stop the member inherits. With `inherit_parent_stop`, a durable stop
+/// already on the parent's runtime row is written to the member's row in the
+/// same transaction, so every later finalizer of the member commits that
+/// stop's terminal. Callers pass it only while no handler has run for the
+/// member: an in-process handler has no cancellation contract once started.
+/// An exact existing link is a replay; a conflicting one is refused.
+fn link_in_process_chain_member_locked(
+    g: &Inner,
+    chain_root_id: &str,
+    member: &ThreadSnapshot,
+    inherit_parent_stop: bool,
+) -> Result<Option<StopIntent>> {
+    let parent_thread_id = member.upstream_thread_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "in-process chain member {} of chain {chain_root_id} names no upstream parent",
+            member.thread_id
+        )
+    })?;
+    let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+    let stop_policy = if inherit_parent_stop {
+        let parent_runtime = g
+            .runtime_db
+            .get_runtime_info(parent_thread_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "parent {parent_thread_id} of in-process chain member {} has no runtime row",
+                    member.thread_id
+                )
+            })?;
+        parent_runtime
+            .stop_intent
+            .map_or(runtime_db::ChildLinkStopPolicy::None, |intent| {
+                runtime_db::ChildLinkStopPolicy::Always(intent)
+            })
+    } else {
+        runtime_db::ChildLinkStopPolicy::None
+    };
+    let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
+        parent_thread_id,
+        &member.thread_id,
+        "dispatch",
+        stop_policy,
+    )?;
+    Ok(effective_stop)
+}
+
+/// Replay the link of an in-process chain member. Its birth writes the
+/// `dispatch` link to its upstream parent, together with any stop the parent
+/// carried, under the parent chain's head; a later link request for it is
+/// therefore an exact replay. With `inherit_parent_stop`, which only the
+/// unspawned-child witness supplies, a parent stop that landed between the
+/// birth and this replay is inherited too: no handler has run, and the caller
+/// settles the member to the stop instead of starting it. The reported stop
+/// is the member's row after the replay.
+fn replay_in_process_chain_member_link_locked(
+    g: &Inner,
+    chain_root_id: &str,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+    relation: &str,
+    inherit_parent_stop: bool,
+) -> Result<Option<StopIntent>> {
+    if relation != "dispatch" {
+        bail!(
+            "in-process chain member {child_thread_id} is linked to its parent by `dispatch`, not `{relation}`"
+        );
+    }
+    let member = g
+        .state_db
+        .read_authoritative_thread_snapshot(chain_root_id, child_thread_id)?
+        .ok_or_else(|| {
+            anyhow!(
+                "in-process chain member {child_thread_id} is not published in chain {chain_root_id}"
+            )
+        })?;
+    if member.upstream_thread_id.as_deref() != Some(parent_thread_id) {
+        bail!(
+            "in-process chain member {child_thread_id} was born under {}, not {parent_thread_id}",
+            member.upstream_thread_id.as_deref().unwrap_or("no parent")
+        );
+    }
+    link_in_process_chain_member_locked(g, chain_root_id, &member, inherit_parent_stop)?;
+    Ok(g
+        .runtime_db
+        .get_runtime_info(child_thread_id)?
+        .ok_or_else(|| anyhow!("in-process chain member {child_thread_id} lost its runtime row"))?
+        .stop_intent)
+}
+
+/// Repair the `dispatch` link of an in-process chain member whose reservation
+/// is settling. A birth writes the link after its authoritative commit and
+/// before its reservation leaves `pending`; a crash between those writes
+/// leaves a published member without a link, recovered here from the
+/// member's own upstream id. A root handler has no link to repair.
+fn repair_in_process_chain_member_link_locked(
+    g: &Inner,
+    chain_root_id: &str,
+    snapshot: &ThreadSnapshot,
+    inherit_parent_stop: bool,
+) -> Result<()> {
+    if chain_root_id == snapshot.thread_id {
+        return Ok(());
+    }
+    link_in_process_chain_member_locked(g, chain_root_id, snapshot, inherit_parent_stop)
+        .with_context(|| {
+            format!(
+                "repair dispatch link of in-process chain member {}",
+                snapshot.thread_id
+            )
+        })
+        .map(|_| ())
 }
 
 fn thread_detail_from_committed_snapshot(
@@ -5472,29 +5632,29 @@ impl StateStore {
         let _ = runtime_db_path;
         // Establish the real outside checkout before schema/native Runtime
         // acquisition, so early failures reach the same startup recovery owner.
-        let mut custody = live_native::StateOpenCustody { original: Some(live), runtime: None, state: None };
-        let opened_runtime = custody.original.as_ref().expect("actual Store opening owner").open_runtime();
+        let mut custody = live_native::StateOpenCustody::new(live);
+        let opened_runtime = custody.original().expect("actual Store opening owner").open_runtime();
         let runtime_db = match opened_runtime {
             Ok(runtime) => runtime,
             Err(error) => return Err(custody.fail(error)),
         };
-        custody.runtime = Some(runtime_db);
+        custody.set_runtime(runtime_db);
         // Launch claims are durable owner evidence. They must survive process
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = custody.original.as_ref().expect("actual Store opening owner")
+        let state_db = custody.original().expect("actual Store opening owner")
             .open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
-                head_trust, recovery_observer, custody.runtime.as_ref().expect("acquired Runtime owner"))
+                head_trust, recovery_observer, custody.runtime().expect("acquired Runtime owner"))
             .map_err(with_execution_schema_cutover_hint);
         let state_db = match state_db {
             Ok(state_db) => state_db,
             Err(error) => return Err(custody.fail(error)),
         };
-        custody.state = Some(state_db);
+        custody.set_state(state_db);
         let completed = (|| -> Result<_> {
-            let state_db = custody.state.as_ref().expect("acquired State owner");
-            let runtime_db = custody.runtime.as_ref().expect("acquired Runtime owner");
+            let state_db = custody.state().expect("acquired State owner");
+            let runtime_db = custody.runtime().expect("acquired Runtime owner");
             reconcile_credential_profile_authority(state_db, runtime_db)
                 .context("reconcile stable credential-profile authority")?;
             ensure_current_external_content_bindings(state_db)?;
@@ -5508,11 +5668,11 @@ impl StateStore {
             Ok(completed) => completed,
             Err(error) => return Err(custody.fail(error)),
         };
-        let state_db = custody.state.take().expect("completed State owner");
-        let runtime_db = custody.runtime.take().expect("completed Runtime owner");
+        let state_db = custody.take_state().expect("completed State owner");
+        let runtime_db = custody.take_runtime().expect("completed Runtime owner");
         // Transfer the actual opening owner from the same successful checkout;
         // `live` already moved into custody before State/recovery effects.
-        let live_native_open = custody.original.take();
+        let live_native_open = custody.take_original();
         Ok(Self {
             live_native_open,
             state_authority,
@@ -5746,10 +5906,6 @@ impl StateStore {
         })
     }
 
-    /// Read an in-process handler thread's authoritative snapshot at the chain
-    /// its reservation was born into: its own id for a direct invocation
-    /// root, its parent's chain for an inline in-process child. `None` when
-    /// the chain head does not carry the thread (an unpublished birth).
     /// The chain an in-process handler thread belongs to, read from its own
     /// runtime row. That row is written before the authoritative birth commit
     /// and outlives the rebuildable projection, so terminal repair can locate
@@ -5759,6 +5915,68 @@ impl StateStore {
         in_process_handler_chain_root_locked(&g, thread_id)
     }
 
+    /// Classify where a recorded thread lives, from its authoritative
+    /// snapshot, its runtime row and its child link. A thread that is not its
+    /// own chain root is an [`RecordedThreadPlacement::InProcessMember`] only
+    /// when everything agrees: its runtime row names the in-process handler
+    /// driver and the same chain, its upstream is a member of that chain, and
+    /// its `dispatch` link names that upstream. Any other member is
+    /// [`RecordedThreadPlacement::OtherMember`]; callers decide which
+    /// placements their subject may have.
+    pub fn recorded_thread_placement(&self, thread_id: &str) -> Result<RecordedThreadPlacement> {
+        let g = self.lock()?;
+        let row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("recorded thread {thread_id} does not exist"))?;
+        let snapshot = g
+            .state_db
+            .read_authoritative_thread_snapshot(&row.chain_root_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!("recorded thread {thread_id} is missing its authoritative snapshot")
+            })?;
+        if snapshot.thread_id != thread_id || snapshot.chain_root_id != row.chain_root_id {
+            bail!("recorded thread {thread_id} authoritative identity is inconsistent");
+        }
+        if snapshot.chain_root_id == thread_id {
+            return Ok(RecordedThreadPlacement::Root);
+        }
+        let other = || RecordedThreadPlacement::OtherMember {
+            chain_root_id: snapshot.chain_root_id.clone(),
+        };
+        if in_process_chain_member_root_locked(&g, thread_id)?.as_deref()
+            != Some(snapshot.chain_root_id.as_str())
+        {
+            return Ok(other());
+        }
+        let Some(upstream_thread_id) = snapshot.upstream_thread_id.clone() else {
+            return Ok(other());
+        };
+        if g.state_db
+            .read_authoritative_thread_snapshot(&snapshot.chain_root_id, &upstream_thread_id)?
+            .is_none()
+        {
+            return Ok(other());
+        }
+        let linked = g.runtime_db.child_link_relation(thread_id)?.as_deref() == Some("dispatch")
+            && g
+                .runtime_db
+                .chain_child_links(&[thread_id.to_owned()])?
+                .iter()
+                .any(|(parent, child)| child == thread_id && *parent == upstream_thread_id);
+        if !linked {
+            return Ok(other());
+        }
+        Ok(RecordedThreadPlacement::InProcessMember {
+            chain_root_id: snapshot.chain_root_id,
+            upstream_thread_id,
+        })
+    }
+
+    /// Read an in-process handler thread's authoritative snapshot at the chain
+    /// its reservation was born into: its own id for a direct invocation
+    /// root, its parent's chain for an inline in-process child. `None` when
+    /// the chain head does not carry the thread (an unpublished birth).
     pub fn get_authoritative_in_process_handler_snapshot(
         &self,
         thread_id: &str,
@@ -10252,12 +10470,49 @@ impl StateStore {
     /// with the birth under the parent chain's signed head, and the owner's
     /// birth proof is marked only once that head carries the member. The
     /// registry lock is released before the authoritative commit, as above.
+    ///
+    /// The returned witness is the only way to link the child while it may
+    /// still inherit a parent stop landed since the birth; see
+    /// [`Self::link_unspawned_in_process_child`].
     pub fn create_in_process_child_with_events_and_launch_metadata(
         &self,
         thread: &NewThreadRecord,
         initial_events: Vec<NewEventRecord>,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         owner: &InProcessHandlerControl,
+    ) -> Result<(Vec<PersistedEventRecord>, UnspawnedInProcessChild)> {
+        let persisted =
+            self.create_in_process_child_birth(thread, initial_events, launch_metadata, owner, true)?;
+        let parent_thread_id = thread.upstream_thread_id.clone().ok_or_else(|| {
+            anyhow!("in-process child {} names no upstream parent", thread.thread_id)
+        })?;
+        Ok((
+            persisted,
+            UnspawnedInProcessChild { parent_thread_id, thread_id: thread.thread_id.clone() },
+        ))
+    }
+
+    /// The same birth, interrupted exactly as a crash after the authoritative
+    /// commit would leave it: the member is published, its reservation is
+    /// still pending, and no dispatch link has been written.
+    #[cfg(test)]
+    fn fixture_create_in_process_child_interrupted_before_link(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &InProcessHandlerControl,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_in_process_child_birth(thread, initial_events, launch_metadata, owner, false)
+    }
+
+    fn create_in_process_child_birth(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &InProcessHandlerControl,
+        link_and_advance: bool,
     ) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id == thread.chain_root_id || thread.upstream_thread_id.is_none() {
             bail!("in-process child birth requires a chain member record with an upstream parent");
@@ -10295,6 +10550,31 @@ impl StateStore {
             .load(Ordering::Acquire)
         {
             bail!("thread creation is closed for daemon shutdown");
+        }
+        // The parent must be a live member of the chain before anything of
+        // the child is written. The store lock is held from here through the
+        // link, so no store finalizer can settle the parent in between; the
+        // chain commit repeats the check against the head under its own lock.
+        let parent_thread_id = thread
+            .upstream_thread_id
+            .as_deref()
+            .expect("in-process child upstream checked above");
+        let parent = g
+            .state_db
+            .read_authoritative_thread_snapshot(&thread.chain_root_id, parent_thread_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "in-process child {} names parent {parent_thread_id}, which is not a member of chain {}",
+                    thread.thread_id,
+                    thread.chain_root_id
+                )
+            })?;
+        if parent.status.is_terminal() {
+            bail!(
+                "refusing to birth in-process child {} under terminal parent {parent_thread_id} ({})",
+                thread.thread_id,
+                parent.status.as_str()
+            );
         }
         validate_facet_event_admission(&g, &thread.thread_id, &initial_events)?;
         let mut payload = json!({
@@ -10362,6 +10642,20 @@ impl StateStore {
                 {
                     Ok(Some(snapshot)) if snapshot.status == ThreadStatus::Running => {
                         owner.mark_birth_committed();
+                        // The caller receives an error and its owner settles
+                        // the member with its own failure terminal, so only
+                        // lineage is written here, not an inherited stop that
+                        // would contradict that terminal.
+                        if let Err(link_error) = link_in_process_chain_member_locked(
+                            &g,
+                            &thread.chain_root_id,
+                            &snapshot,
+                            false,
+                        ) {
+                            return Err(anyhow!(
+                                "in-process child birth committed despite its returned error, but its dispatch link could not be written; reservation settlement repairs it: {link_error:#}; original error: {error:#}"
+                            ));
+                        }
                         if let Err(reservation_error) = g
                             .runtime_db
                             .mark_in_process_handler_birth_running(&thread.thread_id)
@@ -10420,6 +10714,22 @@ impl StateStore {
             }
         };
         owner.mark_birth_committed();
+        if !link_and_advance {
+            return persisted_from_add_thread_with_events(&result, &events)
+                .context("reconstruct committed in-process child events");
+        }
+        // The member is published; its dispatch link and any stop the parent
+        // already carries are written in one runtime transaction before the
+        // reservation leaves `pending`, so a running reservation always has
+        // its link and a crash in between is repaired from the upstream id
+        // when reconciliation advances the reservation.
+        link_in_process_chain_member_locked(&g, &thread.chain_root_id, &result.snapshot, true)
+            .with_context(|| {
+                format!(
+                    "record dispatch link of in-process child {} to parent {parent_thread_id}",
+                    thread.thread_id
+                )
+            })?;
         g.runtime_db
             .mark_in_process_handler_birth_running(&thread.thread_id)
             .with_context(|| {
@@ -16089,6 +16399,156 @@ impl StateStore {
         self.reserve_external_allocation_inner(reservation, binding, None)
     }
 
+    /// Reserve a placed session's allocation together with its admitted
+    /// lease's charge against the node lease budget, in one transaction and
+    /// before any provider contact. A replay of the exact reservation reserves
+    /// nothing again.
+    pub(crate) fn reserve_external_lease_allocation(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        lease: &runtime_db::external_execution::ExternalLeaseCharge,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_external_lease_allocation(reservation, binding, lease)
+    }
+
+    /// The lease a placed session still holds, if any.
+    pub(crate) fn held_external_lease(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::HeldExternalLease>> {
+        self.lock()?.runtime_db.held_external_lease(placement)
+    }
+
+    /// Placements holding a lease reserved for a worker of another daemon
+    /// incarnation than `current_generation`.
+    pub(crate) fn predecessor_external_lease_placements(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .predecessor_external_lease_placements(current_generation)
+    }
+
+    /// The lease record of a placed session's remote lease, if it has one.
+    pub(crate) fn external_lease_record(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?.runtime_db.external_lease_record(placement)
+    }
+
+    /// Reserved to activated: bind the lease's identity and ready deadline.
+    pub(crate) fn activate_external_lease_record(
+        &self,
+        placement: &str,
+        activation: &runtime_db::external_execution::ExternalLeaseActivation,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.activate_external_lease_record(
+            placement,
+            activation,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Hold the guest's first frame, un-journalled, on an activated record.
+    pub(crate) fn hold_external_lease_ready_frame(
+        &self,
+        placement: &str,
+        frame: &[u8],
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.hold_external_lease_ready_frame(
+            placement,
+            frame,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Hold the guest's second frame, un-journalled, on an activated record.
+    pub(crate) fn hold_external_lease_report_frame(
+        &self,
+        placement: &str,
+        frame: &[u8],
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.hold_external_lease_report_frame(
+            placement,
+            frame,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Journal the held Ready and admit the lease, in one transaction.
+    pub(crate) fn admit_external_lease_with_ready(
+        &self,
+        placement: &str,
+        admission: &runtime_db::external_execution::ExternalLeaseAdmission,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.admit_external_lease_with_ready(
+            placement,
+            admission,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Refuse the lease, terminally, and cancel its allocation, in one
+    /// transaction.
+    pub(crate) fn refuse_external_lease_and_cancel(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.refuse_external_lease_and_cancel(
+            placement,
+            reason,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        )
+    }
+
+    /// Refuse the lease and cancel its allocation, in one transaction, only if
+    /// it is still activated; returns whether it was refused.
+    pub(crate) fn refuse_activated_external_lease_and_cancel(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .refuse_activated_external_lease_and_cancel(
+                placement,
+                reason,
+                i64::try_from(lillux::time::timestamp_millis())?,
+            )
+    }
+
+    /// Activated lease records whose ready deadline is at or before `now_ms`.
+    pub(crate) fn overdue_external_lease_records(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?.runtime_db.overdue_external_lease_records(now_ms)
+    }
+
+    /// Unrefused lease records of leases held for a worker of another daemon
+    /// incarnation than `current_generation`.
+    pub(crate) fn predecessor_external_lease_records(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<runtime_db::external_execution::ExternalLeaseRecord>> {
+        self.lock()?
+            .runtime_db
+            .predecessor_external_lease_records(current_generation)
+    }
+
     /// First direct reservation consumes evidence from the sole full-capsule
     /// compiler. Retained JSON alone cannot produce this non-serializable token.
     pub(crate) fn reserve_external_direct_allocation(
@@ -20625,8 +21085,17 @@ impl StateStore {
 
     /// Complete pending→running reconciliation only after reading the
     /// authoritative Running root under the same mutation lock.
+    ///
+    /// A chain member's dispatch link is repaired first from its upstream id.
+    /// Without a live owner no handler can have run for the member, so it also
+    /// inherits a stop its parent carries; with a live owner the handler may
+    /// be running and only the link is written.
     pub fn reconcile_in_process_handler_birth_running(&self, thread_id: &str) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let g = self.lock()?;
         let chain_root_id = in_process_handler_chain_root_locked(&g, thread_id)?;
         let snapshot = g
@@ -20641,6 +21110,12 @@ impl StateStore {
                 snapshot.status.as_str()
             );
         }
+        repair_in_process_chain_member_link_locked(
+            &g,
+            &chain_root_id,
+            &snapshot,
+            !active.contains_key(thread_id),
+        )?;
         g.runtime_db
             .mark_in_process_handler_birth_running(thread_id)
     }
@@ -20664,6 +21139,9 @@ impl StateStore {
                 snapshot.status.as_str()
             );
         }
+        // A terminal chain member whose birth never reached its link is still
+        // a descendant of its parent; lineage is restored before settlement.
+        repair_in_process_chain_member_link_locked(&g, &chain_root_id, &snapshot, false)?;
         g.runtime_db
             .settle_in_process_handler_reservation(thread_id)
     }
@@ -23744,7 +24222,11 @@ impl StateStore {
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was
     /// already stop-tombstoned, atomically inherit that monotonic intent on the
-    /// child before releasing the store lock, closing the late-link race.
+    /// child before releasing the store lock, closing the late-link race. An
+    /// in-process chain member is linked, and inherits its parent's stop, by
+    /// its own birth; for it this is the exact replay of that link, which
+    /// inherits nothing more: a parent stop landed since the birth reaches the
+    /// member only through [`Self::link_unspawned_in_process_child`].
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,
@@ -23757,6 +24239,16 @@ impl StateStore {
             .lock()
             .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let g = self.lock()?;
+        if let Some(chain_root_id) = in_process_chain_member_root_locked(&g, child_thread_id)? {
+            return replay_in_process_chain_member_link_locked(
+                &g,
+                &chain_root_id,
+                parent_thread_id,
+                child_thread_id,
+                relation,
+                false,
+            );
+        }
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
@@ -23860,6 +24352,41 @@ impl StateStore {
             stop_policy,
         )?;
         Ok(effective_stop)
+    }
+
+    /// Link an in-process child its birth has just committed, before its
+    /// handler is spawned. The birth already wrote the `dispatch` link with
+    /// any stop its parent then carried; this replay also inherits a parent
+    /// stop landed since, which is sound only because the witness proves no
+    /// handler has run. The reported stop is the child's row after the
+    /// replay; the caller settles the child to it instead of starting the
+    /// handler. Once shutdown has closed admission the handler must not start,
+    /// so the link is refused and the child's owner settles it unstarted.
+    pub fn link_unspawned_in_process_child(
+        &self,
+        child: UnspawnedInProcessChild,
+    ) -> Result<Option<StopIntent>> {
+        let UnspawnedInProcessChild { parent_thread_id, thread_id } = child;
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!(
+                "in-process chain member {thread_id} cannot be linked to start its handler: thread admission is closed for daemon shutdown"
+            );
+        }
+        let chain_root_id = in_process_chain_member_root_locked(&g, &thread_id)?
+            .ok_or_else(|| anyhow!("unspawned in-process child {thread_id} is not an in-process chain member"))?;
+        replay_in_process_chain_member_link_locked(
+            &g,
+            &chain_root_id,
+            &parent_thread_id,
+            &thread_id,
+            "dispatch",
+            true,
+        )
     }
 
     /// Every transitive descendant thread id of `root_thread_id`, breadth-first
@@ -25882,6 +26409,7 @@ mod tests {
             )
             .unwrap(),
             channel_bootstrap_capability_hash: "4".repeat(64),
+            admitted_adapter_request_base64: None,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -32522,6 +33050,516 @@ mod tests {
                 .expect("read parent descendants")
                 .is_empty()
         );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    fn in_process_child_birth_events() -> Vec<NewEventRecord> {
+        vec![NewEventRecord {
+            event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({}),
+        }]
+    }
+
+    fn in_process_child_record(child_id: &str, parent_id: &str) -> NewThreadRecord {
+        let mut record = thread_record(child_id, parent_id);
+        record.upstream_thread_id = Some(parent_id.to_string());
+        record
+    }
+
+    fn in_process_reservation_phase(
+        store: &StateStore,
+        thread_id: &str,
+    ) -> Option<runtime_db::InProcessHandlerReservationPhase> {
+        store
+            .in_process_handler_reservation(thread_id)
+            .expect("read in-process reservation")
+            .map(|reservation| reservation.phase)
+    }
+
+    fn requested_failure() -> FinalizeThreadRecord {
+        FinalizeThreadRecord {
+            status: ThreadStatus::Failed.as_str().to_string(),
+            outcome_code: Some(ThreadStatus::Failed.as_str().to_string()),
+            result_json: None,
+            error_json: Some(json!({"reason": "handler_failed"})),
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
+        }
+    }
+
+    #[test]
+    fn in_process_child_birth_links_the_child_to_its_live_parent() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-live";
+        let child_id = "T-in-process-child-live";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        let _birth = store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process child");
+
+        assert_eq!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants"),
+            [child_id]
+        );
+        assert_eq!(
+            in_process_reservation_phase(&store, child_id),
+            Some(runtime_db::InProcessHandlerReservationPhase::Running)
+        );
+        assert_eq!(
+            store
+                .in_process_handler_chain_root_id(child_id)
+                .expect("child runtime row names its chain"),
+            parent_id
+        );
+        // The birth's own link is replayed exactly, with no stop to inherit.
+        assert_eq!(
+            store
+                .record_child_link(parent_id, child_id, "dispatch")
+                .expect("exact replay of the birth link"),
+            None
+        );
+        let error = store
+            .record_child_link("T-some-other-parent", child_id, "dispatch")
+            .expect_err("an in-process member is linked only to its upstream");
+        assert!(error.to_string().contains("was born under"));
+        let child = store
+            .get_thread(child_id)
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.status, ThreadStatus::Running.as_str());
+        assert_eq!(child.runtime.stop_intent, None);
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    fn birth_in_process_child(
+        store: &StateStore,
+        parent_id: &str,
+        child_id: &str,
+    ) -> InProcessHandlerControl {
+        birth_unspawned_in_process_child(store, parent_id, child_id).0
+    }
+
+    fn birth_unspawned_in_process_child(
+        store: &StateStore,
+        parent_id: &str,
+        child_id: &str,
+    ) -> (InProcessHandlerControl, UnspawnedInProcessChild) {
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        let (_, unspawned) = store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process child");
+        (owner, unspawned)
+    }
+
+    #[test]
+    fn recorded_thread_placement_proves_in_process_lineage() {
+        let store = test_store();
+        let parent_id = "T-placement-parent";
+        let child_id = "T-placement-inline-child";
+        let plain_member_id = "T-placement-plain-member";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let owner = birth_in_process_child(&store, parent_id, child_id);
+        store
+            .create_thread_for_test(&in_process_child_record(plain_member_id, parent_id))
+            .expect("plain chain member");
+
+        assert_eq!(
+            store
+                .recorded_thread_placement(parent_id)
+                .expect("place root"),
+            RecordedThreadPlacement::Root
+        );
+        assert_eq!(
+            store
+                .recorded_thread_placement(child_id)
+                .expect("place inline child"),
+            RecordedThreadPlacement::InProcessMember {
+                chain_root_id: parent_id.to_owned(),
+                upstream_thread_id: parent_id.to_owned(),
+            }
+        );
+        assert_eq!(
+            store
+                .recorded_thread_placement(plain_member_id)
+                .expect("place plain member"),
+            RecordedThreadPlacement::OtherMember {
+                chain_root_id: parent_id.to_owned(),
+            }
+        );
+        assert!(store.recorded_thread_placement("T-absent").is_err());
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    #[test]
+    fn in_process_child_link_replay_refuses_once_shutdown_closed_admission() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-shutdown";
+        let child_id = "T-in-process-child-shutdown";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let (owner, unspawned) = birth_unspawned_in_process_child(&store, parent_id, child_id);
+        store
+            .close_process_attachment_admission()
+            .expect("close shutdown admission");
+
+        let error = store
+            .link_unspawned_in_process_child(unspawned)
+            .expect_err("a closed gate must refuse the pre-spawn replay");
+        assert!(
+            error.to_string().contains("closed for daemon shutdown"),
+            "unexpected refusal: {error:#}"
+        );
+        // The owner settles the unstarted child through the closed gate.
+        store
+            .finalize_in_process_handler_owned(child_id, &owner, &requested_failure())
+            .expect("owner settles the unstarted child");
+        assert_eq!(
+            store
+                .get_thread(child_id)
+                .expect("read child")
+                .expect("child row")
+                .status,
+            ThreadStatus::Failed.as_str()
+        );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    #[test]
+    fn in_process_child_link_replay_inherits_a_stop_landed_after_birth() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-late-stop";
+        let child_id = "T-in-process-child-late-stop";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let (owner, unspawned) = birth_unspawned_in_process_child(&store, parent_id, child_id);
+        assert_eq!(
+            store
+                .get_thread(child_id)
+                .expect("read child")
+                .expect("child row")
+                .runtime
+                .stop_intent,
+            None
+        );
+        store
+            .request_thread_stop(parent_id, StopIntent::Kill)
+            .expect("tombstone parent after the birth");
+
+        // A plain link request is a replay only: without the birth's
+        // unspawned witness it never inherits a stop landed after the birth.
+        assert_eq!(
+            store
+                .record_child_link(parent_id, child_id, "dispatch")
+                .expect("plain replay after the birth"),
+            None
+        );
+        assert_eq!(
+            store
+                .link_unspawned_in_process_child(unspawned)
+                .expect("witnessed replay before the handler spawns"),
+            Some(StopIntent::Kill)
+        );
+        // Inherited once, the stop is the child's own row and every later
+        // replay reports it.
+        assert_eq!(
+            store
+                .record_child_link(parent_id, child_id, "dispatch")
+                .expect("replay after inheritance"),
+            Some(StopIntent::Kill)
+        );
+        store
+            .finalize_in_process_handler_owned(child_id, &owner, &requested_failure())
+            .expect("owner settles the unstarted child");
+        assert_eq!(
+            store
+                .get_thread(child_id)
+                .expect("read child")
+                .expect("child row")
+                .status,
+            ThreadStatus::Killed.as_str()
+        );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    #[test]
+    fn in_process_child_born_under_a_stopped_parent_inherits_the_stop() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-stopped";
+        let child_id = "T-in-process-child-stopped";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        store
+            .request_thread_stop(parent_id, StopIntent::Cancel)
+            .expect("tombstone parent");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        let _birth = store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("a live parent with a stop still births its child");
+
+        // Link and inherited stop landed together with the birth.
+        assert_eq!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants"),
+            [child_id]
+        );
+        assert_eq!(
+            store
+                .get_thread(child_id)
+                .expect("read child")
+                .expect("child row")
+                .runtime
+                .stop_intent,
+            Some(StopIntent::Cancel)
+        );
+        // The birth caller's link request reports the inherited stop instead
+        // of refusing the in-process child.
+        assert_eq!(
+            store
+                .record_child_link(parent_id, child_id, "dispatch")
+                .expect("replay reports the inherited stop"),
+            Some(StopIntent::Cancel)
+        );
+        // Any terminal the owner writes settles to the inherited stop.
+        let outcome = store
+            .finalize_in_process_handler_owned(child_id, &owner, &requested_failure())
+            .expect("owner settles the newborn child");
+        assert!(matches!(outcome, FinalizeIfNonterminalOutcome::Finalized { .. }));
+        let child = store
+            .get_thread(child_id)
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.status, ThreadStatus::Cancelled.as_str());
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    #[test]
+    fn in_process_child_birth_refuses_a_terminal_parent_before_any_write() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-terminal";
+        let child_id = "T-in-process-child-refused";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        store
+            .finalize_thread(
+                parent_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .expect("complete parent");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+
+        let error = store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect_err("a terminal parent cannot acquire a live child");
+        assert!(
+            error.to_string().contains("under terminal parent"),
+            "unexpected refusal: {error:#}"
+        );
+        assert!(!owner.has_committed_birth());
+        assert_eq!(in_process_reservation_phase(&store, child_id), None);
+        assert!(store.in_process_handler_chain_root_id(child_id).is_err());
+        assert!(store.get_thread(child_id).expect("read child").is_none());
+        assert!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants")
+                .is_empty()
+        );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
+    }
+
+    #[test]
+    fn in_process_child_interrupted_before_its_link_is_relinked_by_reconcile() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-crash";
+        let child_id = "T-in-process-child-crash";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        store
+            .fixture_create_in_process_child_interrupted_before_link(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process child without its link");
+        assert!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants")
+                .is_empty()
+        );
+        assert_eq!(
+            in_process_reservation_phase(&store, child_id),
+            Some(runtime_db::InProcessHandlerReservationPhase::Pending)
+        );
+        // The daemon dies: the owner is gone and the parent is stopped before
+        // boot reconciliation reaches the published pending birth.
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("drop in-process child owner")
+        );
+        store
+            .request_thread_stop(parent_id, StopIntent::Kill)
+            .expect("tombstone parent");
+
+        store
+            .reconcile_in_process_handler_birth_running(child_id)
+            .expect("reconcile the published pending birth");
+        assert_eq!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants"),
+            [child_id]
+        );
+        assert_eq!(
+            in_process_reservation_phase(&store, child_id),
+            Some(runtime_db::InProcessHandlerReservationPhase::Running)
+        );
+        // No handler ran for the ownerless member, so it inherits the stop.
+        assert_eq!(
+            store
+                .get_thread(child_id)
+                .expect("read child")
+                .expect("child row")
+                .runtime
+                .stop_intent,
+            Some(StopIntent::Kill)
+        );
+    }
+
+    #[test]
+    fn terminal_in_process_child_without_its_link_is_relinked_at_settlement() {
+        let store = test_store();
+        let parent_id = "T-in-process-parent-settle";
+        let child_id = "T-in-process-child-settle";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        store
+            .fixture_create_in_process_child_interrupted_before_link(
+                &in_process_child_record(child_id, parent_id),
+                in_process_child_birth_events(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process child without its link");
+        store
+            .finalize_in_process_handler_owned(child_id, &owner, &requested_failure())
+            .expect("owner settles its child");
+        assert!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants")
+                .is_empty()
+        );
+
+        assert!(
+            store
+                .settle_in_process_handler_reservation_owned(child_id, &owner)
+                .expect("settle terminal reservation")
+        );
+        assert_eq!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants"),
+            [child_id]
+        );
+        let child = store
+            .get_thread(child_id)
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.status, ThreadStatus::Failed.as_str());
+        assert_eq!(child.runtime.stop_intent, None);
         assert!(
             store
                 .unregister_in_process_handler(child_id, &owner)

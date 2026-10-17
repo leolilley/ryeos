@@ -105,6 +105,31 @@ pub enum RouteDispatchError {
     },
 }
 
+/// The body a handler route returns when it fails internally. A handler
+/// route's caller may be unauthenticated, so the body names no path, digest,
+/// item or cause; the detail goes to the daemon log.
+pub(crate) const HANDLER_ROUTE_FAILURE: &str = "handler route failed";
+
+impl RouteDispatchError {
+    /// Replace an internal failure's detail with the fixed handler-route body
+    /// and log the detail. Every other variant already carries a body chosen
+    /// for the caller and passes through unchanged.
+    pub(crate) fn conceal_handler_detail(self, route_id: &str, source_ref: &str) -> Self {
+        match self {
+            Self::Internal(detail) => {
+                tracing::error!(
+                    route = route_id,
+                    source = source_ref,
+                    %detail,
+                    "handler route failed"
+                );
+                Self::Internal(HANDLER_ROUTE_FAILURE.to_owned())
+            }
+            other => other,
+        }
+    }
+}
+
 impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
@@ -229,6 +254,28 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(actual, json!({ "error": msg }));
+    }
+
+    #[tokio::test]
+    async fn handler_internal_failure_body_is_fixed() {
+        let detail = "canonicalize /srv/node/.ai/bundles/x/.ai/tools/x/t.py: no such file";
+        let response = RouteDispatchError::Internal(detail.to_owned())
+            .conceal_handler_detail("probe/anonymous", "tool:x/t")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(actual, json!({ "error": super::HANDLER_ROUTE_FAILURE }));
+    }
+
+    #[test]
+    fn handler_concealment_keeps_caller_facing_refusals() {
+        match RouteDispatchError::BadRequest("invalid JSON body: eof".to_owned())
+            .conceal_handler_detail("probe/anonymous", "tool:x/t")
+        {
+            RouteDispatchError::BadRequest(message) => assert_eq!(message, "invalid JSON body: eof"),
+            other => panic!("expected the caller-facing refusal unchanged, got {other:?}"),
+        }
     }
 
     #[tokio::test]

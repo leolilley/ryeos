@@ -62,6 +62,24 @@ fn exact_release_payload_ownership(
     item.into_current()
 }
 
+/// Retain the exact ownership a release is built from in the publication CAS,
+/// addressed by the content hash every release input commits to, so a
+/// verifier holding only the fetched CAS can resolve it.
+fn retain_release_ownership(
+    state: &AppState,
+    ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+) -> anyhow::Result<()> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    let hash = cas.store_object(&ownership.to_value()?)?;
+    anyhow::ensure!(
+        hash == ownership.content_hash()?,
+        "retained payload ownership identity changed"
+    );
+    Ok(())
+}
+
 async fn resolve_release_source_generation(
     project_identity: &Path,
     snapshot_hash: &str,
@@ -292,6 +310,7 @@ fn authority_measure_handler(
                 && calibration.substrate_protocol == installed_substrate.protocol,
             "authority calibration measured another installed substrate"
         );
+        require_calibrated_composition(&calibration, &installed_substrate)?;
         anyhow::ensure!(
             calibration.portable.owner_principal == request.portable_qualification_owner_principal
                 && calibration.portable.qualification_attestation_hash
@@ -1003,7 +1022,7 @@ fn native_environment_selections(
 fn calibration_source_bundle_roots(source_root: &Path) -> Vec<PathBuf> {
     vec![
         source_root.join("bundles/bundle-release"),
-        source_root.join("bundles/standard"),
+        source_root.join("bundles/environment-qualification"),
     ]
 }
 
@@ -1380,6 +1399,24 @@ fn verified_calibration_environment(
     Ok(result)
 }
 
+/// Refuse unless this node runs under the init profile and host class the
+/// calibration was measured under, as its signed substrate identity binds.
+fn require_calibrated_composition(
+    calibration: &ryeos_app::bundle_publication::calibration::AuthorityCalibrationEvidence,
+    installed: &ryeos_node::SubstrateIdentity,
+) -> anyhow::Result<()> {
+    let host_class = installed.bound_host_class()?;
+    anyhow::ensure!(
+        installed.node_profile.as_deref() == Some(calibration.node_profile.as_str())
+            && host_class == calibration.host_class,
+        "authority calibration was measured under profile `{}` on host class `{}`; this node runs profile `{}` on host class `{host_class}`",
+        calibration.node_profile,
+        calibration.host_class,
+        installed.node_profile.as_deref().unwrap_or("none"),
+    );
+    Ok(())
+}
+
 fn calibrated_catalog_environment(
     catalog: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundleCatalogPolicy,
     source_generation: &ReleaseSourceGeneration,
@@ -1401,6 +1438,12 @@ fn calibrated_catalog_environment(
         calibration.execution_environment == catalog.calibration_execution_environment,
         "catalog execution environment differs from its signed calibration"
     );
+    // Release products, the substrate build receipt among them, come only
+    // from the composition and kind of host the calibration measured.
+    require_calibrated_composition(
+        &calibration,
+        &ryeos_node::load_verified_substrate_identity(&state.config.app_root)?,
+    )?;
     let selected = CalibrationEnvironmentSelection {
         static_link_inputs: catalog
             .calibration_execution_environment
@@ -1607,6 +1650,11 @@ async fn run_authority_calibration(
         schema: AUTHORITY_CALIBRATION_SCHEMA.to_owned(),
         source_snapshot_hash: request.source_snapshot_hash,
         node_signer_fingerprint: state.identity.fingerprint().to_owned(),
+        node_profile: installed
+            .node_profile
+            .clone()
+            .context("calibration requires a node initialized with a profile")?,
+        host_class: installed.bound_host_class()?.to_owned(),
         substrate_image_digest: installed.image_digest,
         substrate_protocol: installed.protocol,
         portable: portable.lane,
@@ -2354,7 +2402,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
             &binding.catalog_namespace,
         )?;
         let proof =
-            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new(
+            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new_resolving(
                 Arc::new(self.authority.cas_store()?),
                 policy,
             )?;
@@ -2384,7 +2432,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
             &binding.catalog_namespace,
         )?;
         let proof =
-            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new(
+            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new_resolving(
                 Arc::new(self.authority.cas_store()?),
                 standalone,
             )?;
@@ -2944,7 +2992,6 @@ fn core_seed_build_handler(
     Box::pin(async move {
         let request: ryeos_app::bundle_publication::core_seed::CoreSeedBuildRequest =
             crate::handler_error::parse_request(params)?;
-        request.validate()?;
         anyhow::ensure!(
             request.child_product_selections.is_empty(),
             "Core seed service callers cannot provide internal child selectors"
@@ -2978,14 +3025,8 @@ fn core_seed_build_handler(
             "Core seed build does not match current publication policy"
         );
         let ownership = exact_release_payload_ownership(&source_generation, &state)?;
-        let admitted_input =
-            ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput::from_core_seed_value(
-                &request.release_input,
-            )?;
-        ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
-            &ownership,
-            &admitted_input,
-        )?;
+        request.validate_with_ownership(&ownership)?;
+        retain_release_ownership(&state, &ownership)?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
         let measured_target = serde_json::to_value(qualified_platform_target(
@@ -3012,7 +3053,7 @@ fn core_seed_build_handler(
                 recipe_request.clone(),
             ))
             .await?;
-        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint)?;
+        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint, &ownership)?;
         let signed_recipe = recipe["signed_config"]
             .as_str()
             .context("Core seed recipe authorization omitted signed Config bytes")?
@@ -3080,7 +3121,6 @@ fn core_seed_capture_handler(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
         let request: CoreSeedCaptureRequest = crate::handler_error::parse_request(params)?;
-        request.build.validate()?;
         anyhow::ensure!(
             request.build.child_product_selections.is_empty(),
             "Core seed capture callers cannot provide internal child selectors"
@@ -3117,6 +3157,8 @@ fn core_seed_capture_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        request.build.validate_with_ownership(&ownership)?;
         let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
@@ -3154,7 +3196,7 @@ fn core_seed_capture_handler(
                 recipe_request.clone(),
             ))
             .await?;
-        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint)?;
+        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint, &ownership)?;
         let signed_capture_recipe = recipe["signed_config"]
             .as_str()
             .context("Core seed capture recipe omitted signed Config bytes")?
@@ -3210,7 +3252,6 @@ fn core_seed_qualify_handler(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
         let request: CoreSeedQualifyRequest = crate::handler_error::parse_request(params)?;
-        request.build.validate()?;
         let project = request.build.release_input["project_path"]
             .as_str()
             .context("Core seed release input has no project path")?;
@@ -3220,6 +3261,8 @@ fn core_seed_qualify_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        request.build.validate_with_ownership(&ownership)?;
         let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
@@ -3413,6 +3456,7 @@ fn generation_build_handler(
                 &request.release_input,
             )?;
         let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        retain_release_ownership(&state, &ownership)?;
         ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
             &ownership,
             &admitted_input,
@@ -4723,7 +4767,7 @@ mod tests {
             calibration_source_bundle_roots(&root),
             vec![
                 root.join("bundles/bundle-release"),
-                root.join("bundles/standard"),
+                root.join("bundles/environment-qualification"),
             ]
         );
     }
