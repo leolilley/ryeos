@@ -177,7 +177,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIn("#   executor_id: tool:ryeos/development/authoring-environment-production/runtime",
                       finalizer_source)
         self.assertIn("#     type: strict_signed_project_bundle", finalizer_source)
-        self.assertIn("#     bundle_name: standard", finalizer_source)
+        self.assertIn("#     bundle_name: environment-qualification", finalizer_source)
         intent_path = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
         self.assertIn("#     config_path: " + intent_path, finalizer_source)
         self.assertRegex(load(intent_path)["expected_sha256"], r"^[0-9a-f]{64}$")

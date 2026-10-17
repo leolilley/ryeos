@@ -1536,7 +1536,7 @@ mod tests {
         fn write_client_kind_schema(&self) {
             let path = workspace_root()
                 .join("bundles")
-                .join("standard")
+                .join("ryeos-ui")
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
                 .join("engine")

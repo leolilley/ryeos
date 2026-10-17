@@ -50,7 +50,7 @@ def authored_request(lock):
     intent = yaml.safe_load(INTENT.read_text())
     intent["expected_sha256"] = hashlib.sha256(lock).hexdigest()
     return {"resolved_config": {"value": intent, "source": {
-        "bundle_name": "standard", "config_path": INTENT_PATH,
+        "bundle_name": "environment-qualification", "config_path": INTENT_PATH,
         "signer_fingerprint": SIGNER,
     }}}
 
@@ -77,7 +77,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
     def test_signed_tool_selects_exact_source_config_and_refuses_caller_parameters(self):
         tool = tool_header()
         self.assertEqual(tool["config_resolve"], {
-            "type": "strict_signed_project_bundle", "bundle_name": "standard",
+            "type": "strict_signed_project_bundle", "bundle_name": "environment-qualification",
             "config_path": INTENT_PATH,
         })
         self.assertEqual(tool["config_schema"], {
@@ -94,7 +94,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
         self.assertNotIn("EXPECTED_SHA256", FINALIZER.read_text())
         self.assertEqual(self.module.admitted_lock_expectation({"resolved_config": {
             "value": yaml.safe_load(INTENT.read_text()), "source": {
-                "bundle_name": "standard", "config_path": INTENT_PATH,
+                "bundle_name": "environment-qualification", "config_path": INTENT_PATH,
                 "signer_fingerprint": SIGNER,
             },
         }}), yaml.safe_load(INTENT.read_text())["expected_sha256"])

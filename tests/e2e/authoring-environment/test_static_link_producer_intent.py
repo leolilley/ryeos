@@ -61,7 +61,7 @@ def authored_request(body):
     intent = yaml.safe_load(INTENT.read_text())
     intent["expected_contract_body_sha256"] = hashlib.sha256(body).hexdigest()
     return {"resolved_config": {"value": intent, "source": {
-        "bundle_name": "standard", "config_path": INTENT_PATH,
+        "bundle_name": "environment-qualification", "config_path": INTENT_PATH,
         "signer_fingerprint": SIGNER,
     }}}
 
@@ -91,7 +91,7 @@ class StaticLinkProducerIntentTests(unittest.TestCase):
             "type": "object", "properties": {}, "additionalProperties": False,
         })
         self.assertEqual(tool["config_resolve"], {
-            "type": "strict_signed_project_bundle", "bundle_name": "standard",
+            "type": "strict_signed_project_bundle", "bundle_name": "environment-qualification",
             "config_path": INTENT_PATH,
         })
         self.assertEqual(tool["workspace_access"], "immutable_current_generation")
