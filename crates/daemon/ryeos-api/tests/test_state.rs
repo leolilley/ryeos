@@ -157,6 +157,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         &[
             core_bundle.join(".ai/node/engine/kinds"),
             standard_bundle.join(".ai/node/engine/kinds"),
+            ryeos_ui_bundle.join(".ai/node/engine/kinds"),
         ],
         &trust_store,
     )

@@ -1,8 +1,6 @@
 name: bundle-release
 version: "0.1.0"
 description: "Source-bound bundle build, qualification, signing, composition, and remote publication"
-provides_kinds:
-  - release_candidate
 requires_kinds:
   - config
   - graph

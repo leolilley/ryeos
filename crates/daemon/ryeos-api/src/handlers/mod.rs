@@ -112,7 +112,6 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
-pub mod seat;
 pub mod sign;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
@@ -180,11 +179,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
     sign::DESCRIPTOR,
-    seat::OPEN_DESCRIPTOR,
-    seat::LIST_DESCRIPTOR,
-    seat::APPEND_DESCRIPTOR,
-    seat::TOUCH_DESCRIPTOR,
-    seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
     accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
