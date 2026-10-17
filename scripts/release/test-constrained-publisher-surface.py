@@ -40,7 +40,7 @@ assert "ct_eq" in SERVER
 assert "generic" in SERVER.lower() and "signing route" in SERVER.lower()
 assert "secret-mounted path" in DOC
 assert "loopback" in DOC and "HTTPS" in DOC
-for option in ("publisher_key", "bearer_file", "cas_root", "policy"):
+for option in ("publisher_key", "bearer_file", "cas_root", "policy", "bundle_release_root"):
     assert option in COMMAND
 assert "is_loopback" in COMMAND
 assert "LocalConstrainedPublisherAuthority::new_with_cas" in COMMAND

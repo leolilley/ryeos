@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Golden-table gate for the ownership-derived cargo features and bundle-sets.sh."""
 
+import base64
 import hashlib
 import json
 import importlib.util
@@ -8,6 +9,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[2]
 SETS_SH = ROOT / "scripts/pkg/bundle-sets.sh"
@@ -28,8 +32,23 @@ def set_ids():
     return shell("ryeos_bundle_set_ids; echo release-artifacts").decode().split()
 
 
+# Fixtures are signed by a throwaway key that a temporary trust file pins, so
+# the loader's full signature verification runs on them.
+TEST_KEY = Ed25519PrivateKey.generate()
+TEST_PUBLIC = TEST_KEY.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+TEST_TRUST = Path(tempfile.mkdtemp()) / "trust.toml"
+TEST_TRUST.write_text(f'public_key = "ed25519:{base64.b64encode(TEST_PUBLIC).decode()}"\n'
+                      f'fingerprint = "{hashlib.sha256(TEST_PUBLIC).hexdigest()}"\nowner = "test"\n')
+
+
 def signed(body):
-    return f"# ryeos:signed:2026-01-01T00:00:00Z:{hashlib.sha256(body.encode()).hexdigest()}:c2ln:{'0' * 64}\n{body}"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    signature = base64.b64encode(TEST_KEY.sign(digest.encode())).decode()
+    return f"# ryeos:signed:2026-01-01T00:00:00Z:{digest}:{signature}:{hashlib.sha256(TEST_PUBLIC).hexdigest()}\n{body}"
+
+
+def load_fixture(path):
+    return tool.load_ownership(path, TEST_TRUST)
 
 
 def fixture(edit):
@@ -147,7 +166,7 @@ class RejectionTests(unittest.TestCase):
     def test_duplicate_package_binary_is_rejected(self):
         path = fixture(lambda body: body.replace("binary: ryeos-web-tools", "binary: ryeos-browser-tools"))
         with self.assertRaisesRegex(tool.OwnershipError, "more than one owner"):
-            tool.load_ownership(path)
+            load_fixture(path)
 
     def test_duplicate_bundle_in_list_is_rejected(self):
         with self.assertRaisesRegex(tool.OwnershipError, "duplicate bundle"):
@@ -160,7 +179,7 @@ class RejectionTests(unittest.TestCase):
             return body.replace("binary: ryeos-worker-execution-runtime\n          cargo_package: ryeos-structured-session\n          build_class: static",
                                 "binary: ryeos-worker-execution-runtime\n          cargo_package: ryeos-structured-session\n          build_class: release")
         path = fixture(edit)
-        ownership = tool.load_ownership(path)
+        ownership = load_fixture(path)
         with self.assertRaisesRegex(tool.OwnershipError, "disagree on build class"):
             tool.cargo_features(ownership, ["core"], "ryeos-structured-session")
 
@@ -168,13 +187,13 @@ class RejectionTests(unittest.TestCase):
         path = fixture(lambda body: body.replace("host_packages: [ryeos-api, ryeos-cli, ryeosd]",
                                                  "host_packages: [ryeos-api, ryeos-cli, ryeos-core-tools, ryeosd]"))
         with self.assertRaisesRegex(tool.OwnershipError, "both a host package and a payload package"):
-            tool.load_ownership(path)
+            load_fixture(path)
 
     def test_no_default_package_payload_without_features_is_rejected_at_load(self):
         path = fixture(lambda body: body.replace("no_default_features_packages: [ryeos-handler-bins]",
                                                  "no_default_features_packages: [ryeos-handler-bins, ryeos-web-tools]"))
         with self.assertRaisesRegex(tool.OwnershipError, "explicit feature composition"):
-            tool.load_ownership(path)
+            load_fixture(path)
 
     def test_non_string_plain_scalars_are_rejected(self):
         for scalar in ("yes", "No", "on", "OFF", "true", "null", "~", "1.5", "0x1f", "12", "1_000", "2026-01-01"):
@@ -197,12 +216,12 @@ class RejectionTests(unittest.TestCase):
         path = Path(tempfile.mkdtemp()) / "ownership.yaml"
         path.write_text(signed(body).replace("ryeos-web-tools", "ryeos-web-toolz", 1))
         with self.assertRaisesRegex(tool.OwnershipError, "body hash"):
-            tool.load_ownership(path)
+            load_fixture(path)
 
     def test_wrong_schema_is_rejected(self):
         path = fixture(lambda body: body.replace("bundle_payload_ownership.v2", "bundle_payload_ownership.v1"))
         with self.assertRaisesRegex(tool.OwnershipError, "schema must be"):
-            tool.load_ownership(path)
+            load_fixture(path)
 
 
 if __name__ == "__main__":

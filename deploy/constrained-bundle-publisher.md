@@ -92,8 +92,11 @@ node bundle set on the same host neither installs nor removes it. Removing or
 upgrading the standalone service requires its own process/service-manager
 lifecycle and must not be inferred from one app root's selected bundle set.
 
-The binary accepts `--publisher-key`, `--bearer-file`, `--cas-root`, and
-`--policy`, and defaults to `127.0.0.1:7411`. The strict JSON policy pins the catalog namespace,
+The binary accepts `--publisher-key`, `--bearer-file`, `--cas-root`,
+`--policy`, and `--bundle-release-root`, and defaults to `127.0.0.1:7411`.
+`--bundle-release-root` names an installed `bundle-release` bundle tree whose
+signed payload ownership Config, signed by the catalog publisher key, bounds the
+payloads and Cargo features of every Core seed recipe the publisher signs. The strict JSON policy pins the catalog namespace,
 catalog publisher fingerprint, bundle-publication policy digest and trust epoch; qualification signer public
 key, policy, verifier definition and artifact identities, and required claims;
 and publisher-tool definition and artifact identities. Unknown fields are

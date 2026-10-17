@@ -396,11 +396,44 @@ mod policy_invariant_tests {
     };
     use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection, CalibrationProductSelection};
     use ryeos_bundle_publication_contract::{
-        BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration, BundleTarget,
+        BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration,
+        BundlePayloadOwnership, BundleTarget,
     };
     use serde_json::{Value, json};
 
-    fn release_input(native: bool) -> Value {
+    /// Payload ownership for `example`: one native payload granting
+    /// `features`, or a data-only bundle.
+    fn ownership(native: bool, features: &[&str]) -> BundlePayloadOwnership {
+        let (data_only, bundles) = if native {
+            (
+                json!([]),
+                json!([{
+                    "bundle_name": "example",
+                    "bundle_sets": ["example"],
+                    "host_features": [],
+                    "payloads": [{
+                        "binary": "example-bin", "cargo_package": "example-bin",
+                        "build_class": "release", "cargo_features": features
+                    }]
+                }]),
+            )
+        } else {
+            (json!(["example"]), json!([]))
+        };
+        BundlePayloadOwnership::from_current_value(&json!({
+            "schema": "ryeos.bundle_payload_ownership.v2",
+            "kind": "bundle_payload_ownership",
+            "host_packages": [],
+            "no_default_features_packages": ["example-bin"],
+            "feature_implications": {},
+            "data_only_bundles": data_only,
+            "host_only_bundles": [],
+            "bundles": bundles,
+        }))
+        .unwrap()
+    }
+
+    fn release_input(native: bool, features: &[&str]) -> Value {
         let target = if native {
             json!({"kind":"triple","triple":"x86_64-unknown-linux-gnu"})
         } else {
@@ -419,13 +452,13 @@ mod policy_invariant_tests {
             "target": target,
             "build_profile": "release",
             "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
-            "payload_ownership_content_hash": "b".repeat(64),
+            "payload_ownership_content_hash": ownership(native, features).content_hash().unwrap(),
             "payloads": if native { json!([{
                 "bundle":"example", "binary":"example-bin", "cargo_package":"example-bin",
-                "build_class":"release", "bundle_sets":["example"], "required_features":[]
+                "build_class":"release", "bundle_sets":["example"], "required_features":features
             }]) } else { json!([]) },
             "cargo_packages": if native { json!(["example-bin"]) } else { json!([]) },
-            "cargo_feature_selections": if native { json!([{"cargo_package":"example-bin","features":[]}]) } else { json!([]) },
+            "cargo_feature_selections": if native { json!([{"cargo_package":"example-bin","features":features}]) } else { json!([]) },
             "build_classes": if native { json!(["release"]) } else { json!([]) },
             "requires_binary_build": native,
             "clean_output_required": true,
@@ -433,7 +466,7 @@ mod policy_invariant_tests {
         })
     }
 
-    fn generation(target: Value) -> BundleGeneration {
+    fn generation(target: Value, owner_hash: String) -> BundleGeneration {
         serde_json::from_value(json!({
             "schema": BUNDLE_GENERATION_SCHEMA,
             "kind": BUNDLE_GENERATION_KIND,
@@ -452,6 +485,7 @@ mod policy_invariant_tests {
             "accepted_capture_result_hash": "2".repeat(64),
             "selected_signed_product_identity": "signed_example",
             "selected_signed_product_witness": "3".repeat(64),
+            "payload_ownership_hash": owner_hash,
             "source_snapshot_hash": "a".repeat(64),
             "qualification_evidence_hashes": ["4".repeat(64)],
             "provenance_hash": null,
@@ -496,22 +530,87 @@ mod policy_invariant_tests {
 
     #[test]
     fn non_core_release_metadata_must_match_authenticated_input_in_both_lanes() {
-        let portable_input = release_input(false);
-        let native_input = release_input(true);
-        let portable_generation = generation(portable_input["target"].clone());
-        let native_generation = generation(native_input["target"].clone());
-        assert!(require_non_core_release_input(&portable_generation, &portable_input).is_ok());
-        assert!(require_non_core_release_input(&native_generation, &native_input).is_ok());
-        assert!(require_non_core_release_input(&portable_generation, &native_input).is_err());
-        assert!(require_non_core_release_input(&native_generation, &portable_input).is_err());
+        let portable_owner = ownership(false, &[]);
+        let native_owner = ownership(true, &[]);
+        let portable_input = release_input(false, &[]);
+        let native_input = release_input(true, &[]);
+        let portable_generation = generation(portable_input["target"].clone(), portable_owner.content_hash().unwrap());
+        let native_generation = generation(native_input["target"].clone(), native_owner.content_hash().unwrap());
+        let check = |generation: &BundleGeneration, input: &Value, owner: &BundlePayloadOwnership| {
+            require_non_core_release_input(generation, input, owner)
+        };
+        assert!(check(&portable_generation, &portable_input, &portable_owner).is_ok());
+        assert!(check(&native_generation, &native_input, &native_owner).is_ok());
+        assert!(check(&portable_generation, &native_input, &portable_owner).is_err());
+        assert!(check(&native_generation, &portable_input, &native_owner).is_err());
         for field in ["bundle_name", "source_snapshot_hash"] {
             let mut altered = portable_input.clone();
             altered[field] = json!("different");
-            assert!(require_non_core_release_input(&portable_generation, &altered).is_err());
+            assert!(check(&portable_generation, &altered, &portable_owner).is_err());
         }
         let mut altered = portable_input.clone();
         altered["authored_manifest"]["version"] = json!("2.0.0");
-        assert!(require_non_core_release_input(&portable_generation, &altered).is_err());
+        assert!(check(&portable_generation, &altered, &portable_owner).is_err());
+    }
+
+    #[test]
+    fn consumer_resolves_committed_ownership_from_the_fetched_cas() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temp.path().to_path_buf());
+        let owner = ownership(true, &["granted"]);
+        let input = release_input(true, &["granted"]);
+        // Absent from the CAS: refused.
+        assert!(super::resolve_committed_ownership(&cas, &input).is_err());
+        cas.store_object(&owner.to_value().unwrap()).unwrap();
+        let resolved = super::resolve_committed_ownership(&cas, &input).unwrap();
+        let generation = generation(input["target"].clone(), owner.content_hash().unwrap());
+        assert!(require_non_core_release_input(&generation, &input, &resolved).is_ok());
+        // A different ownership stored in the CAS does not satisfy the commitment.
+        let other = ownership(true, &["forged"]);
+        cas.store_object(&other.to_value().unwrap()).unwrap();
+        let mut elsewhere = input.clone();
+        elsewhere["payload_ownership_content_hash"] = json!(other.content_hash().unwrap());
+        let widened = super::resolve_committed_ownership(&cas, &elsewhere).unwrap();
+        assert!(require_non_core_release_input(&generation, &input, &widened).is_err());
+        // Tampered bytes under the committed hash are refused.
+        let hash = owner.content_hash().unwrap();
+        let path = lillux::cas::shard_path(temp.path(), "objects", &hash, ".json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, other.to_value().unwrap().to_string()).unwrap();
+        assert!(super::resolve_committed_ownership(&cas, &input).is_err());
+    }
+
+    #[test]
+    fn proof_admits_granted_features_and_refuses_forged_ones() {
+        let owner = ownership(true, &["granted"]);
+        let generation = generation(release_input(true, &["granted"])["target"].clone(), owner.content_hash().unwrap());
+        let granted = release_input(true, &["granted"]);
+        assert!(require_non_core_release_input(&generation, &granted, &owner).is_ok());
+        let forged = release_input(true, &["forged"]);
+        assert!(require_non_core_release_input(&generation, &forged, &owner).is_err());
+        let mut widened = granted.clone();
+        widened["payloads"][0]["required_features"] = json!(["granted", "forged"]);
+        widened["cargo_feature_selections"][0]["features"] = json!(["granted", "forged"]);
+        assert!(require_non_core_release_input(&generation, &widened, &owner).is_err());
+        let mut stripped = granted;
+        stripped["cargo_feature_selections"][0]["features"] = json!([]);
+        assert!(require_non_core_release_input(&generation, &stripped, &owner).is_err());
+    }
+
+    #[test]
+    fn generation_ownership_binding_refuses_a_different_valid_ownership() {
+        let owner = ownership(true, &["granted"]);
+        let other = ownership(true, &["forged"]);
+        let generation = generation(
+            release_input(true, &["granted"])["target"].clone(),
+            owner.content_hash().unwrap(),
+        );
+        assert!(super::require_generation_ownership(&generation, &owner).is_ok());
+        let refusal = super::require_generation_ownership(&generation, &other)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains(&owner.content_hash().unwrap()));
+        assert!(refusal.contains(&other.content_hash().unwrap()));
     }
 
     #[test]
@@ -619,10 +718,50 @@ pub struct StandalonePublisherProof {
     cas: Arc<lillux::CasStore>,
     policy: StandalonePublisherPolicy,
     qualification_key: lillux::crypto::VerifyingKey,
+    /// `Some` pins the ownership every release input must select; `None`
+    /// resolves each input's ownership from the proof's CAS by the content
+    /// hash the input commits to.
+    ownership: Option<ryeos_bundle_publication_contract::BundlePayloadOwnership>,
+}
+
+/// Content-addressed lookup of the ownership a release input commits to. The
+/// hash lives inside a publisher-attested release input, so the object is
+/// authentic exactly when it hashes to that commitment.
+pub fn resolve_committed_ownership(
+    cas: &lillux::CasStore,
+    release_value: &serde_json::Value,
+) -> anyhow::Result<ryeos_bundle_publication_contract::BundlePayloadOwnership> {
+    let hash = release_value
+        .get("payload_ownership_content_hash")
+        .and_then(serde_json::Value::as_str)
+        .context("release input names no payload ownership hash")?;
+    anyhow::ensure!(lillux::cas::valid_hash(hash), "invalid payload ownership hash");
+    let value = cas
+        .get_object(hash)?
+        .context("payload ownership item is absent from the fetched CAS")?;
+    let ownership =
+        ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(&value)?;
+    anyhow::ensure!(
+        ownership.content_hash()? == hash,
+        "payload ownership item differs from the hash the release input commits to"
+    );
+    Ok(ownership)
 }
 
 impl StandalonePublisherProof {
-    pub fn new(
+    fn ownership_for(
+        &self,
+        release_value: &serde_json::Value,
+    ) -> anyhow::Result<ryeos_bundle_publication_contract::BundlePayloadOwnership> {
+        match &self.ownership {
+            Some(pinned) => Ok(pinned.clone()),
+            None => resolve_committed_ownership(&self.cas, release_value),
+        }
+    }
+
+    /// Prove against the ownership each release input commits to, resolved
+    /// from `cas`. For a consumer that holds no release source or bundle.
+    pub fn new_resolving(
         cas: Arc<lillux::CasStore>,
         policy: StandalonePublisherPolicy,
     ) -> anyhow::Result<Self> {
@@ -633,6 +772,26 @@ impl StandalonePublisherProof {
             cas,
             policy,
             qualification_key,
+            ownership: None,
+        })
+    }
+
+    /// `ownership` is the verified payload ownership every proven release
+    /// input must select exactly, payload features included.
+    pub fn new(
+        cas: Arc<lillux::CasStore>,
+        policy: StandalonePublisherPolicy,
+        ownership: ryeos_bundle_publication_contract::BundlePayloadOwnership,
+    ) -> anyhow::Result<Self> {
+        policy.validate()?;
+        ownership.validate()?;
+        let qualification_key =
+            lillux::crypto::VerifyingKey::from_bytes(&policy.qualification_signer_public_key)?;
+        Ok(Self {
+            cas,
+            policy,
+            qualification_key,
+            ownership: Some(ownership),
         })
     }
 }
@@ -967,12 +1126,16 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
                     })
                     .context("Core seed witness omits its exact producer relationship")?;
                 relationship.validate_product_evidence(&product)?;
-                let input = super::admitted_build::AdmittedReleaseInput::from_core_seed_value(
-                    relationship
-                        .producer
-                        .parameters
-                        .get("release_input")
-                        .context("Core seed producer omitted release input")?,
+                let release_value = relationship
+                    .producer
+                    .parameters
+                    .get("release_input")
+                    .context("Core seed producer omitted release input")?;
+                let ownership = self.ownership_for(release_value)?;
+                require_generation_ownership(generation, &ownership)?;
+                let input = super::admitted_build::AdmittedReleaseInput::from_core_seed_value_with_ownership(
+                    release_value,
+                    &ownership,
                 )?;
                 anyhow::ensure!(
                     generation.source_snapshot_hash.as_deref()
@@ -1140,7 +1303,8 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
                 let release_value = parameters
                     .get("release_input")
                     .context("bundle producer omitted release input")?;
-                require_non_core_release_input(generation, release_value)?;
+                let ownership = self.ownership_for(release_value)?;
+                require_non_core_release_input(generation, release_value, &ownership)?;
                 if let Some(previous) = &release_input_value {
                     anyhow::ensure!(
                         previous == release_value,
@@ -1277,11 +1441,28 @@ fn require_non_core_selections(
     Ok(())
 }
 
+fn require_generation_ownership(
+    generation: &ryeos_bundle_publication_contract::BundleGeneration,
+    ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+) -> anyhow::Result<()> {
+    let owned = ownership.content_hash()?;
+    anyhow::ensure!(
+        generation.payload_ownership_hash == owned,
+        "bundle generation names payload ownership {} but its release input resolves to {}",
+        generation.payload_ownership_hash,
+        owned
+    );
+    Ok(())
+}
+
 fn require_non_core_release_input(
     generation: &ryeos_bundle_publication_contract::BundleGeneration,
     release_value: &serde_json::Value,
+    ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
 ) -> anyhow::Result<()> {
-    let input = super::admitted_build::AdmittedReleaseInput::from_value(release_value)?;
+    require_generation_ownership(generation, ownership)?;
+    let input =
+        super::admitted_build::AdmittedReleaseInput::from_value_with_ownership(release_value, ownership)?;
     anyhow::ensure!(
         generation.bundle_name == input.bundle_name
             && generation.authored_version == input.authored_manifest.version
@@ -1321,6 +1502,7 @@ pub struct ManifestOnlyTreePublisher {
     cas: Arc<lillux::CasStore>,
     identity: ryeos_node_runtime::identity::NodeIdentity,
     policy: StandalonePublisherPolicy,
+    ownership: ryeos_bundle_publication_contract::BundlePayloadOwnership,
 }
 
 impl ManifestOnlyTreePublisher {
@@ -1328,12 +1510,15 @@ impl ManifestOnlyTreePublisher {
         cas: Arc<lillux::CasStore>,
         identity: ryeos_node_runtime::identity::NodeIdentity,
         policy: StandalonePublisherPolicy,
+        ownership: ryeos_bundle_publication_contract::BundlePayloadOwnership,
     ) -> anyhow::Result<Self> {
         policy.validate()?;
+        ownership.validate()?;
         Ok(Self {
             cas,
             identity,
             policy,
+            ownership,
         })
     }
 }
@@ -1368,8 +1553,9 @@ impl ConstrainedBundleTreePublisher for ManifestOnlyTreePublisher {
             &self.policy.catalog_namespace,
             &self.policy.bundle_publication_policy_section_digest,
             self.policy.trust_epoch,
+            &self.ownership,
         )?;
-        let body = request.config_body()?;
+        let body = request.config_body(&self.ownership)?;
         let signed = lillux::signature::sign_content(&body, self.identity.signing_key(), "#", None);
         let blob = self.cas.put_blob(signed.as_bytes())?;
         Ok(

@@ -146,6 +146,16 @@ pub fn verify_bundle_generation(
 ) -> anyhow::Result<VerifiedBundleGeneration> {
     generation.validate()?;
 
+    let ownership_value = read_exact(objects, &generation.payload_ownership_hash)?;
+    let ownership =
+        ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(
+            &ownership_value,
+        )
+        .context("bundle generation references an invalid payload ownership")?;
+    if ownership.content_hash()? != generation.payload_ownership_hash {
+        bail!("bundle generation payload ownership identity changed");
+    }
+
     let accepted_value = read_exact(objects, &generation.accepted_product_result_hash)?;
     let accepted_result = ProductBuildAcceptedResult::from_value(&accepted_value)
         .context("bundle generation references an invalid accepted product result")?;

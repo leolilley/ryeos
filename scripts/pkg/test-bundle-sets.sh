@@ -550,4 +550,7 @@ if (( static_failures > 0 )); then
   exit 1
 fi
 
+python3 -I "$ROOT/scripts/pkg/test-bundle-features.py"
+python3 -I "$ROOT/scripts/pkg/test-bundle-features-signature.py"
+
 printf '%s\n' "bundle set contract ok"

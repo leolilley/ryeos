@@ -386,3 +386,36 @@ fn duplicate_selections_stale_schema_and_unknown_fields_are_rejected() {
     unknown_field["unrecognized"] = json!(true);
     assert!(AdmittedReleaseInput::from_value(&unknown_field).is_err());
 }
+
+#[test]
+fn core_seed_request_validation_enforces_the_ownership_features() {
+    use ryeos_app::bundle_publication::core_seed::CoreSeedBuildRequest;
+    let owner = ownership(
+        "core",
+        &[("ryeos-direct-execution-evidence", &["core-handlers"])],
+    );
+    let release_input = input(
+        &owner,
+        "core",
+        vec![payload(
+            "core",
+            "ryeos-direct-execution-evidence",
+            &["core-handlers"],
+        )],
+        &["core-handlers"],
+    );
+    let request = |release_input: Value| -> CoreSeedBuildRequest {
+        serde_json::from_value(json!({
+            "catalog_namespace": "official",
+            "bundle_publication_policy_section_digest": "a".repeat(64),
+            "trust_epoch": 1,
+            "release_input": release_input,
+        }))
+        .unwrap()
+    };
+    assert!(request(release_input.clone()).validate_with_ownership(&owner).is_ok());
+    let mut forged = release_input;
+    forged["payloads"][0]["required_features"] = json!(["graph-handlers"]);
+    forged["cargo_feature_selections"][0]["features"] = json!(["graph-handlers"]);
+    assert!(request(forged).validate_with_ownership(&owner).is_err());
+}

@@ -62,6 +62,24 @@ fn exact_release_payload_ownership(
     item.into_current()
 }
 
+/// Retain the exact ownership a release is built from in the publication CAS,
+/// addressed by the content hash every release input commits to, so a
+/// verifier holding only the fetched CAS can resolve it.
+fn retain_release_ownership(
+    state: &AppState,
+    ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
+) -> anyhow::Result<()> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    let hash = cas.store_object(&ownership.to_value()?)?;
+    anyhow::ensure!(
+        hash == ownership.content_hash()?,
+        "retained payload ownership identity changed"
+    );
+    Ok(())
+}
+
 async fn resolve_release_source_generation(
     project_identity: &Path,
     snapshot_hash: &str,
@@ -2384,7 +2402,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
             &binding.catalog_namespace,
         )?;
         let proof =
-            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new(
+            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new_resolving(
                 Arc::new(self.authority.cas_store()?),
                 policy,
             )?;
@@ -2414,7 +2432,7 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
             &binding.catalog_namespace,
         )?;
         let proof =
-            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new(
+            ryeos_app::bundle_publication::standalone_publisher::StandalonePublisherProof::new_resolving(
                 Arc::new(self.authority.cas_store()?),
                 standalone,
             )?;
@@ -2974,7 +2992,6 @@ fn core_seed_build_handler(
     Box::pin(async move {
         let request: ryeos_app::bundle_publication::core_seed::CoreSeedBuildRequest =
             crate::handler_error::parse_request(params)?;
-        request.validate()?;
         anyhow::ensure!(
             request.child_product_selections.is_empty(),
             "Core seed service callers cannot provide internal child selectors"
@@ -3008,14 +3025,8 @@ fn core_seed_build_handler(
             "Core seed build does not match current publication policy"
         );
         let ownership = exact_release_payload_ownership(&source_generation, &state)?;
-        let admitted_input =
-            ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput::from_core_seed_value(
-                &request.release_input,
-            )?;
-        ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
-            &ownership,
-            &admitted_input,
-        )?;
+        request.validate_with_ownership(&ownership)?;
+        retain_release_ownership(&state, &ownership)?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
         let measured_target = serde_json::to_value(qualified_platform_target(
@@ -3042,7 +3053,7 @@ fn core_seed_build_handler(
                 recipe_request.clone(),
             ))
             .await?;
-        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint)?;
+        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint, &ownership)?;
         let signed_recipe = recipe["signed_config"]
             .as_str()
             .context("Core seed recipe authorization omitted signed Config bytes")?
@@ -3110,7 +3121,6 @@ fn core_seed_capture_handler(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
         let request: CoreSeedCaptureRequest = crate::handler_error::parse_request(params)?;
-        request.build.validate()?;
         anyhow::ensure!(
             request.build.child_product_selections.is_empty(),
             "Core seed capture callers cannot provide internal child selectors"
@@ -3147,6 +3157,8 @@ fn core_seed_capture_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        request.build.validate_with_ownership(&ownership)?;
         let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
@@ -3184,7 +3196,7 @@ fn core_seed_capture_handler(
                 recipe_request.clone(),
             ))
             .await?;
-        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint)?;
+        recipe_request.validate_response(&recipe, &catalog.publisher_fingerprint, &ownership)?;
         let signed_capture_recipe = recipe["signed_config"]
             .as_str()
             .context("Core seed capture recipe omitted signed Config bytes")?
@@ -3240,7 +3252,6 @@ fn core_seed_qualify_handler(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
     Box::pin(async move {
         let request: CoreSeedQualifyRequest = crate::handler_error::parse_request(params)?;
-        request.build.validate()?;
         let project = request.build.release_input["project_path"]
             .as_str()
             .context("Core seed release input has no project path")?;
@@ -3250,6 +3261,8 @@ fn core_seed_qualify_handler(
         let (source_generation, _source_context) =
             resolve_release_source_generation(Path::new(project), source_hash, &context, &state)
                 .await?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        request.build.validate_with_ownership(&ownership)?;
         let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?;
         let catalog = policy.require_catalog(&request.build.catalog_namespace)?;
         let environment =
@@ -3443,6 +3456,7 @@ fn generation_build_handler(
                 &request.release_input,
             )?;
         let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        retain_release_ownership(&state, &ownership)?;
         ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
             &ownership,
             &admitted_input,

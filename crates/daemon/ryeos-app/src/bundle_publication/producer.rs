@@ -267,8 +267,8 @@ impl BundleReleaseOperation {
             "bundle release request exceeds {MAX_REQUEST_BYTES} bytes"
         );
         match self {
-            Self::CoreSeedBuild(request) => request.validate()?,
-            Self::AuthorizeCoreSeedRecipe(request) => request.validate()?,
+            Self::CoreSeedBuild(request) => request.validate_wire()?,
+            Self::AuthorizeCoreSeedRecipe(request) => request.validate_wire()?,
             Self::InputInspect(r) => {
                 canonical_absolute_path(&r.project_path)?;
                 name(&r.bundle_name)?;
@@ -710,12 +710,11 @@ impl BundlePublisherAuthority for AuthenticatedPublisherClient {
         request: super::core_seed::CoreSeedRecipeRequest,
     ) -> ProducerFuture<'a> {
         Box::pin(async move {
-            request.validate()?;
-            let result = self
-                .post("v1/substrate-core/authorize-recipe", &request)
-                .await?;
-            request.validate_response(&result, &self.expected_publisher_fingerprint)?;
-            Ok(result)
+            request.validate_wire()?;
+            // The release caller holds the verified payload ownership and
+            // checks this response against the exact authorized template.
+            self.post("v1/substrate-core/authorize-recipe", &request)
+                .await
         })
     }
     fn authorize_build_recipe<'a>(
@@ -986,7 +985,7 @@ impl BundlePublisherAuthority for LocalConstrainedPublisherAuthority {
         request: super::core_seed::CoreSeedRecipeRequest,
     ) -> ProducerFuture<'a> {
         Box::pin(async move {
-            request.validate()?;
+            request.validate_wire()?;
             self.tree_publisher.authorize_core_seed_recipe(&request)
         })
     }
@@ -1467,7 +1466,7 @@ impl SubstrateBootstrapAuthority for AdmittedSubstrateBootstrapAuthority {
         request: super::core_seed::CoreSeedBuildRequest,
     ) -> ProducerFuture<'a> {
         Box::pin(async move {
-            request.validate()?;
+            request.validate_wire()?;
             let executor = self.core_seed_executor.as_ref().context(
                 "Core seed production requires an explicitly admitted substrate build executor",
             )?;

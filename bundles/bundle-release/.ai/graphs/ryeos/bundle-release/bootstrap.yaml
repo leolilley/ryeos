@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T01:29:18Z:5ccf807280dae497e3005976f2cec9bbcc26943fe1c2611bcb1490527bf4454d:A9F8SbpjO8Li8eWjTV4L+ghAOr7B1FGR4Bc5bqAw0CLHOz6v4mX7+W8aEAjZpFJDvOVQMSlXXL/wmx0rC9TYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-16T10:45:18Z:b06d0f32eefe7e2326ef572cced0f51cac374afd90f5596a942e37f41c47ed4a:CYD+TWEVVvvU0Dh1wbzIJO87orwi45mzBr0YFF7w8BIg0yKeH3q7kTsbLx8wPvvxkcq2t4tb8Q4ACJ2EmZjWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.1.0"
 category: ryeos/bundle-release
 description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
@@ -142,6 +142,7 @@ config:
             accepted_capture_result_hash: "${state.core_capture.accepted_capture_result_hash}"
             selected_signed_product_identity: "${state.core_capture.signed_product_identity}"
             selected_signed_product_witness: "${state.core_capture.signed_product_witness}"
+            payload_ownership_hash: "${state.core_input.payload_ownership_content_hash}"
             source_snapshot_hash: "${inputs.source_snapshot_hash}"
             qualification_evidence_hashes: "${state.core_qualification.qualification_evidence_hashes}"
             provenance_hash: null

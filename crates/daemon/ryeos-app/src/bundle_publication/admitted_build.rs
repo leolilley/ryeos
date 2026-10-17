@@ -60,6 +60,49 @@ impl PayloadOwnershipConfigItem {
     }
 }
 
+/// Path of the payload ownership Config inside an installed `bundle-release`
+/// bundle tree.
+pub const PAYLOAD_OWNERSHIP_INSTALLED_PATH: &str =
+    ".ai/config/bundle-release/payload-ownership.yaml";
+
+const MAX_PAYLOAD_OWNERSHIP_BYTES: u64 = 1024 * 1024;
+
+/// Load the payload ownership Config from an installed `bundle-release`
+/// bundle tree. The signature must verify under `trust`; an unsigned or
+/// untrusted ownership file is never authority over payload features.
+pub fn load_installed_payload_ownership(
+    bundle_root: &Path,
+    trust: &ryeos_engine::trust::TrustStore,
+) -> anyhow::Result<BundlePayloadOwnership> {
+    let path = bundle_root.join(PAYLOAD_OWNERSHIP_INSTALLED_PATH);
+    let bytes = lillux::read_regular_file_bounded_no_follow(&path, MAX_PAYLOAD_OWNERSHIP_BYTES)
+        .with_context(|| format!("read payload ownership {}", path.display()))?;
+    let raw = String::from_utf8(bytes).context("payload ownership is not UTF-8")?;
+    let (body, canonical_header) =
+        lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
+            .map_err(|error| anyhow::anyhow!("noncanonical signature envelope: {error}"))?;
+    anyhow::ensure!(
+        canonical_header.is_some(),
+        "payload ownership requires a trusted signature"
+    );
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: "#".to_owned(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = ryeos_engine::item_resolution::parse_signature_header(&raw, &envelope)
+        .context("payload ownership has no valid signature envelope")?;
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(&raw, &header, &envelope, trust)?;
+    anyhow::ensure!(
+        trust_class == ryeos_engine::contracts::TrustClass::Trusted,
+        "payload ownership signer is not trusted"
+    );
+    let value: Value = serde_yaml::from_str(&body).context("decode payload ownership")?;
+    let item: PayloadOwnershipConfigItem = serde_json::from_value(value)?;
+    item.into_current()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedPayload {

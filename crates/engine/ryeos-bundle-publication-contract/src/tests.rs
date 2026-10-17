@@ -25,6 +25,7 @@ fn generation_value() -> Value {
         "accepted_capture_result_hash": h('f'),
         "selected_signed_product_identity": "signed-bundle",
         "selected_signed_product_witness": h('9'),
+        "payload_ownership_hash": h('8'),
         "source_snapshot_hash": null,
         "qualification_evidence_hashes": [h('1'), h('2')],
         "provenance_hash": null,

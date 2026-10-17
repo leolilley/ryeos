@@ -4,14 +4,18 @@
 The publisher-signed ownership item declares, per bundle, the sets it belongs
 to, the daemon-linked host features it contributes, and each native payload
 with its Cargo package and per-package Cargo features. This tool computes the
-`<package>/<feature>,...` selection that a set builds with. It uses only the
-standard library: the first-line signature envelope is checked for body-hash
-integrity here, while the Ed25519 signature itself is verified by
-scripts/release/bundle-payload-ownership.py and the node.
+`<package>/<feature>,...` selection that a set builds with. The first-line
+signature envelope is verified in full before the file is read: the body hash,
+then the Ed25519 signature over the hex hash string against the key pinned in
+bundles/.ai/PUBLISHER_TRUST.toml. Needs python3-cryptography.
 
 Usage:
   python3 -I bundle-features.py [--repository-root DIR | --config FILE]
       (--set NAME | --bundles A,B,...) cargo-features PACKAGE
+
+Exit codes: 1 invalid ownership content, 2 signature support unavailable,
+3 malformed signature envelope, 4 body hash mismatch, 5 unknown or untrusted
+signer, 6 signature does not verify.
 
 `cargo-features` prints one comma-joined line, or nothing when the package has
 no selected feature. Set membership is known only for bundles that own native
@@ -20,18 +24,42 @@ data-only and has no effect on the selection.
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 OWNERSHIP_PATH = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
 SCHEMA = "ryeos.bundle_payload_ownership.v2"
-HEADER = re.compile(r"# ryeos:signed:.+:([0-9a-f]{64}):([^:]+):([0-9a-f]{64})")
+TRUST_PATH = "bundles/.ai/PUBLISHER_TRUST.toml"
+HEADER = re.compile(r"# ryeos:signed:[0-9TZ:-]+:([0-9a-f]{64}):([A-Za-z0-9+/]{86}==):([0-9a-f]{64})")
 
 
 class OwnershipError(ValueError):
-    pass
+    exit_code = 1
+
+
+class SignatureUnavailable(OwnershipError):
+    exit_code = 2
+
+
+class MalformedEnvelope(OwnershipError):
+    exit_code = 3
+
+
+class BodyHashMismatch(OwnershipError):
+    exit_code = 4
+
+
+class UntrustedSigner(OwnershipError):
+    exit_code = 5
+
+
+class BadSignature(OwnershipError):
+    exit_code = 6
 
 
 # ── Restricted YAML subset ───────────────────────────────────────────
@@ -142,14 +170,55 @@ def parse_yaml(body):
 
 # ── Ownership document ───────────────────────────────────────────────
 
-def load_ownership(path):
-    raw = Path(path).read_bytes().decode("utf-8")
-    first, _, body = raw.partition("\n")
+def _pinned_key(trust_path, fingerprint):
+    """The raw 32-byte public key the trust file pins for `fingerprint`."""
+    try:
+        trust = tomllib.loads(Path(trust_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise UntrustedSigner(f"publisher trust file {trust_path} is unreadable: {error}")
+    if trust.get("fingerprint") != fingerprint:
+        raise UntrustedSigner(f"signer {fingerprint} is not the pinned publisher {trust.get('fingerprint')!r}")
+    encoded = trust.get("public_key")
+    if not isinstance(encoded, str) or not encoded.startswith("ed25519:"):
+        raise UntrustedSigner("publisher trust has no Ed25519 public key")
+    try:
+        key = base64.b64decode(encoded[len("ed25519:"):], validate=True)
+    except binascii.Error:
+        raise UntrustedSigner("publisher trust public key is not base64")
+    if len(key) != 32 or hashlib.sha256(key).hexdigest() != fingerprint:
+        raise UntrustedSigner("pinned public key does not match its fingerprint")
+    return key
+
+
+def verify_signed(raw, trust_path):
+    """Verify a first-line signed text against the pinned publisher; return its body.
+
+    The signature is Ed25519 over the ASCII hex sha256 of the body bytes
+    (everything after the first line), as scripts/dev/sign-dev.sh produces.
+    """
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        raise SignatureUnavailable("python3 cryptography is required to verify the ownership signature")
+    first, newline, body = raw.partition("\n")
     match = HEADER.fullmatch(first)
-    if not match:
-        raise OwnershipError("ownership config requires a first-line signature envelope")
-    if hashlib.sha256(body.encode("utf-8")).hexdigest() != match.group(1):
-        raise OwnershipError("ownership config body hash does not match its signature envelope")
+    if not newline or not match or raw.count("# ryeos:signed:") != 1:
+        raise MalformedEnvelope("ownership config requires exactly one well-formed first-line signature envelope")
+    claimed_hash, encoded_signature, fingerprint = match.groups()
+    if hashlib.sha256(body.encode("utf-8")).hexdigest() != claimed_hash:
+        raise BodyHashMismatch("ownership config body hash does not match its signature envelope")
+    key = _pinned_key(trust_path, fingerprint)
+    try:
+        Ed25519PublicKey.from_public_bytes(key).verify(base64.b64decode(encoded_signature), claimed_hash.encode("ascii"))
+    except InvalidSignature:
+        raise BadSignature("ownership config signature does not verify against the pinned publisher key")
+    return body
+
+
+def load_ownership(path, trust_path=None):
+    raw = Path(path).read_bytes().decode("utf-8")
+    body = verify_signed(raw, trust_path or Path(__file__).resolve().parents[2] / TRUST_PATH)
     ownership = parse_yaml(body).get("payload_ownership")
     if not isinstance(ownership, dict) or ownership.get("schema") != SCHEMA:
         raise OwnershipError(f"payload ownership schema must be {SCHEMA}")
@@ -260,7 +329,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="query", required=True)
     sub.add_parser("cargo-features").add_argument("package")
     args = parser.parse_args(argv)
-    ownership = load_ownership(args.config or args.repository_root / OWNERSHIP_PATH)
+    ownership = load_ownership(args.config or args.repository_root / OWNERSHIP_PATH, args.repository_root / TRUST_PATH)
     bundles = None if args.bundles is None else [b for b in args.bundles.split(",") if b]
     sys.stdout.write(render(derive(ownership, args.package, args.set_name, bundles)))
 
@@ -270,4 +339,4 @@ if __name__ == "__main__":
         main()
     except OwnershipError as error:
         print(f"bundle features rejected: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(error.exit_code)

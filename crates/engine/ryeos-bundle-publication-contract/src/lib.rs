@@ -158,6 +158,9 @@ pub struct BundleGeneration {
     pub accepted_capture_result_hash: String,
     pub selected_signed_product_identity: String,
     pub selected_signed_product_witness: String,
+    /// Content hash of the `BundlePayloadOwnership` the release input was
+    /// admitted against; the object travels with the generation's closure.
+    pub payload_ownership_hash: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub source_snapshot_hash: Option<String>,
     /// Attestation object hashes. Their subjects retain the qualified objects.
@@ -481,6 +484,7 @@ impl BundleGeneration {
                 "selected signed product witness",
                 &self.selected_signed_product_witness,
             ),
+            ("payload ownership", &self.payload_ownership_hash),
         ] {
             hash64(hash, label)?;
         }
