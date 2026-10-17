@@ -22,7 +22,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 FINALIZER = ROOT / ".ai/tools/ryeos/development/cargo-vendor-finalize/run.py"
-INTENT_PATH = "bundles/standard/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+INTENT_PATH = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
 INTENT = ROOT / INTENT_PATH
 SIGNER = "a" * 64  # Synthetic already-verified projection, not a node credential.
 
@@ -222,7 +222,7 @@ class CargoVendorFinalizerTests(unittest.TestCase):
         # Exercise the existing consuming algorithm with its Cargo subprocess
         # boundary stubbed. This establishes exact lock handoff, not an actual
         # offline Cargo run or daemon qualification publication.
-        checker = load_module(ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/cargo-vendor.py",
+        checker = load_module(ROOT / "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/cargo-vendor.py",
                               "cargo_vendor_checker")
         for version in ("1.0.0", "1.1.0"):
             lock = f'version = 4\n\n[[package]]\nname = "fixture"\nversion = "{version}"\n'.encode()

@@ -21,7 +21,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOL = ROOT / ".ai/tools/ryeos/development/static-link-inputs/assemble.py"
-INTENT_PATH = "bundles/standard/.ai/config/development/ryeos/static-link-contract-intent.yaml"
+INTENT_PATH = "bundles/environment-qualification/.ai/config/development/ryeos/static-link-contract-intent.yaml"
 INTENT = ROOT / INTENT_PATH
 SIGNER = "a" * 64
 
