@@ -202,8 +202,8 @@ async fn reset_refused(h: &DaemonHarness) -> Result<String> {
 /// After settlement no scheduler role remains at any coordinate, the daemon
 /// reaches readiness, and its scheduler service answers on a fresh projection.
 async fn assert_settled_and_ready(h: &mut DaemonHarness, runtime: &Path) -> Result<()> {
-    // No case here takes a resolution path, so no R coordinate may exist
-    // either: every canonical, quarantine, purge and resolution name is gone.
+    // Every canonical, quarantine, purge and resolution name is gone, whether
+    // or not the case took the resolution path.
     let left = role_coordinates(runtime)?;
     assert!(
         left.is_empty(),
@@ -393,23 +393,64 @@ async fn foreign_file_swapped_in_after_the_pin_is_kept() -> Result<()> {
 }
 
 #[cfg(feature = "crash-qualification-test-support")]
-/// The Q to U move and the unlink of U run inside one native purge call, so
-/// a process kill with the original only at U cannot be selected from the
-/// scheduler participant. This case needs a cut inside lillux-sqlite.
+/// The Q to U move and the unlink of U run inside one native purge call; the
+/// cut inside it parks after the move, so the original survives only at the
+/// purge coordinate U until the rerun settles it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "pending: Q-to-U survivor needs a crash cut inside the lillux-sqlite purge"]
 async fn crash_after_q_to_u_before_unlink_survives_only_at_u_then_settles() -> Result<()> {
-    anyhow::bail!("pending: no scheduler-participant boundary separates Q-to-U from the unlink")
+    let (mut h, runtime, original) = stopped_scheduling_node().await?;
+    reset_until_cut(&h, "moved_to_purge_before_unlink:main").await?;
+
+    let holders = locate(&runtime, original)?;
+    assert_eq!(
+        holders.len(),
+        1,
+        "the original must survive at exactly one coordinate: {holders:?}"
+    );
+    assert!(
+        holders[0].starts_with("scheduler-retirement.role.") && holders[0].ends_with(".main.purge"),
+        "the original must survive only at U, found {holders:?}"
+    );
+    assert_eq!(observe(&runtime, MAIN)?, None, "P must be vacated at U");
+
+    reset_to_completion(&h).await?;
+    assert!(
+        locate(&runtime, original)?.is_empty(),
+        "settlement must retire the original from every coordinate"
+    );
+    assert_settled_and_ready(&mut h, &runtime).await
 }
 
 #[cfg(feature = "crash-qualification-test-support")]
 /// The U to R move happens only inside a native resolution after a failed
-/// purge, so a process kill with the original only at R cannot be selected
-/// from the scheduler participant. This case needs a cut inside lillux-sqlite.
+/// purge. The cut makes the ordinary purge fail its unlink at U, lets the
+/// resolution move the original from U to the resolution quarantine R, and
+/// parks there before its unlink: the original survives only at R until the
+/// rerun settles it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "pending: R survivor needs a crash cut inside the lillux-sqlite resolution move"]
 async fn crash_after_u_to_r_survives_only_at_r_then_settles() -> Result<()> {
-    anyhow::bail!("pending: no scheduler-participant boundary separates U-to-R from its ack")
+    let (mut h, runtime, original) = stopped_scheduling_node().await?;
+    reset_until_cut(&h, "moved_to_resolution_before_unlink:main").await?;
+
+    let holders = locate(&runtime, original)?;
+    assert_eq!(
+        holders.len(),
+        1,
+        "the original must survive at exactly one coordinate: {holders:?}"
+    );
+    assert!(
+        holders[0].starts_with("scheduler-retirement.resolve.")
+            && holders[0].ends_with(".quarantine"),
+        "the original must survive only at R, found {holders:?}"
+    );
+    assert_eq!(observe(&runtime, MAIN)?, None, "P must be vacated at R");
+
+    reset_to_completion(&h).await?;
+    assert!(
+        locate(&runtime, original)?.is_empty(),
+        "settlement must retire the original from every coordinate"
+    );
+    assert_settled_and_ready(&mut h, &runtime).await
 }
 
 /// The node-configuration directory signed schedule sources live in.

@@ -45,16 +45,6 @@ const MAX_RECORDS_PER_GENERATION: usize =
 const MAX_DIRECTORY_ENTRIES: usize =
     ryeos_scheduler_contract::SCHEDULER_RETIREMENT_MAX_DIRECTORY_ENTRIES;
 
-#[cfg(test)]
-thread_local! {
-    static FAIL_RESOLUTION_ACK_AFTER_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn fail_next_resolution_ack_after_install() {
-    FAIL_RESOLUTION_ACK_AFTER_INSTALL.with(|flag| flag.set(true));
-}
-
 /// Test-only process-kill boundaries at the armed stage transitions of one
 /// role. The physical move or unlink itself is a single native call; these
 /// cuts sit at the signed record immediately on either side of it.
@@ -73,6 +63,60 @@ enum ResetCrashCut {
     /// The native purge unlinked the role; its `Purged` acknowledgement is
     /// not yet durable.
     UnlinkedBeforeAck,
+}
+
+/// Native-owner cuts inside the planned removal, between its move and its
+/// unlink. They are selected by the same environment value as [`ResetCrashCut`]
+/// and run inside the native call, so they are dispatched through the Lillux
+/// planned-removal hook.
+#[cfg(feature = "crash-qualification-test-support")]
+const MOVED_TO_PURGE_BEFORE_UNLINK: &str = "moved_to_purge_before_unlink";
+/// Selecting this cut makes the ordinary purge's unlink fail after its move so
+/// the resolution path runs, and parks that resolution after its own move from
+/// the purge coordinate into the resolution quarantine, before its unlink.
+#[cfg(feature = "crash-qualification-test-support")]
+const MOVED_TO_RESOLUTION_BEFORE_UNLINK: &str = "moved_to_resolution_before_unlink";
+
+/// Register the native planned-removal hook once per process.
+#[cfg(feature = "crash-qualification-test-support")]
+pub(crate) fn install_native_removal_cut() {
+    lillux::secure_fs::install_planned_removal_hook(native_removal_cut);
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+fn native_removal_cut(
+    _source: &OsStr,
+    sink: &OsStr,
+) -> lillux::secure_fs::PlannedRemovalCut {
+    use lillux::secure_fs::PlannedRemovalCut;
+    let Some(sink) = sink.to_str() else {
+        return PlannedRemovalCut::Proceed;
+    };
+    let parts: Vec<&str> = sink.split('.').collect();
+    let (stage, role) = match parts.as_slice() {
+        ["scheduler-retirement", "role", _, role, "purge"] => ("purge", *role),
+        ["scheduler-retirement", "resolve", _, role, _, "quarantine"] => ("resolution", *role),
+        _ => return PlannedRemovalCut::Proceed,
+    };
+    let Some(selected) = std::env::var_os(ryeos_app::env_contract::SCHEDULER_RESET_TEST_CUT_ENV)
+    else {
+        return PlannedRemovalCut::Proceed;
+    };
+    let selected = selected.to_string_lossy();
+    let purge = format!("{MOVED_TO_PURGE_BEFORE_UNLINK}:{role}");
+    let resolution = format!("{MOVED_TO_RESOLUTION_BEFORE_UNLINK}:{role}");
+    if stage == "resolution" && selected == resolution {
+        park_at(&resolution);
+    }
+    if stage == "purge" {
+        if selected == purge {
+            park_at(&purge);
+        }
+        if selected == resolution {
+            return PlannedRemovalCut::FailUnlink;
+        }
+    }
+    PlannedRemovalCut::Proceed
 }
 
 #[cfg(feature = "crash-qualification-test-support")]
@@ -124,6 +168,13 @@ fn reach_reset_crash_cut(cut: Option<ResetCrashCut>, role: SchedulerRetirementRo
     if selected.as_deref() != Some(OsStr::new(&boundary)) {
         return;
     }
+    park_at(&boundary);
+}
+
+/// Announce `boundary` on stderr and park the thread forever; the harness
+/// SIGKILLs the process there.
+#[cfg(feature = "crash-qualification-test-support")]
+fn park_at(boundary: &str) -> ! {
     eprintln!(
         "{}scheduler_reset:{boundary}",
         ryeos_app::env_contract::TEST_CRASH_CUT_REACHED_PREFIX
@@ -2490,10 +2541,6 @@ impl<'a> RetirementJournal<'a> {
             &retained.value,
             &retained.signed,
         )?;
-        #[cfg(test)]
-        if FAIL_RESOLUTION_ACK_AFTER_INSTALL.with(|flag| flag.replace(false)) {
-            anyhow::bail!("injected resolution outcome acknowledgement failure after install");
-        }
         self.previous_resolution_outcome[index] = Some(lillux::sha256_hex(&signed));
         if retained
             .value
@@ -3919,15 +3966,6 @@ fn role_index_from_name(value: &str) -> Result<usize> {
         "wal" => Ok(1),
         "shm" => Ok(2),
         _ => anyhow::bail!("unknown scheduler retirement role"),
-    }
-}
-
-fn role_from_index(index: usize) -> Result<SchedulerRetirementRole> {
-    match index {
-        0 => Ok(SchedulerRetirementRole::Main),
-        1 => Ok(SchedulerRetirementRole::Wal),
-        2 => Ok(SchedulerRetirementRole::Shm),
-        _ => anyhow::bail!("unknown scheduler retirement role index"),
     }
 }
 

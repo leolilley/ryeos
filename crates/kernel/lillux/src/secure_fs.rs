@@ -12,6 +12,34 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, ensure};
 
+/// What a qualification hook asks a planned removal to do between its move
+/// into the second coordinate and the unlink there.
+#[cfg(feature = "crash-qualification-test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedRemovalCut {
+    /// Unlink as usual.
+    Proceed,
+    /// Report the unlink as failed with the original still at the second
+    /// coordinate, without attempting it.
+    FailUnlink,
+}
+
+/// Called with the source and sink coordinates after a planned removal's move
+/// succeeded and before its unlink. The hook may block forever to park the
+/// process at that boundary.
+#[cfg(feature = "crash-qualification-test-support")]
+pub type PlannedRemovalHook = fn(&OsStr, &OsStr) -> PlannedRemovalCut;
+
+#[cfg(feature = "crash-qualification-test-support")]
+static PLANNED_REMOVAL_HOOK: std::sync::OnceLock<PlannedRemovalHook> = std::sync::OnceLock::new();
+
+/// Install the process-wide planned-removal hook. The first installation
+/// wins; later calls with another hook are ignored.
+#[cfg(feature = "crash-qualification-test-support")]
+pub fn install_planned_removal_hook(hook: PlannedRemovalHook) {
+    PLANNED_REMOVAL_HOOK.get_or_init(|| hook);
+}
+
 mod descriptor_observation;
 pub use descriptor_observation::RetainedFileDescriptorObservation;
 #[cfg(target_os = "linux")]
@@ -7259,6 +7287,17 @@ impl PinnedDirectory {
         self.quarantine_if_same_planned_atomic(name, expected, quarantine)?;
         #[cfg(target_os = "linux")]
         {
+            #[cfg(feature = "crash-qualification-test-support")]
+            if let Some(hook) = PLANNED_REMOVAL_HOOK.get() {
+                if hook(name, quarantine) == PlannedRemovalCut::FailUnlink {
+                    return Err(PlannedQuarantineFailure {
+                        disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                        stage: PlannedQuarantineStage::QuarantinedOriginal,
+                        quarantine_name: quarantine.to_os_string(),
+                        error: anyhow::anyhow!("injected failure after planned move, before unlink"),
+                    });
+                }
+            }
             let name_c = std::ffi::CString::new(quarantine.as_bytes()).expect("validated child");
             if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
                 return Err(PlannedQuarantineFailure {
