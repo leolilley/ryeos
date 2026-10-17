@@ -2552,4 +2552,103 @@ mod deploy_recovery_tests {
         drop(session);
         fixture.close(&host, node);
     }
+
+    /// The per-schedule fire history directory a deploy never owns.
+    fn fire_history(fixture: &Fixture, schedule_id: &str) -> PathBuf {
+        fixture
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("schedules")
+            .join(schedule_id)
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_id_whose_fire_history_is_retained() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let history = fire_history(&fixture, CHARLIE);
+        fs::create_dir_all(&history).unwrap();
+
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        let error = session
+            .plan(fixture.request(
+                fixture.stage("second", &[(ALPHA, 300), (CHARLIE, 90)]),
+                "two",
+            ))
+            .expect_err("a new schedule must not inherit a retired id's fire history");
+        assert!(
+            format!("{error:#}").contains("reuse not allowed"),
+            "got: {error:#}"
+        );
+        assert_eq!(fixture.observe(&node.db), baseline, "refusal mutates nothing");
+        assert!(history.is_dir(), "the retained history is untouched");
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn omission_and_rollback_keep_the_omitted_schedules_fire_history() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let history = fire_history(&fixture, BRAVO);
+        fs::create_dir_all(&history).unwrap();
+        fs::write(history.join("fire.marker"), b"retained").unwrap();
+
+        let mut session = fixture.prepare_second(&node).await;
+        assert_eq!(fixture.observe(&node.db)[BRAVO], (None, None));
+        assert_eq!(
+            fs::read(history.join("fire.marker")).unwrap(),
+            b"retained",
+            "omission deletes the schedule, never its fire history"
+        );
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        drop(session);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
+    async fn omitting_every_declaration_deletes_all_and_rollback_restores_them() {
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let baseline = fixture.deploy_baseline(&node).await;
+        let histories: Vec<PathBuf> = [ALPHA, BRAVO]
+            .iter()
+            .map(|schedule_id| {
+                let history = fire_history(&fixture, schedule_id);
+                fs::create_dir_all(&history).unwrap();
+                fs::write(history.join("fire.marker"), b"retained").unwrap();
+                history
+            })
+            .collect();
+
+        let staging = fixture.stage("empty", &[(ALPHA, 300)]);
+        fs::remove_file(staging.join(".ai/config/schedules/project.yaml")).unwrap();
+        let mut session = node.service.acquire_project_schedules().await.unwrap();
+        session.plan(fixture.request(staging, "empty")).unwrap();
+        assert!(session.has_actions().unwrap());
+        session.prepare_recovery().await.unwrap();
+        let report = session.prepare().unwrap();
+        assert_eq!((report.created, report.updated, report.deleted), (0, 0, 2));
+        let emptied = fixture.observe(&node.db);
+        assert_eq!(emptied[ALPHA], (None, None));
+        assert_eq!(emptied[BRAVO], (None, None));
+        for history in &histories {
+            assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        }
+        session.rollback().unwrap();
+        assert_eq!(fixture.observe(&node.db), baseline);
+        for history in &histories {
+            assert_eq!(fs::read(history.join("fire.marker")).unwrap(), b"retained");
+        }
+        drop(session);
+        fixture.close(&host, node);
+    }
 }
