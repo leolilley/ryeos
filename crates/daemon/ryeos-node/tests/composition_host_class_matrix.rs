@@ -485,11 +485,33 @@ fn the_codex_login_is_refused_without_a_credential_private_home() {
     assert!(text.contains(CREDENTIAL_PRIVATE_HOME), "{text}");
 }
 
+const PROBE_REF: &str = "tool:ryeos/qualification/namespaces-probe";
+
+/// The `requires` block of the signed probe item the standard bundle ships,
+/// read from the item file itself.
+fn shipped_probe_requires() -> ryeos_bundle::runtime_authority::RuntimeRequires {
+    let path = repo_root().join("bundles/standard/.ai/tools/ryeos/qualification/namespaces-probe.yaml");
+    let document: serde_yaml::Value =
+        serde_yaml::from_slice(&std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
+            .unwrap();
+    let requires = serde_json::to_value(&document["requires"]).unwrap();
+    ryeos_bundle::runtime_authority::parse_runtime_requires_block(&requires)
+        .unwrap_or_else(|reason| panic!("{}: {reason}", path.display()))
+}
+
+#[test]
+fn the_shipped_probe_declares_namespace_isolation_as_data() {
+    let requires = shipped_probe_requires();
+    let node: Vec<String> = requires.node.iter().map(|entry| entry.label()).collect();
+    assert_eq!(node, vec!["isolation:namespaces".to_owned()]);
+    assert!(requires.credential_kinds.is_empty());
+}
+
 #[test]
 fn workloads_are_admitted_or_refused_on_what_the_host_proves() {
     let none = ryeos_bundle::runtime_authority::RuntimeRequires::default();
-    let namespaces: ryeos_bundle::runtime_authority::RuntimeRequires =
-        serde_json::from_value(serde_json::json!({"node": ["isolation:namespaces"]})).unwrap();
+    let probe = PROBE_REF;
+    let namespaces = shipped_probe_requires();
     // An item that declares no requirement, such as
     // `tool:ryeos/core/identity/public_key`, is admitted on every host.
     for host in [runit(), local_docker(), railway(), render_sandbox()] {
@@ -500,10 +522,10 @@ fn workloads_are_admitted_or_refused_on_what_the_host_proves() {
     // An item that needs namespace isolation is admitted only where the
     // host allows the unshare.
     let node = node_reporting(runit().capabilities());
-    admit_item_requirements(&node, "tool:test/namespaces", &namespaces).unwrap();
+    admit_item_requirements(&node, probe, &namespaces).unwrap();
     for host in [local_docker(), railway()] {
         let node = node_reporting(host.capabilities());
-        let text = refusal_text(admit_item_requirements(&node, "tool:test/namespaces", &namespaces).unwrap_err());
+        let text = refusal_text(admit_item_requirements(&node, probe, &namespaces).unwrap_err());
         assert!(text.contains("isolation:namespaces"), "{}: {text}", host.name);
     }
 }
