@@ -205,6 +205,7 @@ fn coverage_label(coverage: PrefixDirectoryCoverage) -> &'static str {
         PrefixDirectoryCoverage::NamePrefix => "name_prefix",
         PrefixDirectoryCoverage::StreamPrefix => "stream_prefix",
         PrefixDirectoryCoverage::DepthLimit => "depth_limit",
+        PrefixDirectoryCoverage::MountBoundary => "mount_boundary",
         PrefixDirectoryCoverage::NotVisited => "not_visited",
         PrefixDirectoryCoverage::Replaced => "replaced",
         PrefixDirectoryCoverage::Failed => "failed",

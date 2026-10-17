@@ -2400,6 +2400,32 @@ impl PinnedRegularFile {
         read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
     }
 
+    /// Read at most `max_bytes` from the start of this exact observed file.
+    /// Unlike a complete bounded read, larger files are deliberately accepted.
+    /// The caller must label the result as a prefix when observation.size()
+    /// exceeds the ceiling. This observes mutable content, not an immutable
+    /// snapshot or a digest proof. Positional reads do not move shared cursors.
+    pub fn read_stable_prefix(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        let length = usize::try_from(observation.size().min(max_bytes))
+            .map_err(|_| anyhow::anyhow!("regular file prefix does not fit this platform"))?;
+        let mut bytes = vec![0_u8; length];
+        let mut offset = 0;
+        while offset < length {
+            let count = read_regular_file_at(&self.file, &mut bytes[offset..], offset as u64)?;
+            if count == 0 {
+                anyhow::bail!("regular file ended before its observed prefix length");
+            }
+            offset += count;
+        }
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        Ok(bytes)
+    }
+
     /// Capture exactly this prior descriptor observation, refusing an
     /// unbounded or changed source. Path selection and policy remain with the
     /// caller; sealing does not attest that the original host file is immutable.
@@ -8963,6 +8989,59 @@ fn restore_quarantined_regular(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {
+        use std::io::{Seek, SeekFrom};
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let mut file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        file.seek(SeekFrom::Start(7)).unwrap();
+        assert_eq!(file.read_stable_prefix(&observation, 4).unwrap(), b"0123");
+        assert_eq!(file.stream_position().unwrap(), 7);
+        assert_eq!(
+            file.read_stable_prefix(&observation, 10).unwrap(),
+            b"0123456789"
+        );
+        assert_eq!(
+            file.read_stable_prefix(&observation, 40).unwrap(),
+            b"0123456789"
+        );
+        assert!(file.read_stable_prefix(&observation, 0).unwrap().is_empty());
+        std::fs::write(&path, b"short").unwrap();
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
+
+    #[test]
+    fn stable_prefix_rejects_a_same_size_rewrite_of_the_same_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        // The kernel stamps times at a coarse tick, so let one pass before the
+        // rewrite for the change to be visible in the observation.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let inode_before = std::fs::metadata(&path).unwrap();
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let inode_after = std::fs::metadata(&path).unwrap();
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(inode_before.ino(), inode_after.ino());
+        }
+        assert_eq!(inode_before.len(), inode_after.len());
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

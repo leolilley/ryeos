@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use ryeos_app::state::AppState;
-use ryeos_app::test_support::TestStateStore;
+use ryeos_app::test_support::{NativeTestState, TestStateStore};
 use ryeos_engine::kind_registry::KindRegistry;
 
 #[allow(dead_code)]
@@ -102,36 +102,10 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
 #[allow(dead_code)]
 pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_db_path = TestStateStore::runtime_state_dir(tmpdir.path()).join("runtime.sqlite3");
-    let key_path = tmpdir.path().join("identity").join("node-key.pem");
-    let config = ryeos_node_runtime::config::Config {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db_path: runtime_db_path.clone(),
-        uds_path: tmpdir.path().join("test.sock"),
-        app_root: tmpdir.path().to_path_buf(),
-        node_signing_key_path: key_path.clone(),
-        operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-        authorized_keys_dir: tmpdir.path().join("auth"),
-    };
-    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
-    ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
-    let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
-        &identity,
-    ));
-    let mut head_trust = ryeos_state::refs::TrustStore::new();
-    head_trust.insert(
-        identity.fingerprint().to_string(),
-        *identity.verifying_key(),
-    );
-    let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
-        tmpdir.path(),
-        signer,
-        write_barrier.clone(),
-        Arc::new(head_trust),
-    )
-    .unwrap();
-    let state_store = std::sync::Arc::clone(store_owner.store());
+    let native = NativeTestState::open(tmpdir.path()).expect("open native test state");
+    let state_store = Arc::clone(native.store());
+    let (store_owner, node) = native.into_parts();
+    let (config, identity, write_barrier) = node.into_parts();
     let engine = Arc::new(ryeos_engine::engine::Engine::new(
         ryeos_engine::kind_registry::KindRegistry::empty(),
         ryeos_engine::parsers::ParserDispatcher::new(
@@ -183,36 +157,10 @@ pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
 #[allow(dead_code)]
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStore, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let runtime_db_path = TestStateStore::runtime_state_dir(tmpdir.path()).join("runtime.sqlite3");
-    let key_path = tmpdir.path().join("identity").join("node-key.pem");
-    let config = ryeos_node_runtime::config::Config {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        db_path: runtime_db_path.clone(),
-        uds_path: tmpdir.path().join("test.sock"),
-        app_root: tmpdir.path().to_path_buf(),
-        node_signing_key_path: key_path.clone(),
-        operator_signing_key_path: tmpdir.path().join("user-key.pem"),
-        authorized_keys_dir: tmpdir.path().join("auth"),
-    };
-    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
-    ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
-    let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
-        &identity,
-    ));
-    let mut head_trust = ryeos_state::refs::TrustStore::new();
-    head_trust.insert(
-        identity.fingerprint().to_string(),
-        *identity.verifying_key(),
-    );
-    let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
-        tmpdir.path(),
-        signer,
-        write_barrier.clone(),
-        Arc::new(head_trust),
-    )
-    .unwrap();
-    let state_store = std::sync::Arc::clone(store_owner.store());
+    let native = NativeTestState::open(tmpdir.path()).expect("open native test state");
+    let state_store = Arc::clone(native.store());
+    let (store_owner, node) = native.into_parts();
+    let (config, identity, write_barrier) = node.into_parts();
     let engine = Arc::new(build_live_bundle_engine());
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
