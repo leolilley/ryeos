@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:06edbd6d33bba0e87491eb2b6168d6528d867096f53a5487c7e57571f4bdb3e7:lJP7s9wOjjSyMg2uGI2Wmc+wL+Zr5W2DVDM6QH6u7vZPePX3GdcfBYKPQWhEQBDg71LdgkoGmwqIHYCfcGaBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-17T01:32:58Z:fe7a2c7b287659520ac3075fcd8e66e345620db1493d981667c753c0b5809464:RfEIBdmlGJLovArF8qFfbBxSO7SazRxT8laHpMTzTLBBAKcCBtZWzjjv10iy/EadrXw1Eqb9nBzLa2nwZdqHAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, events, replay, threads]
@@ -7,6 +7,8 @@ description: Events service reference.
 ---
 
 # Services: events
+
+The core bundle ships these services; this reference lives with the standard workflow knowledge.
 
 Invariant: event services replay persisted thread events without mutating thread state.
 

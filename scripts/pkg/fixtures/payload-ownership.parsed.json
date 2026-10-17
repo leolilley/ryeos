@@ -88,6 +88,14 @@
     "host_features": [],
     "payloads": [
      {
+      "binary": "rye-composer-extends-chain",
+      "build_class": "release",
+      "cargo_features": [
+       "extends-composer"
+      ],
+      "cargo_package": "ryeos-handler-bins"
+     },
+     {
       "binary": "rye-composer-identity",
       "build_class": "release",
       "cargo_features": [
@@ -241,14 +249,6 @@
      "model-provider-setup"
     ],
     "payloads": [
-     {
-      "binary": "rye-composer-extends-chain",
-      "build_class": "release",
-      "cargo_features": [
-       "extends-composer"
-      ],
-      "cargo_package": "ryeos-handler-bins"
-     },
      {
       "binary": "ryeos-directive-launch-preparer",
       "build_class": "release",

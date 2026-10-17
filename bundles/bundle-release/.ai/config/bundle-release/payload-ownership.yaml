@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-15T23:40:48Z:43823d5a37b8e34c9924e78a0c15f1a39976916cc28bc89e2715051b381a93d7:lBw8vK+UkplB3qV3ld0J23t9USUwrmoLsRV+BwMtkY5I+cQJ1T/0ViCThGAOeNe+ADjt4OCOYupKoJIS1VJcCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-17T03:14:05Z:480ad6f59a48e32090e115e45abafce8632ac352a2c5c1f2ad64cb30b2da7f3f:dLGSrBAjTd5Cx4M342gkpqdAVE/8ZERAAgjaKLzxtb8NyLrCtLauLdI8bKdhPP0jMahLQIB3MJYn+YTL1tfqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -64,6 +64,10 @@ payload_ownership:
       bundle_sets: [bundle-source, central-host, core, core-scheduling, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: []
       payloads:
+        - binary: rye-composer-extends-chain
+          cargo_package: ryeos-handler-bins
+          build_class: release
+          cargo_features: [extends-composer]
         - binary: rye-composer-identity
           cargo_package: ryeos-handler-bins
           build_class: release
@@ -148,10 +152,6 @@ payload_ownership:
       bundle_sets: [central-host, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: [model-provider-setup]
       payloads:
-        - binary: rye-composer-extends-chain
-          cargo_package: ryeos-handler-bins
-          build_class: release
-          cargo_features: [extends-composer]
         - binary: ryeos-directive-launch-preparer
           cargo_package: ryeos-handler-bins
           build_class: release

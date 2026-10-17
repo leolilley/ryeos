@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:1aa20e6d2868a7f0cb53a961008e810b9fb2383049daadadc4403388044a56fb:GvflgBqAKi2oR/uZUkHrQOxVy1/fWqF+HqDNOR7L1aITHYe3iSIXGuXLYzjuVhNOwnButdXY9nwL5B5Ps57XDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-17T01:32:58Z:fa48c91c371c9217566792f7cab19e746fcd2dab5da579dbd5f1ee7bf588cb38:V7Q5+VzqoL8D/jf90yKRi81Uwn7Fjz6DSJ16BXhw2cNJi/gvfEKKnaksEWjdXV6Tla8/kE8uAD7gNEO0OKV5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/handlers
 tags: [handler, directive, extends]
@@ -7,6 +7,8 @@ description: Extends-chain composer reference.
 ---
 
 # Handler: extends-chain
+
+The core bundle ships this handler; this reference lives with the standard directive knowledge.
 
 Invariant: extends-chain resolves directive inheritance into one effective directive while preventing children from widening their parent's capability requirements.
 

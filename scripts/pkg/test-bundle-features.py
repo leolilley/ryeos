@@ -45,7 +45,7 @@ def fixture(edit):
 # the scheduling feature and Standard the model-provider-setup feature to the
 # node binaries, in membership order. Every other package gets no features.
 HANDLERS_STANDARD = "directive-handlers,graph-handlers"
-HANDLERS_CORE = "core-handlers"
+HANDLERS_CORE = "core-handlers,extends-composer"
 GOLDEN = {
     "full": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
     "central-host": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
