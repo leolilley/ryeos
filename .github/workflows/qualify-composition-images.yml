@@ -70,24 +70,26 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Assert development publisher key
-        env:
-          PUBLISHER_KEY: ${{ secrets.RYEOS_DEV_PUBLISHER_KEY }}
         run: |
-          test -n "$PUBLISHER_KEY"
-          # The key file lives under the runner's per-job temporary directory,
-          # private to this account, and is removed when the step ends.
-          umask 077
-          KEY_FILE="$(mktemp -p "$RUNNER_TEMP" publisher-key.XXXXXX)"
-          trap 'rm -f "$KEY_FILE"' EXIT
-          printf '%s\n' "$PUBLISHER_KEY" > "$KEY_FILE"
+          # The development publisher key is committed: it only signs
+          # candidates that development trust accepts, never an official
+          # release. The checks pin it to the development trust document and
+          # refuse it if it were ever the official key.
+          KEY_FILE=.dev-keys/PUBLISHER_DEV.pem
+          test -s "$KEY_FILE"
           EXPECTED="$(python3 -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text())["fingerprint"])')"
           ACTUAL="$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null \
             | tail -c 32 | sha256sum | cut -d' ' -f1)"
           [[ "$ACTUAL" == "$EXPECTED" ]] || {
-            echo "RYEOS_DEV_PUBLISHER_KEY does not match the development publisher trust document" >&2
+            echo "$KEY_FILE does not match the development publisher trust document" >&2
             exit 1
           }
           [[ "$ACTUAL" != "$(scripts/release/official-publisher-fingerprint.sh)" ]]
+          {
+            echo 'RYEOS_PUBLISHER_KEY<<RYEOS_PUBLISHER_KEY_EOF'
+            cat "$KEY_FILE"
+            echo 'RYEOS_PUBLISHER_KEY_EOF'
+          } >> "$GITHUB_ENV"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -102,8 +104,6 @@ jobs:
       - name: Build and push composition candidates
         id: bake
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
-        env:
-          RYEOS_PUBLISHER_KEY: ${{ secrets.RYEOS_DEV_PUBLISHER_KEY }}
         with:
           source: .
           files: ./docker-bake.composition.hcl
