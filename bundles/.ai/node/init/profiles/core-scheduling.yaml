@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-14T12:31:24Z:74cb0b88c13f42cee57e17892c39349fcb8dfbed5fc1b2c00e4ed8842f401125:LsKbDQ9eiiUQ5QN7QWMfPRcWbAUuA1PC06jPU16vSalELpD79/+fEqPc5AZWTdMLv7B6lOotYsqWF9d6TtSoAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# Source-only Core+scheduling profile; signing/admission/native qualification pending.
+# ryeos:signed:2026-10-18T10:11:10Z:df8a8e04167878529f5d07365878386ba5710074919c6406a9915f33425f3a84:2WB+xk1m3rGT0XQ1y0PjIKBq1Ff9ja4KByMVfAJ1yJQ9GBCnFuly8BYwtaEJP2aRxsuli+OqumRFYOGrT4y4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Core plus scheduling.
 schema: 1
 exact_bundles:
   - core

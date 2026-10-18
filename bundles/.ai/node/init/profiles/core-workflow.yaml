@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-18T05:28:04Z:015e7b0a63629a1482acdb8be5e0de2b7879ba0cb285b1157a2861f3f1e1049f:x2eLqcq55Botm/0TbysVzRjPHOGQMZ+/MvhGEi2lFwZzQB+10l7uMmRrDn36ql04PJigABV3hvxtLyXii4SJAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# Source-only Core plus graph workflow profile; signing/admission/native qualification pending.
+# ryeos:signed:2026-10-18T10:11:10Z:7c9889de465e7f40b48b4dfebc3cb6aed3803020a22f9f7f576e9b0149f0ceab:sz49bfpAo9U4f6Jtp9TSc4Aq1YiiEy63a5S3UvMiFXXv3K0ol75P10sgiuPOdhCKG3DthAevnk9e+4PLsTptDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
   - core

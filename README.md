@@ -220,6 +220,25 @@ docker pull ghcr.io/leolilley/ryeos-hosted-workflow:X.Y.Z
 Production deployment should pin the resolved digest of the immutable version
 tag rather than the mutable `latest` channel.
 
+Composition images, one per bundle set:
+
+| Image | Bundle set | Init profile |
+| --- | --- | --- |
+| `ryeos-core` | core | `core` |
+| `ryeos-core-scheduling` | core, scheduling | `core-scheduling` |
+| `ryeos-core-workflow` | core, graph | `core-workflow` |
+| `ryeos-core-knowledge` | core, knowledge | `core-knowledge` |
+| `ryeos-standard` | standard | `standard` |
+| `ryeos-f5r-controller` | f5r-controller | `f5r-controller` |
+| `ryeos-local-inference` | local-inference | `local-inference` |
+| `ryeos-hosted-workflow` | hosted-workflow | `hosted-workflow` |
+| `ryeos-central-host` | central-host | `central-host` |
+| `ryeos-substrate` | bundle-source | `bundle-source` |
+
+`ryeos-standard` and `ryeos-hosted-workflow` are the published release images.
+The rest are branch candidates deployed by digest, not tagged releases. See
+[deploy/composition-images.md](deploy/composition-images.md).
+
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init --non-interactive --node-profile standard
 --host-class "$RYEOS_INIT_HOST_CLASS"` for first policy publication. The image
