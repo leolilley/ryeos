@@ -3,8 +3,8 @@
 import argparse
 import datetime
 import json
+import os
 import re
-import subprocess
 import sys
 import time
 import urllib.error
@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+DEFAULT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 API = "https://api.render.com/v1"
 FARM_SERVICE_ID = "srv-datiea7avr4c73dm14fg"
 SERVICE_PREFIX = "ryeos-f5r-s9-"
@@ -102,17 +103,40 @@ def clean_secret(text):
     return text
 
 
+def parse_env_file(text):
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name, value = name.strip(), value.strip()
+        if name.startswith("export "):
+            name = name[len("export "):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name] = value
+    return values
+
+
+def read_env_file_key(path):
+    path = Path(path)
+    if not path.is_file():
+        raise Failure(f"no render api key: {path} does not exist")
+    if path.stat().st_mode & 0o077:
+        raise Refusal(f"env file {path} is group or world readable; run chmod 600 on it")
+    key = parse_env_file(path.read_text()).get("RENDER_API_KEY")
+    if not key:
+        raise Failure(f"no render api key: RENDER_API_KEY missing from {path}")
+    return clean_secret(key)
+
+
 def read_key(args):
     if args.api_key_file:
         return clean_secret(Path(args.api_key_file).read_text())
-    return read_pass("ryeos/render-api-key")
-
-
-def read_pass(entry):
-    out = subprocess.run(["pass", "show", entry], capture_output=True, text=True)
-    if out.returncode != 0:
-        raise Failure(f"pass show for {entry} failed")
-    return clean_secret(out.stdout)
+    if os.environ.get("RENDER_API_KEY"):
+        return clean_secret(os.environ["RENDER_API_KEY"])
+    return read_env_file_key(args.env_file)
 
 
 def guard(name, payload):
@@ -250,25 +274,6 @@ def cmd_deploy(args, api, sleep=time.sleep, clock=time.monotonic):
         if found.get("name") == args.name:
             raise Refusal(f"a service named {args.name} already exists: {found.get('id')}")
     credential_id = args.registry_credential_id
-    created_credential = False
-    if not credential_id and args.ghcr_token_pass:
-        wanted = args.name + "-ghcr"
-        for cred in list_all(api, "/registrycredentials"):
-            if cred.get("name") == wanted:
-                credential_id = cred["id"]
-                print(f"reusing registry credential {credential_id}", flush=True)
-                break
-        else:
-            token = read_pass(args.ghcr_token_pass)
-            api.add_secret(token)
-            _, cred = api.call("POST", "/registrycredentials", {
-                "name": wanted,
-                "registry": "GITHUB",
-                "username": args.ghcr_user,
-                "authToken": token,
-            })
-            credential_id, created_credential = cred["id"], True
-            print(f"created registry credential {credential_id}", flush=True)
     payload = build_payload(args, owner_id, credential_id)
     guard(args.name, payload)
     record = {
@@ -276,7 +281,7 @@ def cmd_deploy(args, api, sleep=time.sleep, clock=time.monotonic):
         "image": args.image,
         "substrateDigest": args.substrate_digest,
         "registryCredentialId": credential_id,
-        "registryCredentialCreated": created_credential,
+        "registryCredentialCreated": False,
         "envKeys": [e["key"] for e in payload["envVars"]],
         "state": "credential-ready" if credential_id else "starting",
         "startedAt": now(),
@@ -395,6 +400,7 @@ def cmd_teardown(args, api, sleep=time.sleep):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--api-key-file")
+    p.add_argument("--env-file", default=str(DEFAULT_ENV_FILE))
     sub = p.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("deploy")
     d.add_argument("--image", required=True)
@@ -406,8 +412,6 @@ def parser():
     d.add_argument("--disk-gb", type=int, default=1)
     d.add_argument("--owner-email")
     d.add_argument("--registry-credential-id")
-    d.add_argument("--ghcr-token-pass")
-    d.add_argument("--ghcr-user", default="leolilley")
     d.add_argument("--operator-hold", action="store_true")
     d.add_argument("--timeout", type=int, default=1200)
     d.add_argument("--poll-interval", type=int, default=10)
