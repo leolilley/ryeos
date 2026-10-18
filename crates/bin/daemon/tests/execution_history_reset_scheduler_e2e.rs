@@ -105,7 +105,14 @@ fn quarantine_coordinate(name: &str, role: &str) -> bool {
 fn reset_command(h: &DaemonHarness) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(ryeos_binary());
     command
-        .args(["node", "reset", "execution-history", "--confirm", "--json", "--app-root"])
+        .args([
+            "node",
+            "reset",
+            "execution-history",
+            "--confirm",
+            "--json",
+            "--app-root",
+        ])
         .arg(&h.state_path)
         .env("RYEOS_APP_ROOT", &h.state_path)
         .env("HOME", h.user_space.path())
@@ -238,7 +245,8 @@ async fn stopped_scheduling_node() -> Result<(DaemonHarness, PathBuf, EntryIdent
     let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
     h.stop_gracefully().await?;
     let runtime = runtime_dir(&h);
-    let main = observe(&runtime, MAIN)?.context("started scheduling node has no scheduler.sqlite3")?;
+    let main =
+        observe(&runtime, MAIN)?.context("started scheduling node has no scheduler.sqlite3")?;
     Ok((h, runtime, main))
 }
 
@@ -323,22 +331,23 @@ async fn crash_after_unlink_before_ack_leaves_no_survivor_then_settles() -> Resu
 /// they are orphans of an already-removed main when the reset is rerun.
 #[tokio::test(flavor = "multi_thread")]
 async fn orphan_sidecars_after_main_removal_settle() -> Result<()> {
-    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
-    let runtime = runtime_dir(&h);
-    h.kill_daemon().await?;
-    let main = observe(&runtime, MAIN)?.context("scheduling node has no scheduler.sqlite3")?;
-    let wal = observe(&runtime, WAL)?
-        .context("a killed scheduling node must retain scheduler.sqlite3-wal for this fixture")?;
-    let shm = observe(&runtime, SHM)?
-        .context("a killed scheduling node must retain scheduler.sqlite3-shm for this fixture")?;
+    let (mut h, runtime, [(_, main), (_, wal), (_, shm)]) = killed_scheduling_node().await?;
 
     reset_until_cut(&h, "quarantine_armed:wal").await?;
     assert!(
         locate(&runtime, main)?.is_empty(),
         "main must already be removed when the WAL quarantine is armed"
     );
-    assert_eq!(observe(&runtime, WAL)?, Some(wal), "orphan WAL must stay at P");
-    assert_eq!(observe(&runtime, SHM)?, Some(shm), "orphan SHM must stay at P");
+    assert_eq!(
+        observe(&runtime, WAL)?,
+        Some(wal),
+        "orphan WAL must stay at P"
+    );
+    assert_eq!(
+        observe(&runtime, SHM)?,
+        Some(shm),
+        "orphan SHM must stay at P"
+    );
 
     reset_to_completion(&h).await?;
     for (role, identity) in [("main", main), ("wal", wal), ("shm", shm)] {
@@ -365,7 +374,10 @@ async fn foreign_file_swapped_in_after_the_pin_is_kept() -> Result<()> {
     std::fs::write(&staged, &foreign_bytes)?;
     std::fs::rename(&staged, runtime.join(MAIN))?;
     let foreign = observe(&runtime, MAIN)?.context("foreign occupant must be at P")?;
-    assert_ne!(foreign, original, "swap must replace the pinned original inode");
+    assert_ne!(
+        foreign, original,
+        "swap must replace the pinned original inode"
+    );
 
     for attempt in 0..2 {
         let refusal = reset_refused(&h).await?;
@@ -444,6 +456,109 @@ async fn crash_after_u_to_r_survives_only_at_r_then_settles() -> Result<()> {
         "the original must survive only at R, found {holders:?}"
     );
     assert_eq!(observe(&runtime, MAIN)?, None, "P must be vacated at R");
+
+    reset_to_completion(&h).await?;
+    assert!(
+        locate(&runtime, original)?.is_empty(),
+        "settlement must retire the original from every coordinate"
+    );
+    assert_settled_and_ready(&mut h, &runtime).await
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+/// A SIGKILLed scheduling node: main plus the WAL and shared-memory sidecars
+/// the kill left on disk, each with its pinned identity.
+async fn killed_scheduling_node()
+-> Result<(DaemonHarness, PathBuf, [(&'static str, EntryIdentity); 3])> {
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
+    let runtime = runtime_dir(&h);
+    h.kill_daemon().await?;
+    let main = observe(&runtime, MAIN)?.context("scheduling node has no scheduler.sqlite3")?;
+    let wal = observe(&runtime, WAL)?
+        .context("a killed scheduling node must retain scheduler.sqlite3-wal for this fixture")?;
+    let shm = observe(&runtime, SHM)?
+        .context("a killed scheduling node must retain scheduler.sqlite3-shm for this fixture")?;
+    Ok((h, runtime, [("main", main), ("wal", wal), ("shm", shm)]))
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+/// The unlink of the shared-memory sidecar completes and the reset dies
+/// before acknowledging it: main and the WAL are already retired, and the
+/// sidecar survives at no coordinate.
+#[tokio::test(flavor = "multi_thread")]
+async fn crash_after_unlink_before_ack_on_shm_leaves_no_survivor_then_settles() -> Result<()> {
+    let (mut h, runtime, roles) = killed_scheduling_node().await?;
+    reset_until_cut(&h, "unlinked_before_ack:shm").await?;
+
+    for (role, identity) in roles {
+        assert!(
+            locate(&runtime, identity)?.is_empty(),
+            "after unlinked_before_ack:shm the original {role} must not survive at any coordinate"
+        );
+    }
+    assert_eq!(observe(&runtime, SHM)?, None, "P must be vacated for shm");
+
+    reset_to_completion(&h).await?;
+    assert_settled_and_ready(&mut h, &runtime).await
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+/// The resolution move of the WAL sidecar from U to R parks before its
+/// unlink: main is already retired and the WAL survives only at R.
+#[tokio::test(flavor = "multi_thread")]
+async fn crash_after_u_to_r_on_wal_survives_only_at_r_then_settles() -> Result<()> {
+    let (mut h, runtime, [(_, main), (_, wal), (_, _shm)]) = killed_scheduling_node().await?;
+    reset_until_cut(&h, "moved_to_resolution_before_unlink:wal").await?;
+
+    assert!(
+        locate(&runtime, main)?.is_empty(),
+        "main must already be retired when the WAL reaches R"
+    );
+    let holders = locate(&runtime, wal)?;
+    assert_eq!(
+        holders.len(),
+        1,
+        "the original WAL must survive at exactly one coordinate: {holders:?}"
+    );
+    assert!(
+        holders[0].starts_with("scheduler-retirement.resolve.")
+            && holders[0].ends_with(".quarantine"),
+        "the original WAL must survive only at R, found {holders:?}"
+    );
+    assert_eq!(
+        observe(&runtime, WAL)?,
+        None,
+        "P must be vacated for the WAL"
+    );
+
+    reset_to_completion(&h).await?;
+    assert!(
+        locate(&runtime, wal)?.is_empty(),
+        "settlement must retire the original WAL from every coordinate"
+    );
+    assert_settled_and_ready(&mut h, &runtime).await
+}
+
+#[cfg(feature = "crash-qualification-test-support")]
+/// A reset killed once at Q and killed again while resuming at the Q to U
+/// arming still holds the original only at Q, and the next rerun settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_kill_during_settlement_still_settles() -> Result<()> {
+    let (mut h, runtime, original) = stopped_scheduling_node().await?;
+
+    for cut in ["quarantined_before_ack:main", "purge_armed:main"] {
+        reset_until_cut(&h, cut).await?;
+        let holders = locate(&runtime, original)?;
+        assert_eq!(
+            holders.len(),
+            1,
+            "after {cut} the original must survive at exactly one coordinate: {holders:?}"
+        );
+        assert!(
+            quarantine_coordinate(&holders[0], "main"),
+            "after {cut} the original must survive only at Q, found {holders:?}"
+        );
+    }
 
     reset_to_completion(&h).await?;
     assert!(
@@ -578,7 +693,10 @@ async fn core_only_reset_refuses_stale_scheduler_state_with_remedy() -> Result<(
     let stale = observe(&runtime, MAIN)?.context("planted scheduler.sqlite3 must exist")?;
 
     let refusal = reset_refused(&h).await?;
-    assert_names_remedy(&refusal, "scheduler history requires its selected reset participant");
+    assert_names_remedy(
+        &refusal,
+        "scheduler history requires its selected reset participant",
+    );
     assert_eq!(
         observe(&runtime, MAIN)?,
         Some(stale),
@@ -763,7 +881,9 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
     let mut h = stopped_core_only_node().await?;
     switch_node_profile(&h, "core-scheduling").await?;
     anyhow::ensure!(
-        h.state_path.join(".ai/node/bundles/scheduling.yaml").is_file(),
+        h.state_path
+            .join(".ai/node/bundles/scheduling.yaml")
+            .is_file(),
         "the core-scheduling profile must register the scheduling bundle"
     );
 
@@ -807,7 +927,10 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
             }),
         )
         .await?;
-    anyhow::ensure!(status.is_success(), "scheduler/register refused with {status}: {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "scheduler/register refused with {status}: {body}"
+    );
     let source = node_schedules_dir(&h).join(format!("{REMEDY_SCHEDULE_ID}.yaml"));
     anyhow::ensure!(
         std::fs::symlink_metadata(&source)?.file_type().is_file(),
@@ -834,12 +957,20 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
     let (status, body) = h
         .post_execute("service:scheduler/list", ".", serde_json::json!({}))
         .await?;
-    anyhow::ensure!(status.is_success(), "scheduler/list refused with {status}: {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "scheduler/list refused with {status}: {body}"
+    );
     let listed = body.get("result").unwrap_or(&body)["schedules"]
         .as_array()
         .with_context(|| format!("scheduler/list returned no schedules array: {body}"))?
         .iter()
-        .map(|schedule| schedule["schedule_id"].as_str().unwrap_or_default().to_owned())
+        .map(|schedule| {
+            schedule["schedule_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
         .collect::<Vec<_>>();
     anyhow::ensure!(
         listed.iter().any(|id| id == REMEDY_SCHEDULE_ID),
