@@ -68,6 +68,25 @@ class Ctx:
         return sb
 
 
+def write_file(sb, path, text):
+    """Write a file through exec stdin; every Sandbox file API is refused server-side."""
+    p = sb.exec("sh", "-c", f"cat > {path}", timeout=60)
+    p.stdin.write(text)
+    p.stdin.write_eof()
+    p.stdin.drain()
+    err = p.stderr.read()
+    code = p.wait()
+    if code != 0:
+        raise RuntimeError(f"write {path} exit {code}: {err.strip()[-200:]}")
+
+
+def read_file(sb, path):
+    p = sb.exec("cat", path, timeout=60)
+    out = p.stdout.read()
+    p.wait()
+    return out
+
+
 def run_py(sb, code, stdin=None, timeout=60):
     """Run python in the sandbox; return (exit, stdout, stderr)."""
     p = sb.exec("python3", "-c", code, timeout=timeout)
@@ -117,6 +136,7 @@ import json, socket, ssl
 host = "example.com"
 ctx = ssl.create_default_context()
 raw = socket.create_connection((host, 443), timeout=15)
+peer = raw.getpeername()[0]
 tls = ctx.wrap_socket(raw, server_hostname=host)
 import hashlib
 chain = tls.get_verified_chain() if hasattr(tls, "get_verified_chain") else None
@@ -137,7 +157,7 @@ print(json.dumps({"status_line": buf.split(b"\r\n")[0].decode(),
   "subject": flat(cert["subject"]), "issuer": flat(cert["issuer"]),
   "notAfter": cert["notAfter"], "verified_chain_len": len(chain) if chain else None, "verified_chain_sha256": chain_sha256,
   "ca_cafile": paths.cafile, "ca_openssl_cafile": paths.openssl_cafile,
-  "peer": raw.getpeername()[0]}))
+  "peer": peer}))
 """
 
 
@@ -272,9 +292,7 @@ def ws_client_echo(host, port, payload):
 @step("websocket_echo", "tiny RFC 6455 echo server inside the sandbox behind an encrypted tunnel; stdlib client checks TLS and echo")
 def websocket_echo(ctx):
     sb = ctx.sandbox(encrypted_ports=[WS_PORT])
-    f = sb.open("/tmp/ws_server.py", "w")
-    f.write(WS_SERVER)
-    f.close()
+    write_file(sb, "/tmp/ws_server.py", WS_SERVER)
     server = sb.exec("python3", "/tmp/ws_server.py")
     tunnel = sb.tunnels()[WS_PORT]
     last = None
@@ -357,19 +375,16 @@ def lost_stream(ctx):
     return ev
 
 
-@step("file_write", "write a file through the SDK file API, read it back, and hash it inside the sandbox")
+@step("file_write", "write a file through exec stdin, read it back through exec cat, and hash it inside the sandbox")
 def file_write(ctx):
     sb = ctx.sandbox()
     data = "ryeos-e0m file\n" * 64
-    f = sb.open("/tmp/e0m.txt", "w")
-    f.write(data)
-    f.close()
-    f = sb.open("/tmp/e0m.txt", "r")
-    back = f.read()
-    f.close()
+    write_file(sb, "/tmp/e0m.txt", data)
+    back = read_file(sb, "/tmp/e0m.txt")
     code, out, _ = run_py(sb, "import hashlib;print(hashlib.sha256(open('/tmp/e0m.txt','rb').read()).hexdigest())")
     want = hashlib.sha256(data.encode()).hexdigest()
-    ev = {"bytes": len(data), "readback_equal": back == data, "guest_sha256": out.strip(), "expected_sha256": want}
+    ev = {"bytes": len(data), "readback_equal": back == data, "guest_sha256": out.strip(), "expected_sha256": want,
+          "write_path": "exec stdin to sh cat; Sandbox.open/ls/mkdir/rm share one file API the server refuses (UnimplementedError), so none is used"}
     if not ev["readback_equal"] or ev["guest_sha256"] != want:
         raise RuntimeError("file content differs after write")
     return ev
