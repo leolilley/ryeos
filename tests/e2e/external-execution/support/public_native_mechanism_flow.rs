@@ -364,7 +364,7 @@ async fn public_native_mechanism_probe_settles_writer_then_captures() -> Result<
     let input = RuntimeInput::load()?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, keys| {
-            fast_fixture::register_standard_bundle(state, keys)?;
+            fast_fixture::register_workflow_bundles(state, keys)?;
             install(state, keys, &input)
         },
         |_| {},

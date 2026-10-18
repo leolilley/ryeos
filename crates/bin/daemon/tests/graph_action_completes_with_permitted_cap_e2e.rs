@@ -16,7 +16,7 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use lillux::crypto::SigningKey;
 use serde_json::{Map, Value, json};
 
@@ -356,7 +356,7 @@ fn assert_graph_runtime_event_identity(
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_completes_with_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -369,7 +369,7 @@ async fn graph_action_completes_with_permitted_cap() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
@@ -556,13 +556,13 @@ async fn graph_action_completes_with_permitted_cap() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_in_process_service_graph(project.path(), &fixture.publisher)
@@ -739,7 +739,7 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -798,7 +798,7 @@ async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_with_runtime_authority_permission_rejected_at_launch() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -811,7 +811,7 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_runtime_authority_graph(project.path(), &fixture.publisher)
@@ -856,7 +856,7 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_with_legacy_callbacks_rejected() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -869,7 +869,7 @@ async fn graph_with_legacy_callbacks_rejected() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_legacy_callbacks_graph(project.path(), &fixture.publisher)
@@ -907,7 +907,7 @@ async fn graph_with_legacy_callbacks_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_denied_without_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -920,7 +920,7 @@ async fn graph_action_denied_without_permitted_cap() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");

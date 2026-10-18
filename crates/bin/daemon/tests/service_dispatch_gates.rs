@@ -74,7 +74,7 @@ fn workspace_root() -> PathBuf {
 
 /// Build an engine-like fixture using the live bundle + trusted signers.
 /// Mirrors `engine_init::build_engine` but uses the test fixture trust store
-/// instead of the daemon's three-tier loader. Loads both core and standard
+/// instead of the daemon's three-tier loader. Loads core and the workflow
 /// bundles so all services in the descriptor table can resolve.
 fn build_test_engine() -> ryeos_engine::engine::Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
@@ -82,18 +82,24 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
     let workspace = workspace_root();
     let core_bundle = workspace.join("bundles/core");
-    let std_bundle = workspace.join("bundles/standard");
+    let workflow_bundles: Vec<PathBuf> = ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace.join("bundles").join(name))
+        .collect();
 
-    // Kind schemas from both bundles (core has service/tool/parser/etc,
-    // standard has directive/graph/knowledge).
-    let kinds_dirs = vec![
-        core_bundle.join(".ai/node/engine/kinds"),
-        std_bundle.join(".ai/node/engine/kinds"),
-    ];
+    // Kind schemas from every bundle (core has service/tool/parser/etc,
+    // the workflow bundles have directive/graph/knowledge).
+    let mut kinds_dirs = vec![core_bundle.join(".ai/node/engine/kinds")];
+    kinds_dirs.extend(
+        workflow_bundles
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store).expect("load kind registry");
 
-    // Parser tools from both bundles.
-    let bundle_roots: Vec<PathBuf> = vec![core_bundle.clone(), std_bundle];
+    // Parser tools from every bundle.
+    let mut bundle_roots: Vec<PathBuf> = vec![core_bundle.clone()];
+    bundle_roots.extend(workflow_bundles);
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load parser tools");

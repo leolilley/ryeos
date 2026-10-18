@@ -15,7 +15,7 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
@@ -165,7 +165,7 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
     let project_path = project.path().to_path_buf();
     let plant =
         |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-context-model-config",
@@ -242,7 +242,7 @@ async fn e2e_directive_without_context_still_works() {
     let project_path = project.path().to_path_buf();
     let plant =
         |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-context-model-config",

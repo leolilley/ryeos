@@ -94,16 +94,14 @@ fn installable_refs(
 #[test]
 fn installable_graph_expression_fields_compile_through_live_loaders() {
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
-    let bundle_roots = vec![core.clone(), standard.clone()];
+    let mut bundle_roots = vec![core.clone()];
+    bundle_roots.extend(ryeos_engine::test_support::workflow_bundle_roots());
     let trust = ryeos_engine::test_support::live_trust_store();
-    let kinds = KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
+    let kind_roots: Vec<_> = bundle_roots
+        .iter()
+        .map(|root| root.join(".ai/node/engine/kinds"))
+        .collect();
+    let kinds = KindRegistry::load_base(&kind_roots, &trust)
     .expect("load signed live kind schemas");
     let graph_schema = kinds.get("graph").expect("graph kind schema");
     let items = installable_refs("graph", graph_schema, &bundle_roots);

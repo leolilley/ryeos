@@ -275,7 +275,7 @@ def _closure(implications, selected):
 def cargo_features(ownership, bundles, package):
     """Return the `package/feature` entries `bundles` build `package` with.
 
-    `bundles` is ordered; host features follow that order, de-duplicated.
+    Host features are de-duplicated and sorted, so the result does not depend on bundle order.
     Names listed as data-only contribute nothing; any other unknown name is an error.
     Payload features of a package are unioned across the bundles, then any
     feature implied by another selected feature is dropped, and the rest is
@@ -298,11 +298,7 @@ def cargo_features(ownership, bundles, package):
     if len(classes) > 1:
         raise OwnershipError(f"{package}: payloads disagree on build class {sorted(classes)}")
     if package in ownership["host_packages"]:
-        features = []
-        for name in bundles:
-            for feature in by_name[name]["host_features"]:
-                if feature not in features:
-                    features.append(feature)
+        features = sorted({feature for name in bundles for feature in by_name[name]["host_features"]})
     else:
         features = sorted(selected - _closure(ownership["feature_implications"].get(package, {}), selected))
     return [f"{package}/{feature}" for feature in features]

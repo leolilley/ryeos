@@ -28,7 +28,7 @@ class ConsumerUpdateContract(unittest.TestCase):
         self.assertTrue(descriptor["operator_signing_key"].startswith("/"))
 
     def test_operator_contract_forbids_mutable_and_live_fallbacks(self):
-        doc = (ROOT / "bundles/standard/.ai/knowledge/ryeos/standard/bundle-set-update.md").read_text()
+        doc = (ROOT / "bundles/ryeos-docs/.ai/knowledge/ryeos/standard/bundle-set-update.md").read_text()
         for phrase in ("no mutable-name fallback", "no mutable-name"):
             if phrase in doc.lower():
                 break

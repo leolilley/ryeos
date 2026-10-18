@@ -23,7 +23,7 @@ fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Re
     let root = tempfile::tempdir()?;
     let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
     let test_bundle = root.path().join("test-bundle");
     let policy_path = test_bundle.join(".ai/config/test/consumer-qualification.yaml");
@@ -49,7 +49,10 @@ product_qualification_policy:
         &policy_path,
         lillux::signature::sign_content(policy, &signer, "#", None),
     )?;
-    let roots = vec![core.clone(), standard.clone(), codex, test_bundle];
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(codex);
+    roots.push(test_bundle);
     let mut trust = ryeos_engine::test_support::live_trust_store();
     let verifier = signer.verifying_key();
     trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
@@ -57,18 +60,14 @@ product_qualification_policy:
         verifying_key: verifier,
         label: Some("consumer qualification fixture".into()),
     }]));
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
-    let registered = ["core", "standard", "codex", "test"]
+    let registered = ["core", "knowledge", "directive", "graph", "codex", "test"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(
@@ -353,7 +352,7 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
     let manifest_hash = cas.store_object(&serde_json::to_value(&manifest)?)?;
 
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
     let test_bundle = root.path().join("test-bundle");
     let signer = SigningKey::from_bytes(&[7u8; 32]);
@@ -411,7 +410,10 @@ product_qualification_policy:
         &policy_path,
         lillux::signature::sign_content(policy, &signer, "#", None),
     )?;
-    let roots = vec![core.clone(), standard.clone(), codex, test_bundle];
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(codex);
+    roots.push(test_bundle);
     let mut trust = ryeos_engine::test_support::live_trust_store();
     let verifier = signer.verifying_key();
     trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
@@ -419,18 +421,14 @@ product_qualification_policy:
         verifying_key: verifier,
         label: Some("consumer environment fixture".into()),
     }]));
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
-    let registered = ["core", "standard", "codex", "test"]
+    let registered = ["core", "knowledge", "directive", "graph", "codex", "test"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(

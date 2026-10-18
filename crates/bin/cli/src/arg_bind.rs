@@ -244,14 +244,14 @@ mod tests {
 
     #[test]
     fn bind_positional() {
-        let tail = vec!["./bundles/standard".into()];
+        let tail = vec!["./bundles/directive".into()];
         let result = bind_tail(&tail).unwrap();
         assert_eq!(result.get("_args").unwrap().as_array().unwrap().len(), 1);
     }
 
     #[test]
     fn bind_mixed() {
-        let tail = vec!["--seed".into(), "119".into(), "./bundles/standard".into()];
+        let tail = vec!["--seed".into(), "119".into(), "./bundles/directive".into()];
         let result = bind_tail(&tail).unwrap();
         assert_eq!(result.get("seed").unwrap(), "119");
         assert_eq!(result.get("_args").unwrap().as_array().unwrap().len(), 1);

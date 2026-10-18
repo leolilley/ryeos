@@ -1,0 +1,32 @@
+# ryeos:signed:2026-10-18T01:45:23Z:983948f57f61e2cbae6f9218d386f3461f0f2faa34def155700058fa7feed571:jU1DKPwl3lnDc6B3LX883Z37dPKpIEk+sHA/EBmCJCn8aWLjZweJYiPNBYx7Lb3bGDTDYTLDwNv76SMBjIdNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/qualification"
+version: "1.0.0"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+required_caps: []
+description: "Qualification workload: returns the node's public identity document, and runs only on a node whose capability report proves namespace isolation. A host that cannot prove it refuses the launch plainly."
+# Guarantees the node running this probe must prove in its capability report.
+# The probe does nothing the identity tool does not, so what it shows is the
+# admission: admitted where unprivileged namespaces are allowed, refused with
+# the unmet entry named elsewhere.
+requires:
+  node:
+    - isolation:namespaces
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "identity"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    system_space_dir:
+      type: string
+      description: "System space root (parent of .ai/). Defaults to RYEOS_APP_ROOT env or XDG data dir / ryeos."
+    project_path:
+      type: string
+      description: "Project root path. Injected by the engine; not used by this tool."

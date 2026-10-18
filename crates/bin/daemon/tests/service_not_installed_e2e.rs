@@ -51,10 +51,12 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
         installed.iter().any(|b| b == "core"),
         "installed_bundles must list core, got: {installed:?}"
     );
-    assert!(
-        !installed.iter().any(|b| b == "standard"),
-        "standard must not be listed on a core-only node, got: {installed:?}"
-    );
+    for workflow in ["knowledge", "directive", "graph", "ryeos-docs"] {
+        assert!(
+            !installed.iter().any(|b| b == workflow),
+            "{workflow} must not be listed on a core-only node, got: {installed:?}"
+        );
+    }
     assert!(
         !installed.iter().any(|b| b == "scheduling"),
         "scheduling must not be listed on a core-only node, got: {installed:?}"

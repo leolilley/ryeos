@@ -58,8 +58,8 @@ class GatePackageSelection(unittest.TestCase):
         for package in ["ryeosd", "ryeos-api", "ryeos-cli"]:
             with self.subTest(package=package):
                 args = self.invoke("--bundle-set", "standard", "-p", package)
-                features = f"{package}/scheduling"
-                features += f",{package}/model-provider-setup"
+                features = f"{package}/model-provider-setup"
+                features += f",{package}/scheduling"
                 self.assertEqual(args[args.index("--features") + 1], features)
                 self.assertNotIn("--workspace", args)
 

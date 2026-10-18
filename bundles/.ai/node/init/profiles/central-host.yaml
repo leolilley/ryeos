@@ -1,10 +1,13 @@
-# ryeos:signed:2026-10-14T12:31:24Z:40d1d0ca13d3a03ff5d7802293e5aff7792db7f135b007d7aec0c0ab4e06a51c:L1gMCejPdbeNBYELOL6OpQMLr6Rei2fc/zZzR4jB5Yxsm5M4n0L3pdBu2H8C88VhAdFGYBDI8K7kYNZpD/jxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:de98269e539e9e29eef2677aed2633d885c68704d408402b2367673682f1545e:ReM6261P1+NBUT2IPoyT27972PtVBHa1yOwarHZvWhDvi6PqA60rgBrgLVj4WveoA3ybgXn7kyXSZ8EDv5lrBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - core
+  - directive
+  - graph
+  - knowledge
+  - ryeos-docs
   - scheduling
-  - standard
   - web
 policies:
   bundle_publication:
@@ -132,8 +135,11 @@ policies:
         - ryeos.register.command.root.system
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      standard:
+      directive: []
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
+      knowledge: []
+      ryeos-docs: []
       web: []
   execution:
     schema: 4

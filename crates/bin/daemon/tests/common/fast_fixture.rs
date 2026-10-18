@@ -108,12 +108,27 @@ const FULL_BUNDLE_INVENTORY: &[&str] = &[
     "central-auth",
     "codex",
     "core",
+    "directive",
     "environment-qualification",
+    "graph",
+    "knowledge",
     "opencode",
+    "ryeos-docs",
     "ryeos-ui",
     "scheduling",
-    "standard",
     "web",
+];
+
+/// The workflow bundles layered over Core by the Standard composition.
+const WORKFLOW_BUNDLES: &[&str] = &["knowledge", "directive", "graph", "ryeos-docs"];
+
+const STANDARD_BUNDLE_INVENTORY: &[&str] = &[
+    "core",
+    "directive",
+    "graph",
+    "knowledge",
+    "ryeos-docs",
+    "scheduling",
 ];
 
 #[derive(Clone, Copy)]
@@ -138,7 +153,7 @@ impl FastFixtureProfile {
         match self {
             Self::Core => Some(&["core"]),
             Self::CoreScheduling => Some(&["core", "scheduling"]),
-            Self::Standard => Some(&["core", "scheduling", "standard"]),
+            Self::Standard => Some(STANDARD_BUNDLE_INVENTORY),
             Self::Full => Some(FULL_BUNDLE_INVENTORY),
         }
     }
@@ -770,19 +785,23 @@ pub fn register_central_auth_bundle(state_path: &Path, fixture: &FastFixture) ->
     register_bundle_record(state_path, fixture, "central-auth")
 }
 
-/// Write a `kind: node` bundle record pointing at `bundles/standard`.
-pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    super::require_bundles_prepared(&["core", "standard"])?;
-    register_bundle_record(state_path, fixture, "standard")
+/// Write `kind: node` bundle records for the knowledge, directive, graph and
+/// ryeos-docs bundles.
+pub fn register_workflow_bundles(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::require_bundles_prepared(&["core", "knowledge", "directive", "graph", "ryeos-docs"])?;
+    for bundle_name in WORKFLOW_BUNDLES {
+        register_bundle_record(state_path, fixture, bundle_name)?;
+    }
+    Ok(())
 }
 
-/// Register the exact authored Standard composition: Core,
-/// Scheduling, and Standard. Its policy retains Standard's maintenance
+/// Register the exact authored Standard composition: Core, Scheduling, and
+/// the workflow bundles. Its policy retains Standard's maintenance
 /// obligations while its physical bundle set matches `standard.yaml`.
 pub fn register_standard_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    super::require_bundles_prepared(&["core", "scheduling", "standard"])?;
+    super::require_bundles_prepared(STANDARD_BUNDLE_INVENTORY)?;
     register_scheduling_bundle(state_path, fixture)?;
-    register_standard_bundle(state_path, fixture)
+    register_workflow_bundles(state_path, fixture)
 }
 
 /// Register every bundle selected by the authored Full profile. The caller's

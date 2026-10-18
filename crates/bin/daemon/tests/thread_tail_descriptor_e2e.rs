@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -177,7 +177,7 @@ const TERMINAL_EVENTS: [&str; 5] = [
     "thread_timed_out",
 ];
 
-/// Boot a daemon with the standard bundle (provides the thread-events route +
+/// Boot a daemon with the workflow bundles (core provides the thread-events route +
 /// the `service:threads/tail` item), run a directive to completion, and return
 /// the harness, the owner signing key, the node fingerprint (audience), the
 /// completed thread id, and the project path (reused for service dispatch).
@@ -204,7 +204,7 @@ async fn boot_and_run_directive(
     let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-tail-model-config",
@@ -226,7 +226,7 @@ async fn boot_and_run_directive(
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();

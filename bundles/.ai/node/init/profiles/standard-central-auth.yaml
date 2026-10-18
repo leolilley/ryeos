@@ -1,11 +1,14 @@
-# ryeos:signed:2026-10-14T12:31:24Z:cb634d0f293c7c4347699992dbd711d7518c07a4ced4fa85730e574309a9b197:V2e5tmq78CnKEarKv7w5IXBLA+0YVUyU+HCO+LhAPbXTOerh6eSBNCUooezv3PybOawVkDdi4gMadbdCnH/dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:b8fd50a6292fd69895a32e05df5c6881dce14d1911194aafa7e0ae0a58114b6c:F5wgjENSankMjpTnDTofg2MW5BUjCd66/tvgsF1fbKi516/a20HGJuh985ju4e1cqco+FUH36JvGn/oUOe/mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above Standard; source-only, admission pending.
 schema: 1
 exact_bundles:
   - central-auth
   - core
+  - directive
+  - graph
+  - knowledge
+  - ryeos-docs
   - scheduling
-  - standard
 policies:
   bundle_publication:
     schema: 2
@@ -132,8 +135,11 @@ policies:
         - ryeos.register.command.root.system
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      standard:
+      directive: []
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
+      knowledge: []
+      ryeos-docs: []
   execution:
     schema: 4
     max_live_fanout: 8

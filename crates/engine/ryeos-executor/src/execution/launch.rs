@@ -490,7 +490,7 @@ impl From<ryeos_engine::error::EngineError> for MaterializationError {
 /// `rustc -vV | grep ^host:` for a native build, which is the convention the
 /// build-bundle pipeline uses when writing `bin/<triple>/<name>` into bundle
 /// manifests (see `crates/tools/core-tools/tests/build_bundle_smoke.rs` and
-/// `bundles/standard/.ai/bin/<triple>/`).
+/// `bundles/<name>/.ai/bin/<triple>/`).
 ///
 /// Using the compile-time `TARGET` (as opposed to a hand-built
 /// `ARCH-VENDOR-OS` string) guarantees the daemon's lookup key matches the

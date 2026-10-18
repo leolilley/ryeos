@@ -39,7 +39,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
 use ryeos_runtime::CheckpointWriter;
@@ -228,7 +228,7 @@ fn count_step_started_for_node(events: &[(String, Value)], node: &str) -> usize 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -244,7 +244,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_chain_graph(project.path(), &fixture.publisher).expect("plant chain graph");

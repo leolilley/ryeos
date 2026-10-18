@@ -5,7 +5,7 @@
 RyeOS is portable verified execution. That portability describes signed
 execution data moving between compatible nodes; the current production
 distribution is Linux x86-64. See the
-[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md).
+[platform support matrix](bundles/ryeos-docs/.ai/knowledge/ryeos/core/platform-support.md).
 
 (_RYE Your Execution_.)
 
@@ -47,7 +47,7 @@ Build around the work: tools perform operations, directives exercise judgment,
 and graphs coordinate explicit transitions. Projects define objectives,
 evidence and acceptance. Assistant experiences can use those mechanisms, but
 an "agent" is not a prerequisite abstraction for designing a RyeOS system.
-See [Why RyeOS](bundles/standard/.ai/knowledge/ryeos/core/why-ryeos.md).
+See [Why RyeOS](bundles/ryeos-docs/.ai/knowledge/ryeos/core/why-ryeos.md).
 
 ## Mental model
 
@@ -160,7 +160,7 @@ The kernel floor supplies the pidfd process-group and authenticated Unix-peer
 primitives used for durable cancellation and lifecycle control. Official
 container images are currently `linux/amd64`, and packaged bundle executables target
 `x86_64-unknown-linux-gnu`. Other targets are tracked in the
-[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
+[platform support matrix](bundles/ryeos-docs/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
 the isolation or durability contracts.
 
 ### Arch Linux / AUR
@@ -188,7 +188,7 @@ with runtime defaults, and the class is never inferred from what the host
 proves.
 Isolation backends are ordinary, separately installed bundles. `ryeos start`
 launches `ryeosd`. See the
-[execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
+[execution isolation contract](bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
 enabling or tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
@@ -257,7 +257,7 @@ docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
 
 That switch pins the image's `PUBLISHER_TRUST.toml` files before preflight. Do
 not use it for release images. See the
-[official publisher trust contract](bundles/standard/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
+[official publisher trust contract](bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
 for the complete operator contract.
 
 When an upgrade intentionally changes the signed node-policy schema or the
@@ -415,7 +415,11 @@ The repository currently includes bundles such as:
 | Bundle         | Purpose                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------- |
 | `core`         | Node, trust, identity, signing, state, service, and bundle primitives.                   |
-| `standard`     | Execution-facing workflows: directives, tools, graphs, threads, scheduler, and runtimes. |
+| `knowledge`    | Knowledge kind, composition tool, and the knowledge runtime.                            |
+| `graph`        | Graph kind, graph runtime, launch and evidence handlers.                                 |
+| `directive`    | Directive kind, directive runtime, model-provider configuration and launch handler.      |
+| `ryeos-docs`   | Operator and authoring knowledge documents.                                              |
+| `scheduling`   | Scheduler service and schedule declarations.                                             |
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
 | `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
@@ -461,7 +465,7 @@ projection of its thread's durable state.
 Contributor documentation is indexed in
 [RyeOS repository development knowledge](.ai/knowledge/ryeos/development/README.md).
 Installed product and operator knowledge lives in the signed bundle trees,
-primarily `bundles/standard/.ai/knowledge/`.
+primarily `bundles/ryeos-docs/.ai/knowledge/`.
 
 Use the repository scripts rather than hand-editing derived bundle state.
 

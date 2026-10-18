@@ -589,10 +589,10 @@ mod tests {
 
     #[test]
     fn positional_only() {
-        let result = bind_argv(&["./bundles/standard".into()]);
+        let result = bind_argv(&["./bundles/directive".into()]);
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "./bundles/standard");
+        assert_eq!(args[0], "./bundles/directive");
     }
 
     #[test]
@@ -650,14 +650,14 @@ mod tests {
         let result = bind_argv(&[
             "--seed".into(),
             "119".into(),
-            "./bundles/standard".into(),
+            "./bundles/directive".into(),
             "--force".into(),
         ]);
         assert_eq!(result["seed"], "119");
         assert_eq!(result["force"], true);
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "./bundles/standard");
+        assert_eq!(args[0], "./bundles/directive");
     }
 
     #[test]

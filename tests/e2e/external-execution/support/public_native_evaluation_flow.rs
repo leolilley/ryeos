@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires current signed daemon/standard fixture and four explicit native ELF input paths; public capture/import/bind only"]
+    #[ignore = "requires current signed daemon/workflow-bundle fixture and four explicit native ELF input paths; public capture/import/bind only"]
     async fn public_native_evaluator_runtime_capture_import_bind_prerequisite() -> Result<()> {
         // Explicit host fixture inputs only: no ldconfig/PATH search, symlink
         // canonicalization, subprocess ELF discovery, or guest execution here.

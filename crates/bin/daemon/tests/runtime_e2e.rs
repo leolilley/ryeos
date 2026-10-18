@@ -369,7 +369,7 @@ fn parse_rotated_recovery_marker(raw: &str) -> anyhow::Result<RotatedRecoveryMar
 }
 
 /// Proof, through `service:threads/get`, that the marker-writing process is
-/// the live process durably attached to this running thread. `false` while the
+/// the live process durably attached to this (pre-terminal) thread. `false` while the
 /// attachment is still committing; contradictory coordinates are hard test
 /// failures. The running daemon's Runtime store is never opened from the test
 /// process: the published PID/PGID must equal the marker, and the process must
@@ -391,9 +391,15 @@ async fn rotated_recovery_process_attached(
         marker.pid,
         marker.pgid
     );
+    // Attachment publishes the process identity before the runtime's own
+    // mark-running callback; the stub never makes that callback, so the row
+    // stays `created` while attached. Either pre-terminal status is live.
     anyhow::ensure!(
-        detail["thread"]["status"].as_str() == Some("running"),
-        "attached native recovery thread is not running: {detail:#}"
+        matches!(
+            detail["thread"]["status"].as_str(),
+            Some("created") | Some("running")
+        ),
+        "attached native recovery thread is not live: {detail:#}"
     );
     ryeos_app::process::verify_thread_process_identity(pid, pgid, &marker.thread_id)
         .context("marker-writing native process is not the live attached incarnation")?;
@@ -550,18 +556,17 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // The stub exits non-zero, so we expect either a real thread envelope or a
     // runtime error, never a silent dispatch fallthrough.
     //
-    // The plant below registers the standard bundle alongside core via
-    // `common::fast_fixture::register_standard_bundle` — the signed
-    // `.ai/node/bundles/standard.yaml` registration writer that closes the
-    // former blocker — so the engine walks both `bundles/core` (kinds) and
-    // `bundles/standard` (binaries). This case deliberately plants a
+    // The plant below registers the workflow bundles alongside core via
+    // `common::fast_fixture::register_workflow_bundles` — the signed
+    // `.ai/node/bundles/<name>.yaml` registration writer — so the engine
+    // walks `bundles/core` (kinds) and the workflow bundles (binaries). This case deliberately plants a
     // *synthetic* runtime whose binary and executor manifest live in a separate
     // synthetic bundle so its provenance cannot mutate or impersonate the
     // copied core bundle's manifest authority. Resolution
-    // through the standard bundle's *real* directive/graph runtimes,
+    // through the workflow bundles' *real* directive/graph runtimes,
     // end-to-end, is covered by tests 5 / 5c / 5d below.
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         let bundle_root = state.join(".ai/bundles/runtime-e2e-direct");
         std::fs::create_dir_all(&bundle_root)?;
         install_kind_schema(&bundle_root, "e2e_kind", &fixture.publisher)?;
@@ -622,7 +627,7 @@ async fn e2e_rotated_native_resume_reconstruction_failure_retains_launch_failure
     let planted_marker = marker.clone();
     let planted_release = release.clone();
     let plant = move |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         let bundle_root = state.join(".ai/bundles/runtime-e2e-rotated-recovery");
         std::fs::create_dir_all(&bundle_root)?;
         install_kind_schema(&bundle_root, "e2e_recovery_kind", &fixture.publisher)?;
@@ -878,7 +883,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     // propagates a terminal readiness failure. `daemon.json` is only an early
     // discovery hint and is expected to exist before verified boot finishes.
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         let bundle_root = state.join(".ai/bundles/runtime-e2e-default-conflict");
         std::fs::create_dir_all(&bundle_root)?;
         install_kind_schema(&bundle_root, "dup_kind", &fixture.publisher)?;
@@ -932,7 +937,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 // `runtime.execute`. Direct `runtime:*` calls DO require the cap, but
 // the gate must NOT broaden retroactively to indirect chains.
 //
-// Uses the real standard bundle's directive runtime (no synth runtime).
+// Uses the real directive bundle's runtime (no synth runtime).
 // The directive item is a minimal YAML that resolves successfully;
 // the dispatch loop follows the kind-schema delegation onto the real
 // `runtime:directive-runtime`. The materialization step either succeeds
@@ -947,12 +952,12 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)
+        common::fast_fixture::register_workflow_bundles(state, fixture)
     };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     // Synth directive item planted in the PROJECT tier — minimal valid
     // YAML so engine resolution succeeds and the dispatch loop reaches
@@ -1003,7 +1008,7 @@ inputs: []
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         let bundle_root = state.join(".ai/bundles/runtime-e2e-malformed-ref");
         std::fs::create_dir_all(&bundle_root)?;
         install_kind_schema(&bundle_root, "p15_kind", &fixture.publisher)?;
@@ -1060,7 +1065,7 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
 // `item_ref`. P1.1 introduced `RootSubject` so the audit captures the
 // caller-typed subject's identity, not the executor's.
 //
-// This test pins that contract end-to-end using the real standard
+// This test pins that contract end-to-end using the real directive
 // bundle's directive runtime. A synth directive item in project space
 // dispatches through the real runtime using a bundle-owned, deliberately
 // unreachable no-auth provider. Whether that provider call succeeds or fails,
@@ -1076,7 +1081,7 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         common::fast_fixture::register_config_fixture_bundle(
             state,
             "fixture-audit-model-config",
@@ -1237,7 +1242,7 @@ model:
 // ── 5d. P4.B2 — graph indirect: subject identity wins audit ────────────
 //
 // Mirror of `e2e_indirect_directive_audit_records_subject_not_runtime`
-// for the graph kind. Uses the real standard bundle's graph runtime.
+// for the graph kind. Uses the real graph bundle's runtime.
 // Pins that an indirect dispatch chain
 //   graph:p4/flow → registry → runtime:graph-runtime
 // records the SUBJECT's identity (`graph_run` thread_profile +
@@ -1249,7 +1254,7 @@ model:
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_graph_records_graph_thread_profile() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)
+        common::fast_fixture::register_workflow_bundles(state, fixture)
     };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
@@ -1357,7 +1362,7 @@ config:
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_graph_validate_is_threadless_and_never_enters_the_runtime() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)
+        common::fast_fixture::register_workflow_bundles(state, fixture)
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await

@@ -29,7 +29,7 @@ may replace the stopped node's complete policy generation under the normal
 node-signing and compare-and-swap contract; execution fails closed when a
 selected signed backend is missing or unusable. Validate the change with
 `ryeos node doctor` and restart the node to load it. The
-[isolation contract](../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
+[isolation contract](../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
 schema and operating contract.
 
 For a release, download both immutable inputs once and run:

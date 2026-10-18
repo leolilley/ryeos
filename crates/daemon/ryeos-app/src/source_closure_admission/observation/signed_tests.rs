@@ -1,5 +1,5 @@
 //! Real signed Bundle resolution/capture controls. Like the existing consumer
-//! definition fixtures, these require populated core/standard handler payloads.
+//! definition fixtures, these require populated core/graph/directive handler payloads.
 //! No workload admission, workload process, credential, or provider contact is minted.
 
 use super::*;
@@ -154,9 +154,11 @@ external_content:
 
     fn reload_engine(&mut self) -> anyhow::Result<()> {
         let core = ryeos_engine::test_support::core_bundle_root();
-        let standard = ryeos_engine::test_support::standard_bundle_root();
+        let workflow = ryeos_engine::test_support::workflow_bundle_roots();
         fs::create_dir_all(&self.kind_root)?;
-        let roots = vec![core.clone(), standard.clone(), self.bundle.clone()];
+        let mut roots = vec![core.clone()];
+        roots.extend(workflow.iter().cloned());
+        roots.push(self.bundle.clone());
         let mut trust = ryeos_engine::test_support::live_trust_store();
         let key = self.signer.verifying_key();
         trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
@@ -164,14 +166,9 @@ external_content:
             verifying_key: key,
             label: Some("source observation fixture".into()),
         }]));
-        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-            &[
-                self.kind_root.clone(),
-                core.join(".ai/node/engine/kinds"),
-                standard.join(".ai/node/engine/kinds"),
-            ],
-            &trust,
-        )?;
+        let mut kind_roots = vec![self.kind_root.clone(), core.join(".ai/node/engine/kinds")];
+        kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
         let (parsers, _) =
             ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
         let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -185,7 +182,7 @@ external_content:
             .collect::<Vec<_>>();
         let protocols =
             ryeos_engine::protocols::ProtocolRegistry::load_base(&protocol_roots, &trust)?;
-        let registered = ["core", "standard", "fixture"]
+        let registered = ["core", "knowledge", "directive", "graph", "fixture"]
             .into_iter()
             .zip(roots.iter().cloned())
             .map(

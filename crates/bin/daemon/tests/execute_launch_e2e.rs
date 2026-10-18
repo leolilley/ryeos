@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use common::DaemonHarness;
 use common::build_signed_headers_for_bytes;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_with_scopes,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -470,13 +470,13 @@ async fn accepted_launch_owner_recovers_lost_ack_through_intrinsic_status_route(
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_admits_graph_ref() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_smoke_graph(project.path(), &fixture.publisher).expect("plant smoke graph");
@@ -507,7 +507,7 @@ async fn execute_launch_admits_directive_ref() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-execute-launch-model-config",
@@ -517,7 +517,7 @@ async fn execute_launch_admits_directive_ref() {
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -549,13 +549,13 @@ async fn execute_launch_admits_directive_ref() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_admits_knowledge_query() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
@@ -585,13 +585,13 @@ async fn execute_launch_admits_knowledge_query() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_method_missing_required_arg_is_rejected() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
@@ -625,13 +625,13 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_unsigned_knowledge_item(project.path(), "test/unsigned").expect("plant knowledge");
@@ -660,11 +660,11 @@ async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_unsigned_directive_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_workflow_bundles(state_path, fixture)
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_unsigned_directive(project.path(), "test/unsigned").expect("plant directive");
@@ -861,7 +861,7 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         // Grant only the per-ref execute cap, NOT the runtime's required
         // `runtime.execute` cap, so the direct-runtime cap gate rejects.
@@ -875,7 +875,7 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let (status, body) = h
         .post_json(

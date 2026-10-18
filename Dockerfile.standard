@@ -2,7 +2,8 @@
 #
 # ryeos-standard — standard remote workflow node image.
 #
-# Bakes the exact standard set: core + scheduling + standard. This provides
+# Bakes the exact standard set: core + scheduling + knowledge + directive + graph +
+# ryeos-docs. This provides
 # project sync/CAS/remote APIs, native caller authorization, and scheduling,
 # graph/directive/knowledge schemas, services, and runtimes. The application central-auth, ryeos-ui, and web are explicit additions.
 
@@ -86,7 +87,10 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 COPY --from=builder /build/bundles/.ai      /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
+COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=builder /build/bundles/directive /opt/ryeos/directive
+COPY --from=builder /build/bundles/graph /opt/ryeos/graph
+COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -1,7 +1,7 @@
 //! V5.4 Phase 3b — directive-runtime end-to-end with mock LLM provider.
 //!
 //! These tests spawn the real `ryeosd` binary, register the
-//! `bundles/standard` bundle (which ships
+//! `bundles/directive` bundle (which ships
 //! `runtime:directive-runtime` + the materializable
 //! `bin/<host_triple>/ryeos-directive-runtime` binary in its CAS),
 //! plant a directive + mock provider config, then exercise the full
@@ -17,7 +17,7 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use lillux::crypto::SigningKey;
 
@@ -197,7 +197,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -212,7 +212,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         );
     })
     .await
-    .expect("start daemon with mock provider + standard bundle");
+    .expect("start daemon with mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -318,7 +318,7 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -440,7 +440,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -452,7 +452,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         );
     })
     .await
-    .expect("start daemon with mock + standard bundle + echo tool");
+    .expect("start daemon with mock + workflow bundles + echo tool");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -548,7 +548,7 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -675,7 +675,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -686,7 +686,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
         );
     })
     .await
-    .expect("start daemon with mock provider + standard bundle");
+    .expect("start daemon with mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -898,7 +898,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-hard-budget-model-config",
@@ -1207,7 +1207,7 @@ async fn run_sleepy_batch(
     let mock_url = mock_url.to_string();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(state_path, &mock_url, fixture)
         };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -1218,7 +1218,7 @@ async fn run_sleepy_batch(
         );
     })
     .await
-    .expect("start daemon with mock + standard bundle");
+    .expect("start daemon with mock + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -1452,7 +1452,7 @@ async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
     let plant = {
         let mock_url = mock_url.clone();
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(state_path, &mock_url, fixture)
         }
     };

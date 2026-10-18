@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-06T01:00:58Z:f0d8e3f70e13b31480fa038e182918abcb5f15b5ce5edcb1d1154f9963fc269c:ODXxwxslyXtB2tg4nofo75HhND+pa2pFezfOvoDjbj6bFF9oU4pzqdqQq2WPhSeNw6zhQONChFcZCjrwqnsbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T10:07:11Z:f256c625ae2c6dc3cfd20d91e7a17f4639cd58c3d624d16f52430b381802ce1a:W/p3Q1kgowNFKiaNOk+hehUawaNResx3fkqDVgNz8wt9/iUO/eyRO9leN1nbJRmtIgsDQzm4ZQBO11O6ZndMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
@@ -222,5 +222,5 @@ A future implementation should demonstrate:
 - [Data-driven scope profiles](data-driven-scope-profiles.md) describes a
   related RyeOS pattern: declarative policy expands only into explicit,
   validated authority.
-- [Attachment before execution](../../../../bundles/standard/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md)
+- [Attachment before execution](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md)
   defines the daemon's durable launch-ownership boundary.

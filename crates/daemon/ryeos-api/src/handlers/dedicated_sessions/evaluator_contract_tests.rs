@@ -67,8 +67,10 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
 "#,
         )?;
         let core = ryeos_engine::test_support::core_bundle_root();
-        let standard = ryeos_engine::test_support::standard_bundle_root();
-        let roots = vec![core.clone(), standard.clone(), bundle];
+        let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+        let mut roots = vec![core.clone()];
+        roots.extend(workflow.iter().cloned());
+        roots.push(bundle);
         let mut trust = ryeos_engine::test_support::live_trust_store();
         trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
             ryeos_engine::trust::TrustedSigner {
@@ -77,13 +79,9 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 label: Some("evaluator fixture".into()),
             },
         ]));
-        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-            &[
-                core.join(".ai/node/engine/kinds"),
-                standard.join(".ai/node/engine/kinds"),
-            ],
-            &trust,
-        )?;
+        let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+        kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
         let (parsers, _) =
             ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
         let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -120,7 +118,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 state.isolation.clone(),
                 &roots,
             )?;
-        let registered = ["core", "standard", "evaluator-fixture"]
+        let registered = ["core", "knowledge", "directive", "graph", "evaluator-fixture"]
             .into_iter()
             .zip(&roots)
             .map(

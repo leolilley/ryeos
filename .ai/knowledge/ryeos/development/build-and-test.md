@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:57dfb90ccaa1b1cacd6c7a13839d512ec4f783d2f9183dad8f56dec00f1d337d:972OWhTeqG+DgfKXInx092TuF1gQS5SyQiXZJcNAzQr/XzzJ0SxN88eFLwqzoTA4/cJHBovZH+KSi3328V4ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:fd35e5b39449dcd03da6acd6ee9fd5edfaa02e9760e511e444c0f5f96aebdac1:3T4XO2S3U/RUulP9h5qH6zhplz+tGCtzTuH71fGPoxKCEaMlK7R9JBj/DpxvhP+CGtd2VAyc1E/BXUkw/VDbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -24,8 +24,8 @@ test, refresh bundles, or install this checkout locally.
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
-| Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
-| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/standard` |
+| Verify core and workflow source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge` |
+| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/knowledge --registry-root bundles/directive --registry-root bundles/graph` |
 | Stronger-host build and configured-remote qualification | See `development/remote-development-and-qualification.md` |
 
 Prereqs: Rust stable, `cargo-nextest`, Python 3, Linux, and usually `HOSTNAME`
@@ -88,7 +88,7 @@ It does all of this as one atomic authoring refresh:
 1. builds release binaries owned by bundles;
 2. deletes derived bundle state: `.ai/bin`, `.ai/objects`, `.ai/refs`, stale
    `PUBLISHER_TRUST.toml`;
-3. stages binaries into `bundles/{core,standard}/.ai/bin/<triple>/`;
+3. stages binaries into `bundles/{core,knowledge,directive,graph}/.ai/bin/<triple>/`;
 4. runs `ryeos-core-tools build` for core and standard, which signs items and
    rebuilds CAS manifests.
 
@@ -214,7 +214,7 @@ script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 The generated isolation policy is disabled by default. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
-Isolation](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md).
+Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md).
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.

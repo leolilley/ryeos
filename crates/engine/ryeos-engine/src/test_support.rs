@@ -46,13 +46,38 @@ pub fn core_bundle_root() -> PathBuf {
     workspace_root().join("bundles/core")
 }
 
-/// Absolute path to the canonical standard bundle shipped in this repo.
-pub fn standard_bundle_root() -> PathBuf {
-    workspace_root().join("bundles/standard")
+/// Absolute path to the knowledge bundle shipped in this repo.
+pub fn knowledge_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/knowledge")
+}
+
+/// Absolute path to the graph bundle shipped in this repo.
+pub fn graph_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/graph")
+}
+
+/// Absolute path to the directive bundle shipped in this repo.
+pub fn directive_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/directive")
+}
+
+/// Absolute path to the ryeos-docs bundle shipped in this repo.
+pub fn docs_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/ryeos-docs")
+}
+
+/// The workflow bundle roots (knowledge, directive, graph) that sit on
+/// top of core, in install order.
+pub fn workflow_bundle_roots() -> [PathBuf; 3] {
+    [
+        knowledge_bundle_root(),
+        directive_bundle_root(),
+        graph_bundle_root(),
+    ]
 }
 
 /// Platform-author verifying key (`09674c8...`) that signs every
-/// artifact shipped in `bundles/core/` and `bundles/standard/`
+/// artifact shipped in `bundles/core/` and the workflow bundles
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
@@ -105,7 +130,7 @@ pub fn live_trust_store() -> TrustStore {
     ])
 }
 
-/// Load the signed kind schemas from the live Core, Standard and ryeos-ui bundles.
+/// Load the signed kind schemas from the live core, workflow and ryeos-ui bundles.
 pub fn load_live_kind_registry() -> KindRegistry {
     let trust_store = live_trust_store();
     KindRegistry::load_base(
@@ -113,7 +138,13 @@ pub fn load_live_kind_registry() -> KindRegistry {
             core_bundle_root()
                 .join(crate::AI_DIR)
                 .join(crate::KIND_SCHEMAS_DIR),
-            standard_bundle_root()
+            knowledge_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            directive_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            graph_bundle_root()
                 .join(crate::AI_DIR)
                 .join(crate::KIND_SCHEMAS_DIR),
             workspace_root()
@@ -123,11 +154,11 @@ pub fn load_live_kind_registry() -> KindRegistry {
         ],
         &trust_store,
     )
-    .expect("live kind registry must load from bundles/{core,standard,ryeos-ui}")
+    .expect("live kind registry must load from bundles/{core,knowledge,directive,graph,ryeos-ui}")
 }
 
-/// Load the live `HandlerRegistry` from both `bundles/core/` and
-/// `bundles/standard/` using the standard test trust store.
+/// Load the live `HandlerRegistry` from `bundles/core/`,
+/// `bundles/graph/` and `bundles/directive/` using the standard test trust store.
 /// Requires that the handler binaries have been built and the bundle
 /// manifest signed (e.g. via `populate-bundles.sh`).
 ///
@@ -135,11 +166,11 @@ pub fn load_live_kind_registry() -> KindRegistry {
 /// load for tests that drive the parser/composer dispatcher.
 pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
     let core_root = core_bundle_root();
-    let std_root = standard_bundle_root();
     let trust_store = live_trust_store();
     let tagged_roots: Vec<(PathBuf, TrustClass)> = vec![
         (core_root, TrustClass::TrustedBundle),
-        (std_root, TrustClass::TrustedBundle),
+        (graph_bundle_root(), TrustClass::TrustedBundle),
+        (directive_bundle_root(), TrustClass::TrustedBundle),
     ];
     let registry = HandlerRegistry::load_base_for_authoring(&tagged_roots, &trust_store)
         .unwrap_or_else(|err| {
@@ -149,13 +180,13 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
                 "PRECONDITION FAILED: bundle bin trees are signed with a key this test \
                  harness does not trust.\n\n  {detail}\n\n\
                  The harness trusts the platform-author and dev-publisher (741a8bc6…) keys \
-                 only. This usually means bundles/{{core,standard}}/.ai/bin was last signed \
+                 only. This usually means bundles/{{core,graph,directive}}/.ai/bin was last signed \
                  with a different (e.g. operator) key. Re-sign with the dev key:\n\n  \
                  ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner \"RyeOS Development\"\n\n\
                  then re-run. Every live-registry test fails with this same message until then."
             );
         }
-        panic!("live HandlerRegistry must load from bundles/{{core,standard}}/: {detail}");
+        panic!("live HandlerRegistry must load from bundles/{{core,graph,directive}}/: {detail}");
         });
     Arc::new(registry)
 }

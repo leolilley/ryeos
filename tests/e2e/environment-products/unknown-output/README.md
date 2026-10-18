@@ -73,7 +73,7 @@ external network is involved.
      <absolute-verifier-binary> <new-absolute-bundle-overlay>
    ```
 
-   Merge that prepared overlay into the disposable publisher's `standard`
+   Merge that prepared overlay into the disposable publisher's `environment-qualification`
    Bundle source. Publish/sign its Tools, Graph and policies with the existing
    full Bundle population flow, then initialize/install that disposable node
    through the existing owner. The staging step never signs or installs

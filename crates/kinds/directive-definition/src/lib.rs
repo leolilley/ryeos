@@ -2604,7 +2604,7 @@ mod shipped_provider_config_tests {
     #[test]
     fn deepseek_config_deserializes_and_validates_for_every_shipped_model() {
         let value: serde_json::Value = serde_yaml::from_str(include_str!(
-            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
         ))
         .expect("shipped DeepSeek provider YAML");
         let provider: ProviderConfig =

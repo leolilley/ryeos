@@ -463,7 +463,7 @@ cargo test --offline --locked -j1 -p ryeosd --test external_adapter_restart_e2e 
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-This uses disposable test nodes and current populated signed core/standard test
+This uses disposable test nodes and current populated signed core/workflow test
 artifacts, never the installed operator node. Do not treat an observation timeout
 as permission to dispatch the producer again.
 

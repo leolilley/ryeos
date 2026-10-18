@@ -642,7 +642,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            14,
+            16,
             "update init-profile policy expectations"
         );
 
@@ -667,7 +667,9 @@ mod tests {
                 | "f5r-controller"
                 | "bundle-source"
                 | "core"
-                | "core-scheduling" => {
+                | "core-knowledge"
+                | "core-scheduling"
+                | "core-workflow" => {
                     assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
                 }
                 _ => panic!("add an explicit producer-admission expectation for {profile}"),

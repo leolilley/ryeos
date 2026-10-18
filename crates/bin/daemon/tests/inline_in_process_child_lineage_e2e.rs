@@ -12,7 +12,7 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use lillux::crypto::SigningKey;
 use serde_json::{Value, json};
 
@@ -69,12 +69,12 @@ fn string_field<'a>(value: &'a Value, field: &str, ctx: &str) -> &'a str {
 #[tokio::test(flavor = "multi_thread")]
 async fn inline_in_process_service_child_is_a_same_chain_child_of_the_graph_thread() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         Ok(())
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_in_process_service_graph(project.path(), &fixture.publisher)

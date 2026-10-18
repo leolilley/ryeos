@@ -13,7 +13,7 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use lillux::crypto::SigningKey;
 
 /// Plant ZEN_API_KEY in the sealed vault so the preflight passes.
@@ -55,7 +55,7 @@ config:
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_spawn_smoke_returns_valid_result() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -68,7 +68,7 @@ async fn graph_spawn_smoke_returns_valid_result() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_smoke_graph(project.path(), &fixture.publisher).expect("plant smoke graph");

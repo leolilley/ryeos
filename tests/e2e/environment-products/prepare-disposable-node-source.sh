@@ -27,8 +27,8 @@ destination=$2
   exit 73
 }
 
-policy=$populated_repository/bundles/standard/.ai/config/test/runtime-qualification.yaml
-verifier=$populated_repository/bundles/standard/.ai/tools/test/verify-runtime.yaml
+policy=$populated_repository/bundles/environment-qualification/.ai/config/test/runtime-qualification.yaml
+verifier=$populated_repository/bundles/environment-qualification/.ai/tools/test/verify-runtime.yaml
 worker=$populated_repository/bundles/codex/.ai/workers/fixture/hosted.yaml
 enrollment_worker=$populated_repository/bundles/codex/.ai/workers/fixture/enrollment.yaml
 login=$populated_repository/bundles/codex/.ai/worker-executions/fixture/login.yaml
@@ -36,8 +36,8 @@ session=$populated_repository/bundles/codex/.ai/worker-executions/fixture/sessio
 # Do not silently retain predecessor copies in another Bundle: that would
 # create competing canonical definitions and preserve the invalid binary edge.
 for relative in workers/fixture worker-executions/fixture; do
-  [[ ! -e $populated_repository/bundles/standard/.ai/$relative ]] || {
-    printf 'stale fixed-fixture definition remains in standard: %s\n' "$relative" >&2
+  [[ ! -e $populated_repository/bundles/environment-qualification/.ai/$relative ]] || {
+    printf 'stale fixed-fixture definition remains in environment-qualification: %s\n' "$relative" >&2
     exit 65
   }
 done

@@ -1455,22 +1455,20 @@ mod tests {
     fn live_bundle_engine() -> ryeos_engine::engine::Engine {
         let trust_store = ryeos_engine::test_support::live_trust_store();
         let core = ryeos_engine::test_support::core_bundle_root();
-        let standard = ryeos_engine::test_support::standard_bundle_root();
-        let kinds = KindRegistry::load_base(
-            &[
-                core.join(ryeos_engine::AI_DIR)
-                    .join(ryeos_engine::KIND_SCHEMAS_DIR),
-                standard
-                    .join(ryeos_engine::AI_DIR)
-                    .join(ryeos_engine::KIND_SCHEMAS_DIR),
-            ],
-            &trust_store,
-        )
-        .unwrap();
-        let roots = vec![core, standard];
+        let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+        let kind_roots: Vec<_> = std::iter::once(&core)
+            .chain(workflow.iter())
+            .map(|root| {
+                root.join(ryeos_engine::AI_DIR)
+                    .join(ryeos_engine::KIND_SCHEMAS_DIR)
+            })
+            .collect();
+        let kinds = KindRegistry::load_base(&kind_roots, &trust_store).unwrap();
+        let mut roots = vec![core];
+        roots.extend(workflow);
         let registered_roots = roots
             .iter()
-            .zip(["core", "standard"])
+            .zip(["core", "knowledge", "directive", "graph"])
             .map(
                 |(root, name)| ryeos_engine::item_resolution::RegisteredBundleRoot {
                     name: name.to_owned(),

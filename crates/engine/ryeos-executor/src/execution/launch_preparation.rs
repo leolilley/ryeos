@@ -3051,7 +3051,7 @@ mod ref_binding_projection_tests {
             signer_fingerprint: "b".repeat(64),
             yaml: serde_yaml::from_str(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../bundles/standard/.ai/runtimes/graph-runtime.yaml",
+                "/../../../bundles/graph/.ai/runtimes/graph-runtime.yaml",
             )))
             .unwrap(),
             trust_class: TrustClass::TrustedBundle,

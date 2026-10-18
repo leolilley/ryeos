@@ -154,7 +154,7 @@ async fn public_projectless_bundle_probe_observes_bound_runtime_input() -> Resul
     let runtime_hash = lillux::sha256_hex(&runtime);
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, keys| {
-            fast_fixture::register_standard_bundle(state, keys)?;
+            fast_fixture::register_workflow_bundles(state, keys)?;
             install(state, keys, &probe, &expected_manifest, &runtime_hash)
         },
         |_| {},

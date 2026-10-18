@@ -195,9 +195,9 @@ the remaining acceptance work.
   callback enforcement, including deferred delegation.
 - [Managed runtime worker leases](content-addressed-managed-runtime-workers.md):
   separately admitted invocation lifetime within a persistent runtime.
-- [Attachment before execution](../../../../bundles/standard/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md):
+- [Attachment before execution](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md):
   durable process ownership, held release and recovery.
-- [Hosted worker execution](../../../../bundles/standard/.ai/knowledge/ryeos/core/execution/worker-hosted-execution.md):
+- [Hosted worker execution](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/execution/worker-hosted-execution.md):
   child observation, workspace ownership and terminal evidence.
 - [Follow child execution](../../../../crates/engine/ryeos-executor/src/execution/spawn_follow_child.rs)
   and [detached child execution](../../../../crates/engine/ryeos-executor/src/execution/spawn_detached_child.rs):

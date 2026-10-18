@@ -3,9 +3,9 @@
 # ryeosd-hosted-workflow — hosted remote-node image that also runs
 # workflow workloads.
 #
-# Bakes the exact hosted-workflow bundle set: core + scheduling + standard +
-# codex + opencode. This is the remote admission/execution substrate plus the
-# selected scheduling and Standard graph/directive/knowledge services,
+# Bakes the exact hosted-workflow bundle set: core + scheduling + knowledge +
+# directive + graph + ryeos-docs + codex + opencode. This is the remote admission/execution substrate plus the
+# selected scheduling and graph/directive/knowledge services,
 # kind schemas, and runtimes. Use this when a hosted node owns
 # schedules or runs graph/directive work; use the core image when it should
 # stay a lean control plane.
@@ -81,7 +81,10 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
+COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=builder /build/bundles/directive /opt/ryeos/directive
+COPY --from=builder /build/bundles/graph /opt/ryeos/graph
+COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex
 COPY --from=builder /build/bundles/opencode    /opt/ryeos/opencode
 

@@ -171,7 +171,9 @@ fn changed_hosted_worker_bundles_pass_signed_source_preflight() {
     ryeos_engine::trust::pin_key(&public_fixture, "development-publisher", &trusted, None).unwrap();
     let dependencies = [
         repository.join("bundles/core"),
-        repository.join("bundles/standard"),
+        repository.join("bundles/knowledge"),
+        repository.join("bundles/directive"),
+        repository.join("bundles/graph"),
     ];
     let isolation = Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring());
     for bundle in ["codex", "opencode"] {
@@ -184,6 +186,12 @@ fn changed_hosted_worker_bundles_pass_signed_source_preflight() {
         )
         .unwrap_or_else(|error| panic!("signed {bundle} bundle failed preflight: {error:#}"));
     }
+}
+
+fn daemon_isolation_roots() -> Vec<PathBuf> {
+    let mut roots = vec![ryeos_engine::test_support::core_bundle_root()];
+    roots.extend(ryeos_engine::test_support::workflow_bundle_roots());
+    roots
 }
 
 fn live_bundle_engine(
@@ -200,22 +208,25 @@ fn live_bundle_engine(
         },
     ]));
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
-    .unwrap();
-    let roots = vec![core, standard, candidate_authoring_bundle];
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
+    let mut roots = vec![core];
+    roots.extend(workflow);
+    roots.push(candidate_authoring_bundle);
     let tagged_roots = roots
         .iter()
         .cloned()
         .map(|root| (root, ryeos_engine::resolution::TrustClass::TrustedBundle))
         .collect::<Vec<_>>();
-    let registered_roots: Vec<_> = ["core", "standard", "external-candidate-authoring"]
+    let registered_roots: Vec<_> = [
+        "core",
+        "knowledge",
+        "directive",
+        "graph",
+        "external-candidate-authoring",
+    ]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(
@@ -333,11 +344,13 @@ fn install_live_engine(
     };
     import_policy.validate().unwrap();
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let mut isolation_roots = vec![core];
+    isolation_roots.extend(ryeos_engine::test_support::workflow_bundle_roots());
+    isolation_roots.push(candidate_authoring_bundle.clone());
     let trust = ryeos_engine::test_support::live_trust_store();
     let isolation = ryeos_node_runtime::engine_init::load_test_execution_isolation(
         &state.config.app_root,
-        &[core, standard, candidate_authoring_bundle.clone()],
+        &isolation_roots,
         &trust,
         isolation_policy,
     )
@@ -349,14 +362,14 @@ fn install_live_engine(
     ));
     state.isolation = isolation;
     let trust = ryeos_engine::test_support::live_trust_store();
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            ryeos_engine::test_support::core_bundle_root().join(".ai/node/engine/kinds"),
-            ryeos_engine::test_support::standard_bundle_root().join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
-    .unwrap();
+    let mut kind_roots =
+        vec![ryeos_engine::test_support::core_bundle_root().join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        ryeos_engine::test_support::workflow_bundle_roots()
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
         &kinds,
     )));
@@ -3322,10 +3335,7 @@ async fn run_production_tls_candidate(
     state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         root.path(),
         &state.config.uds_path,
-        &[
-            ryeos_engine::test_support::core_bundle_root(),
-            ryeos_engine::test_support::standard_bundle_root(),
-        ],
+        &daemon_isolation_roots(),
         &trust,
         isolation_policy,
     )
@@ -3458,10 +3468,7 @@ async fn run_production_tls_candidate(
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
             &state.config.uds_path,
-            &[
-                ryeos_engine::test_support::core_bundle_root(),
-                ryeos_engine::test_support::standard_bundle_root(),
-            ],
+            &daemon_isolation_roots(),
             &trust,
             hosted_policy,
         )

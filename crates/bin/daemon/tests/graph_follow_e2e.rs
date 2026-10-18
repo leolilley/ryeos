@@ -37,7 +37,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 use serde_json::Value;
@@ -275,7 +275,7 @@ fn threads_that_ran(events: &[(String, String, Value)], node: &str) -> Vec<Strin
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_follow_suspends_launches_child_and_resumes_parent() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -288,7 +288,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
@@ -471,7 +471,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -569,7 +569,7 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -748,7 +748,7 @@ config:
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_follow_child_failure_routes_parent_on_error() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -929,7 +929,7 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
     let mock = MockProvider::start(vec![MockResponse::Text("child b completed".into())]).await;
     let mock_url = mock.base_url.clone();
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-follow-overlay-model-config",
@@ -1194,7 +1194,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-follow-model-config",
@@ -1213,7 +1213,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
         );
     })
     .await
-    .expect("start daemon with mock provider + standard bundle");
+    .expect("start daemon with mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -1343,7 +1343,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-follow-live-input-model-config",
@@ -1362,7 +1362,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         );
     })
     .await
-    .expect("start daemon with delayed mock provider + standard bundle");
+    .expect("start daemon with delayed mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");

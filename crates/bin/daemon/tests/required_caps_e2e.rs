@@ -27,14 +27,22 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
-    let std_kinds = workspace.join("bundles/standard/.ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store)
-        .expect("load kind registry");
+    let workflow_roots: Vec<_> = ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace.join("bundles").join(name))
+        .collect();
+    let mut kind_roots = vec![core_kinds];
+    kind_roots.extend(
+        workflow_roots
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = KindRegistry::load_base(&kind_roots, &trust_store).expect("load kind registry");
 
-    let core_root = workspace.join("bundles/core");
-    let std_root = workspace.join("bundles/standard");
+    let mut bundle_roots = vec![workspace.join("bundles/core")];
+    bundle_roots.extend(workflow_roots);
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[core_root.clone(), std_root.clone()],
+        &bundle_roots,
         &trust_store,
         &kinds,
     )
@@ -49,7 +57,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![core_root, std_root])
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
         .with_composers(composers)

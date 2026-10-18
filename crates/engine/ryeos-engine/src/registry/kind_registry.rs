@@ -6438,7 +6438,7 @@ metadata:
         // augmentation, with a bespoke payload, so it is intentionally not
         // generically dispatchable.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../bundles/standard/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
+            "../../../bundles/knowledge/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
         );
         let content = std::fs::read_to_string(&path).expect("read knowledge kind schema");
         let schema = parse_kind_schema_content("knowledge.kind-schema.yaml", &content)
@@ -6479,18 +6479,24 @@ metadata:
     #[test]
     fn bundle_provided_release_candidate_kind_loads_from_its_own_bundle_only() {
         use crate::test_support::{
-            core_bundle_root, live_trust_store, standard_bundle_root, workspace_root,
+            core_bundle_root, directive_bundle_root, graph_bundle_root, knowledge_bundle_root,
+            live_trust_store, workspace_root,
         };
         let kinds_of = |bundle: PathBuf| bundle.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
         let release_root = kinds_of(workspace_root().join("bundles/bundle-release"));
         let trust = live_trust_store();
 
-        // Core and Standard do not provide the kind.
+        // Core and the workflow bundles do not provide the kind.
         let base = KindRegistry::load_base(
-            &[kinds_of(core_bundle_root()), kinds_of(standard_bundle_root())],
+            &[
+                kinds_of(core_bundle_root()),
+                kinds_of(knowledge_bundle_root()),
+                kinds_of(directive_bundle_root()),
+                kinds_of(graph_bundle_root()),
+            ],
             &trust,
         )
-        .expect("core and standard kinds load");
+        .expect("core and workflow kinds load");
         assert!(!base.contains("release_candidate"));
 
         // Adding the bundle-release root provides it, as an opaque signed
@@ -6498,7 +6504,9 @@ metadata:
         let registry = KindRegistry::load_base(
             &[
                 kinds_of(core_bundle_root()),
-                kinds_of(standard_bundle_root()),
+                kinds_of(knowledge_bundle_root()),
+                kinds_of(directive_bundle_root()),
+                kinds_of(graph_bundle_root()),
                 release_root.clone(),
             ],
             &trust,

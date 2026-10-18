@@ -2748,14 +2748,10 @@ config:
 
     fn live_kind_registry() -> KindRegistry {
         let trust = crate::test_support::live_trust_store();
-        let roots = [
-            crate::test_support::core_bundle_root()
-                .join(crate::AI_DIR)
-                .join("node/engine/kinds"),
-            crate::test_support::standard_bundle_root()
-                .join(crate::AI_DIR)
-                .join("node/engine/kinds"),
-        ];
+        let roots: Vec<_> = std::iter::once(crate::test_support::core_bundle_root())
+            .chain(crate::test_support::workflow_bundle_roots())
+            .map(|root| root.join(crate::AI_DIR).join("node/engine/kinds"))
+            .collect();
         KindRegistry::load_base(&roots, &trust).unwrap()
     }
 

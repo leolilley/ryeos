@@ -1,11 +1,14 @@
-# ryeos:signed:2026-10-15T23:14:22Z:c4d4a85fe75002764bbc729d0016820c1bce27c57784e196ca422901f7d3513f:KxEfnLk9zPMCJMOmki36RVh+p8NED818wf+MZM1Si6wxcZBEn1MJo3hirKLt8fZK4Txfhz3vAM2CXqOwihfFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:82f20049e34a443c28145264fa6335046099e2eab808e277eac568e1eb8583cf:DXhx5N2pErTWTFEQmxC1x6qRKtpGtzFPCmqZELr8N5CPqoWPwhj4FKEL/0aR620heE9tftDYY5G6h1wjfIElCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
   - core
+  - directive
+  - graph
+  - knowledge
   - opencode
+  - ryeos-docs
   - scheduling
-  - standard
 policies:
   bundle_publication:
     schema: 2
@@ -139,8 +142,11 @@ policies:
         - ryeos.register.command.root.system
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      standard:
+      directive: []
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
+      knowledge: []
+      ryeos-docs: []
   execution:
     schema: 4
     max_live_fanout: 8

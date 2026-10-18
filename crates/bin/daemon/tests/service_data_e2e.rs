@@ -30,7 +30,7 @@ async fn start_with_isolated_bundle(
         "service_data_e2e/{test_name}"
     ));
     DaemonHarness::start_fast_with(
-        |state, _, fixture| common::fast_fixture::register_standard_bundle(state, fixture),
+        |state, _, fixture| common::fast_fixture::register_workflow_bundles(state, fixture),
         move |cmd| {
             cmd.env("RYEOS_APP_ROOT", &bundle);
         },

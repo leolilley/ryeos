@@ -59,23 +59,27 @@ def fixture(edit):
     return path
 
 
-# Hand-written expectations, independent of the ownership file: Standard selects
-# the directive and graph handlers (otherwise Core's handlers), Scheduling adds
-# the scheduling feature and Standard the model-provider-setup feature to the
-# node binaries, in membership order. Every other package gets no features.
+# Hand-written expectations, independent of the ownership file: Directive and
+# Graph select the directive and graph handlers (Graph alone selects only the
+# graph handlers; otherwise Core's handlers), Scheduling adds the scheduling
+# feature and Directive the model-provider-setup feature to the node binaries,
+# in canonical sorted order. Every other package gets no features.
 HANDLERS_STANDARD = "directive-handlers,graph-handlers"
+HANDLERS_GRAPH = "graph-handlers"
 HANDLERS_CORE = "core-handlers,extends-composer"
 GOLDEN = {
-    "full": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "central-host": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "standard": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "standard-central-auth": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "local-inference": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "hosted-workflow": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "f5r-controller": (HANDLERS_STANDARD, "model-provider-setup"),
-    "release-authority": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
-    "release-artifacts": (HANDLERS_STANDARD, "scheduling,model-provider-setup"),
+    "full": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "central-host": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "standard": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "standard-central-auth": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "local-inference": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "hosted-workflow": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
+    "f5r-controller": (HANDLERS_GRAPH, ""),
+    "release-authority": (HANDLERS_GRAPH, ""),
+    "release-artifacts": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "core-scheduling": (HANDLERS_CORE, "scheduling"),
+    "core-workflow": (HANDLERS_GRAPH, ""),
+    "core-knowledge": (HANDLERS_CORE, ""),
     "core": (HANDLERS_CORE, ""),
     "bundle-source": (HANDLERS_CORE, ""),
 }

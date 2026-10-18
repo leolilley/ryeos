@@ -1,4 +1,4 @@
-//! Continuation-authority projection against the REAL signed standard bundle.
+//! Continuation-authority projection against the REAL signed workflow bundles.
 //!
 //! The lighter `server.rs` unit tests build `KindProfileRegistry::build(None)`
 //! (only internal, non-continuable profiles), so they can pin the projection
@@ -62,11 +62,13 @@ fn lifecycle_with_real_kinds() -> (TempDir, TestStateStore, Arc<ThreadLifecycleS
     let kinds = KindRegistry::load_base(
         &[
             root.join("bundles/core/.ai/node/engine/kinds"),
-            root.join("bundles/standard/.ai/node/engine/kinds"),
+            root.join("bundles/knowledge/.ai/node/engine/kinds"),
+            root.join("bundles/directive/.ai/node/engine/kinds"),
+            root.join("bundles/graph/.ai/node/engine/kinds"),
         ],
         &trust_store,
     )
-    .expect("load live core + standard kind schemas");
+    .expect("load live core + workflow kind schemas");
     let kind_profiles = Arc::new(KindProfileRegistry::build(Some(&kinds)));
 
     let identity = NodeIdentity::create(&tmp.path().join("identity").join("node-key.pem")).unwrap();
@@ -147,7 +149,7 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
     assert_eq!(dir["kind"], "directive_run");
     assert_eq!(
         dir["execution"]["supports_continuation"], true,
-        "directive_run is continuable in the standard bundle: {dir:#?}"
+        "directive_run is continuable in the directive bundle: {dir:#?}"
     );
     assert_eq!(
         dir["execution"]["supports_operator_followup"], true,

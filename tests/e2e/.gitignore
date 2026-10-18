@@ -43,8 +43,8 @@ __pycache__/
 !environment-products/project/.ai/graphs/test/recorded-producer.yaml
 !environment-products/project/.ai/graphs/test/two-products.yaml
 !environment-products/project/.ai/tools/test/produce.yaml
-!environment-products/qualification-bundle-overlay/standard/.ai/config/test/runtime-qualification.yaml
-!environment-products/qualification-bundle-overlay/standard/.ai/tools/test/verify-runtime.yaml
+!environment-products/qualification-bundle-overlay/environment-qualification/.ai/config/test/runtime-qualification.yaml
+!environment-products/qualification-bundle-overlay/environment-qualification/.ai/tools/test/verify-runtime.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/worker-executions/fixture/login.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/worker-executions/fixture/session.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/workers/fixture/enrollment.yaml

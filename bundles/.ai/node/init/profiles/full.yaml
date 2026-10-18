@@ -1,15 +1,18 @@
-# ryeos:signed:2026-10-17T00:24:16Z:6e170ed8bee851af0824a4efc4678c27c5c1b67ac2dcde338ed74208a68a8cfb:z1O0j1hvmK36nDzRGS3q3AQP3QuCtGQrLZEO50th7pf9PLxwv+WM9Eh6pmRdFXIfHczRr3kRZ4qqY/nckbAGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:2d74c9700d81d8e9cd1dd1ca2319827fea26ae9c11951b65bbed70a11f763fd2:HWHMcegSgBmJRl+OwpcgNZLv2Lfc5fL9LT90mg6ytGvXjusdvZtig7aeOAZQXRw4KiazyEfjDConIyzpDyLFDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
   - central-auth
   - codex
   - core
+  - directive
   - environment-qualification
+  - graph
+  - knowledge
   - opencode
+  - ryeos-docs
   - ryeos-ui
   - scheduling
-  - standard
   - web
 policies:
   bundle_publication:
@@ -148,8 +151,11 @@ policies:
       ryeos-ui: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      standard:
+      directive: []
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
+      knowledge: []
+      ryeos-docs: []
       web: []
   execution:
     schema: 4

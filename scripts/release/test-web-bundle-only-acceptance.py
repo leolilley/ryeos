@@ -42,7 +42,7 @@ class WebBundleOnlyAcceptance(unittest.TestCase):
             text=True, capture_output=True, check=True).stdout)
         self.assertEqual(plan["payloads"], [{"bundle": "web", "binary": "ryeos-web-tools",
             "cargo_package": "ryeos-web-tools", "build_class": "release",
-            "bundle_sets": ["central-host", "full", "release-artifacts", "release-authority"],
+            "bundle_sets": ["central-host", "full", "release-artifacts"],
             "required_features": []}])
         self.assertEqual(plan["cargo_feature_selections"], [
             {"cargo_package": "ryeos-web-tools", "features": []}

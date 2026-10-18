@@ -8,19 +8,31 @@
       "core",
       "central-auth",
       "scheduling",
-      "standard",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
       "web"
     ],
     "core": [
       "core"
     ],
+    "core-knowledge": [
+      "core",
+      "knowledge"
+    ],
     "core-scheduling": [
       "core",
       "scheduling"
     ],
+    "core-workflow": [
+      "core",
+      "graph"
+    ],
     "f5r-controller": [
       "core",
-      "standard",
+      "graph",
+      "knowledge",
       "codex",
       "render-sandbox"
     ],
@@ -28,7 +40,10 @@
       "core",
       "central-auth",
       "scheduling",
-      "standard",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
       "environment-qualification",
       "web",
       "browser",
@@ -39,38 +54,43 @@
     "hosted-workflow": [
       "core",
       "scheduling",
-      "standard",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
       "codex",
       "opencode"
     ],
     "local-inference": [
       "core",
       "scheduling",
-      "standard",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
       "local-inference"
     ],
     "release-authority": [
       "core",
-      "central-auth",
-      "scheduling",
-      "standard",
+      "graph",
       "environment-qualification",
-      "web",
-      "browser",
-      "ryeos-ui",
-      "codex",
-      "opencode",
       "bundle-release"
     ],
     "standard": [
       "core",
       "scheduling",
-      "standard"
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs"
     ],
     "standard-central-auth": [
       "core",
       "scheduling",
-      "standard",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
       "central-auth"
     ]
   },
@@ -79,7 +99,9 @@
     "central-host": "central-host",
     "contained-workflow": "hosted-workflow",
     "core": "core",
+    "core-knowledge": "core-knowledge",
     "core-scheduling": "core-scheduling",
+    "core-workflow": "core-workflow",
     "development": "full",
     "f5r-controller": "f5r-controller",
     "full": "full",

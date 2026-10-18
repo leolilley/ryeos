@@ -1,0 +1,16 @@
+# ryeos:signed:2026-10-18T03:41:39Z:b084bfbb6fbfbfc7d9d305ac6e68ec4f4c41f27288bea4af244feac41bc408bd:KBcR0vbjlluqxW39EL5e8sAnA2st9+XgSYxSOlaytZ3eenHpP8QkAk2L9/NFOXIhJliFbL3nMxftJOnSUORTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: knowledge
+version: 0.5.0
+description: Knowledge kind, knowledge runtime, and context composition
+provides_kinds:
+- knowledge
+requires_kinds:
+- config
+- handler
+- node
+- parser
+- protocol
+- runtime
+- service
+- tool
+uses_kinds: []

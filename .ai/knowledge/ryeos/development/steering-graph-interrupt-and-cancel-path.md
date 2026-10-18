@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:55Z:2a98551f12464ef8a59fb03ca921a8480f911d0cb10c091e4e6edb7aa0368111:xYfgTbT/O9oq7A6AbnSJ25BihP5uS3zENvoC9E9cNQZ3k8e+s3nGISLajnjv97j9yDLUZoRZHSuSwC68/qPaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:6034b628c92912180cfcd76c8bc40096171df32e426ad0742f8ebbed1e16c9ae:W51MH9JOdyoAdHfAxR6Dfzp5pyhFRAMRoh2MbUPWbMqVf0/gXl4zaexOD5IYEv5DFLMMEh2pcB9JNMQYUHecDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: steering-graph-interrupt-and-cancel-path
@@ -118,7 +118,7 @@ operator-facing affordance and the launcher now share the one path.
 
 Both YAML edits invalidate signatures and ride the single Wave 3 republish:
 
-- `bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml`
+- `bundles/graph/.ai/node/engine/kinds/graph/graph.kind-schema.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`
 
 This decision record is a repo doc; it needs no signing or republish.

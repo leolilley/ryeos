@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T23:50:51Z:681f8583a716908a7c0828ca0313e42857dae0f96a16dfdf3df68326e3de0a07:RkbkLziu9q+ee8QLuJMbCGuV7abFov2Om72WhvkYd1za2KEUkB/RHbOEsvv1SUGkQRoNwvh8OfGnO34NCC2mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:e2a2b3347e8ee4d32edf0ac0e5dff0f02e6db912245d2afc65989c67b75e1fb0:eT8t7bvnY33PzJEaCpl2CQvPu7y+4CH7aEhuQtONyCoCwvfIia9yLArO48q2rld85LFohnLc1SEU3ix19aYMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -539,10 +539,10 @@ projectless authority: its retained composition result is explicitly
 projectless bind covers only `producer-python`, not the subject manifest. The
 prior actual `--no-project` verifier launch failed before process start for
 lack of an active consumer binding. Also, `gnu-python-products` is a
-project-owned Config absent from `bundles/standard`; product-relationship
+project-owned Config absent from the installed bundles; product-relationship
 resolution under `Projectless` uses bundle roots only. Do not relabel the
 pinned binding as `InstalledBundle`, rerun the verifier with `--no-project`,
-move this development Config into `standard`, or weaken identity/authority
+move this development Config into an installed bundle, or weaken identity/authority
 checks. The source-level correction is to retain the exact sealed pinned
 snapshot through verifier re-admission using the RyeOS snapshot lease; this
 candidate is not yet installed or live-verified. Publish qualification only

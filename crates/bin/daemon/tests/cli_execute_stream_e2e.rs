@@ -14,7 +14,7 @@ mod common;
 use std::path::Path;
 
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -93,7 +93,7 @@ async fn boot(responses: Vec<MockResponse>) -> (Box<dyn std::any::Any>, DaemonHa
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-cli-model-config",

@@ -112,7 +112,7 @@ pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
     let expected_manifest = expected_runtime_manifest()?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, keys| {
-            fast_fixture::register_standard_bundle(state, keys)?;
+            fast_fixture::register_workflow_bundles(state, keys)?;
             install_before_start(state, keys, &expected_manifest)
         },
         |_| {},

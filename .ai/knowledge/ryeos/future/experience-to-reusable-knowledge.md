@@ -32,7 +32,7 @@ Repository-root paths:
 
 | Existing owner | Relevant coverage | Boundary still to connect |
 |---|---|---|
-| bundles/standard/.ai/knowledge/ryeos/standard/kinds/knowledge.md and knowledge/composition.md | Knowledge context, composition, positions and budgets | Eligibility for reusable adoption, correction and withdrawal |
+| bundles/ryeos-docs/.ai/knowledge/ryeos/standard/kinds/knowledge.md and knowledge/composition.md | Knowledge context, composition, positions and budgets | Eligibility for reusable adoption, correction and withdrawal |
 | crates/runtimes/knowledge/src/types.rs and compose.rs | Verified-item inputs, composition membership, exclusions and over-budget omissions; query output includes content digests | Whether all needed metadata survives admission and is inspectable for later use |
 | crates/engine/ryeos-executor/src/augmentations/compose_context_positions.rs | Resolution, child authority and rendered context/meta projection | End-to-end explanation of selection and current eligibility |
 | crates/state/ryeos-state/src/objects/attestation.rs | Issuer, subject, policy, evidence, expiry and signature; local policy decides authority | Domain-specific meaning of approving a lesson |

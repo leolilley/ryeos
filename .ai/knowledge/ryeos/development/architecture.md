@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-15T00:59:19Z:1d0d9b13a2a1d0fa1ba7e6789e83be320e820859f28451664964dc9c821307e7:qqgeYv3uLHofUiGnDV1IhL3aqNaO+edWiJM10n/JVOZJIHsmtbnfhNDm2Tquqkgcx/H8upVIiOWskz++9k0KDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:4c7f30625cb686a2125d9971269ae54f9a010dd17b7be1adebc43de065e60bc5:MPFwntyZ0TsgWnYY1s6KPse9fDTBEBgNwNEanx0cQhFw0nrqrKm/CIo5lf2k/5AJaGuBlRln06R1sYwXKjxgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -45,7 +45,10 @@ Bundles are signed content trees. Derived bundle state (`.ai/bin`, `.ai/objects`
 | Bundle | Path | Contains |
 |---|---|---|
 | Core | `bundles/core/` | kind schemas, parsers, handlers, protocols, services, core tools, routes, CLI aliases/verbs |
-| Standard | `bundles/standard/` | directive/graph/knowledge runtimes, model provider config, user-facing clients/tools/directives |
+| Knowledge | `bundles/knowledge/` | knowledge kind, knowledge runtime, context composition |
+| Graph | `bundles/graph/` | graph kind, graph runtime, graph validation and launch handlers |
+| Directive | `bundles/directive/` | directive kind, directive runtime, model provider config and routing, directives |
+| RyeOS docs | `bundles/ryeos-docs/` | reference knowledge (data only) |
 | Local inference | `bundles/local-inference/` | optional local-model workers, provider routes, activation fixtures, and acceptance probes |
 
 Important bundle subdirs:

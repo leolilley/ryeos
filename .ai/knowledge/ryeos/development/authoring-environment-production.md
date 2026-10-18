@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T06:55:47Z:41b17e9b321350eafb73000091ec19af593f5d33b2e993cbd6aee7531a433c7f:n3wktf7iTlMzU7gTB7T5a5e8liKt7AabmaRz0WRnOr4cY9OLcYy8qEa3HzbLDfKLBbXzXfNfafy19YG9k6c4BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:ffa3b59bf06533fed84359fc51c1a7e32db4b884c314759efa35964b2f9a8f01:hCogR55PQU9QqleF1SFbTCXE4z2KMP7w9ea6lGpmK9kktODURRxlrIBYmiRRRb3MqrEnoFIOxN5z7cy8J+SGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
@@ -301,7 +301,7 @@ an alias for a present mismatch.
 
 The producer retains a bounded canonical ELF inventory and its digest as
 reproduction evidence. Neither that inventory nor the relocation receipt is
-independent qualification testimony. The Standard Bundle qualifier instead
+independent qualification testimony. The environment-qualification Bundle qualifier instead
 runs the exact selected interpreter, rejects ambient loader overrides, reads
 its actual bounded process mappings, and requires the mapped
 `libgcc_s.so.1` and `libpthread.so.0` objects to be the exact product members.
