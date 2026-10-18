@@ -328,9 +328,61 @@ class DriverTest(unittest.TestCase):
         self.assertNotIn(KEY, blob)
         self.assertTrue(self.logs)
 
+    def args_for(self, **kw):
+        ns = driver.argparse.Namespace(render_key_file=None, env_file=str(self.dir / "env"))
+        ns.__dict__.update(kw)
+        return ns
+
+    def test_env_file_parsing_and_precedence(self):
+        env = self.dir / "env"
+        env.write_text('# c\n\nOTHER=x\nRENDER_API_KEY="from-file"\n')
+        env.chmod(0o600)
+        self.assertEqual(driver.read_key(self.args_for(), {}), "from-file")
+        self.assertEqual(driver.read_key(self.args_for(), {"RENDER_API_KEY": "from-env"}), "from-env")
+        keyfile = self.dir / "k"
+        keyfile.write_text("from-keyfile\n")
+        self.assertEqual(driver.read_key(self.args_for(render_key_file=str(keyfile)),
+                                         {"RENDER_API_KEY": "from-env"}), "from-keyfile")
+        env.write_text("RENDER_API_KEY='single'\n")
+        self.assertEqual(driver.read_key(self.args_for(), {}), "single")
+
+    def test_env_file_permissions_refused_without_leak(self):
+        env = self.dir / "env"
+        env.write_text("RENDER_API_KEY=secretvalue99\n")
+        env.chmod(0o644)
+        with self.assertRaises(driver.Refusal) as ctx:
+            driver.read_key(self.args_for(), {})
+        self.assertIn("chmod 600", str(ctx.exception))
+        self.assertNotIn("secretvalue99", str(ctx.exception))
+
+    def test_no_key_refuses(self):
+        with self.assertRaises(driver.Refusal):
+            driver.read_key(self.args_for(), {})
+
+    def test_env_file_key_not_logged_end_to_end(self):
+        env = self.dir / "env"
+        env.write_text("RENDER_API_KEY=envfilekey777\n")
+        env.chmod(0o600)
+        argv = ["--app-root", str(self.dir), "--handoff", str(self.dir / "handoff.json"),
+                "--binding-id", "prod", "--qualification-binding-id", "qual",
+                "--env-file", str(env), "--owner-id", "own-1", "--region", "oregon",
+                "--plan", "starter", "--out", str(self.dir / "out"),
+                "--state", str(self.dir / "state.json")]
+        with unittest.mock.patch.dict("os.environ", {}, clear=False) as e:
+            e.pop("RENDER_API_KEY", None)
+            self.fakes.fail_on = "produce-runtime-snapshot"
+            self.fakes.cli_calls.clear()
+            orig = self.fakes.cli
+            self.fakes.cli = lambda a, en: (1, "", "boom envfilekey777") if a[2] == "produce-runtime-snapshot" else orig(a, en)
+            driver.main(argv, cli=self.fakes.cli, opener=self.fakes.opener, sleep=lambda s: None,
+                        clock=iter(range(0, 10000)).__next__, log=self.logs.append)
+        blob = "\n".join(self.logs) + (self.dir / "state.json").read_text()
+        self.assertNotIn("envfilekey777", blob)
+        self.assertTrue(self.logs)
+
     def test_requires_app_root_or_controller_url(self):
         argv = ["--handoff", "h", "--binding-id", "b", "--qualification-binding-id", "q",
-                "--render-key-file", "k", "--owner-id", "o", "--region", "r", "--plan", "starter",
+                "--owner-id", "o", "--region", "r", "--plan", "starter",
                 "--out", "o", "--state", "s"]
         self.assertEqual(driver.main(argv), 2)
 

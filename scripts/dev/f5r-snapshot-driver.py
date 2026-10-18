@@ -58,13 +58,38 @@ def clean_secret(text):
     return text
 
 
-def read_key(args):
+DEFAULT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def parse_env_file(text):
+    values = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    return values
+
+
+def read_key(args, environ=None):
+    environ = os.environ if environ is None else environ
     if args.render_key_file:
         return clean_secret(Path(args.render_key_file).read_text())
-    out = subprocess.run(["pass", "show", args.render_key_pass], capture_output=True, text=True)
-    if out.returncode != 0:
-        raise Failure(f"pass show for {args.render_key_pass} failed")
-    return clean_secret(out.stdout)
+    if environ.get("RENDER_API_KEY"):
+        return clean_secret(environ["RENDER_API_KEY"])
+    path = Path(args.env_file) if args.env_file else DEFAULT_ENV_FILE
+    if path.is_file():
+        if path.stat().st_mode & 0o077:
+            raise Refusal(f"env file {path} is group or world readable; run chmod 600 on it")
+        value = parse_env_file(path.read_text()).get("RENDER_API_KEY")
+        if value:
+            return clean_secret(value)
+    raise Refusal("no Render API key: pass --render-key-file, set RENDER_API_KEY, or put "
+                  f"RENDER_API_KEY in {path}")
 
 
 def write_atomic(path, text):
@@ -489,9 +514,8 @@ def build_parser():
     p.add_argument("--handoff", required=True)
     p.add_argument("--binding-id", required=True)
     p.add_argument("--qualification-binding-id", required=True)
-    k = p.add_mutually_exclusive_group(required=True)
-    k.add_argument("--render-key-pass")
-    k.add_argument("--render-key-file")
+    p.add_argument("--render-key-file")
+    p.add_argument("--env-file")
     p.add_argument("--owner-id", required=True)
     p.add_argument("--region", required=True)
     p.add_argument("--plan", required=True, choices=["starter", "standard", "pro"])
