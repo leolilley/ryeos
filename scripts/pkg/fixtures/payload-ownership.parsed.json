@@ -73,7 +73,9 @@
      "bundle-source",
      "central-host",
      "core",
+     "core-knowledge",
      "core-scheduling",
+     "core-workflow",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -208,6 +210,7 @@
     "bundle_name": "graph",
     "bundle_sets": [
      "central-host",
+     "core-workflow",
      "f5r-controller",
      "full",
      "hosted-workflow",
@@ -255,6 +258,7 @@
     "bundle_name": "knowledge",
     "bundle_sets": [
      "central-host",
+     "core-knowledge",
      "f5r-controller",
      "full",
      "hosted-workflow",

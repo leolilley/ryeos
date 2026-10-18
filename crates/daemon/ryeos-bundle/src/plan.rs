@@ -819,11 +819,13 @@ mod tests {
             .expect("workspace root with bundles/ directory")
             .join("bundles");
 
-        let sets: [&[&str]; 4] = [
+        let sets: [&[&str]; 6] = [
             &["core", "scheduling", "knowledge", "directive", "graph", "ryeos-docs"],
             &["core", "graph", "bundle-release"],
             &["core", "graph", "knowledge", "codex"],
             &["core", "knowledge", "directive", "graph", "ryeos-docs", "opencode"],
+            &["core", "graph"],
+            &["core", "knowledge"],
         ];
         for set in sets {
             let inputs: Vec<PlanInput> = set

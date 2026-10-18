@@ -22,7 +22,7 @@
 # compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority
 }
 
 ryeos_bundle_set_names() {
@@ -35,6 +35,11 @@ ryeos_bundle_set_names() {
     hosted-workflow) printf '%s\n' core scheduling knowledge directive graph ryeos-docs codex opencode ;;
     core)            printf '%s\n' core ;;
     core-scheduling) printf '%s\n' core scheduling ;;
+    # Core plus the graph kind and runtime only: no model providers, directive
+    # or knowledge.
+    core-workflow)   printf '%s\n' core graph ;;
+    # Core plus the knowledge kind and runtime only.
+    core-knowledge)  printf '%s\n' core knowledge ;;
     # Controller of remote Codex authoring leases. Graph and knowledge supply
     # the kinds codex and render-sandbox require; the controller runs no
     # schedules, so scheduling is absent.
@@ -71,7 +76,7 @@ ryeos_bundle_set_cargo_features() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller contained-workflow development release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller contained-workflow development release-authority
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -79,7 +84,7 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller) printf '%s\n' "$1" ;;
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller) printf '%s\n' "$1" ;;
     # The hosted-node profile is the core set under hosted admission policy.
     hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
@@ -185,7 +190,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-authority)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -214,7 +219,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|f5r-controller|release-artifacts)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-artifacts)
       return 0
       ;;
     *) return 1 ;;

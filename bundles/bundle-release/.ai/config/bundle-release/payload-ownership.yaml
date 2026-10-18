@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T01:22:55Z:5b5b236797d4fa03475ad31ad0d4ead606966728344c18ad9f62848ed0559370:MUINlucNYd013cV87TMdLDNb0lW8ItdfspRTZN1xFdQ5qI9vGCZRRaPiuAak6Yj8BVe+gd1TXzgaXe9vSTadAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T05:27:56Z:19a71db3138a007b2bf47e1e61ee125935dabef96a97d200dd4bdd47f9885e90:qjOTi1U+w8hqAdtuB0wdjTlFEZFDD8LIXFeXReGnTo7YAZO88tl8qGZqHCb58pNKLp8tpZiZ8HyxHZ/Ik+jXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -61,7 +61,7 @@ payload_ownership:
           build_class: static
           cargo_features: []
     - bundle_name: core
-      bundle_sets: [bundle-source, central-host, core, core-scheduling, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
+      bundle_sets: [bundle-source, central-host, core, core-knowledge, core-scheduling, core-workflow, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: rye-composer-extends-chain
@@ -129,7 +129,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: graph
-      bundle_sets: [central-host, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
+      bundle_sets: [central-host, core-workflow, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: ryeos-graph-effective-validator
@@ -149,7 +149,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: knowledge
-      bundle_sets: [central-host, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
+      bundle_sets: [central-host, core-knowledge, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: ryeos-knowledge-runtime

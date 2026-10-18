@@ -78,6 +78,8 @@ GOLDEN = {
     "release-authority": (HANDLERS_GRAPH, ""),
     "release-artifacts": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "core-scheduling": (HANDLERS_CORE, "scheduling"),
+    "core-workflow": (HANDLERS_GRAPH, ""),
+    "core-knowledge": (HANDLERS_CORE, ""),
     "core": (HANDLERS_CORE, ""),
     "bundle-source": (HANDLERS_CORE, ""),
 }

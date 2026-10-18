@@ -316,7 +316,14 @@ fn core_and_core_scheduling_follow_the_host_class_matrix() {
 
 #[test]
 fn core_profiles_declare_exactly_the_local_and_hosted_classes() {
-    for profile in ["core", "core-scheduling", "standard", "f5r-controller"] {
+    for profile in [
+        "core",
+        "core-scheduling",
+        "core-workflow",
+        "core-knowledge",
+        "standard",
+        "f5r-controller",
+    ] {
         let loaded = load_profile(profile);
         let classes: BTreeSet<String> =
             host_classes(&loaded).keys().map(|key| key.as_str().unwrap().to_owned()).collect();

@@ -61,7 +61,7 @@ Options:
   --bundle-set SET      Bundle set to populate/install: full, central-host,
                         standard, standard-central-auth, local-inference,
                         hosted-workflow,
-                        bundle-source, core, core-scheduling, or release-authority.
+                        bundle-source, core, core-scheduling, core-workflow, core-knowledge, or release-authority.
                         Each set
                         has an explicit default publisher-authored node init
                         profile; an existing signed generation is preserved.

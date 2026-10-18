@@ -164,6 +164,8 @@ release_daemon_stages=(
     ryeos-substrate
     ryeos-core
     ryeos-core-scheduling
+    ryeos-core-workflow
+    ryeos-core-knowledge
     ryeos-f5r-controller
 )
 release_runtime_base() {
@@ -260,6 +262,8 @@ assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-contain
 assert_runtime_bundle_inventory Dockerfile.release bundle-source ryeos-substrate
 assert_runtime_bundle_inventory Dockerfile.release core ryeos-core
 assert_runtime_bundle_inventory Dockerfile.release core-scheduling ryeos-core-scheduling
+assert_runtime_bundle_inventory Dockerfile.release core-workflow ryeos-core-workflow
+assert_runtime_bundle_inventory Dockerfile.release core-knowledge ryeos-core-knowledge
 assert_runtime_bundle_inventory Dockerfile.release f5r-controller ryeos-f5r-controller
 
 assert_runtime_init_profile() {
@@ -296,6 +300,8 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
 assert_runtime_init_profile Dockerfile.release bundle-source ryeos-substrate
 assert_runtime_init_profile Dockerfile.release core ryeos-core
 assert_runtime_init_profile Dockerfile.release core-scheduling ryeos-core-scheduling
+assert_runtime_init_profile Dockerfile.release core-workflow ryeos-core-workflow
+assert_runtime_init_profile Dockerfile.release core-knowledge ryeos-core-knowledge
 assert_runtime_init_profile Dockerfile.release f5r-controller ryeos-f5r-controller
 
 # The host class selects which of a profile's signed capability floors the node
@@ -340,6 +346,8 @@ assert_composition_pair() {
 }
 assert_composition_pair ryeos-core core-pair core
 assert_composition_pair ryeos-core-scheduling core-scheduling-pair core-scheduling
+assert_composition_pair ryeos-core-workflow core-workflow-pair core-workflow
+assert_composition_pair ryeos-core-knowledge core-knowledge-pair core-knowledge
 assert_composition_pair ryeos-f5r-controller controller-pair f5r-controller
 assert_composition_pair ryeos-standard standard-pair standard
 grep -Fxq 'ARG PUBLICATION_STAGE=published' <<<"$(dockerfile_instructions "$root/Dockerfile.release")" || {
@@ -354,6 +362,8 @@ grep -Fxq 'FROM ${PUBLICATION_STAGE} AS composition-publication' <<<"$(dockerfil
 # set has no scheduling bundle, no provider setup where it has no directive.
 [[ -z "$(ryeos_bundle_set_cargo_features core ryeosd)" ]]
 [[ "$(ryeos_bundle_set_cargo_features core-scheduling ryeosd)" == ryeosd/scheduling ]]
+[[ -z "$(ryeos_bundle_set_cargo_features core-workflow ryeosd)" ]]
+[[ -z "$(ryeos_bundle_set_cargo_features core-knowledge ryeosd)" ]]
 [[ -z "$(ryeos_bundle_set_cargo_features f5r-controller ryeosd)" ]]
 [[ "$(ryeos_bundle_set_cargo_features standard ryeosd)" == ryeosd/model-provider-setup,ryeosd/scheduling ]]
 
@@ -595,7 +605,7 @@ if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
     exit 1
 fi
 composition_bake="$root/docker-bake.composition.hcl"
-for target in core core-scheduling standard f5r-controller; do
+for target in core core-scheduling core-workflow core-knowledge standard f5r-controller; do
     grep -Fq "target \"$target\"" "$composition_bake" || {
         echo "composition Bake contract is missing target $target" >&2
         exit 1

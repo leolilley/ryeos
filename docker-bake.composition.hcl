@@ -15,7 +15,7 @@ variable "IMAGE_PREFIX" { default = "ryeos" }
 variable "IMAGE_TAG" { default = "composition-candidate" }
 
 group "composition" {
-  targets = ["core", "core-scheduling", "standard", "f5r-controller"]
+  targets = ["core", "core-scheduling", "core-workflow", "core-knowledge", "standard", "f5r-controller"]
 }
 
 target "_composition" {
@@ -48,6 +48,18 @@ target "core-scheduling" {
   inherits = ["_composition"]
   target   = "ryeos-core-scheduling"
   tags     = ["${IMAGE_PREFIX}-core-scheduling:${IMAGE_TAG}"]
+}
+
+target "core-workflow" {
+  inherits = ["_composition"]
+  target   = "ryeos-core-workflow"
+  tags     = ["${IMAGE_PREFIX}-core-workflow:${IMAGE_TAG}"]
+}
+
+target "core-knowledge" {
+  inherits = ["_composition"]
+  target   = "ryeos-core-knowledge"
+  tags     = ["${IMAGE_PREFIX}-core-knowledge:${IMAGE_TAG}"]
 }
 
 target "standard" {

@@ -69,9 +69,9 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller release-authority" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority" ]]
 # Native node/caller authentication does not require application sessions.
-for set_name in core core-scheduling f5r-controller standard local-inference hosted-workflow bundle-source; do
+for set_name in core core-scheduling core-workflow core-knowledge f5r-controller standard local-inference hosted-workflow bundle-source; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   assert_rejected contains central-auth "${members[@]}"
 done
@@ -114,7 +114,7 @@ for set_name in core core-scheduling bundle-source; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/core-handlers,ryeos-handler-bins/extends-composer" ]]
 done
 # The parser package has no compositions: every set builds it with its defaults.
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller release-authority release-artifacts; do
+for set_name in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority release-artifacts; do
   [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-parser-bins)" ]]
 done
 mapfile -t core < <(ryeos_bundle_set_names core)
@@ -124,6 +124,26 @@ mapfile -t core_bins < <(ryeos_bundle_set_bin_managed_names core)
 for forbidden in central-auth scheduling knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core[@]}"
 done
+mapfile -t core_workflow < <(ryeos_bundle_set_names core-workflow)
+[[ "${core_workflow[*]}" == "core graph" ]]
+mapfile -t core_workflow_bins < <(ryeos_bundle_set_bin_managed_names core-workflow)
+[[ "${core_workflow_bins[*]}" == "core graph" ]]
+mapfile -t core_knowledge < <(ryeos_bundle_set_names core-knowledge)
+[[ "${core_knowledge[*]}" == "core knowledge" ]]
+mapfile -t core_knowledge_bins < <(ryeos_bundle_set_bin_managed_names core-knowledge)
+[[ "${core_knowledge_bins[*]}" == "core knowledge" ]]
+for forbidden in central-auth scheduling directive ryeos-docs local-inference codex render-sandbox; do
+  assert_rejected contains "$forbidden" "${core_workflow[@]}"
+  assert_rejected contains "$forbidden" "${core_knowledge[@]}"
+done
+assert_rejected contains knowledge "${core_workflow[@]}"
+assert_rejected contains graph "${core_knowledge[@]}"
+for package in ryeosd ryeos-cli ryeos-api; do
+  [[ -z "$(ryeos_bundle_set_cargo_features core-workflow "$package")" ]]
+  [[ -z "$(ryeos_bundle_set_cargo_features core-knowledge "$package")" ]]
+done
+[[ "$(ryeos_bundle_set_cargo_features core-workflow ryeos-handler-bins)" == "ryeos-handler-bins/graph-handlers" ]]
+[[ "$(ryeos_bundle_set_cargo_features core-knowledge ryeos-handler-bins)" == "ryeos-handler-bins/core-handlers,ryeos-handler-bins/extends-composer" ]]
 mapfile -t core_scheduling < <(ryeos_bundle_set_names core-scheduling)
 [[ "${core_scheduling[*]}" == "core scheduling" ]]
 mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-scheduling)
@@ -179,7 +199,7 @@ for set_name in full release-authority release-artifacts; do
   mapfile -t managed < <(ryeos_bundle_set_bin_managed_names "$set_name")
   assert_rejected contains environment-qualification "${managed[@]}"
 done
-for set_name in central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller; do
+for set_name in central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   assert_rejected contains environment-qualification "${members[@]}"
 done
@@ -199,7 +219,7 @@ grep -Fq 'sudo cp -a "$bundle_dir/specs" "$share_dir/$name/specs"' \
   "$ROOT/scripts/pkg/install-local-direct.sh"
 grep -Fq 'cp -a "$bundle_dir/specs" "$pkgdir/usr/share/ryeos/$name/specs"' \
   "$ROOT/deploy/aur/ryeos/PKGBUILD"
-for ordinary_set in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling f5r-controller; do
+for ordinary_set in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   assert_rejected contains bundle-release "${ordinary_members[@]}"
   [[ -z "$(ryeos_bundle_set_host_support_bins "$ordinary_set")" ]]
@@ -212,7 +232,7 @@ assert_rejected ryeos_bundle_set_node_init_profile release-artifacts
 assert_rejected ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling f5r-controller contained-workflow development release-authority" ]]
+[[ "${node_init_profiles[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller contained-workflow development release-authority" ]]
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set hosted-node)" == "core" ]]
 assert_rejected ryeos_bundle_set_names hosted-node
@@ -262,7 +282,7 @@ for profile_name in "${node_init_profiles[@]}"; do
       | sed -nE 's/^        ([a-z][a-z0-9_]*):$/\1/p' | tr '\n' ' '
   )"
   case "$profile_name" in
-    core|core-scheduling|standard|f5r-controller)
+    core|core-scheduling|core-workflow|core-knowledge|standard|f5r-controller)
       [[ "$declared_host_classes" == "hosted local " ]] ;;
     hosted-node|hosted-workflow)
       [[ "$declared_host_classes" == "hosted " ]] ;;

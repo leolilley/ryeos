@@ -17,9 +17,17 @@
     "core": [
       "core"
     ],
+    "core-knowledge": [
+      "core",
+      "knowledge"
+    ],
     "core-scheduling": [
       "core",
       "scheduling"
+    ],
+    "core-workflow": [
+      "core",
+      "graph"
     ],
     "f5r-controller": [
       "core",
@@ -91,7 +99,9 @@
     "central-host": "central-host",
     "contained-workflow": "hosted-workflow",
     "core": "core",
+    "core-knowledge": "core-knowledge",
     "core-scheduling": "core-scheduling",
+    "core-workflow": "core-workflow",
     "development": "full",
     "f5r-controller": "f5r-controller",
     "full": "full",

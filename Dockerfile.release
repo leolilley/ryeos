@@ -191,6 +191,66 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/core-scheduling/ryeos
 
+# Core with the graph bundle: graph workflows, no scheduler or provider setup.
+FROM composition-publication AS core-workflow-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-workflow "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/core-workflow && \
+    cp /build/target-cache/release/ryeosd /build/target/core-workflow/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-workflow/ryeos
+
+# Core with the knowledge bundle: no scheduler or provider setup.
+FROM composition-publication AS core-knowledge-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-knowledge "$package")" && \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    feature_args=() && \
+    if [ "${#features[@]}" -gt 0 ]; then \
+      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
+    fi && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    mkdir -p /build/target/core-knowledge && \
+    cp /build/target-cache/release/ryeosd /build/target/core-knowledge/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-knowledge/ryeos
+
 # Remote-authoring controller: graph and knowledge only, no scheduler or
 # directive runtime.
 FROM composition-publication AS controller-pair
@@ -595,6 +655,66 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="core-scheduling"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-workflow
+COPY --from=core-workflow-pair /build/target/core-workflow/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-workflow-pair /build/target/core-workflow/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-workflow
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-knowledge
+COPY --from=core-knowledge-pair /build/target/core-knowledge/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-knowledge-pair /build/target/core-knowledge/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-knowledge
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-knowledge"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
