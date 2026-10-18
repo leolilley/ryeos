@@ -280,6 +280,8 @@ fn check(profile_name: &str, class: &str, host: &Host, expect: &Expect) {
 
 const SCOPE_TRIO: &[&str] = &["limits:scope", "recovery:scope", "termination:scope"];
 const NO_DISK: &[&str] = &["storage:durable_root"];
+const NO_NAMESPACES: &[&str] = &["isolation:namespaces"];
+const NO_ENCLOSURE_LIMIT: &[&str] = &["limits:enclosure"];
 const NO_ACCOUNTING: &[&str] = &["accounting"];
 /// What bare runit lacks of the controller's `local` floor: a container
 /// enclosure to recover and terminate jobs through.
@@ -306,8 +308,8 @@ fn core_cases() -> Vec<(&'static str, Host, Expect)> {
 }
 
 #[test]
-fn core_and_core_scheduling_follow_the_host_class_matrix() {
-    for profile in ["core", "core-scheduling"] {
+fn the_core_compositions_follow_the_host_class_matrix() {
+    for profile in ["core", "core-scheduling", "core-workflow", "core-knowledge"] {
         for (class, host, expect) in core_cases() {
             check(profile, class, &host, &expect);
         }
@@ -315,19 +317,37 @@ fn core_and_core_scheduling_follow_the_host_class_matrix() {
 }
 
 #[test]
-fn core_profiles_declare_exactly_the_local_and_hosted_classes() {
-    for profile in [
-        "core",
-        "core-scheduling",
-        "core-workflow",
-        "core-knowledge",
-        "standard",
-        "f5r-controller",
-    ] {
+fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
+    let both = ["hosted", "local"];
+    let local_only = ["local"];
+    let hosted_only = ["hosted"];
+    let expected: [(&str, &[&str]); 16] = [
+        ("core", &both),
+        ("core-scheduling", &both),
+        ("core-workflow", &both),
+        ("core-knowledge", &both),
+        ("standard", &both),
+        ("f5r-controller", &both),
+        ("standard-central-auth", &local_only),
+        ("central-host", &local_only),
+        ("bundle-source", &local_only),
+        ("local-inference", &local_only),
+        ("contained-workflow", &local_only),
+        ("release-authority", &local_only),
+        ("development", &local_only),
+        ("full", &local_only),
+        ("hosted-workflow", &hosted_only),
+        ("hosted-node", &hosted_only),
+    ];
+    let shipped: BTreeSet<String> = profile_names().into_iter().collect();
+    let covered: BTreeSet<String> = expected.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(shipped, covered, "every shipped profile has a declared-classes row");
+    for (profile, classes) in expected {
         let loaded = load_profile(profile);
-        let classes: BTreeSet<String> =
+        let declared: BTreeSet<String> =
             host_classes(&loaded).keys().map(|key| key.as_str().unwrap().to_owned()).collect();
-        assert_eq!(classes, BTreeSet::from(["hosted".to_owned(), "local".to_owned()]), "{profile}");
+        let want: BTreeSet<String> = classes.iter().map(|class| (*class).to_owned()).collect();
+        assert_eq!(declared, want, "{profile}");
     }
 }
 
@@ -347,6 +367,83 @@ fn standard_follows_the_host_class_matrix() {
     for (class, host, expect) in &cases {
         check("standard", class, host, expect);
     }
+}
+
+/// The local floor of the central-auth, central-host and bundle-source
+/// compositions: accounting, a durable root and time, no process scopes.
+fn plain_local_cases() -> Vec<(&'static str, Host, Expect)> {
+    vec![
+        ("local", runit(), Expect::Admit),
+        ("local", local_docker(), Expect::Admit),
+        ("local", local_docker_oci_hook(), Expect::Admit),
+        ("local", railway(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("local", render_sandbox(), Expect::Refuse(NO_DISK)),
+    ]
+}
+
+#[test]
+fn the_central_and_bundle_source_compositions_follow_the_host_class_matrix() {
+    for profile in ["standard-central-auth", "central-host", "bundle-source"] {
+        for (class, host, expect) in plain_local_cases() {
+            check(profile, class, &host, &expect);
+        }
+    }
+}
+
+#[test]
+fn the_hosted_compositions_follow_the_host_class_matrix() {
+    let hosted_node: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", runit(), Expect::Admit),
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", railway(), Expect::Admit),
+        ("hosted", railway_no_volume(), Expect::Admit),
+        ("hosted", render_sandbox(), Expect::Refuse(&["any_of(accounting, residency:swap_absent)"])),
+    ];
+    for (class, host, expect) in &hosted_node {
+        check("hosted-node", class, host, expect);
+    }
+    let hosted_workflow: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", railway(), Expect::Admit),
+        ("hosted", railway_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", render_sandbox(), Expect::Refuse(NO_DISK)),
+    ];
+    for (class, host, expect) in &hosted_workflow {
+        check("hosted-workflow", class, host, expect);
+    }
+}
+
+#[test]
+fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
+    let scoped = |isolation: Expect| -> Vec<(&'static str, Host, Expect)> {
+        vec![
+            ("local", runit(), Expect::Admit),
+            ("local", local_docker(), Expect::Refuse(SCOPE_TRIO)),
+            ("local", local_docker_oci_hook(), isolation),
+            ("local", railway(), Expect::Refuse(SCOPE_TRIO)),
+        ]
+    };
+    for (profile, cases) in [
+        ("local-inference", scoped(Expect::Admit)),
+        ("full", scoped(Expect::Admit)),
+        // The OCI hook delegates scopes but not user namespaces.
+        ("contained-workflow", scoped(Expect::Refuse(NO_NAMESPACES))),
+        ("development", scoped(Expect::Refuse(NO_NAMESPACES))),
+    ] {
+        for (class, host, expect) in &cases {
+            check(profile, class, host, expect);
+        }
+    }
+}
+
+#[test]
+fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_proves() {
+    for host in [runit(), local_docker(), local_docker_oci_hook(), railway()] {
+        check("release-authority", "local", &host, &Expect::Refuse(NO_ENCLOSURE_LIMIT));
+    }
+    check("release-authority", "local", &local_docker(), &Expect::Refuse(NO_NAMESPACES));
 }
 
 #[test]
@@ -394,16 +491,9 @@ fn every_shipped_profile_declares_valid_floors_that_a_runit_host_meets_in_its_lo
             }
             assert!(entry["requires_capabilities"].is_sequence(), "{name} [{class}]");
         }
-        // The profiles that need isolation namespaces, quiescence, or a
-        // container enclosure ask for more than a bare runit host proves.
-        let beyond_runit = [
-            "full",
-            "development",
-            "contained-workflow",
-            "release-authority",
-            "local-inference",
-            "f5r-controller",
-        ];
+        // The profiles that need an enclosure limit or a container enclosure
+        // ask for more than a bare runit host proves.
+        let beyond_runit = ["release-authority", "f5r-controller"];
         if name == "f5r-controller" {
             let admission = match_floor(&floor(&profile, "local"), &view);
             assert!(!admission.admitted, "{name} [local] on runit: {admission:#?}");
