@@ -120,6 +120,26 @@ class Case(unittest.TestCase):
         self.assertIn("RYEOS_OPERATOR_HOLD", record["envKeys"])
         self.assertNotIn("hosted", json.dumps(record))
 
+    def test_owner_id_skips_owner_lookup(self):
+        routes = deploy_routes(["live"])
+        del routes[("GET", "/owners?limit=20")]
+        fake = Fake(routes)
+        rc, log = self.run_main(self.deploy_argv("--owner-id", "own-1"), fake)
+        self.assertEqual(rc, 2, log)
+        routes2 = {(m, p.replace("own-1", "tea-abc1")): v for (m, p), v in routes.items()}
+        fake = Fake(routes2)
+        rc, log = self.run_main(self.deploy_argv("--owner-id", "tea-abc1"), fake)
+        self.assertEqual(rc, 0, log)
+        self.assertFalse([r for r in fake.requests if r[1].startswith("/owners")])
+        self.assertEqual(json.loads(fake.methods("POST")[0][2])["ownerId"], "tea-abc1")
+
+    def test_bad_owner_id_refused_without_requests(self):
+        for bad in ("TEA-abc", "own-1", "tea-", "tea-a b"):
+            fake = Fake({})
+            rc, _ = self.run_main(self.deploy_argv("--owner-id", bad), fake)
+            self.assertEqual(rc, 2)
+            self.assertEqual(fake.requests, [])
+
     def test_no_hold_by_default(self):
         payload = CTL.build_payload(CTL.parser().parse_args(self.deploy_argv()), "own-1", None)
         self.assertNotIn("RYEOS_OPERATOR_HOLD", [e["key"] for e in payload["envVars"]])

@@ -224,7 +224,12 @@ def list_all(api, path):
             return [unwrap(i) for i in items]
 
 
-def resolve_owner(api, email):
+OWNER_ID_RE = re.compile(r"^(tea|usr)-[a-z0-9]+$")
+
+
+def resolve_owner(api, email, owner_id=None):
+    if owner_id:
+        return owner_id
     _, owners = api.call("GET", "/owners?limit=20")
     items = [unwrap(o) for o in (owners or [])]
     if email:
@@ -265,7 +270,7 @@ def write_json(out, name, record):
 def cmd_deploy(args, api, sleep=time.sleep, clock=time.monotonic):
     require_prefix(args.name)
     guard(args.name, build_payload(args, "own-placeholder", "rcred-placeholder"))
-    owner_id = resolve_owner(api, args.owner_email)
+    owner_id = resolve_owner(api, args.owner_email, args.owner_id)
     guard(args.name, build_payload(args, owner_id, "rcred-placeholder"))
     query = urllib.parse.urlencode({"name": args.name, "ownerId": owner_id})
     _, existing = api.call("GET", f"/services?{query}")
@@ -411,6 +416,7 @@ def parser():
     d.add_argument("--plan", default="starter")
     d.add_argument("--disk-gb", type=int, default=1)
     d.add_argument("--owner-email")
+    d.add_argument("--owner-id")
     d.add_argument("--registry-credential-id")
     d.add_argument("--operator-hold", action="store_true")
     d.add_argument("--timeout", type=int, default=1200)
@@ -433,6 +439,8 @@ def main(argv=None, opener=http_open, sleep=time.sleep, clock=time.monotonic, ke
             # Static refusals run before the key is read or any request is made.
             guard(args.name, {"name": args.name, "image": args.image})
             build_payload(args, "own-placeholder", args.registry_credential_id)
+            if args.owner_id and not OWNER_ID_RE.match(args.owner_id):
+                raise Refusal("--owner-id must match (tea|usr)-[a-z0-9]+")
         elif args.cmd in ("status", "teardown"):
             guard_id(args.service_id)
     except Refusal as err:
