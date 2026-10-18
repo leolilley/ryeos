@@ -10,7 +10,7 @@ fn generation_value() -> Value {
     json!({
         "schema": BUNDLE_GENERATION_SCHEMA,
         "kind": BUNDLE_GENERATION_KIND,
-        "bundle_name": "standard",
+        "bundle_name": "knowledge",
         "authored_version": "1.2.3",
         "content_manifest_hash": h('a'),
         "manifest_item_hash": h('b'),
@@ -60,7 +60,7 @@ fn set_value() -> Value {
         "substrate_release_attestation_hash": h('5'),
         "entries": [
             {"bundle_name":"core","generation_hash":h('1'),"publisher_attestation_hash":h('2')},
-            {"bundle_name":"standard","generation_hash":h('3'),"publisher_attestation_hash":h('4')}
+            {"bundle_name":"knowledge","generation_hash":h('3'),"publisher_attestation_hash":h('4')}
         ],
         "migration_requirement": "none"
     })
@@ -120,7 +120,7 @@ fn snapshot_value() -> Value {
         "publisher": format!("fp:{}", h('1')),
         "bundle_channels": [
             {"bundle_name":"core","channel":"stable","generation_attestation_hash":h('2')},
-            {"bundle_name":"standard","channel":"stable","generation_attestation_hash":h('3')}
+            {"bundle_name":"knowledge","channel":"stable","generation_attestation_hash":h('3')}
         ],
         "set_channels": [
             {"set_name":"complete","channel":"stable","set_attestation_hash":h('4')}

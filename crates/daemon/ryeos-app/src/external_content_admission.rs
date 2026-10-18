@@ -1652,7 +1652,7 @@ mod consumer_authority_tests {
 
         resolution.root.source_space = ItemSpace::Bundle;
         resolution.root.source_root = ItemSourceRoot::Bundle {
-            name: "standard".into(),
+            name: "knowledge".into(),
         };
         resolution.root.trust_class = TrustClass::TrustedBundle;
         assert!(!is_pinned_project_consumer_resolution(&resolution));

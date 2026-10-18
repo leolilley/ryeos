@@ -213,8 +213,8 @@ mod tests {
                 canonical_root: "/candidate".into(),
             },
             RegisteredBundleRoot {
-                name: "standard".into(),
-                canonical_root: "/standard".into(),
+                name: "graph".into(),
+                canonical_root: "/graph".into(),
             },
         ];
         assert_eq!(
@@ -225,7 +225,7 @@ mod tests {
                 &registered
             )
             .unwrap(),
-            [PathBuf::from("/core"), PathBuf::from("/standard")]
+            [PathBuf::from("/core"), PathBuf::from("/graph")]
         );
     }
 

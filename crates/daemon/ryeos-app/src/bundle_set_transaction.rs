@@ -1324,19 +1324,19 @@ mod tests {
             old_installed_set_digest: hash('2'),
             new_installed_set_digest: hash('3'),
             actions: vec![BundleSetAction {
-                bundle_name: "standard".to_owned(),
+                bundle_name: "knowledge".to_owned(),
                 kind: BundleSetActionKind::Replace,
                 old_tree_digest: Some(hash('4')),
                 new_tree_digest: Some(hash('5')),
                 old_registration_digest: Some(hash('6')),
                 new_registration_digest: Some(hash('7')),
-                old_tree_backup_path: Some(format!("{recovery_root}/old/trees/standard")),
-                new_tree_staging_path: Some(format!("{recovery_root}/new/trees/standard")),
+                old_tree_backup_path: Some(format!("{recovery_root}/old/trees/knowledge")),
+                new_tree_staging_path: Some(format!("{recovery_root}/new/trees/knowledge")),
                 old_registration_backup_path: Some(format!(
-                    "{recovery_root}/old/registrations/standard.yaml"
+                    "{recovery_root}/old/registrations/knowledge.yaml"
                 )),
                 new_registration_staging_path: Some(format!(
-                    "{recovery_root}/new/registrations/standard.yaml"
+                    "{recovery_root}/new/registrations/knowledge.yaml"
                 )),
             }],
             phase,

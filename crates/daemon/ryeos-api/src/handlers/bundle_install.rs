@@ -765,7 +765,7 @@ mod tests {
     fn validate_name_accepts_valid() {
         assert!(validate_name("my-bundle_v2").is_ok());
         assert!(validate_name("core").is_ok());
-        assert!(validate_name("standard").is_ok());
+        assert!(validate_name("knowledge").is_ok());
     }
 
     #[test]

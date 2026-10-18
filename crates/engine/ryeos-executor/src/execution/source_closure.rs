@@ -1027,7 +1027,7 @@ pub(crate) mod tests {
                 item_kind: "tool".to_owned(),
                 source_space: ryeos_state::objects::SourceSpaceIdentity::Bundle,
                 source_root: ryeos_state::objects::SourceRootIdentity::Bundle {
-                    name: "standard".to_owned(),
+                    name: "knowledge".to_owned(),
                 },
                 root_source_content_digest: "a".repeat(64),
                 root_raw_content_digest: "b".repeat(64),

@@ -407,7 +407,7 @@ mod tests {
         let value = json!({
             "schema": ryeos_bundle_publication_contract::BUNDLE_GENERATION_SCHEMA,
             "kind": ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
-            "bundle_name": "standard", "authored_version": "1.2.3",
+            "bundle_name": "knowledge", "authored_version": "1.2.3",
             "content_manifest_hash": hash('a'), "manifest_item_hash": hash('b'),
             "target": {"kind":"portable"}, "build_profile": "release",
             "substrate_protocol": 1, "bundle_manifest_format": "ryeos.bundle-manifest/v1",

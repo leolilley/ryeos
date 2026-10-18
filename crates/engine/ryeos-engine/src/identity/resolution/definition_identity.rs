@@ -1226,7 +1226,7 @@ mod tests {
             root_raw_content_digest: digest.to_string().repeat(64),
             source_space: ItemSpace::Bundle,
             source_root: ItemSourceRoot::Bundle {
-                name: "standard".to_string(),
+                name: "knowledge".to_string(),
             },
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some("f".repeat(64)),

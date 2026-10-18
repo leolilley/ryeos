@@ -900,7 +900,7 @@ mod tests {
                 .contains("core")
         );
 
-        let omission = verified_set(&[("standard", '2')]);
+        let omission = verified_set(&[("knowledge", '2')]);
         assert!(
             plan_exact_set(&omission, &installed)
                 .unwrap_err()
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn substrate_release_must_bind_exact_core_protocol_and_target() {
-        let set = verified_set(&[("core", '3'), ("standard", '4')]);
+        let set = verified_set(&[("core", '3'), ("knowledge", '4')]);
         assert!(verify_substrate_release_binding(&set.set, &set.substrate_release).is_ok());
 
         let mut wrong_core = set.substrate_release.clone();

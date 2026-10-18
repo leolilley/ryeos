@@ -2059,9 +2059,9 @@ mod tests {
     }
 
     /// A live-project provenance whose request engine carries the signed
-    /// kind schemas of the live Core and Standard bundles, so callback
-    /// capability enforcement derives each item's required capability from
-    /// its kind's signed admission policy.
+    /// kind schemas of the live bundles that supply them (core, knowledge,
+    /// directive and graph), so callback capability enforcement derives each
+    /// item's required capability from its kind's signed admission policy.
     fn test_provenance_with_live_kinds(path: &str) -> TestProvenance {
         test_provenance_with_engine(
             Arc::new(ryeos_engine::engine::Engine::new(
@@ -2250,7 +2250,7 @@ mod tests {
         ));
         // Most rows in this minimal harness use the daemon-internal
         // `system_task` profile. Follow-reconciliation fixtures truthfully use
-        // the standard bundle's `graph_run` profile without teaching the
+        // the graph bundle's `graph_run` profile without teaching the
         // production registry any hardcoded schema kinds.
         let kind_profiles = Arc::new(
             KindProfileRegistry::build(None)
