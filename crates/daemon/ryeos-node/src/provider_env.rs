@@ -194,7 +194,7 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         profiles.sort();
-        assert_eq!(profiles.len(), 14, "update provider-environment profile expectations");
+        assert_eq!(profiles.len(), 16, "update provider-environment profile expectations");
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         for path in profiles {
             let profile_name = path
@@ -217,8 +217,9 @@ mod tests {
                 // Authority-class profiles never declare a provider source.
                 "release-authority" | "central-host" | "standard-central-auth"
                 | "bundle-source" => &[],
-                "contained-workflow" | "core" | "core-scheduling" | "development" | "full"
-                | "hosted-node" | "local-inference" | "standard" => &[],
+                "contained-workflow" | "core" | "core-knowledge" | "core-scheduling"
+                | "core-workflow" | "development" | "full" | "hosted-node" | "local-inference"
+                | "standard" => &[],
                 _ => panic!("add an explicit provider-environment expectation for {profile_name}"),
             };
             assert_eq!(provider.declared_names(), expected, "{profile_name}");

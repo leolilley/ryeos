@@ -93,7 +93,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 14, "every shipped offline reset quota is checked");
+        assert_eq!(checked, 16, "every shipped offline reset quota is checked");
     }
 
     #[test]
