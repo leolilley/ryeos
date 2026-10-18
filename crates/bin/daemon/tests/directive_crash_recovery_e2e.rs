@@ -12,7 +12,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::runtime_phase_cut::RuntimePhaseCutGate;
 use common::{DaemonHarness, build_signed_headers_for_bytes};
@@ -587,7 +587,7 @@ async fn run_crash_cut(cut: CrashCut) {
     let mock_url = mock.base_url.clone();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)
         };
     let (mut phase_gate, mut phase_child) = match cut.runtime_block_stage() {

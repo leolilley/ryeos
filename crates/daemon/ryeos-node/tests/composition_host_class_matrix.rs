@@ -485,12 +485,12 @@ fn the_codex_login_is_refused_without_a_credential_private_home() {
     assert!(text.contains(CREDENTIAL_PRIVATE_HOME), "{text}");
 }
 
-const PROBE_REF: &str = "tool:ryeos/qualification/namespaces-probe";
+const PROBE_REF: &str = "tool:ryeos/core/qualification/namespaces-probe";
 
-/// The `requires` block of the signed probe item the standard bundle ships,
+/// The `requires` block of the signed probe item the core bundle ships,
 /// read from the item file itself.
 fn shipped_probe_requires() -> ryeos_bundle::runtime_authority::RuntimeRequires {
-    let path = repo_root().join("bundles/standard/.ai/tools/ryeos/qualification/namespaces-probe.yaml");
+    let path = repo_root().join("bundles/core/.ai/tools/ryeos/core/qualification/namespaces-probe.yaml");
     let document: serde_yaml::Value =
         serde_yaml::from_slice(&std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
             .unwrap();

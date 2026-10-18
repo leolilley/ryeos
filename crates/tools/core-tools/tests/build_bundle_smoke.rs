@@ -3,16 +3,25 @@
 //! These tests verify the *structure* of a built bundle without
 //! re-running the full build pipeline (which requires `cargo build`).
 //!
-//! Prerequisite: a populated `bundles/standard/.ai/bin/<triple>/`
+//! Prerequisite: a populated `bundles/directive/.ai/bin/<triple>/`
 //! plus CAS objects + refs. Regenerate via:
-//!   `ryeos publish bundles/standard --key .dev-keys/PUBLISHER_DEV.pem`
+//!   `ryeos publish bundles/directive --key .dev-keys/PUBLISHER_DEV.pem`
 
 use sha2::Digest;
 use std::path::Path;
 
-/// The standard bundle directory relative to workspace root.
+/// The directive bundle directory relative to workspace root. It owns the
+/// directive runtime binary that the structural checks below inspect.
 fn bundle_dir() -> std::path::PathBuf {
-    workspace_root().join("bundles/standard")
+    workspace_root().join("bundles/directive")
+}
+
+/// The bundles that ship the workflow kinds and their runtimes.
+fn workflow_bundle_dirs() -> Vec<std::path::PathBuf> {
+    ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace_root().join("bundles").join(name))
+        .collect()
 }
 
 fn read_signed_manifest_hash(path: &Path) -> String {
@@ -130,7 +139,7 @@ fn bundle_manifest_ref_exists() {
         // It may not exist in all checkouts — skip gracefully rather than fail.
         eprintln!(
             "skipping bundle_manifest_ref_exists: manifest ref not found at {:?}. \
-              Run: ryeos publish bundles/standard --key .dev-keys/PUBLISHER_DEV.pem",
+              Run: ryeos publish bundles/directive --key .dev-keys/PUBLISHER_DEV.pem",
             ref_path
         );
         return;
@@ -231,31 +240,35 @@ fn bundle_cas_contains_binary_blob() {
 }
 
 #[test]
-fn standard_bundle_has_no_old_tool_descriptors() {
-    let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
-    if !tools_dir.is_dir() {
-        return;
+fn workflow_bundles_have_no_old_tool_descriptors() {
+    for bundle in workflow_bundle_dirs() {
+        let tools_dir = bundle.join(".ai").join("tools").join("ryeos");
+        if !tools_dir.is_dir() {
+            continue;
+        }
+
+        let mut yaml_files = Vec::new();
+        walk_yaml_files(&tools_dir, &mut yaml_files);
+        yaml_files.retain(|path| {
+            path.strip_prefix(&tools_dir)
+                .map(|rel| rel != Path::new("knowledge/compose.yaml"))
+                .unwrap_or(true)
+        });
+
+        // The workflow bundles ship no legacy Python/HTTP provider or
+        // state-graph tool descriptors under tools/ryeos/. Runtime delegation
+        // is via runtimes/ pointing at native Rust binaries; model providers
+        // are config-driven. The knowledge compose wrapper is intentionally a
+        // knowledge-bundle tool because it routes to the knowledge kind/runtime
+        // through method dispatch.
+        assert!(
+            yaml_files.is_empty(),
+            "{}'s tools/ryeos/ contains old state-graph/provider \
+             tool descriptors; found {:?}",
+            bundle.display(),
+            yaml_files
+        );
     }
-
-    let mut yaml_files = Vec::new();
-    walk_yaml_files(&tools_dir, &mut yaml_files);
-    yaml_files.retain(|path| {
-        path.strip_prefix(&tools_dir)
-            .map(|rel| rel != Path::new("knowledge/compose.yaml"))
-            .unwrap_or(true)
-    });
-
-    // Standard bundle ships no legacy Python/HTTP provider or state-graph tool
-    // descriptors under tools/ryeos/. Runtime delegation is via runtimes/
-    // pointing at native Rust binaries; model providers are config-driven. The
-    // knowledge compose wrapper is intentionally a standard-bundle tool because
-    // it routes to the standard knowledge kind/runtime through method dispatch.
-    assert!(
-        yaml_files.is_empty(),
-        "standard bundle's tools/ryeos/ contains old state-graph/provider \
-         tool descriptors; found {:?}",
-        yaml_files
-    );
 }
 
 #[test]
@@ -336,45 +349,64 @@ fn service_descriptor_table_matches_api_handlers() {
             .strip_prefix("service:")
             .expect("service ref prefix checked by parser");
         let rel = format!(".ai/services/{bare}.yaml");
-        let core = workspace.join("bundles/core").join(&rel);
-        let standard = workspace.join("bundles/standard").join(&rel);
+        let candidates: Vec<_> = std::iter::once(workspace.join("bundles/core"))
+            .chain(workflow_bundle_dirs())
+            .map(|bundle| bundle.join(&rel))
+            .collect();
         assert!(
-            core.exists() || standard.exists(),
+            candidates.iter().any(|path| path.exists()),
             "API handler {service_ref} has no matching service descriptor; \
-             expected {} or {}",
-            core.display(),
-            standard.display()
+             expected one of {candidates:?}"
         );
     }
 }
 
 // ── V5.4 P2.1 — runtime binaries must be in the manifest ──────────────
 
-#[test]
-fn bundle_manifest_includes_all_runtime_binaries() {
-    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
+/// Each runtime binary ships in the bundle that owns its runtime.
+const RUNTIME_BINARIES: [(&str, &str); 3] = [
+    ("directive", "ryeos-directive-runtime"),
+    ("graph", "ryeos-graph-runtime"),
+    ("knowledge", "ryeos-knowledge-runtime"),
+];
+
+fn bundle_manifest_item_hashes(
+    bundle: &Path,
+) -> Option<std::collections::HashMap<String, String>> {
+    let ref_path = bundle.join(".ai/refs/bundles/manifest");
     if !ref_path.exists() {
-        return; // bundle not built
+        return None; // bundle not built
     }
     let manifest_hash = read_signed_manifest_hash(&ref_path);
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
-    let manifest_path = bundle_dir()
+    let manifest_path = bundle
         .join(".ai/objects/objects")
         .join(&shard)
         .join(format!("{manifest_hash}.json"));
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    Some(
+        value["item_source_hashes"]
+            .as_object()
+            .expect("map")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+            .collect(),
+    )
+}
+
+#[test]
+fn bundle_manifest_includes_all_runtime_binaries() {
     let triple = host_triple();
-    let map = value["item_source_hashes"].as_object().expect("map");
-    for bare in &[
-        "ryeos-directive-runtime",
-        "ryeos-graph-runtime",
-        "ryeos-knowledge-runtime",
-    ] {
+    for (bundle, bare) in RUNTIME_BINARIES {
+        let Some(map) = bundle_manifest_item_hashes(&workspace_root().join("bundles").join(bundle))
+        else {
+            continue;
+        };
         let key = format!("bin/{triple}/{bare}");
         assert!(
             map.contains_key(&key),
-            "manifest missing {key}; entries: {:?}",
+            "{bundle} manifest missing {key}; entries: {:?}",
             map.keys().collect::<Vec<_>>()
         );
     }
@@ -382,33 +414,13 @@ fn bundle_manifest_includes_all_runtime_binaries() {
 
 #[test]
 fn materialization_resolves_each_runtime_binary() {
-    use std::collections::HashMap;
-    let ref_path = bundle_dir().join(".ai/refs/bundles/manifest");
-    if !ref_path.exists() {
-        return;
-    }
-    let manifest_hash = read_signed_manifest_hash(&ref_path);
-    let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
-    let manifest_path = bundle_dir()
-        .join(".ai/objects/objects")
-        .join(&shard)
-        .join(format!("{manifest_hash}.json"));
-    let manifest_value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    let item_source_hashes: HashMap<String, String> = manifest_value["item_source_hashes"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-        .collect();
-
-    let cas = lillux::cas::CasStore::new(bundle_dir().join(".ai/objects"));
     let triple = host_triple();
-    for bare in &[
-        "ryeos-directive-runtime",
-        "ryeos-graph-runtime",
-        "ryeos-knowledge-runtime",
-    ] {
+    for (bundle, bare) in RUNTIME_BINARIES {
+        let bundle_root = workspace_root().join("bundles").join(bundle);
+        let Some(item_source_hashes) = bundle_manifest_item_hashes(&bundle_root) else {
+            continue;
+        };
+        let cas = lillux::cas::CasStore::new(bundle_root.join(".ai/objects"));
         let executor_ref = format!("native:{bare}");
         let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
             &item_source_hashes,

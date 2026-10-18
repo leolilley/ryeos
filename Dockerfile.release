@@ -105,7 +105,7 @@ FROM compiled-publication AS development-publication
 # Local qualification must not masquerade as official publication.
 RUN python3 -c 'import tomllib; from pathlib import Path; actual=tomllib.loads(Path("bundles/.ai/PUBLISHER_TRUST.toml").read_text()); expected=tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text()); assert actual["fingerprint"] == expected["fingerprint"]; assert actual["owner"] != "ryeos-official"'
 
-# The bundle-source substrate omits Standard. Compile its node pair explicitly
+# The bundle-source substrate omits the workflow bundles. Compile its node pair explicitly
 # from the same source and lockfile; copying the full publication's node pair
 # would retain the scheduler implementation despite omitting its bundle.
 FROM published AS scheduler-free-publication
@@ -191,7 +191,8 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/core-scheduling/ryeos
 
-# Remote-authoring controller: provider setup for Standard, no scheduler.
+# Remote-authoring controller: graph and knowledge only, no scheduler or
+# directive runtime.
 FROM composition-publication AS controller-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
@@ -221,7 +222,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos
 
-# Standard: the scheduler and provider setup its bundles select.
+# Standard: the scheduler (scheduling) and provider setup (directive) its bundles select.
 FROM composition-publication AS standard-pair
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG BUNDLE_BUILD_PROFILE=release
@@ -295,7 +296,10 @@ COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/
 COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
 COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=composition-publication /build/bundles/standard     /opt/ryeos/standard
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -326,7 +330,10 @@ COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeo
 COPY --from=published /build/bundles/.ai             /opt/ryeos/.ai
 COPY --from=published /build/bundles/core            /opt/ryeos/core
 COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/standard        /opt/ryeos/standard
+COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=published /build/bundles/directive /opt/ryeos/directive
+COPY --from=published /build/bundles/graph /opt/ryeos/graph
+COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=published /build/bundles/local-inference /opt/ryeos/local-inference
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -359,7 +366,10 @@ COPY --from=published /build/bundles/.ai                   /opt/ryeos/.ai
 COPY --from=published /build/bundles/core                  /opt/ryeos/core
 COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=published /build/bundles/central-auth          /opt/ryeos/central-auth
-COPY --from=published /build/bundles/standard              /opt/ryeos/standard
+COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=published /build/bundles/directive /opt/ryeos/directive
+COPY --from=published /build/bundles/graph /opt/ryeos/graph
+COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=published /build/bundles/web                   /opt/ryeos/web
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -405,7 +415,10 @@ COPY --from=contained-publication /build/target/release/lillux     /usr/local/bi
 COPY --from=contained-publication /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=contained-publication /build/bundles/core         /opt/ryeos/core
 COPY --from=contained-publication /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=contained-publication /build/bundles/standard     /opt/ryeos/standard
+COPY --from=contained-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=contained-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=contained-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=contained-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=contained-publication /build/bundles/codex        /opt/ryeos/codex
 COPY --from=contained-publication /build/bundles/opencode     /opt/ryeos/opencode
 COPY images/contained-workflow/entrypoint.sh /usr/local/bin/contained-workflow-entrypoint
@@ -498,7 +511,10 @@ COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeo
 COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=published /build/bundles/core         /opt/ryeos/core
 COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/standard     /opt/ryeos/standard
+COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=published /build/bundles/directive /opt/ryeos/directive
+COPY --from=published /build/bundles/graph /opt/ryeos/graph
+COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=published /build/bundles/codex        /opt/ryeos/codex
 COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -595,7 +611,8 @@ COPY --from=controller-pair /build/target/f5r-controller/ryeos  /usr/local/bin/r
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
-COPY --from=composition-publication /build/bundles/standard /opt/ryeos/standard
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
 COPY --from=composition-publication /build/bundles/codex /opt/ryeos/codex
 COPY --from=composition-publication /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

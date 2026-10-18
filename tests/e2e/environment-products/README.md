@@ -85,7 +85,7 @@ mode. The awaited producer returns the typed accepted-product result.
 
 `qualification-bundle-overlay/` contains two explicit unsigned Bundle overlays:
 
-- `standard/.ai/` owns `config:test/runtime-qualification` and its fixed-pin
+- `environment-qualification/.ai/` owns `config:test/runtime-qualification` and its fixed-pin
   `tool:test/verify-runtime`;
 - `codex/.ai/` owns `worker:fixture/enrollment`, which uses a separately granted literal pin for
   the public credential-enrollment ceremony;
@@ -98,7 +98,7 @@ mode. The awaited producer returns the typed accepted-product result.
 Both Workers use the existing packaged
 `bin:core/ryeos-structured-session-bridge`. That is binary packaging only:
 their definitions and worker-executions live alongside that binary in the
-disposable Codex Bundle, not in Standard with an undeclared cross-Bundle edge.
+disposable Codex Bundle, not in the environment-qualification Bundle with an undeclared cross-Bundle edge.
 the fixture never selects `worker:codex/hosted`, a Codex profile, Codex
 credential state, a provider route, or network access. The admitted product
 program implements the finite JSON-RPC methods locally and reports
@@ -148,8 +148,8 @@ First copy and validate the unsigned overlay using the exact observed manifest:
 tests/e2e/environment-products/prepare-qualification-bundle.sh \
   94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881 \
   <new-overlay-directory>
-cp -a <new-overlay-directory>/standard/.ai/. \
-  <disposable-repository-source>/bundles/standard/.ai/
+cp -a <new-overlay-directory>/environment-qualification/.ai/. \
+  <disposable-repository-source>/bundles/environment-qualification/.ai/
 cp -a <new-overlay-directory>/codex/.ai/. \
   <disposable-repository-source>/bundles/codex/.ai/
 ```
@@ -158,8 +158,8 @@ Then use the repository's ordinary publisher flow. It must sign the complete
 source and stage the full existing binary set, including the generic bridge:
 
 When replacing an older disposable fixture source, remove only its obsolete
-`bundles/standard/.ai/workers/fixture` and
-`bundles/standard/.ai/worker-executions/fixture` copies before repopulation.
+`bundles/environment-qualification/.ai/workers/fixture` and
+`bundles/environment-qualification/.ai/worker-executions/fixture` copies before repopulation.
 The preparation checker refuses those stale duplicates. This changes no
 installed node or production Bundle ownership.
 

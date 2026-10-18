@@ -7865,7 +7865,9 @@ requires:
         }]);
         let schema_roots = [
             root.join("bundles/core/.ai/node/engine/kinds"),
-            root.join("bundles/standard/.ai/node/engine/kinds"),
+            root.join("bundles/knowledge/.ai/node/engine/kinds"),
+            root.join("bundles/directive/.ai/node/engine/kinds"),
+            root.join("bundles/graph/.ai/node/engine/kinds"),
         ];
         let kinds =
             KindRegistry::load_base(&schema_roots, &ts).expect("repo kind schemas load cleanly");

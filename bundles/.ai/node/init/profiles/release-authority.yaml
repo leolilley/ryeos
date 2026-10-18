@@ -1,17 +1,10 @@
-# ryeos:signed:2026-10-17T00:23:00Z:875595d7bf730fc4e192a9d71be7f74e7ef7edc6007cc1f9712edc6b30e212ee:g5LTU3d7cD+WMp5bR5CcimWUTqnjq8I+3xxhJXwzc3j1Q6IPZ+7qt6hzhziRTHUIhFCTGnjQRokaqTARwWVYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:d5f8244f0ec425c22266c1bbb787a91525d184331692d4dce9d0812d50743756:C4QiAicFeJJe8NdNM4nJCRACbk8/CDaPgmYeZ3nCVYqsfnV6RchnRcsimyOwPSJSVqqU8aQceACEm/x3750GDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
-  - browser
   - bundle-release
-  - central-auth
-  - codex
   - core
   - environment-qualification
-  - opencode
-  - ryeos-ui
-  - scheduling
-  - standard
-  - web
+  - graph
 policies:
   bundle_publication:
     schema: 2
@@ -103,11 +96,6 @@ policies:
         required_caps:
           - ryeos.register.command.root.execute
       - claim:
-          kind: command.root
-          value: codex
-        required_caps:
-          - ryeos.register.command.root.codex
-      - claim:
           kind: command.dispatch.kind
           value: direct_execute_item_ref
         required_caps:
@@ -129,7 +117,6 @@ policies:
       - ryeos.register.command.root.stop
       - ryeos.register.command.root.system
     bundle_source_caps:
-      browser: []
       bundle-release:
         - ryeos.execute.config.bundle-release/core-seed-build-products
         - ryeos.execute.config.bundle-release/core-seed-capture-products
@@ -176,10 +163,6 @@ policies:
         - ryeos.execute.tool.ryeos/bundle-release/signed-capture
         - ryeos.execute.tool.ryeos/bundle-release/substrate-build
         - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
-      central-auth: []
-      codex:
-        - ryeos.register.command.root.codex
-      opencode: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -192,12 +175,8 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       environment-qualification: []
-      ryeos-ui: []
-      scheduling:
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
-      standard:
-        - ryeos.register.command.dispatch.direct_execute_item_ref
-      web: []
   execution:
     schema: 4
     max_live_fanout: 8
@@ -302,30 +281,9 @@ policies:
       max_cleanup_millis: 60000
       max_cleanup_steps: 1024
       max_recovery_record_bytes: 2097152
-    schedules:
-      - schedule_id: maintenance-gc
-        item_ref: service:maintenance/gc
-        ref_bindings: {}
-        schedule_type: cron
-        expression: "0 0 4 * * *"
-        timezone: UTC
-        misfire_policy: skip
-        overlap_policy: skip
-        lateness_grace_secs: 60
-        initial_enabled: true
-        params:
-          compact: true
-          policy:
-            manual_pushes: 10
-            auto_snapshots: 30
-          deep: true
-          schedule_fire_max_age_days: 30
-          schedule_fire_max_count: 500
-          sync_job_retention_days: 14
-          seat_lease_grace_seconds: 600
-          durable_cas_upload_max_age_seconds: 21600
-        capabilities:
-          - ryeos.execute.service.maintenance/gc
+    # Maintenance is explicitly invoked, not scheduled: this node carries no
+    # scheduling bundle.
+    schedules: []
   hosted:
     schema: 1
     admission_enabled: true

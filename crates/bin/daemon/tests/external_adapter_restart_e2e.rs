@@ -116,22 +116,20 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     let root = tempfile::tempdir()?;
     let (_state_owner, mut state) = ryeos_app::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
-    let roots = vec![core.clone(), standard.clone(), codex];
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(codex);
     let trust = ryeos_engine::test_support::live_trust_store();
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
-    let registered = ["core", "standard", "codex"]
+    let registered = ["core", "knowledge", "directive", "graph", "codex"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(
@@ -465,7 +463,7 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
     let credential = "ordinary-direct-disposable-fixture-only";
     let generation = lillux::sha256_hex(b"ordinary-direct-fixture-generation-v1");
     let (mut harness, fixture) = DaemonHarness::start_fast_with(|state, _user, fixture| {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_workflow_bundles(state, fixture)?;
         ordinary_direct::install_before_start(state, fixture, &artifacts, ordinary_direct::EndpointInputs {
             transport: &transport, tls_roots_der_base64: &roots,
             credential_generation: &generation, credential_sha256: &lillux::sha256_hex(credential.as_bytes()),
@@ -1318,7 +1316,7 @@ async fn author_independent_verifier_scenario_from_public_import(
 ) -> anyhow::Result<independent_verifier_scenario::IndependentVerifierScenario> {
     let (mut authoring_node, _) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
-            common::fast_fixture::register_standard_bundle(state, fixture)?;
+            common::fast_fixture::register_workflow_bundles(state, fixture)?;
             admit_independent_verifier_input_root(state, fixture, input_root)
         },
         |_| {},
@@ -1571,7 +1569,7 @@ async fn prepare_signed_direct_qualification_fixture(
     // needs a disposable host-backed harness before this test can pass.
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
-            common::fast_fixture::register_standard_bundle(state, fixture)?;
+            common::fast_fixture::register_workflow_bundles(state, fixture)?;
             // The exact Codex member exceeds the fast node's 64 MiB command
             // ceiling. Sign only this disposable fixture's bounded limits.
             let policy_path = state.join(".ai/node/policies/isolation.yaml");
@@ -2695,7 +2693,7 @@ async fn signed_external_adapter_remains_admitted_after_real_daemon_restart() {
 
     let (mut harness, _) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
-            common::fast_fixture::register_standard_bundle(state_path, fixture)?;
+            common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
             let (bundle, _, _) = signed_bundle::install_signed_test_bundle(
                 state_path,
                 true,
@@ -3109,7 +3107,7 @@ async fn recorded_managed_realization_replays_after_daemon_restart() -> anyhow::
 
     let (mut harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _, fixture| {
-            common::fast_fixture::register_standard_bundle(state_path, fixture)?;
+            common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
             let path = state_path.join(".ai/node/policies/isolation.yaml");
             let mut document: Value = serde_yaml::from_str(
                 &lillux::signature::strip_signature_lines(&std::fs::read_to_string(&path)?),
@@ -3413,7 +3411,7 @@ async fn public_codex_runtime_production_captures_real_workspace_output() -> any
     let mut inputs = None;
     let (mut harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _, fixture| {
-            common::fast_fixture::register_standard_bundle(state_path, fixture)?;
+            common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
             inputs = Some(codex_runtime_producer::prepare(
                 &common::workspace_root(),
                 state_path,

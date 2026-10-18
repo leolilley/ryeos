@@ -39,7 +39,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
@@ -208,7 +208,7 @@ async fn run_directive_and_capture_first_request_headers(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(
                 state_path,
                 &mock_url,
@@ -412,7 +412,7 @@ async fn run_directive_with_vault_secret(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(
                 state_path,
                 &mock_url,
@@ -534,7 +534,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
         // Pre-generate vault keypair so the daemon boots cleanly,
         // but DO NOT seal any secret — the .env overlay must be the
@@ -649,7 +649,7 @@ async fn vault_blocked_name_fails_request_loud() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, "ZEN_API_KEY", None, None, fixture)?;
         // Poisoned sealed store: PATH is on the blocked list, but we
         // bypass write-time validation by sealing the plaintext

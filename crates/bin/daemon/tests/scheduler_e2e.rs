@@ -634,7 +634,9 @@ async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
     );
     assert!(bundles.iter().any(|bundle| bundle["name"] == "core"));
     assert!(bundles.iter().any(|bundle| bundle["name"] == "scheduling"));
-    assert!(!bundles.iter().any(|bundle| bundle["name"] == "standard"));
+    for workflow in ["knowledge", "directive", "graph", "ryeos-docs"] {
+        assert!(!bundles.iter().any(|bundle| bundle["name"] == workflow));
+    }
 
     let project_root = h.user_space.path().join("scheduler-doctor-project");
     let project_ai = project_root.join(".ai");

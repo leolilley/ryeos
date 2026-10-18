@@ -36,14 +36,23 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
-    let std_kinds = workspace.join("bundles/standard/.ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store)
-        .expect("load kind registry");
+    let workflow_roots: Vec<_> = ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace.join("bundles").join(name))
+        .collect();
+    let mut kind_roots = vec![core_kinds];
+    kind_roots.extend(
+        workflow_roots
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = KindRegistry::load_base(&kind_roots, &trust_store).expect("load kind registry");
 
     let bundle_root = workspace.join("bundles/core");
-    let standard_root = workspace.join("bundles/standard");
+    let mut parser_roots = vec![bundle_root.clone()];
+    parser_roots.extend(workflow_roots.iter().cloned());
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[bundle_root.clone(), standard_root.clone()],
+        &parser_roots,
         &trust_store,
         &kinds,
     )
@@ -61,13 +70,12 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     // The descriptor table also serves the bundle catalog, bundle release and
     // (in builds composed with scheduling) scheduler services, whose signed
     // items live in their own source bundles.
-    let bundle_roots = vec![
-        bundle_root,
-        standard_root,
+    let mut bundle_roots = parser_roots;
+    bundle_roots.extend([
         workspace.join("bundles/bundle-source"),
         workspace.join("bundles/bundle-release"),
         workspace.join("bundles/scheduling"),
-    ];
+    ]);
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)

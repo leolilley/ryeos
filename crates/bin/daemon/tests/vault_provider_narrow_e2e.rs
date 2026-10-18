@@ -30,7 +30,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
@@ -198,7 +198,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_provider_config_bundle(
             state_path,
             "zen",
@@ -301,7 +301,7 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
 
     let (h, fixture) = DaemonHarness::start_fast_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_provider_config_bundle(
                 state_path,
                 "zen",
@@ -399,7 +399,7 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_provider_config_bundle(state_path, "noauth", &mock_url, None, fixture)?;
         // Empty vault — fine because provider declares no env var.
         plant_empty_vault(state_path)?;
@@ -570,7 +570,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(
         |state_path: &Path, _user: &Path, f: &FastFixture| {
-            register_standard_bundle(state_path, f)?;
+            register_workflow_bundles(state_path, f)?;
             // Empty vault — no ZEN_API_KEY.
             plant_empty_vault(state_path)?;
             Ok(())
@@ -786,7 +786,7 @@ async fn execute_stream_emits_structured_required_secret_missing_stream_error() 
 
     let (h, fixture) = DaemonHarness::start_fast_with(
         |state_path: &Path, _user: &Path, f: &FastFixture| {
-            register_standard_bundle(state_path, f)?;
+            register_workflow_bundles(state_path, f)?;
             register_provider_config_bundle(state_path, "zen", &mock_url, Some("ZEN_API_KEY"), f)?;
             plant_empty_vault(state_path)?;
             // Authorize the user key so /execute/stream accepts signed requests.

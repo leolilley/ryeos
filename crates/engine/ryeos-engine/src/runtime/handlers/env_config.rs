@@ -327,7 +327,7 @@ mod interpreter_resolution_tests {
     //! Pins the Python (and any `local_binary`) interpreter resolution
     //! order: env-var override → project-local search paths → PATH
     //! candidate. This is the contract documented in
-    //! `bundles/standard/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
+    //! `bundles/ryeos-docs/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
     use super::*;
     use std::fs;
 

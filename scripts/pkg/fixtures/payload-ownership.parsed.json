@@ -7,8 +7,7 @@
     "bundle_name": "browser",
     "bundle_sets": [
      "full",
-     "release-artifacts",
-     "release-authority"
+     "release-artifacts"
     ],
     "host_features": [],
     "payloads": [
@@ -26,8 +25,7 @@
      "f5r-controller",
      "full",
      "hosted-workflow",
-     "release-artifacts",
-     "release-authority"
+     "release-artifacts"
     ],
     "host_features": [],
     "payloads": [
@@ -176,6 +174,106 @@
     ]
    },
    {
+    "bundle_name": "directive",
+    "bundle_sets": [
+     "central-host",
+     "full",
+     "hosted-workflow",
+     "local-inference",
+     "release-artifacts",
+     "standard",
+     "standard-central-auth"
+    ],
+    "host_features": [
+     "model-provider-setup"
+    ],
+    "payloads": [
+     {
+      "binary": "ryeos-directive-launch-preparer",
+      "build_class": "release",
+      "cargo_features": [
+       "directive-handlers"
+      ],
+      "cargo_package": "ryeos-handler-bins"
+     },
+     {
+      "binary": "ryeos-directive-runtime",
+      "build_class": "release",
+      "cargo_features": [],
+      "cargo_package": "ryeos-directive-runtime"
+     }
+    ]
+   },
+   {
+    "bundle_name": "graph",
+    "bundle_sets": [
+     "central-host",
+     "f5r-controller",
+     "full",
+     "hosted-workflow",
+     "local-inference",
+     "release-artifacts",
+     "release-authority",
+     "standard",
+     "standard-central-auth"
+    ],
+    "host_features": [],
+    "payloads": [
+     {
+      "binary": "ryeos-graph-effective-validator",
+      "build_class": "release",
+      "cargo_features": [
+       "graph-handlers"
+      ],
+      "cargo_package": "ryeos-handler-bins"
+     },
+     {
+      "binary": "ryeos-graph-execution-evidence",
+      "build_class": "release",
+      "cargo_features": [
+       "graph-handlers"
+      ],
+      "cargo_package": "ryeos-handler-bins"
+     },
+     {
+      "binary": "ryeos-graph-launch-preparer",
+      "build_class": "release",
+      "cargo_features": [
+       "graph-handlers"
+      ],
+      "cargo_package": "ryeos-handler-bins"
+     },
+     {
+      "binary": "ryeos-graph-runtime",
+      "build_class": "release",
+      "cargo_features": [],
+      "cargo_package": "ryeos-graph-runtime"
+     }
+    ]
+   },
+   {
+    "bundle_name": "knowledge",
+    "bundle_sets": [
+     "central-host",
+     "f5r-controller",
+     "full",
+     "hosted-workflow",
+     "local-inference",
+     "release-artifacts",
+     "standard",
+     "standard-central-auth"
+    ],
+    "host_features": [],
+    "payloads": [
+     {
+      "binary": "ryeos-knowledge-runtime",
+      "build_class": "release",
+      "cargo_features": [],
+      "cargo_package": "ryeos-knowledge-runtime"
+     }
+    ]
+   },
+   {
     "bundle_name": "render-sandbox",
     "bundle_sets": [
      "f5r-controller",
@@ -213,8 +311,7 @@
     "bundle_name": "ryeos-ui",
     "bundle_sets": [
      "full",
-     "release-artifacts",
-     "release-authority"
+     "release-artifacts"
     ],
     "host_features": [],
     "payloads": [
@@ -233,81 +330,11 @@
     ]
    },
    {
-    "bundle_name": "standard",
-    "bundle_sets": [
-     "central-host",
-     "f5r-controller",
-     "full",
-     "hosted-workflow",
-     "local-inference",
-     "release-artifacts",
-     "release-authority",
-     "standard",
-     "standard-central-auth"
-    ],
-    "host_features": [
-     "model-provider-setup"
-    ],
-    "payloads": [
-     {
-      "binary": "ryeos-directive-launch-preparer",
-      "build_class": "release",
-      "cargo_features": [
-       "directive-handlers"
-      ],
-      "cargo_package": "ryeos-handler-bins"
-     },
-     {
-      "binary": "ryeos-directive-runtime",
-      "build_class": "release",
-      "cargo_features": [],
-      "cargo_package": "ryeos-directive-runtime"
-     },
-     {
-      "binary": "ryeos-graph-effective-validator",
-      "build_class": "release",
-      "cargo_features": [
-       "graph-handlers"
-      ],
-      "cargo_package": "ryeos-handler-bins"
-     },
-     {
-      "binary": "ryeos-graph-execution-evidence",
-      "build_class": "release",
-      "cargo_features": [
-       "graph-handlers"
-      ],
-      "cargo_package": "ryeos-handler-bins"
-     },
-     {
-      "binary": "ryeos-graph-launch-preparer",
-      "build_class": "release",
-      "cargo_features": [
-       "graph-handlers"
-      ],
-      "cargo_package": "ryeos-handler-bins"
-     },
-     {
-      "binary": "ryeos-graph-runtime",
-      "build_class": "release",
-      "cargo_features": [],
-      "cargo_package": "ryeos-graph-runtime"
-     },
-     {
-      "binary": "ryeos-knowledge-runtime",
-      "build_class": "release",
-      "cargo_features": [],
-      "cargo_package": "ryeos-knowledge-runtime"
-     }
-    ]
-   },
-   {
     "bundle_name": "web",
     "bundle_sets": [
      "central-host",
      "full",
-     "release-artifacts",
-     "release-authority"
+     "release-artifacts"
     ],
     "host_features": [],
     "payloads": [
@@ -326,7 +353,8 @@
    "central-auth",
    "environment-qualification",
    "local-inference",
-   "opencode"
+   "opencode",
+   "ryeos-docs"
   ],
   "feature_implications": {
    "ryeos-handler-bins": {
@@ -350,7 +378,6 @@
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
-     "release-authority",
      "standard",
      "standard-central-auth"
     ],

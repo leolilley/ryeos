@@ -12,7 +12,7 @@
 //! The harness initializes nodes from the authored `core`,
 //! `core-scheduling`, `standard` and `full` init profiles. Every profile
 //! except `core` installs the scheduling bundle (`service:scheduler/*`) and
-//! all but `core-scheduling` also install the standard bundle
+//! all but `core-scheduling` also install the directive bundle
 //! (`service:model-providers/*`). A daemon refuses to start when an installed
 //! operational service has no compiled handler, so the suite runs with the
 //! standard composition CI uses for these bundle sets. The handoff crash
@@ -507,7 +507,7 @@ pub fn require_compiled_composition(bundle_names: &[&str]) -> anyhow::Result<()>
     let needs = [
         ("scheduling", "scheduling", cfg!(feature = "scheduling")),
         (
-            "standard",
+            "directive",
             "model-provider-setup",
             cfg!(feature = "model-provider-setup"),
         ),
@@ -591,8 +591,9 @@ pub fn require_bundles_prepared(bundle_names: &[&str]) -> anyhow::Result<()> {
 }
 
 /// The publisher writes the bundle-root `PUBLISHER_TRUST.toml` after it
-/// commits the manifest ref. The document names the signing key and does not
-/// feed the published artifacts, so its later mtime is not staleness.
+/// commits the manifest ref, and the signed `.ai/manifest.yaml` after the ref
+/// too. Both are publish outputs rather than inputs, so their later mtimes are
+/// not staleness.
 fn bundle_tree_has_newer(
     bundle_root: &Path,
     path: &Path,
@@ -615,6 +616,8 @@ fn bundle_tree_has_newer(
                 return Ok(true);
             }
         } else if path == bundle_root && entry.file_name() == "PUBLISHER_TRUST.toml" {
+            continue;
+        } else if path == bundle_root.join(".ai") && entry.file_name() == "manifest.yaml" {
             continue;
         } else if entry
             .metadata()?
@@ -942,8 +945,8 @@ impl DaemonHarness {
     /// * `tweak`: mutates the `Command` (env, args, …) before spawn.
     ///
     /// Note: only the core bundle is registered. Call
-    /// `register_standard_bundle(state_path, fixture)` from your `plant`
-    /// closure if the test needs standard bundle services/runtimes.
+    /// `register_workflow_bundles(state_path, fixture)` from your `plant`
+    /// closure if the test needs workflow bundle services/runtimes.
     pub async fn start_fast_with<S, F>(
         plant: S,
         tweak: F,
@@ -1028,7 +1031,11 @@ impl DaemonHarness {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
             FastBundleSelection::PreparedStandard => {
-                copy_core_to_temp_prepared(&["core", "scheduling", "standard"])?
+                copy_core_to_temp_prepared(
+                    fast_fixture::FastFixtureProfile::Standard
+                        .exact_bundles()
+                        .expect("Standard profile has an exact bundle inventory"),
+                )?
             }
             FastBundleSelection::PreparedFull => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Full

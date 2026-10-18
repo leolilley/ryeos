@@ -976,35 +976,65 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
         assert!(
             !mf.provides_kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {:?}",
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {:?}",
             mf.provides_kinds
         );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
     }
 
     #[test]
-    fn parse_manifest_reads_standard() {
-        let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest");
-        assert_eq!(mf.name, "standard");
+    fn parse_manifest_reads_directive() {
+        let mf = parse_manifest(&workspace_root().join("bundles/directive"), "directive")
+            .expect("parse directive manifest");
+        assert_eq!(mf.name, "directive");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
+        assert!(
+            mf.uses_kinds.contains(&"knowledge".to_string()),
+            "directive uses knowledge from its provider bundle"
+        );
+        for kind in ["config", "handler", "worker"] {
+            assert!(
+                mf.requires_kinds.contains(&kind.to_string()),
+                "directive requires {kind} from core"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_manifest_reads_graph() {
+        let mf = parse_manifest(&workspace_root().join("bundles/graph"), "graph")
+            .expect("parse graph manifest");
+        assert_eq!(mf.name, "graph");
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
         assert!(
-            mf.provides_kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core"
+            mf.requires_kinds.contains(&"handler".to_string()),
+            "graph requires handler from core"
         );
+    }
+
+    #[test]
+    fn parse_manifest_reads_knowledge() {
+        let mf = parse_manifest(&workspace_root().join("bundles/knowledge"), "knowledge")
+            .expect("parse knowledge manifest");
+        assert_eq!(mf.name, "knowledge");
+        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
         assert!(
             !mf.uses_kinds.contains(&"knowledge".to_string()),
-            "standard must not use knowledge externally since it now provides it"
+            "knowledge must not use knowledge externally since it provides it"
         );
         assert!(
             mf.requires_kinds.contains(&"config".to_string()),
-            "standard requires config from core"
+            "knowledge requires config from core"
         );
-        assert!(
-            mf.requires_kinds.contains(&"handler".to_string()),
-            "standard requires handler from core"
-        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_ryeos_docs() {
+        let mf = parse_manifest(&workspace_root().join("bundles/ryeos-docs"), "ryeos-docs")
+            .expect("parse ryeos-docs manifest");
+        assert_eq!(mf.name, "ryeos-docs");
+        assert!(mf.provides_kinds.is_empty(), "ryeos-docs provides no kind");
+        assert!(mf.requires_kinds.contains(&"knowledge".to_string()));
     }
 
     #[test]
@@ -1026,15 +1056,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_core_and_standard_ok() {
+    fn validate_dependencies_core_and_workflow_bundles_ok() {
         let root = workspace_root();
-        let bundles = vec![
-            ("core".to_string(), root.join("bundles/core")),
-            ("standard".to_string(), root.join("bundles/standard")),
-        ];
+        let bundles = ["core", "knowledge", "directive", "graph"]
+            .into_iter()
+            .map(|name| (name.to_string(), root.join("bundles").join(name)))
+            .collect::<Vec<_>>();
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
-            "core + standard should satisfy all dependencies"
+            "core + knowledge + directive + graph should satisfy all dependencies"
         );
     }
 
@@ -1236,30 +1266,30 @@ typo_field: oops
         );
         assert!(
             !kinds.contains(&"directive".to_string()),
-            "directive is a standard kind, not core: {kinds:?}"
+            "directive is a directive-bundle kind, not core: {kinds:?}"
         );
         assert!(
             !kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {kinds:?}"
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {kinds:?}"
         );
     }
 
     #[test]
-    fn derive_provides_kinds_scans_standard_schemas() {
-        let ai_dir = workspace_root().join("bundles/standard/.ai");
-        let kinds = derive_provides_kinds(&ai_dir).expect("derive standard provides_kinds");
-        assert!(
-            kinds.contains(&"directive".to_string()),
-            "standard must provide directive: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"graph".to_string()),
-            "standard must provide graph: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core: {kinds:?}"
-        );
+    fn derive_provides_kinds_scans_workflow_schemas() {
+        for (bundle, kind) in [
+            ("directive", "directive"),
+            ("graph", "graph"),
+            ("knowledge", "knowledge"),
+        ] {
+            let ai_dir = workspace_root().join("bundles").join(bundle).join(".ai");
+            let kinds = derive_provides_kinds(&ai_dir)
+                .unwrap_or_else(|error| panic!("derive {bundle} provides_kinds: {error}"));
+            assert_eq!(
+                kinds,
+                vec![kind.to_string()],
+                "{bundle} must provide exactly {kind}"
+            );
+        }
     }
 
     #[test]

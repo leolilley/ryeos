@@ -5143,16 +5143,16 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     };
     use ryeos_runtime::verified_loader::VerifiedLoader;
 
-    /// Path to the bundled standard root in the workspace.
+    /// Path to the directive bundle root in the workspace.
     fn bundle_root() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
-            .join("bundles/standard")
+            .join("bundles/directive")
     }
 
-    /// Dev publisher public key trust entry — the standard bundle's configs
+    /// Dev publisher public key trust entry — the directive bundle's configs
     /// are signed with this key, so tests that load real bundle configs need
     /// it in the trust store.  This is public key material (not a secret).
     const DEV_PUBLISHER_TRUST_TOML: &str = r#"

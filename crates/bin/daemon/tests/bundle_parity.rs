@@ -8,8 +8,8 @@
 //! drift detector that runs in CI without network or absolute paths.
 //!
 //! Also asserts correct bundle ownership: engine kinds live in core,
-//! workflow kinds live in standard. If someone accidentally moves a
-//! kind back to the wrong bundle, this catches it.
+//! workflow kinds live in the knowledge, directive and graph bundles.
+//! If someone accidentally moves a kind to the wrong bundle, this catches it.
 //!
 //! The trusted-signers fixture under `tests/fixtures/trusted_signers/`
 //! is the bundle's own signing key — committed alongside the bundle so
@@ -39,8 +39,19 @@ fn core_kinds_dir() -> PathBuf {
     workspace_root().join("bundles/core/.ai/node/engine/kinds")
 }
 
-fn standard_kinds_dir() -> PathBuf {
-    workspace_root().join("bundles/standard/.ai/node/engine/kinds")
+const WORKFLOW_BUNDLES: [&str; 3] = ["knowledge", "directive", "graph"];
+
+fn workflow_kinds_dirs() -> Vec<PathBuf> {
+    WORKFLOW_BUNDLES
+        .iter()
+        .map(|name| workspace_root().join("bundles").join(name).join(".ai/node/engine/kinds"))
+        .collect()
+}
+
+fn live_kinds_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![core_kinds_dir()];
+    dirs.extend(workflow_kinds_dirs());
+    dirs
 }
 
 fn fixture_trust_store() -> TrustStore {
@@ -87,30 +98,42 @@ fn core_bundle_owns_engine_kinds_only() {
     for forbidden in ["directive", "graph", "knowledge"] {
         assert!(
             !registry.contains(forbidden),
-            "core must NOT own `{forbidden}` kind — it belongs in standard; got: {:?}",
+            "core must NOT own `{forbidden}` kind — it belongs in a workflow bundle; got: {:?}",
             kinds
         );
     }
 }
 
 #[test]
-fn standard_bundle_owns_workflow_kinds() {
+fn workflow_bundles_own_workflow_kinds() {
     let trust_store = fixture_trust_store();
-    let kinds_dir = standard_kinds_dir();
-    assert!(
-        kinds_dir.is_dir(),
-        "standard kinds dir missing at {}",
-        kinds_dir.display()
-    );
-
-    let registry =
-        KindRegistry::load_base(&[kinds_dir], &trust_store).expect("standard kinds load");
-
-    for expected in ["directive", "graph", "knowledge"] {
+    for (bundle, expected) in [
+        ("knowledge", "knowledge"),
+        ("directive", "directive"),
+        ("graph", "graph"),
+    ] {
+        let kinds_dir = workspace_root()
+            .join("bundles")
+            .join(bundle)
+            .join(".ai/node/engine/kinds");
         assert!(
-            registry.contains(expected),
-            "standard must own `{expected}` kind; got: {:?}",
-            registry.kinds().collect::<Vec<_>>()
+            kinds_dir.is_dir(),
+            "{bundle} kinds dir missing at {}",
+            kinds_dir.display()
+        );
+
+        // A bundle's kinds can target kinds from sibling bundles (directive
+        // launch augmentation targets knowledge), so load them together with
+        // core and assert ownership from the bundle's own schema directory.
+        KindRegistry::load_base(&live_kinds_dirs(), &trust_store).expect("workflow kinds load");
+        let owned: Vec<String> = std::fs::read_dir(&kinds_dir)
+            .expect("read kinds dir")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            owned,
+            vec![expected.to_string()],
+            "{bundle} must own exactly the `{expected}` kind"
         );
     }
 }
@@ -121,8 +144,8 @@ fn standard_bundle_owns_workflow_kinds() {
 fn live_bundle_kind_registry_loads_with_pinned_signer() {
     let trust_store = fixture_trust_store();
 
-    // Load kinds from BOTH bundles — that's what the engine does at boot.
-    let kinds_dirs = vec![core_kinds_dir(), standard_kinds_dir()];
+    // Load kinds from core and every workflow bundle — that's what the engine does at boot.
+    let kinds_dirs = live_kinds_dirs();
     for dir in &kinds_dirs {
         assert!(dir.is_dir(), "kinds dir missing at {}", dir.display());
     }
@@ -160,13 +183,18 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
     );
 }
 
-/// Build a `ParserDispatcher` from both live bundles' parser tool
+/// Build a `ParserDispatcher` from the live bundles' parser tool
 /// descriptors so dispatch goes through the same descriptors the
 /// daemon would load at boot.
 fn live_parser_dispatcher(trust_store: &TrustStore, kinds: &KindRegistry) -> ParserDispatcher {
     let core_root = workspace_root().join("bundles/core");
-    let std_root = workspace_root().join("bundles/standard");
-    let (parsers, _dups) = ParserRegistry::load_base(&[core_root, std_root], trust_store, kinds)
+    let mut roots = vec![core_root];
+    roots.extend(
+        WORKFLOW_BUNDLES
+            .iter()
+            .map(|name| workspace_root().join("bundles").join(name)),
+    );
+    let (parsers, _dups) = ParserRegistry::load_base(&roots, trust_store, kinds)
         .expect("live bundle parser tools load");
     ParserDispatcher::new(
         parsers,
@@ -195,8 +223,8 @@ fn synth_project_with_directive(name: &str, body: &str) -> PathBuf {
 fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution::ResolutionOutput {
     let trust_store = fixture_trust_store();
 
-    // Load kinds from BOTH bundles — directive kind lives in standard.
-    let kinds_dirs = vec![core_kinds_dir(), standard_kinds_dir()];
+    // Load kinds from core and the workflow bundles — the directive kind lives in directive.
+    let kinds_dirs = live_kinds_dirs();
     let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store).expect("live bundle kinds load");
     let parsers = live_parser_dispatcher(&trust_store, &kinds);
     let composers = ComposerRegistry::from_kinds(

@@ -25,7 +25,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                          4096)
 
     def test_graph_owned_product_inputs_fit_the_signed_kind_contract(self):
-        kind = load("bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml")
+        kind = load("bundles/graph/.ai/node/engine/kinds/graph/graph.kind-schema.yaml")
         contract = kind["execution"]["external_content"]
         self.assertEqual(contract["max_declarations"], 4)
         for name in ("authoring-environment-production", "authoring-built-utilities-production",
@@ -90,7 +90,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertNotIn("expected_manifest_hash", str(verifier) + str(worker))
 
     def test_installed_native_verifier_ships_its_product_relationships(self):
-        """Projectless verification must resolve both selected slots from Standard."""
+        """Projectless verification must resolve both selected slots from environment-qualification."""
         for name in ("authoring-environment-products", "authoring-prepared-input-products"):
             source = load(f".ai/config/development/ryeos/{name}.yaml")
             installed = load(

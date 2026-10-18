@@ -651,9 +651,9 @@ mod tests {
     fn init_plan_orders_dependencies_before_dependents_and_emits_jobs_in_order() {
         let tmp = tempfile::tempdir().unwrap();
         let core = write_bundle(tmp.path(), "core", &["config", "knowledge"], &[], &[]);
-        let standard = write_bundle(
+        let workflow = write_bundle(
             tmp.path(),
-            "standard",
+            "workflow",
             &["directive"],
             &["config"],
             &["knowledge"],
@@ -662,24 +662,24 @@ mod tests {
         let plan = build_plan(
             BundlePlanMode::InitSourceSet,
             &[
-                input("standard", standard.clone()),
+                input("workflow", workflow.clone()),
                 input("core", core.clone()),
             ],
             &[],
         )
         .unwrap();
 
-        assert_eq!(plan.install_order, vec!["core", "standard"]);
+        assert_eq!(plan.install_order, vec!["core", "workflow"]);
         assert_eq!(
             plan.verification_jobs
                 .iter()
                 .map(|job| job.subject.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core", "standard"]
+            vec!["core", "workflow"]
         );
         assert_eq!(plan.verification_jobs[1].dependency_roots, vec![core]);
         assert_eq!(
-            plan.bundles["standard"].dependency_closure,
+            plan.bundles["workflow"].dependency_closure,
             BTreeSet::from(["core".to_string()])
         );
     }
@@ -782,16 +782,14 @@ mod tests {
             .expect("workspace root with bundles/ directory")
             .join("bundles");
 
-        // ryeos-ui uses directive, graph and knowledge; include whichever
-        // shipped bundles provide them.
+        // ryeos-ui uses directive, graph and knowledge, so all three
+        // providers are part of the set.
         let mut inputs = vec![
             input("ryeos-ui", bundles.join("ryeos-ui")),
             input("core", bundles.join("core")),
         ];
-        for name in ["standard", "directive", "graph", "knowledge"] {
-            if bundles.join(name).is_dir() {
-                inputs.push(input(name, bundles.join(name)));
-            }
+        for name in ["directive", "graph", "knowledge"] {
+            inputs.push(input(name, bundles.join(name)));
         }
         let plan = build_plan(BundlePlanMode::InitSourceSet, &inputs, &[]).unwrap();
 
@@ -805,6 +803,38 @@ mod tests {
         let position = |name: &str| order.iter().position(|n| n == name).unwrap();
         assert!(position("core") < position("ryeos-ui"));
         assert!(plan.bundles["ryeos-ui"].dependency_closure.contains("core"));
+        for provider in ["directive", "graph", "knowledge"] {
+            assert!(
+                position(provider) < position("ryeos-ui"),
+                "{provider} must install before ryeos-ui"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_workflow_sets_plan_over_core() {
+        let bundles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .join("bundles");
+
+        let sets: [&[&str]; 4] = [
+            &["core", "scheduling", "knowledge", "directive", "graph", "ryeos-docs"],
+            &["core", "graph", "bundle-release"],
+            &["core", "graph", "knowledge", "codex"],
+            &["core", "knowledge", "directive", "graph", "ryeos-docs", "opencode"],
+        ];
+        for set in sets {
+            let inputs: Vec<PlanInput> = set
+                .iter()
+                .map(|name| input(name, bundles.join(name)))
+                .collect();
+            let plan = build_plan(BundlePlanMode::InitSourceSet, &inputs, &[])
+                .unwrap_or_else(|error| panic!("set {set:?} must plan: {error}"));
+            assert_eq!(plan.install_order.first().map(String::as_str), Some("core"));
+            assert_eq!(plan.install_order.len(), set.len());
+        }
     }
 
     #[test]

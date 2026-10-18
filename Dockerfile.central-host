@@ -3,7 +3,8 @@
 # ryeos-central-host — standard node that hosts its own central-auth realm
 # and can search the web.
 #
-# Bakes core + scheduling + standard + central-auth + web: everything the
+# Bakes core + scheduling + knowledge + directive + graph + ryeos-docs +
+# central-auth + web: everything the
 # `standard` image ships, plus the central-auth bundle (login/verify/revoke,
 # policy) so the node is its own auth authority, and the web bundle
 # (rye/web/search + rye/web/tavily-search). RyeOS UI and browser
@@ -92,7 +93,10 @@ COPY --from=builder /build/bundles/.ai           /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core          /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
 COPY --from=builder /build/bundles/central-auth  /opt/ryeos/central-auth
-COPY --from=builder /build/bundles/standard      /opt/ryeos/standard
+COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=builder /build/bundles/directive /opt/ryeos/directive
+COPY --from=builder /build/bundles/graph /opt/ryeos/graph
+COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=builder /build/bundles/web           /opt/ryeos/web
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

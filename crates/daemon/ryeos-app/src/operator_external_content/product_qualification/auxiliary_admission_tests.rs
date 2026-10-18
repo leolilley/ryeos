@@ -830,21 +830,19 @@ product_qualification_policy:
         &signer,
     )?;
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
-    let roots = vec![core.clone(), standard.clone(), bundle];
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(bundle);
     let mut trust = ryeos_engine::test_support::live_trust_store();
     trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
         fingerprint: lillux::signature::compute_fingerprint(&signer.verifying_key()),
         verifying_key: signer.verifying_key(),
         label: Some("qualification fixture".into()),
     }]));
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
@@ -864,7 +862,7 @@ product_qualification_policy:
         state.isolation.clone(),
         &roots,
     )?;
-    let registered = ["core", "standard", "qualification-fixture"]
+    let registered = ["core", "knowledge", "directive", "graph", "qualification-fixture"]
         .into_iter()
         .zip(roots.iter())
         .map(

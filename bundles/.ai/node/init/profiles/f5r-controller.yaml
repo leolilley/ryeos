@@ -1,12 +1,13 @@
-# ryeos:signed:2026-10-15T01:38:13Z:444680ca2e7dabac7961e1d3ea39d2e9db72a695e6e7a0dbc0fcc33efdb25741:f2DCRz1zL0SHENFhIQ1tDMUcHnLCxhmsOuE4d6PDy/Xf0Yy0CPgWAWD9R3xPq90dhm7j4O8e1DzOKPBKnhAzAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:22:55Z:dfd4654f68d55f7f8d3b31773475def80e7ebe619cd6b402746e33a85d593fba:XkcRA/9vX595P8+/yU19IzgEUes1v8rzHjqR5lhgUkVgZBrzCFXXM0e0PNyxogILwA/4jjeduzBspG1uU6tNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
 exact_bundles:
   - codex
   - core
+  - graph
+  - knowledge
   - render-sandbox
-  - standard
 policies:
   bundle_publication:
     schema: 2
@@ -138,8 +139,9 @@ policies:
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
       render-sandbox: []
-      standard:
+      graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
+      knowledge: []
   execution:
     schema: 4
     max_live_fanout: 8

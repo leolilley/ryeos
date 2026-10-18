@@ -803,7 +803,7 @@ mod tests {
         let repository = repository_root();
         let runtime: serde_yaml::Value = serde_yaml::from_str(
             &std::fs::read_to_string(
-                repository.join("bundles/standard/.ai/runtimes/directive-runtime.yaml"),
+                repository.join("bundles/directive/.ai/runtimes/directive-runtime.yaml"),
             )
             .expect("read directive runtime descriptor"),
         )
@@ -829,7 +829,7 @@ mod tests {
         );
 
         let providers =
-            repository.join("bundles/standard/.ai/config/ryeos-runtime/model-providers");
+            repository.join("bundles/directive/.ai/config/ryeos-runtime/model-providers");
         for entry in std::fs::read_dir(providers).expect("read bundled provider configs") {
             let path = entry.expect("provider config entry").path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn bundled_deepseek_provider_is_strict_and_hard_spend_capable() {
         let path = repository_root()
-            .join("bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml");
+            .join("bundles/directive/.ai/config/ryeos-runtime/model-providers/deepseek.yaml");
         let provider: ryeos_directive_definition::ProviderConfig = serde_yaml::from_str(
             &std::fs::read_to_string(&path).expect("read DeepSeek provider config"),
         )

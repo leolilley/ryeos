@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-27T22:01:04Z:12db5676b51943e6ad69a58d9709901c270fdd7ae28cf057e02a41ef8f34682e:PqDJY4xkwjKEyhUSjs9DWZMabzbbFnwglr8yjLtjrGHdMWJaOQ6rL2/JNWO1AVaqEqOd1GZmH7Lib9cYW2b1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:15a0fbabfbd26b8fd08542e4056ed45760b4c5f4ba60891df027dedaec36ce8f:Aj+wDeuqV6hmea26QJ37b1mhI96VljarC4VOK6gba6uWm67HJ/pixVtMElZuoKPIMwoRhBukPJOC+e2SvS2nBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
@@ -20,7 +20,7 @@ product architecture, operator activation, or user workflows.
 | Knowledge | Location |
 |---|---|
 | How to build, test, sign, review, migrate, debug, or release this repository | `.ai/knowledge/ryeos/development/` |
-| Implemented RyeOS concepts, runtime contracts, user workflows, and cross-bundle operator runbooks | `bundles/standard/.ai/knowledge/` |
+| Implemented RyeOS concepts, runtime contracts, user workflows, and cross-bundle operator runbooks | `bundles/ryeos-docs/.ai/knowledge/` |
 | Knowledge inseparable from a self-contained optional bundle and intentionally available only with that bundle | That feature bundle's `.ai/knowledge/`, when the bundle provides knowledge |
 | Explicitly deferred design work | `.ai/knowledge/ryeos/future/` |
 | Research arguments and papers | `.ai/knowledge/ryeos/papers/` |

@@ -75,33 +75,40 @@ for set_name in core core-scheduling f5r-controller standard local-inference hos
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   assert_rejected contains central-auth "${members[@]}"
 done
-for set_name in full central-host standard-central-auth release-authority release-artifacts; do
+for set_name in full central-host standard-central-auth release-artifacts; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
-  contains standard "${members[@]}"
+  for workflow_member in knowledge directive graph ryeos-docs; do
+    contains "$workflow_member" "${members[@]}"
+  done
 done
 mapfile -t standard_baseline < <(ryeos_bundle_set_names standard)
-[[ "${standard_baseline[*]}" == "core scheduling standard" ]]
+[[ "${standard_baseline[*]}" == "core scheduling knowledge directive graph ryeos-docs" ]]
 mapfile -t standard_auth < <(ryeos_bundle_set_names standard-central-auth)
-[[ "${standard_auth[*]}" == "core scheduling standard central-auth" ]]
+[[ "${standard_auth[*]}" == "core scheduling knowledge directive graph ryeos-docs central-auth" ]]
 
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-authority release-artifacts; do
+# Host features derive in canonical sorted order from the bundles present.
+for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
   for package in ryeosd ryeos-cli ryeos-api; do
-    [[ "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" == "$package/scheduling,$package/model-provider-setup" ]]
+    [[ "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" == "$package/model-provider-setup,$package/scheduling" ]]
   done
 done
 for package in ryeosd ryeos-cli ryeos-api; do
   [[ "$(ryeos_bundle_set_cargo_features core-scheduling "$package")" == "$package/scheduling" ]]
-  # The controller carries Standard without scheduling.
-  [[ "$(ryeos_bundle_set_cargo_features f5r-controller "$package")" == "$package/model-provider-setup" ]]
+  # The controller carries no directive or scheduling, so no host features.
+  [[ -z "$(ryeos_bundle_set_cargo_features f5r-controller "$package")" ]]
+  [[ -z "$(ryeos_bundle_set_cargo_features release-authority "$package")" ]]
 done
 for set_name in bundle-source core; do
   for package in ryeosd ryeos-cli ryeos-api; do
     [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" ]]
   done
 done
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow f5r-controller release-authority release-artifacts; do
+for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/directive-handlers,ryeos-handler-bins/graph-handlers" ]]
+done
+for set_name in f5r-controller release-authority; do
+  [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/graph-handlers" ]]
 done
 for set_name in core core-scheduling bundle-source; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/core-handlers,ryeos-handler-bins/extends-composer" ]]
@@ -114,33 +121,56 @@ mapfile -t core < <(ryeos_bundle_set_names core)
 [[ "${core[*]}" == "core" ]]
 mapfile -t core_bins < <(ryeos_bundle_set_bin_managed_names core)
 [[ "${core_bins[*]}" == "core" ]]
-for forbidden in central-auth scheduling standard local-inference codex render-sandbox; do
+for forbidden in central-auth scheduling knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core[@]}"
 done
 mapfile -t core_scheduling < <(ryeos_bundle_set_names core-scheduling)
 [[ "${core_scheduling[*]}" == "core scheduling" ]]
 mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-scheduling)
 [[ "${core_scheduling_bins[*]}" == "core" ]]
-for forbidden in central-auth standard local-inference codex render-sandbox; do
+for forbidden in central-auth knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core_scheduling[@]}"
 done
 mapfile -t f5r_controller < <(ryeos_bundle_set_names f5r-controller)
-[[ "${f5r_controller[*]}" == "core standard codex render-sandbox" ]]
+[[ "${f5r_controller[*]}" == "core graph knowledge codex render-sandbox" ]]
 mapfile -t f5r_controller_bins < <(ryeos_bundle_set_bin_managed_names f5r-controller)
-[[ "${f5r_controller_bins[*]}" == "core standard codex render-sandbox" ]]
-for forbidden in central-auth scheduling opencode local-inference bundle-release; do
+[[ "${f5r_controller_bins[*]}" == "core graph knowledge codex render-sandbox" ]]
+for forbidden in central-auth scheduling directive ryeos-docs opencode local-inference bundle-release; do
   assert_rejected contains "$forbidden" "${f5r_controller[@]}"
 done
 [[ -z "$(ryeos_bundle_set_cargo_features full ryeos-core-tools)" ]]
 assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 
-[[ "${hosted_workflow[*]}" == "core scheduling standard codex opencode" ]]
-[[ "${local_inference[*]}" == "core scheduling standard local-inference" ]]
+[[ "${hosted_workflow[*]}" == "core scheduling knowledge directive graph ryeos-docs codex opencode" ]]
+[[ "${local_inference[*]}" == "core scheduling knowledge directive graph ryeos-docs local-inference" ]]
 for forbidden in codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling standard environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
-[[ "${release_authority[*]}" == "core central-auth scheduling standard environment-qualification web browser ryeos-ui codex opencode bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox opencode local-inference bundle-source bundle-release" ]]
+[[ "${release_authority[*]}" == "core graph environment-qualification bundle-release" ]]
+for forbidden in central-auth scheduling knowledge directive ryeos-docs web browser ryeos-ui codex opencode render-sandbox; do
+  assert_rejected contains "$forbidden" "${release_authority[@]}"
+done
+# ryeos-docs is knowledge-only content and owns no compiled binaries.
+mapfile -t standard_bins < <(ryeos_bundle_set_bin_managed_names standard)
+[[ "${standard_bins[*]}" == "core knowledge directive graph" ]]
+# Reference closure: bundles whose kinds depend on other bundles' kinds never
+# appear without them.
+for set_name in "${bundle_set_ids[@]}" release-artifacts; do
+  mapfile -t members < <(ryeos_bundle_set_names "$set_name")
+  if contains ryeos-ui "${members[@]}"; then
+    for required in directive graph knowledge; do contains "$required" "${members[@]}"; done
+  fi
+  if contains directive "${members[@]}" || contains ryeos-docs "${members[@]}" \
+      || contains opencode "${members[@]}" || contains codex "${members[@]}"; then
+    contains knowledge "${members[@]}"
+  fi
+  if contains codex "${members[@]}" || contains render-sandbox "${members[@]}" \
+      || contains ryeos-ui "${members[@]}" || contains bundle-release "${members[@]}" \
+      || contains local-inference "${members[@]}"; then
+    contains graph "${members[@]}"
+  fi
+done
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
 for set_name in full release-authority release-artifacts; do
@@ -276,7 +306,7 @@ done
 assert_rejected contains local-inference "${full[@]}"
 assert_rejected contains local-inference "${full_bin_managed[@]}"
 mapfile -t local_inference_bin_managed < <(ryeos_bundle_set_bin_managed_names local-inference)
-[[ "${local_inference_bin_managed[*]}" == "core standard" ]]
+[[ "${local_inference_bin_managed[*]}" == "core knowledge directive graph" ]]
 
 # Activation is a signed RyeOS service contract. Installed bundle sources do
 # not carry workload-specific operator assemblers or a packaging escape hatch
@@ -331,7 +361,7 @@ set -e
 [[ "$daemon_scope_status" -eq 2 ]]
 grep -Fq -- 'build --release --locked -p ryeosd -p ryeos-cli -p ryeos-core-tools' \
   <<<"$daemon_scope_output"
-grep -Fq -- '--features ryeosd/scheduling,ryeosd/model-provider-setup,ryeos-cli/scheduling,ryeos-cli/model-provider-setup' \
+grep -Fq -- '--features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling' \
   <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-session-exec' <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-structured-session' <<<"$daemon_scope_output"
@@ -362,7 +392,8 @@ assert_rejected grep -Fq -- 'scheduling' <<<"$reduced_daemon_output"
 assert_rejected grep -Fq -- 'model-provider-setup' <<<"$reduced_daemon_output"
 test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 
-# The controller rebuild selects provider setup without the scheduler.
+# The controller carries neither the directive provider setup nor the
+# scheduler, so its rebuild selects no host features.
 set +e
 controller_daemon_output="$(
   RYEOS_TTY=never \
@@ -377,9 +408,8 @@ controller_daemon_output="$(
 controller_daemon_status=$?
 set -e
 [[ "$controller_daemon_status" -eq 2 ]]
-grep -Fq -- '--features ryeosd/model-provider-setup,ryeos-cli/model-provider-setup' \
-  <<<"$controller_daemon_output"
 assert_rejected grep -Fq -- 'scheduling' <<<"$controller_daemon_output"
+assert_rejected grep -Fq -- 'model-provider-setup' <<<"$controller_daemon_output"
 
 static_package_cases=(
   'ryeos-session-exec|ryeos-session-exec'

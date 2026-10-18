@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-10-15T23:47:07Z:462466d8c6b674b25b4eeb0055b2b8dbd1fe62a41339537bfbb3dee5e84100b7:sVGdSLsKP82qgqU/0xRZj7gY87MRnla11kZ7kXqtKwS8iLln8Jv7el30hi6p6rnUzsBXR544ZUZIkIT8YFlVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-18T01:45:24Z:1c79de67b9a37100c6870edccd4ea94bc81b2d48a859c9e11c9e248cf4d280b3:bYXLtWf6V4cQ8dQwqM6lmyCSVrhE0Vr21rh/kngOcwxBeRVQnmnpOX8c+rehYDph4UoZ3xj7iUCAjWvyLV49CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -8,7 +8,8 @@
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (full = core, central-auth, scheduling,
-#     standard, web, browser, ryeos-ui, codex, opencode; the lean sets are subsets).
+#     knowledge, directive, graph, ryeos-docs, environment-qualification, web,
+#     browser, ryeos-ui, codex, opencode; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -29,8 +30,8 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, scheduling, standard, web, browser, ryeos-ui, codex,
-opencode). The release-authority set additionally installs the
+central-auth, scheduling, knowledge, directive, graph, ryeos-docs,
+environment-qualification, web, browser, ryeos-ui, codex, opencode). The release-authority set additionally installs the
 standalone publisher measurement executable; it does not start the separately
 operated key-bearing publisher service.
 

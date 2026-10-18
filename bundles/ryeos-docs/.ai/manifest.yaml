@@ -1,0 +1,8 @@
+# ryeos:signed:2026-10-18T03:41:43Z:370f1dc4e2730bcb6d291acd8463a0851110ce3603f6845649bc21c287ed8bf7:2FcjnW921gzekYittVrOOzKbbRBzK4oQeACXpcUVvmpy5KFmuX5B9x8uSH4A89WPEfbdU6bnAyKAsoChg7R1DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-docs
+version: 0.5.0
+description: 'RyeOS reference knowledge: concepts, operations, and workflow documentation'
+provides_kinds: []
+requires_kinds:
+- knowledge
+uses_kinds: []

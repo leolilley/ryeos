@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:1551863305c5c111b016205c4110d900e2b8cc6c661fe31ec18edc07a5762e8b:MKGleTXknvAR4lBmX2RizU6TuovDhXX7/rnRf9hEzleIotwa4iC88D488ODRaK1p/nUU0iTCXmFq9ae5L0RZDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:827122e65cde22c98b3249a4b90bd9075f48d8fd1962b7a516de5c1ed20d39f9:JEhFYu8S4tQX/Bamsk7TTDFv8yy8tTLDKBfySHT/uXIHCNE8DyQSAlTL+fHDT/SI3C18Ud2DsOGM9dGPACyJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -61,7 +61,7 @@ signature against the trust store. A stale header is not reusable.
 Quick check:
 
 ```bash
-head -1 bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
+head -1 bundles/directive/.ai/config/ryeos-runtime/model-providers/zen.yaml
 # trailing fingerprint should begin 741a8bc...
 ```
 
@@ -73,7 +73,9 @@ For stale signatures, stale bundle binaries, stale CAS, or wrong-key signing:
 ./scripts/gate.sh --refresh-bundles --no-tests
 
 target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
-target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge
 ```
 
 Then reinitialize the system space you are actually using:

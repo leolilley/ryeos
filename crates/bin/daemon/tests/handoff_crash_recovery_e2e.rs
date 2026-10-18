@@ -466,7 +466,7 @@ fn plant_portable_worker_with_protocol(
         ),
         "portable fixture selected an unknown session protocol"
     );
-    common::fast_fixture::register_standard_bundle(state_path, fixture)?;
+    common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
     let bundle_root = state_path.join(".ai/bundles/handoff-portable-fixture");
     common::fast_fixture::install_signed_bundle_binary(
         &bundle_root,

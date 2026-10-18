@@ -2,7 +2,7 @@
 //!
 //! Proves the full SSE chain works:
 //!   1. Start mock provider
-//!   2. Pre-init: trusted signer, standard bundle, provider-config bundle, model routing,
+//!   2. Pre-init: trusted signer, workflow bundles, provider-config bundle, model routing,
 //!      directive, route YAML, node signing key, authorized key file
 //!   3. Start daemon
 //!   4. POST /execute to run a directive, capture thread_id
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -203,14 +203,14 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-events-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            // thread/events-stream route is provided by the standard bundle.
+            // thread/events-stream route is provided by core.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. The SSE GET must be
             // signed by the same user for the ownership check to pass.
@@ -386,14 +386,14 @@ async fn boot_and_run_directive_with_extra_keys(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-events-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            // thread/events-stream route is provided by the standard bundle.
+            // thread/events-stream route is provided by core.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. Authorize the user key
             // so SSE requests signed by it pass the ryeos_signed verifier.

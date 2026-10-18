@@ -267,18 +267,16 @@ fn fixture_bundle_engine(
         },
     ]));
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let ui = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
-    .unwrap();
-    let roots = vec![core, standard, ui, bundle_root.to_path_buf()];
-    let registered = ["core", "standard", "ryeos-ui", "f05-fixture"]
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
+    let mut roots = vec![core];
+    roots.extend(workflow);
+    roots.push(ui);
+    roots.push(bundle_root.to_path_buf());
+    let registered = ["core", "knowledge", "directive", "graph", "ryeos-ui", "f05-fixture"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(

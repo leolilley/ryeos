@@ -1,7 +1,7 @@
 //! Source authoring for a genuine public ordinary-command admission fixture.
 //!
 //! Include beside `signed_bundle` and `retained_runtime_producer` in the daemon
-//! integration test. Register the standard bundle and install base sources in
+//! integration test. Register the workflow bundles and install base sources in
 //! `DaemonHarness::start_fast_with`,
 //! then run/capture the retained producer through the public services before
 //! authoring the consumer. This helper creates no admission token, product

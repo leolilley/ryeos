@@ -17,7 +17,7 @@
 //!   - `sse_dispatch_launch_rejects_non_root_executable_kind` — proves
 //!     non-root kinds are rejected before any thread id is published
 //!
-//! Tool happy-path test: skipped. The standard bundle ships no
+//! Tool happy-path test: skipped. The shipped bundles carry no
 //! launchable tool fixture with a trivial body (tool kind requires
 //! subprocess executor). Adding one would modify production bundle
 //! content solely for test enablement — out of scope per plan.
@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -272,7 +272,7 @@ async fn boot_daemon() -> (
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-dispatch-launch-model-config",
@@ -770,7 +770,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     drop(project);
 }
 
-// Tool happy-path SSE test: skipped. The standard bundle ships no
+// Tool happy-path SSE test: skipped. The shipped bundles carry no
 // launchable tool fixture with a trivial body (tool kind requires
 // subprocess executor). Adding one would modify production bundle
 // content solely for test enablement — out of scope per plan.

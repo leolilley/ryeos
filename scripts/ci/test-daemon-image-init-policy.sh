@@ -351,11 +351,11 @@ grep -Fxq 'FROM ${PUBLICATION_STAGE} AS composition-publication' <<<"$(dockerfil
     exit 1
 }
 # The selected features are themselves bundle-set data: no scheduler where the
-# set has no scheduling bundle, no provider setup where it has no Standard.
+# set has no scheduling bundle, no provider setup where it has no directive.
 [[ -z "$(ryeos_bundle_set_cargo_features core ryeosd)" ]]
 [[ "$(ryeos_bundle_set_cargo_features core-scheduling ryeosd)" == ryeosd/scheduling ]]
-[[ "$(ryeos_bundle_set_cargo_features f5r-controller ryeosd)" == ryeosd/model-provider-setup ]]
-[[ "$(ryeos_bundle_set_cargo_features standard ryeosd)" == ryeosd/scheduling,ryeosd/model-provider-setup ]]
+[[ -z "$(ryeos_bundle_set_cargo_features f5r-controller ryeosd)" ]]
+[[ "$(ryeos_bundle_set_cargo_features standard ryeosd)" == ryeosd/model-provider-setup,ryeosd/scheduling ]]
 
 # Contained startup receives its profile through the admitted worker binding,
 # rather than the generic image entrypoint. Keep the declared requirement exact

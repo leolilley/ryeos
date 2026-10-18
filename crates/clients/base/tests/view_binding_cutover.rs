@@ -300,11 +300,15 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     // fields, so validating it directly would test the wrong boundary.
     let trust_store = ryeos_engine::test_support::live_trust_store();
     let core_bundle = repository.join("bundles/core");
-    let standard_bundle = repository.join("bundles/standard");
+    let knowledge_bundle = repository.join("bundles/knowledge");
+    let directive_bundle = repository.join("bundles/directive");
+    let graph_bundle = repository.join("bundles/graph");
     let ui_bundle = repository.join("bundles/ryeos-ui");
     let bundle_roots = vec![
         core_bundle.clone(),
-        standard_bundle.clone(),
+        knowledge_bundle.clone(),
+        directive_bundle.clone(),
+        graph_bundle.clone(),
         ui_bundle.clone(),
     ];
     let kinds = ryeos_engine::test_support::load_live_kind_registry();
@@ -327,8 +331,16 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
                 canonical_root: core_bundle,
             },
             RegisteredBundleRoot {
-                name: "standard".to_string(),
-                canonical_root: standard_bundle,
+                name: "knowledge".to_string(),
+                canonical_root: knowledge_bundle,
+            },
+            RegisteredBundleRoot {
+                name: "directive".to_string(),
+                canonical_root: directive_bundle,
+            },
+            RegisteredBundleRoot {
+                name: "graph".to_string(),
+                canonical_root: graph_bundle,
             },
             RegisteredBundleRoot {
                 name: "ryeos-ui".to_string(),

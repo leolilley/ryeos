@@ -87,7 +87,7 @@ PY
 )
 
 printf '%s\n' \
-  "prepared unsigned standard + codex qualification Bundle overlays at $destination" \
+  "prepared unsigned environment-qualification + codex qualification Bundle overlays at $destination" \
   "fixed subject manifest: $manifest_hash" \
   "fixed fixture Worker source: $source_digest" \
   'publisher signing, Bundle publication, installation, content binding, and execution were not run'

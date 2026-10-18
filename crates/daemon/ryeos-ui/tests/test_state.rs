@@ -222,20 +222,22 @@ pub fn local_operator_context(
 fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let trust_store = ryeos_engine::test_support::live_trust_store();
     let core_bundle = ryeos_engine::test_support::core_bundle_root();
-    let standard_bundle = ryeos_engine::test_support::standard_bundle_root();
+    let workflow_bundles = ryeos_engine::test_support::workflow_bundle_roots();
     let ryeos_ui_bundle = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
 
-    let kinds = KindRegistry::load_base(
-        &[
-            core_bundle.join(".ai/node/engine/kinds"),
-            standard_bundle.join(".ai/node/engine/kinds"),
-            ryeos_ui_bundle.join(".ai/node/engine/kinds"),
-        ],
-        &trust_store,
-    )
+    let mut kind_roots = vec![core_bundle.join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        workflow_bundles
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    kind_roots.push(ryeos_ui_bundle.join(".ai/node/engine/kinds"));
+    let kinds = KindRegistry::load_base(&kind_roots, &trust_store)
     .expect("load live kind registry");
 
-    let bundle_roots = vec![core_bundle, standard_bundle, ryeos_ui_bundle];
+    let mut bundle_roots = vec![core_bundle];
+    bundle_roots.extend(workflow_bundles);
+    bundle_roots.push(ryeos_ui_bundle);
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load live parser tools");
