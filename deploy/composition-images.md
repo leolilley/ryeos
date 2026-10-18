@@ -37,3 +37,20 @@ The offline matrix test
 shipped profiles and judges them against synthetic host evidence; it is the
 authority for host-class expectations, and this document deliberately repeats
 none of them.
+
+## Operator window on a hosted container
+
+Verbs such as `ryeos node external-execution compose` need the node stopped,
+but a hosted container's entrypoint always ends by starting the daemon. Set
+`RYEOS_OPERATOR_HOLD=1` and redeploy: first-boot initialization runs as usual,
+then the entrypoint waits without starting `ryeosd`. Run the stopped-node
+verbs over the platform's shell as the node account, for example
+`setpriv --reuid=10000 --regid=10000 --clear-groups --no-new-privs ryeos node
+external-execution compose ... --app-root /data/app`, then touch
+`/data/app/.ai/state/operator-hold-released` to let the node start (only a
+touch made after the hold begins counts), or unset the variable and redeploy.
+Any value other than unset, `0` or `1` is refused, and the hold is refused
+together with `RYEOS_HOST_RUNTIME_BINDING`. While held, the readiness probe
+fails by design (the image HEALTHCHECK has a 60 s start period and 3
+retries), so on a platform that restarts on a failing health check, disable
+or lengthen the check for the hold and re-enable it after release.
