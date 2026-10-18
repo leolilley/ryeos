@@ -14,7 +14,6 @@ CTL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CTL)
 
 KEY = "rnd_SECRETKEYVALUE"
-TOKEN = "ghp_SECRETTOKENVALUE"
 DIGEST = "sha256:" + "a" * 64
 IMAGE = "ghcr.io/leolilley/ryeos-f5r-controller@sha256:" + "b" * 64
 NAME = "ryeos-f5r-s9-test"
@@ -121,6 +120,26 @@ class Case(unittest.TestCase):
         self.assertIn("RYEOS_OPERATOR_HOLD", record["envKeys"])
         self.assertNotIn("hosted", json.dumps(record))
 
+    def test_owner_id_skips_owner_lookup(self):
+        routes = deploy_routes(["live"])
+        del routes[("GET", "/owners?limit=20")]
+        fake = Fake(routes)
+        rc, log = self.run_main(self.deploy_argv("--owner-id", "own-1"), fake)
+        self.assertEqual(rc, 2, log)
+        routes2 = {(m, p.replace("own-1", "tea-abc1")): v for (m, p), v in routes.items()}
+        fake = Fake(routes2)
+        rc, log = self.run_main(self.deploy_argv("--owner-id", "tea-abc1"), fake)
+        self.assertEqual(rc, 0, log)
+        self.assertFalse([r for r in fake.requests if r[1].startswith("/owners")])
+        self.assertEqual(json.loads(fake.methods("POST")[0][2])["ownerId"], "tea-abc1")
+
+    def test_bad_owner_id_refused_without_requests(self):
+        for bad in ("TEA-abc", "own-1", "tea-", "tea-a b"):
+            fake = Fake({})
+            rc, _ = self.run_main(self.deploy_argv("--owner-id", bad), fake)
+            self.assertEqual(rc, 2)
+            self.assertEqual(fake.requests, [])
+
     def test_no_hold_by_default(self):
         payload = CTL.build_payload(CTL.parser().parse_args(self.deploy_argv()), "own-1", None)
         self.assertNotIn("RYEOS_OPERATOR_HOLD", [e["key"] for e in payload["envVars"]])
@@ -169,57 +188,19 @@ class Case(unittest.TestCase):
         routes = deploy_routes(["live"])
         routes[("GET", f"/services?name={NAME}&ownerId=own-1")] = [(200, [{"service": {"id": "srv-old", "name": NAME}}])]
         fake = Fake(routes)
-        rc, log = self.run_main(self.deploy_argv("--ghcr-token-pass", "x"), fake)
+        rc, log = self.run_main(self.deploy_argv(), fake)
         self.assertEqual(rc, 2)
         self.assertIn("srv-old", log)
         self.assertEqual(fake.methods("POST"), [])
 
-    def test_existing_credential_reused(self):
-        routes = deploy_routes(["live"])
-        routes[("GET", "/registrycredentials?limit=100")] = [
-            (200, [{"registryCredential": {"id": "rcred-old", "name": NAME + "-ghcr"}, "cursor": "c"}])]
-        fake = Fake(routes)
-        rc, _ = self.run_main(self.deploy_argv("--ghcr-token-pass", "x"), fake)
-        self.assertEqual(rc, 0)
-        self.assertEqual([r[1] for r in fake.methods("POST")], ["/services"])
-        self.assertEqual(self.record()["registryCredentialId"], "rcred-old")
-        self.assertFalse(self.record()["registryCredentialCreated"])
-
-    def test_token_never_in_logs_or_files(self):
-        fake = Fake(deploy_routes(["live"]))
-        with mock.patch.object(CTL, "read_pass", lambda entry: TOKEN):
-            rc, log = self.run_main(self.deploy_argv("--ghcr-token-pass", "ryeos/ghcr-read-token"), fake)
-        self.assertEqual(rc, 0, log)
-        cred = fake.methods("POST")[0]
-        self.assertEqual(json.loads(cred[2])["registry"], "GITHUB")
-        self.assertIn(TOKEN, cred[2].decode())
-        blob = log + "".join(p.read_text() for p in Path(self.out).glob("s8-*.json"))
-        self.assertNotIn(TOKEN, blob)
-        self.assertNotIn(KEY, blob)
-        service_post = fake.methods("POST")[1]
-        self.assertNotIn(TOKEN, service_post[2].decode())
-        self.assertEqual(service_post[3]["Authorization"], "Bearer " + KEY)
-
     def test_error_body_secrets_not_echoed(self):
         routes = deploy_routes(["live"])
-        routes[("POST", "/services")] = [(400, {"message": f"bad {TOKEN} and {KEY}"})]
-        with mock.patch.object(CTL, "read_pass", lambda entry: TOKEN):
-            rc, log = self.run_main(self.deploy_argv("--ghcr-token-pass", "p"), Fake(routes))
+        routes[("POST", "/services")] = [(400, {"message": f"bad {KEY}"})]
+        rc, log = self.run_main(self.deploy_argv(), Fake(routes))
         self.assertEqual(rc, 1)
         self.assertIn("message=bad ***", log)
         blob = log + (Path(self.out) / "s8-service.json").read_text()
-        self.assertNotIn(TOKEN, blob)
         self.assertNotIn(KEY, blob)
-
-    def test_partial_failure_surfaces_credential_id(self):
-        routes = deploy_routes(["live"])
-        routes[("POST", "/services")] = [(500, {})]
-        with mock.patch.object(CTL, "read_pass", lambda entry: TOKEN):
-            rc, log = self.run_main(self.deploy_argv("--ghcr-token-pass", "p"), Fake(routes))
-        self.assertEqual(rc, 1)
-        self.assertIn("rcred-1", log)
-        record = self.record()
-        self.assertEqual((record["registryCredentialId"], record["state"]), ("rcred-1", "create-failed"))
 
     def test_poll_failure_keeps_service_id(self):
         routes = deploy_routes(["live"])
@@ -315,13 +296,56 @@ class Case(unittest.TestCase):
         with self.assertRaises(CTL.Failure):
             read(b"ab\x07c")
 
-    def test_pass_failure_stderr_not_echoed(self):
-        done = mock.Mock(returncode=1, stdout="", stderr="leaked " + KEY)
-        with mock.patch.object(CTL.subprocess, "run", return_value=done):
-            rc, log = self.run_main(["status", "--service-id", "srv-a"], Fake({}),
-                                    key_reader=lambda args: CTL.read_pass("ryeos/render-api-key"))
-        self.assertEqual(rc, 1)
-        self.assertNotIn(KEY, log)
+    def env_file(self, text, mode=0o600):
+        path = Path(self.out) / "envfile"
+        path.write_text(text)
+        path.chmod(mode)
+        return str(path)
+
+    def args_for(self, *extra):
+        return CTL.parser().parse_args([*extra, "status", "--service-id", "s"])
+
+    def test_env_file_parsing(self):
+        path = self.env_file(f"# c\n\nOTHER=1\nexport RENDER_API_KEY='{KEY}'\n")
+        self.assertEqual(CTL.parse_env_file('A="x y"\n#B=2\nC=3')["A"], "x y")
+        with mock.patch.dict(CTL.os.environ, {}, clear=True):
+            self.assertEqual(CTL.read_key(self.args_for("--env-file", path)), KEY)
+            path = self.env_file(f'RENDER_API_KEY="{KEY}"\n')
+            self.assertEqual(CTL.read_key(self.args_for("--env-file", path)), KEY)
+
+    def test_key_precedence(self):
+        path = self.env_file("RENDER_API_KEY=fromfile\n")
+        with mock.patch.dict(CTL.os.environ, {"RENDER_API_KEY": "fromenv"}, clear=True):
+            self.assertEqual(CTL.read_key(self.args_for("--env-file", path)), "fromenv")
+            self.assertEqual(CTL.read_key(self.args_for("--api-key-file", self.keyfile, "--env-file", path)), KEY)
+        with mock.patch.dict(CTL.os.environ, {}, clear=True):
+            self.assertEqual(CTL.read_key(self.args_for("--env-file", path)), "fromfile")
+
+    def test_env_file_refusals(self):
+        with mock.patch.dict(CTL.os.environ, {}, clear=True):
+            path = self.env_file(f"RENDER_API_KEY={KEY}\n", mode=0o644)
+            with self.assertRaises(CTL.Refusal) as ctx:
+                CTL.read_key(self.args_for("--env-file", path))
+            self.assertIn("chmod 600", str(ctx.exception))
+            self.assertNotIn(KEY, str(ctx.exception))
+            with self.assertRaises(CTL.Failure):
+                CTL.read_key(self.args_for("--env-file", self.env_file("OTHER=1\n")))
+            with self.assertRaises(CTL.Failure):
+                CTL.read_key(self.args_for("--env-file", self.out + "/missing"))
+
+    def test_env_file_key_not_logged_or_written(self):
+        path = self.env_file(f"RENDER_API_KEY={KEY}\n")
+        with mock.patch.dict(CTL.os.environ, {}, clear=True):
+            fake = Fake(deploy_routes(["live"]))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = CTL.main(["--env-file", path] + self.deploy_argv(), opener=fake,
+                              sleep=lambda s: None, clock=iter(range(0, 99)).__next__)
+        self.assertEqual(rc, 0)
+        blob = err.getvalue() + out.getvalue() + "".join(
+            p.read_text() for p in Path(self.out).glob("s8-*.json"))
+        self.assertNotIn(KEY, blob)
+        self.assertEqual(fake.requests[0][3]["Authorization"], "Bearer " + KEY)
 
     def test_unexpected_exception_prints_type_only(self):
         def boom(args):
