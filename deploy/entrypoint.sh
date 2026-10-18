@@ -27,6 +27,15 @@
 # a start so an always-restart host retries that refusal slowly rather than in
 # a tight loop, and so an operator can open a shell in the container and clear
 # it while no daemon holds the node's state lock.
+#
+# RYEOS_OPERATOR_HOLD=1 opens an operator window on a host that offers a shell
+# only while the container runs: after first-boot initialization, instead of
+# starting ryeosd, the entrypoint waits with no daemon holding the state lock,
+# so stopped-node `ryeos` commands can run in the platform shell. Touch
+# <app root>/.ai/state/operator-hold-released to continue to the normal start
+# (the marker is removed first), or unset the variable and redeploy. Unset,
+# "0" and "1" are the only accepted values; anything else refuses to start.
+# The hold is not supported with RYEOS_HOST_RUNTIME_BINDING and refuses there.
 
 #
 # Every ryeos command here runs as the image's node account, ryeos
@@ -52,6 +61,7 @@
 set -euo pipefail
 
 RESTART_INHIBITED_HOLD_SECONDS=30
+OPERATOR_HOLD_POLL_SECONDS=5
 NODE_UID=10000
 NODE_GID=10000
 
@@ -362,8 +372,44 @@ hold_while_restart_inhibited() {
   fi
 }
 
+# Succeed when an operator hold is requested, fail quietly when it is not, and
+# fail with a message on any value other than unset, "0" or "1".
+operator_hold_requested() {
+  case "${RYEOS_OPERATOR_HOLD:-0}" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *)
+      echo "[entrypoint] RYEOS_OPERATOR_HOLD must be unset, 0 or 1" >&2
+      return 2
+      ;;
+  esac
+}
+
+# When an operator hold is requested, stay stopped until the release marker
+# appears, then remove it and return so the caller starts ryeosd normally.
+hold_for_operator() {
+  local app_root="$1"
+  local marker="$app_root/.ai/state/operator-hold-released"
+  local status=0
+
+  operator_hold_requested || status=$?
+  [[ "$status" -eq 0 ]] || return 0
+  # Only a touch made after the hold begins releases it, and the state
+  # directory is created here so that touch cannot fail.
+  mkdir -p -- "$app_root/.ai/state"
+  rm -f -- "$marker"
+  echo "[entrypoint] node held for operator commands; ryeosd is not running. Touch $marker to start it, or unset RYEOS_OPERATOR_HOLD and redeploy" >&2
+  until [[ -e "$marker" ]]; do
+    sleep "$OPERATOR_HOLD_POLL_SECONDS"
+  done
+  rm -f -- "$marker"
+}
+
 main() {
   local effective_bind
+  local hold_status=0
+  operator_hold_requested || hold_status=$?
+  [[ "$hold_status" -ne 2 ]] || return 1
   run_as_node_account "$@"
   effective_bind="$(container_bind)"
 
@@ -371,6 +417,10 @@ main() {
   if [[ "${DAEMON_ARGS[0]}" == "host-runtime" ]]; then
     if [[ "$(id -u)" != 0 ]]; then
       echo "[entrypoint] refusing to start: RYEOS_HOST_RUNTIME_BINDING is set, but ryeosd host-runtime is an administrator bootstrap and this container started as uid $(id -u), not root" >&2
+      return 1
+    fi
+    if [[ "$hold_status" -eq 0 ]]; then
+      echo "[entrypoint] RYEOS_OPERATOR_HOLD is not supported with RYEOS_HOST_RUNTIME_BINDING" >&2
       return 1
     fi
     hold_while_restart_inhibited /data/app
@@ -398,6 +448,7 @@ main() {
     ryeos "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]}"
   fi
 
+  hold_for_operator /data/app
   hold_while_restart_inhibited /data/app
 
   if [[ "$(id -u)" == 0 ]]; then

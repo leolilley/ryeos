@@ -543,6 +543,37 @@ fi
     mkdir -p "$policy_test_root/.ai/state"
     : > "$policy_test_root/.ai/state/restart-inhibited.json"
     [[ "$(restart_inhibition_hold_seconds "$policy_test_root")" == "$RESTART_INHIBITED_HOLD_SECONDS" ]]
+
+    # The operator hold changes nothing unless the value is exactly 1, and
+    # refuses any value other than unset, 0 or 1.
+    unset RYEOS_OPERATOR_HOLD
+    ! operator_hold_requested
+    RYEOS_OPERATOR_HOLD=0
+    ! operator_hold_requested
+    hold_for_operator "$policy_test_root"
+    hold_status=0
+    RYEOS_OPERATOR_HOLD=true operator_hold_requested 2>/dev/null || hold_status=$?
+    [[ "$hold_status" -eq 2 ]]
+    hold_status=0
+    RYEOS_OPERATOR_HOLD=yes operator_hold_requested 2>/dev/null || hold_status=$?
+    [[ "$hold_status" -eq 2 ]]
+    ! RYEOS_OPERATOR_HOLD= operator_hold_requested
+    RYEOS_OPERATOR_HOLD=1
+    operator_hold_requested
+    OPERATOR_HOLD_POLL_SECONDS=1
+    hold_marker="$policy_test_root/.ai/state/operator-hold-released"
+    rm -f "$hold_marker"
+    (sleep 3; : > "$hold_marker") &
+    hold_release_pid=$!
+    hold_start=$SECONDS
+    hold_message="$(hold_for_operator "$policy_test_root" 2>&1)"
+    wait "$hold_release_pid"
+    [[ $((SECONDS - hold_start)) -ge 2 ]]
+    grep -Fq 'held for operator commands' <<<"$hold_message"
+    [[ ! -e "$hold_marker" ]]
+    # The hold refuses on the host-runtime route instead of being ignored.
+    grep -Fq 'RYEOS_OPERATOR_HOLD is not supported with RYEOS_HOST_RUNTIME_BINDING' "$root/deploy/entrypoint.sh"
+    unset RYEOS_OPERATOR_HOLD
     [[ "$RESTART_INHIBITED_HOLD_SECONDS" -gt 0 && "$RESTART_INHIBITED_HOLD_SECONDS" -le 60 ]]
     grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
     ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
