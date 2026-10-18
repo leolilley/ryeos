@@ -369,7 +369,7 @@ fn parse_rotated_recovery_marker(raw: &str) -> anyhow::Result<RotatedRecoveryMar
 }
 
 /// Proof, through `service:threads/get`, that the marker-writing process is
-/// the live process durably attached to this running thread. `false` while the
+/// the live process durably attached to this (pre-terminal) thread. `false` while the
 /// attachment is still committing; contradictory coordinates are hard test
 /// failures. The running daemon's Runtime store is never opened from the test
 /// process: the published PID/PGID must equal the marker, and the process must
@@ -391,9 +391,15 @@ async fn rotated_recovery_process_attached(
         marker.pid,
         marker.pgid
     );
+    // Attachment publishes the process identity before the runtime's own
+    // mark-running callback; the stub never makes that callback, so the row
+    // stays `created` while attached. Either pre-terminal status is live.
     anyhow::ensure!(
-        detail["thread"]["status"].as_str() == Some("running"),
-        "attached native recovery thread is not running: {detail:#}"
+        matches!(
+            detail["thread"]["status"].as_str(),
+            Some("created") | Some("running")
+        ),
+        "attached native recovery thread is not live: {detail:#}"
     );
     ryeos_app::process::verify_thread_process_identity(pid, pgid, &marker.thread_id)
         .context("marker-writing native process is not the live attached incarnation")?;

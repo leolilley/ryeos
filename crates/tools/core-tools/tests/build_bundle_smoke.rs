@@ -16,6 +16,17 @@ fn bundle_dir() -> std::path::PathBuf {
     workspace_root().join("bundles/directive")
 }
 
+/// Every shipped bundle: each directory under `bundles/` that has an `.ai` dir.
+fn shipped_bundle_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<_> = std::fs::read_dir(workspace_root().join("bundles"))
+        .expect("read bundles dir")
+        .map(|entry| entry.expect("bundles entry").path())
+        .filter(|path| path.join(".ai").is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
 /// The bundles that ship the workflow kinds and their runtimes.
 fn workflow_bundle_dirs() -> Vec<std::path::PathBuf> {
     ["knowledge", "directive", "graph"]
@@ -349,8 +360,8 @@ fn service_descriptor_table_matches_api_handlers() {
             .strip_prefix("service:")
             .expect("service ref prefix checked by parser");
         let rel = format!(".ai/services/{bare}.yaml");
-        let candidates: Vec<_> = std::iter::once(workspace.join("bundles/core"))
-            .chain(workflow_bundle_dirs())
+        let candidates: Vec<_> = shipped_bundle_dirs()
+            .into_iter()
             .map(|bundle| bundle.join(&rel))
             .collect();
         assert!(
@@ -472,21 +483,81 @@ fn api_handler_service_refs() -> Vec<String> {
         }
     }
 
+    let mut app_sources = Vec::new();
+    let mut pending = vec![workspace_root().join("crates/daemon/ryeos-app/src")];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                app_sources.push(std::fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+
     let mut refs = Vec::new();
     for module_name in module_names {
         let path = handlers_dir.join(format!("{module_name}.rs"));
         let content = std::fs::read_to_string(&path).unwrap();
-        if let Some(idx) = content.find("service_ref:") {
-            let after = &content[idx..];
-            if let Some(start) = after.find('"') {
-                let after_quote = &after[start + 1..];
-                if let Some(end) = after_quote.find('"') {
-                    refs.push(after_quote[..end].to_string());
-                    continue;
+        let before = refs.len();
+        for (idx, _) in content.match_indices("service_ref:") {
+            let value = content[idx + "service_ref:".len()..].trim_start();
+            let literal = if let Some(quoted) = value.strip_prefix('"') {
+                quoted.split('"').next().map(str::to_string)
+            } else {
+                // A constant: resolve its `const NAME: &str = "..."` definition
+                // in the handler or in the app crate that owns the shared
+                // service names. Anything else (a function parameter such as
+                // `&str`) names no ref.
+                let name: String = value
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                if name.is_empty() {
+                    None
+                } else {
+                    let definition = format!("const {name}: &str = \"");
+                    let resolved = std::iter::once(content.clone())
+                        .chain(app_sources.iter().cloned())
+                        .find_map(|source| {
+                            source.find(&definition).and_then(|at| {
+                                source[at + definition.len()..]
+                                    .split('"')
+                                    .next()
+                                    .map(str::to_string)
+                            })
+                        });
+                    Some(resolved.unwrap_or_else(|| {
+                        panic!("{}: unresolved service_ref constant {name}", path.display())
+                    }))
                 }
+            };
+            if let Some(literal) = literal
+                && literal.starts_with("service:")
+            {
+                refs.push(literal);
             }
         }
-        panic!("{} does not declare a literal service_ref", path.display());
+        // Macro-declared descriptors: `descriptor!(NAME, "service:...", ...)`.
+        for (idx, _) in content.match_indices("descriptor!(") {
+            let args = &content[idx + "descriptor!(".len()..];
+            let mut parts = args.splitn(3, ',');
+            let (Some(_), Some(second)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if let Some(literal) = second.trim().strip_prefix('"')
+                && let Some(literal) = literal.split('"').next()
+                && literal.starts_with("service:")
+            {
+                refs.push(literal.to_string());
+            }
+        }
+        assert!(
+            refs.len() > before,
+            "{} does not declare a service: service_ref",
+            path.display()
+        );
     }
     refs.sort();
     refs.dedup();

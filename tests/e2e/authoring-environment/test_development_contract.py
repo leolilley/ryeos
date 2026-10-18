@@ -9,6 +9,23 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 
 
+BUNDLE_OWNED_CONFIGS = {
+    "config/development/ryeos/authoring-environment-products.yaml",
+    "config/development/ryeos/authoring-prepared-input-products.yaml",
+}
+
+
+def owned_config(config_path):
+    """Path of a development config in its single owner: the
+    environment-qualification bundle for the native-verifier products, the
+    project for everything else. A copy in the other place is an error."""
+    bundle = f"bundles/environment-qualification/.ai/{config_path}"
+    project = f".ai/{config_path}"
+    owner, other = (bundle, project) if config_path in BUNDLE_OWNED_CONFIGS else (project, bundle)
+    assert not (ROOT / other).exists(), f"{config_path} has a competing copy at {other}"
+    return owner
+
+
 def load(relative):
     return yaml.safe_load((ROOT / relative).read_text())
 
@@ -36,7 +53,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                                  contract["max_declarations"])
             for slot in slots:
                 self.assertIn(slot["mount_root"], contract["allowed_mount_roots"])
-                recipe = load(".ai/config/" + slot["relationship_ref"].removeprefix("config:") + ".yaml")
+                config_path = "config/" + slot["relationship_ref"].removeprefix("config:") + ".yaml"
+                recipe = load(owned_config(config_path))
                 relationship = next(item for item in recipe["product_relationships"]["relationships"]
                                     if item["name"] == slot["relationship"])
                 product = relationship["required_product"]
@@ -68,7 +86,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIsNone(baseline["workload_client"])
 
     def test_native_runtime_adoption_requires_the_independent_bundle_policy(self):
-        products = load(".ai/config/development/ryeos/authoring-environment-products.yaml")
+        products = load("bundles/environment-qualification/.ai/config/development/ryeos/authoring-environment-products.yaml")
         relationships = {item["name"]: item for item in
                          products["product_relationships"]["relationships"]}
         verifier = relationships["runtime_to_native_authoring_qualification"]
@@ -92,10 +110,12 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
     def test_installed_native_verifier_ships_its_product_relationships(self):
         """Projectless verification must resolve both selected slots from environment-qualification."""
         for name in ("authoring-environment-products", "authoring-prepared-input-products"):
-            source = load(f".ai/config/development/ryeos/{name}.yaml")
-            installed = load(
-                f"bundles/environment-qualification/.ai/config/development/ryeos/{name}.yaml")
-            self.assertEqual(installed, source)
+            installed = load(f"bundles/environment-qualification/.ai/config/development/ryeos/{name}.yaml")
+            self.assertEqual(installed["product_relationships"]["schema"],
+                             "ryeos.product_relationships.v1")
+            self.assertTrue(installed["product_relationships"]["relationships"])
+            self.assertFalse((ROOT / f".ai/config/development/ryeos/{name}.yaml").exists(),
+                             "project must not carry a competing copy")
 
     def test_installed_native_verifier_runtime_is_projectless(self):
         """Qualification consumes sealed products and must not require a project."""
@@ -421,7 +441,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         ]
         for case in cases:
             with self.subTest(case=case["relationship"]):
-                recipe = load(f".ai/config/development/ryeos/{case['recipe']}.yaml")
+                recipe = load(owned_config(f"config/development/ryeos/{case['recipe']}.yaml"))
                 relationships = recipe["product_relationships"]
                 self.assertEqual(relationships["schema"], "ryeos.product_relationships.v1")
                 relationship = next(entry for entry in relationships["relationships"]
