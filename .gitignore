@@ -193,4 +193,3 @@ bundles/.*.publish-staging/
 .local/
 
 ## Development publisher private key (local only)
-.dev-keys/PUBLISHER_DEV.pem
