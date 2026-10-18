@@ -36,14 +36,23 @@ enum Generation {
     A,
     /// Updates [`SCHEDULE_ID`] to February 1 and deletes [`RETIRED_ID`].
     B,
+    /// Declares nothing: the declaration file is omitted from the pushed
+    /// tree, so every schedule of the previous generation is deleted.
+    C,
 }
 
 impl Generation {
+    /// Whether this generation declares no schedules at all.
+    fn declares_nothing(self) -> bool {
+        self.schedules().is_empty()
+    }
+
     /// `(schedule_id, cron expression)` pairs this generation declares.
     fn schedules(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::A => &[(SCHEDULE_ID, "0 0 0 1 1 *"), (RETIRED_ID, "0 0 0 1 1 *")],
             Self::B => &[(SCHEDULE_ID, "0 0 0 1 2 *")],
+            Self::C => &[],
         }
     }
 }
@@ -93,8 +102,17 @@ impl ProjectFixture {
         parent: Option<&str>,
     ) -> Result<String> {
         let declaration = self.source_root.join(DECLARATION);
-        std::fs::create_dir_all(declaration.parent().context("declaration has a parent")?)?;
-        std::fs::write(&declaration, self.declaration(generation))?;
+        // An empty tree has no snapshot entries, so omission needs no file.
+        if generation.declares_nothing() {
+            match std::fs::remove_file(&declaration) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            std::fs::create_dir_all(declaration.parent().context("declaration has a parent")?)?;
+            std::fs::write(&declaration, self.declaration(generation))?;
+        }
         let captured = project_push::capture_ai_only_snapshot(&self.source_root, parent)?;
         Ok(project_push::push_snapshot(h, &self.live_path, &captured)
             .await?
@@ -105,9 +123,8 @@ impl ProjectFixture {
 /// Project-backed schedules that never fire within a test: yearly crons for a
 /// Core tool reading the live project.
 fn schedule_declaration(live_path: &str, generation: Generation) -> String {
-    let mut text = String::from(
-        "category: schedules\nversion: 1.0.0\nschema_version: 1.0.0\nschedules:\n",
-    );
+    let mut text =
+        String::from("category: schedules\nversion: 1.0.0\nschema_version: 1.0.0\nschedules:\n");
     for (schedule_id, expression) in generation.schedules() {
         text.push_str(&format!(
             r#"  - schedule_id: {schedule_id}
@@ -155,7 +172,10 @@ async fn listed_schedules(h: &DaemonHarness) -> Result<Vec<(String, String)>> {
     let (status, body) = h
         .post_execute("service:scheduler/list", ".", json!({}))
         .await?;
-    anyhow::ensure!(status.is_success(), "scheduler/list refused with {status}: {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "scheduler/list refused with {status}: {body}"
+    );
     let schedules = service_result(&body)["schedules"]
         .as_array()
         .with_context(|| format!("scheduler/list returned no schedules array: {body}"))?;
@@ -165,7 +185,10 @@ async fn listed_schedules(h: &DaemonHarness) -> Result<Vec<(String, String)>> {
         if id == SCHEDULE_ID || id == RETIRED_ID {
             listed.push((
                 id.to_owned(),
-                schedule["expression"].as_str().unwrap_or_default().to_owned(),
+                schedule["expression"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             ));
         }
     }
@@ -182,16 +205,25 @@ async fn assert_generation(
     deployed: &str,
 ) -> Result<()> {
     assert_eq!(
-        project_push::deployed_snapshot(h, &project.live_path).await?.as_deref(),
+        project_push::deployed_snapshot(h, &project.live_path)
+            .await?
+            .as_deref(),
         Some(deployed),
         "deployed ref must name generation {generation:?}"
     );
-    assert_eq!(
-        std::fs::read_to_string(project.live_declaration())
-            .context("live schedule declaration must be materialized")?,
-        project.declaration(generation),
-        "live schedule declaration must be generation {generation:?}'s bytes"
-    );
+    if generation.declares_nothing() {
+        assert!(
+            !project.live_declaration().exists(),
+            "generation {generation:?} declares nothing, so no live declaration may remain"
+        );
+    } else {
+        assert_eq!(
+            std::fs::read_to_string(project.live_declaration())
+                .context("live schedule declaration must be materialized")?,
+            project.declaration(generation),
+            "live schedule declaration must be generation {generation:?}'s bytes"
+        );
+    }
     let mut expected: Vec<(String, String)> = generation
         .schedules()
         .iter()
@@ -234,7 +266,10 @@ async fn apply_ok(
 ) -> Result<Value> {
     let (status, body) =
         project_push::apply_snapshot(h, &project.live_path, target, expected_deployed).await?;
-    anyhow::ensure!(status.is_success(), "apply-snapshot refused with {status}: {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "apply-snapshot refused with {status}: {body}"
+    );
     Ok(service_result(&body).clone())
 }
 
@@ -262,6 +297,30 @@ async fn core_scheduling_push_deploys_project_schedules() -> Result<()> {
 
     let report = apply_ok(&h, &project, &b, Some(&a)).await?;
     assert_eq!(report["idempotent"], true, "{report}");
+    assert_no_apply_transaction_left(&project.live_root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn omitting_every_declaration_deletes_all_schedules_and_restart_is_idempotent() -> Result<()>
+{
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
+    let project = ProjectFixture::new()?;
+    let a = deploy_a(&h, &project).await?;
+
+    let c = project.push(&h, Generation::C, Some(&a)).await?;
+    let report = apply_ok(&h, &project, &c, Some(&a)).await?;
+    assert_eq!(report["schedules"]["declared"], 0, "{report}");
+    assert_eq!(report["schedules"]["deleted"], 2, "{report}");
+    assert_generation(&h, &project, Generation::C, &c).await?;
+    assert_no_apply_transaction_left(&project.live_root)?;
+
+    h.stop_gracefully().await?;
+    h.respawn_with(|_| {}).await?;
+    assert_generation(&h, &project, Generation::C, &c).await?;
+    let report = apply_ok(&h, &project, &c, Some(&a)).await?;
+    assert_eq!(report["idempotent"], true, "{report}");
+    assert_generation(&h, &project, Generation::C, &c).await?;
     assert_no_apply_transaction_left(&project.live_root)?;
     Ok(())
 }
@@ -401,7 +460,10 @@ mod crash {
         let a = deploy_a(&h, &project).await?;
         h.stop_gracefully().await?;
         h.respawn_with(|command| {
-            command.env(ryeos_app::env_contract::PROJECT_APPLY_TEST_CUT_ENV, boundary);
+            command.env(
+                ryeos_app::env_contract::PROJECT_APPLY_TEST_CUT_ENV,
+                boundary,
+            );
         })
         .await?;
 
@@ -424,6 +486,12 @@ mod crash {
         match expected {
             Recovered::Restored => {
                 assert_generation(&h, &project, Generation::A, &a).await?;
+                assert_no_apply_transaction_left(&project.live_root)?;
+                // A second restart finds nothing left to recover.
+                h.stop_gracefully().await?;
+                h.respawn_with(|_| {}).await?;
+                assert_generation(&h, &project, Generation::A, &a).await?;
+                assert_no_apply_transaction_left(&project.live_root)?;
                 let report = apply_ok(&h, &project, &b, Some(&a)).await?;
                 assert_eq!(report["schedules"]["updated"], 1, "{report}");
                 assert_eq!(report["schedules"]["deleted"], 1, "{report}");
