@@ -1030,9 +1030,9 @@ mod tests {
                 "/etc/ryeos/.ai/node/bundles/core.yaml",
             ),
             make_record(
-                "standard",
-                "/var/lib/ryeos/bundles/standard",
-                "/etc/ryeos/.ai/node/bundles/standard.yaml",
+                "knowledge",
+                "/var/lib/ryeos/bundles/knowledge",
+                "/etc/ryeos/.ai/node/bundles/knowledge.yaml",
             ),
         ];
         check_bundle_collisions(&records).unwrap();
@@ -1358,8 +1358,8 @@ mod tests {
         let mut policy = command_policy([
             ("core", Vec::new()),
             (
-                "standard",
-                vec!["ryeos.register.command.root.standard".into()],
+                "knowledge",
+                vec!["ryeos.register.command.root.knowledge".into()],
             ),
         ]);
         policy.system_source_caps = vec!["ryeos.register.command.root.execute".into()];
@@ -1368,10 +1368,10 @@ mod tests {
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/core.yaml"),
         };
-        let standard = BundleRecord {
-            name: "standard".into(),
-            path: std::path::PathBuf::from("/system/.ai/bundles/standard"),
-            source_file: std::path::PathBuf::from("/system/.ai/node/bundles/standard.yaml"),
+        let knowledge = BundleRecord {
+            name: "knowledge".into(),
+            path: std::path::PathBuf::from("/system/.ai/bundles/knowledge"),
+            source_file: std::path::PathBuf::from("/system/.ai/node/bundles/knowledge.yaml"),
         };
 
         assert_eq!(
@@ -1392,13 +1392,13 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(
-            bundle_scan_root(&standard, &policy)
+            bundle_scan_root(&knowledge, &policy)
                 .unwrap()
                 .source
                 .command_provenance()
                 .unwrap()
                 .command_registration_caps,
-            vec!["ryeos.register.command.root.standard"]
+            vec!["ryeos.register.command.root.knowledge"]
         );
     }
 }

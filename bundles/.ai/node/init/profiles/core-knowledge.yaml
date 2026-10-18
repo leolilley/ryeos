@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-18T05:28:04Z:8aa394f7887bc20e816ef0b4e1d2d7717668e15bc3ee8e1f2de37f8bc0f30c8b:xLh2sMg/YnIcV4natvRjG0CyUzCwduprazvyjVZRMy4vPmeHj85ogYGUwPjJ/9pq3rhdwfz9EIcu9hWJ4WtiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# Source-only Core plus knowledge profile; signing/admission/native qualification pending.
+# ryeos:signed:2026-10-18T10:11:10Z:fafca51342600b55d0d57576d85bc10d9b4cb5250bd94dd0125778a7db3b87c4:z3PLsp5BTnk3NgZGcpj/QX4WatF4cTp0yiSDnvMHQVUS17Y3DFrb9kM2F6JgKYuuNgvVlUc6Dj5InkwCI3xxCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
   - core

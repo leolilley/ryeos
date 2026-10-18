@@ -1232,7 +1232,7 @@ mod tests {
                 source_path: "/bundles/environment-qualification/.ai/tools/qualification/verify.py".into(),
                 source_space: ItemSpace::Bundle,
                 source_root: ItemSourceRoot::Bundle {
-                    name: "standard".into(),
+                    name: "knowledge".into(),
                 },
                 trust_class: TrustClass::TrustedBundle,
                 signer_fingerprint: Some("a".repeat(64)),

@@ -2392,7 +2392,7 @@ CARGO_INCREMENTAL=0 cargo test -p ryeosd --test external_adapter_restart_e2e \
   --jobs 1 -- --ignored
 ```
 
-The refresh opt-out applies only when the staged Core and Standard bundles are
+The refresh opt-out applies only when the staged Core, Knowledge, Directive and Graph bundles are
 already current; it is not evidence that stale published bundle bytes are valid.
 On September 23, the four replacement-controller placement regressions passed
 after a real retained store reopen. The dedicated-session terminal replay suite

@@ -1,7 +1,7 @@
 name: Build composition image candidates
 
-# Builds the composition images (core, core-scheduling, core-workflow,
-# core-knowledge, standard, f5r-controller) from the checked-out commit, signed with the development
+# Builds every composition image in the bake file's `composition` group from
+# the checked-out commit, signed with the development
 # publisher key, and pushes candidate tags to GHCR. Candidates are deployed by
 # the digests printed below, never by tag. Nothing here promotes an image to an
 # official release: the development publication refuses the official owner.
@@ -136,7 +136,7 @@ jobs:
             echo "| image | digest reference |"
             echo "|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          for target in core core-scheduling core-workflow core-knowledge standard f5r-controller; do
+          for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
             DIGEST="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
             [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
               echo "no pushed digest for $target" >&2

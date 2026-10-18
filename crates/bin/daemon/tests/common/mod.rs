@@ -1315,7 +1315,7 @@ impl DaemonHarness {
     }
 
     /// Persisted events of one thread as `(event_type, payload)` in chain
-    /// order, read through `service:events/replay` (Standard bundle). `None`
+    /// order, read through `service:events/replay` (core bundle). `None`
     /// when the daemon does not know the thread yet. A running daemon's
     /// projection is never opened from the test process.
     pub async fn thread_events(
@@ -1337,7 +1337,7 @@ impl DaemonHarness {
     }
 
     /// Persisted events of one chain as `(thread_id, event_type, payload)` in
-    /// chain order, read through `service:events/chain_replay` (Standard
+    /// chain order, read through `service:events/chain_replay` (core
     /// bundle). `None` when the daemon does not know the chain root yet.
     pub async fn chain_events(
         &self,

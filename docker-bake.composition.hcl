@@ -15,7 +15,7 @@ variable "IMAGE_PREFIX" { default = "ryeos" }
 variable "IMAGE_TAG" { default = "composition-candidate" }
 
 group "composition" {
-  targets = ["core", "core-scheduling", "core-workflow", "core-knowledge", "standard", "f5r-controller"]
+  targets = ["core", "core-scheduling", "core-workflow", "core-knowledge", "standard", "central-host", "local-inference", "hosted-workflow", "bundle-source", "f5r-controller"]
 }
 
 target "_composition" {
@@ -66,6 +66,30 @@ target "standard" {
   inherits = ["_composition"]
   target   = "ryeos-standard"
   tags     = ["${IMAGE_PREFIX}-standard:${IMAGE_TAG}"]
+}
+
+target "central-host" {
+  inherits = ["_composition"]
+  target   = "ryeos-central-host"
+  tags     = ["${IMAGE_PREFIX}-central-host:${IMAGE_TAG}"]
+}
+
+target "local-inference" {
+  inherits = ["_composition"]
+  target   = "ryeos-local-inference"
+  tags     = ["${IMAGE_PREFIX}-local-inference:${IMAGE_TAG}"]
+}
+
+target "hosted-workflow" {
+  inherits = ["_composition"]
+  target   = "ryeos-hosted-workflow"
+  tags     = ["${IMAGE_PREFIX}-hosted-workflow:${IMAGE_TAG}"]
+}
+
+target "bundle-source" {
+  inherits = ["_composition"]
+  target   = "ryeos-substrate"
+  tags     = ["${IMAGE_PREFIX}-bundle-source:${IMAGE_TAG}"]
 }
 
 target "f5r-controller" {

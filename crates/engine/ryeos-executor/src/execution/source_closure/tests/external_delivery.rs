@@ -117,7 +117,7 @@ pub(crate) fn capsule(
     root["source_content_digest"] = json!(owner.root_source_content_digest);
     root["raw_content_digest"] = json!(owner.root_raw_content_digest);
     root["source_space"] = json!("bundle");
-    root["source_root"] = json!({"kind":"bundle","name":"standard"});
+    root["source_root"] = json!({"kind":"bundle","name":"knowledge"});
     root["trust_class"] = json!("trusted_bundle");
     root["signer_fingerprint"] = json!(owner.signer_fingerprint);
     invocation["resolution_output"]["effective_trust_class"] = json!("trusted_bundle");

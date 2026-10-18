@@ -1,5 +1,5 @@
-# ryeos:signed:2026-10-18T01:22:55Z:b8fd50a6292fd69895a32e05df5c6881dce14d1911194aafa7e0ae0a58114b6c:F5wgjENSankMjpTnDTofg2MW5BUjCd66/tvgsF1fbKi516/a20HGJuh985ju4e1cqco+FUH36JvGn/oUOe/mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# Optional application authentication above Standard; source-only, admission pending.
+# ryeos:signed:2026-10-18T10:11:10Z:37a2f3299a1424ac92dbd4093ba75d26f886e68b18c2883ee4af5c391b6a0cd2:mEzxl/TRTNYdPnOwosSCqcUAOt1t5fUzNoqwiuxko5oABUZm5UU1stfbT9OMp4qJiVhY/dFEFMQowYH/bJ40Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
   - central-auth
