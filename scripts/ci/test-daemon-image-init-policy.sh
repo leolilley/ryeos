@@ -605,12 +605,83 @@ if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
     exit 1
 fi
 composition_bake="$root/docker-bake.composition.hcl"
-for target in core core-scheduling core-workflow core-knowledge standard f5r-controller; do
+for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
     grep -Fq "target \"$target\"" "$composition_bake" || {
         echo "composition Bake contract is missing target $target" >&2
         exit 1
     }
 done
+# Every bundle set is either built as a composition image or explicitly listed
+# as having none, so a new set cannot ship without a deliberate choice. The
+# stage of each imaged set is read from the Bake target of the same name.
+image_bundle_sets=(
+    standard
+    central-host
+    local-inference
+    hosted-workflow
+    bundle-source
+    core
+    core-scheduling
+    core-workflow
+    core-knowledge
+    f5r-controller
+)
+no_image_bundle_sets=(
+    full
+    standard-central-auth
+    release-authority
+)
+while IFS= read -r set_id; do
+    listed=0
+    for listed_id in "${image_bundle_sets[@]}" "${no_image_bundle_sets[@]}"; do
+        [[ "$listed_id" != "$set_id" ]] || listed=$((listed + 1))
+    done
+    [[ "$listed" -eq 1 ]] || {
+        echo "bundle set $set_id must be on exactly one of the image and no-image lists (found $listed)" >&2
+        exit 1
+    }
+done < <(ryeos_bundle_set_ids)
+for listed_id in "${image_bundle_sets[@]}" "${no_image_bundle_sets[@]}"; do
+    ryeos_bundle_set_ids | grep -Fxq -- "$listed_id" || {
+        echo "image inventory names $listed_id, which is not a bundle set" >&2
+        exit 1
+    }
+done
+
+# Bake targets and release stages correspond one to one.
+composition_group="$(sed -nE '/^group "composition" \{/,/^\}/p' "$composition_bake" | grep -Eo '"[^"]+"' | tr -d '"' | grep -vx composition || true)"
+bake_stages=()
+while IFS= read -r target_name; do
+    [[ "$target_name" != _composition ]] || continue
+    stage="$(awk -v name="$target_name" '
+        $0 == "target \"" name "\" {" { in_target = 1; next }
+        in_target && /^\}/ { exit }
+        in_target && $1 == "target" { gsub(/"/, "", $3); print $3; exit }
+    ' "$composition_bake")"
+    [[ -n "$stage" ]] || {
+        echo "composition Bake target $target_name names no Dockerfile.release stage" >&2
+        exit 1
+    }
+    printf '%s\n' "${release_daemon_stages[@]}" | grep -Fxq -- "$stage" || {
+        echo "composition Bake target $target_name names $stage, which is not a release daemon stage" >&2
+        exit 1
+    }
+    grep -Fxq -- "$target_name" <<<"$composition_group" || {
+        echo "composition Bake target $target_name is missing from the composition group" >&2
+        exit 1
+    }
+    bake_stages+=("$stage")
+done < <(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$composition_bake")
+for stage in "${release_daemon_stages[@]}"; do
+    printf '%s\n' "${bake_stages[@]}" | grep -Fxq -- "$stage" || {
+        echo "release daemon stage $stage has no composition Bake target" >&2
+        exit 1
+    }
+done
+[[ "${#bake_stages[@]}" -eq "${#image_bundle_sets[@]}" ]] || {
+    echo "composition Bake targets do not match the image bundle-set inventory" >&2
+    exit 1
+}
 grep -Fq 'PUBLICATION_STAGE = PUBLICATION_STAGE' "$composition_bake" || {
     echo "composition Bake contract must pass the selected publication stage" >&2
     exit 1
