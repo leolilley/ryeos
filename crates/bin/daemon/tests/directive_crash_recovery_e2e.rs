@@ -12,6 +12,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use common::fast_fixture::{
     FastFixture, register_config_fixture_bundle, register_workflow_bundles,
 };
@@ -19,6 +20,7 @@ use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::runtime_phase_cut::RuntimePhaseCutGate;
 use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
+use rusqlite::OptionalExtension as _;
 use serde_json::{Value, json};
 
 const DIRECTIVE_REF: &str = "directive:test/recovery";
@@ -228,192 +230,134 @@ print(json.dumps({{"executed": True}}))
     Ok(())
 }
 
-fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn
-        .prepare("SELECT event_type, payload FROM events WHERE thread_id=?1 ORDER BY chain_seq ASC")
-    {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map(rusqlite::params![thread_id], |row| {
-            let event_type: String = row.get(0)?;
-            let payload: Vec<u8> = row.get(1)?;
-            Ok((
-                event_type,
-                serde_json::from_slice(&payload).unwrap_or(Value::Null),
-            ))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
+/// Persisted events of `thread_id` through the daemon's replay service. The
+/// daemon must be answering; a refusal or an unknown thread is an error.
+async fn projection_events(
+    harness: &DaemonHarness,
+    thread_id: &str,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    harness.existing_thread_events(thread_id).await
 }
 
-fn projection_thread_status(state_path: &Path, thread_id: &str) -> Option<String> {
-    let db_path = common::selected_projection_path(state_path).ok()?;
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    conn.query_row(
-        "SELECT status FROM threads WHERE thread_id=?1",
-        rusqlite::params![thread_id],
-        |row| row.get(0),
-    )
-    .ok()
+/// The directive root thread, by item ref, through `service:threads/list`.
+async fn root_thread_id(harness: &DaemonHarness) -> anyhow::Result<Option<String>> {
+    Ok(harness
+        .list_threads(500)
+        .await?
+        .into_iter()
+        .find(|thread| thread.item_ref == DIRECTIVE_REF)
+        .map(|thread| thread.thread_id))
 }
 
-use anyhow::Context as _;
-use rusqlite::OptionalExtension;
-
-fn root_thread_id(state_path: &Path) -> anyhow::Result<Option<String>> {
-    let db_path = common::selected_projection_path(state_path)?;
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("open projection {}", db_path.display()))?;
-    conn.query_row(
-        "SELECT thread_id FROM threads WHERE item_ref=?1 ORDER BY created_at ASC LIMIT 1",
-        rusqlite::params![DIRECTIVE_REF],
-        |row| row.get(0),
-    )
-    .optional()
-    .context("query the directive root thread")
+/// Status of `thread_id` through `service:threads/get`; `None` while the
+/// daemon does not know the thread.
+async fn thread_status(harness: &DaemonHarness, thread_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(detail) = harness.get_thread(thread_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        detail
+            .pointer("/thread/status")
+            .and_then(Value::as_str)
+            .with_context(|| format!("threads/get returned no status: {detail}"))?
+            .to_owned(),
+    ))
 }
 
-/// Everything a reader can see when the root row never appears: the
-/// projection the generation points at and every thread row in it.
-fn describe_projection_threads(state_path: &Path) -> String {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(error) => return format!("no selected projection: {error:#}"),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(error) => return format!("open {} failed: {error}", db_path.display()),
-    };
-    let mut statement = match conn.prepare("SELECT thread_id, item_ref, status FROM threads") {
-        Ok(statement) => statement,
-        Err(error) => return format!("prepare over {} failed: {error}", db_path.display()),
-    };
-    let rows = statement.query_map([], |row| {
-        Ok(format!(
-            "{} {} {}",
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?
-        ))
-    });
-    match rows {
-        Ok(rows) => format!(
-            "projection {}:\n{}",
-            db_path.display(),
-            rows.filter_map(Result::ok).collect::<Vec<_>>().join("\n")
-        ),
-        Err(error) => format!("query over {} failed: {error}", db_path.display()),
+/// Everything a reader can see when the root row never appears: every thread
+/// the daemon lists.
+async fn describe_listed_threads(harness: &DaemonHarness) -> String {
+    match harness.list_threads(500).await {
+        Ok(threads) => threads
+            .iter()
+            .map(|thread| format!("{} {} {}", thread.thread_id, thread.item_ref, thread.status))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => format!("threads/list failed: {error:#}"),
     }
 }
 
+/// Runtime-action intents of one chain from the stopped node's Runtime store
+/// through the native test gate. The daemon must already have exited.
 fn runtime_action_intents(state_path: &Path, chain_root_id: &str) -> Vec<(String, String)> {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn.prepare(
-        "SELECT chain_root_id, operation_id, child_thread_id FROM runtime_action_intent \
-         ORDER BY created_at_ms ASC",
-    ) {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
-        .into_iter()
+    let rows = ryeos_app::test_support::read_existing_runtime(&db_path, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT chain_root_id, operation_id, child_thread_id FROM runtime_action_intent \
+             ORDER BY created_at_ms ASC",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    });
+    rows.into_iter()
         .filter_map(|(retained_chain, operation_id, child_thread_id)| {
             (retained_chain == chain_root_id).then_some((operation_id, child_thread_id))
         })
         .collect()
 }
 
+fn accounting_db_path(state_path: &Path) -> std::path::PathBuf {
+    state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME)
+}
+
+/// The first retry advancement recorded for `thread_id`, from the stopped
+/// node's accounting ledger through the native test gate.
 fn provider_retry_advance(
     state_path: &Path,
     thread_id: &str,
 ) -> Option<ryeos_accounting::ProviderRetryAdvance> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let raw: String = conn
-        .query_row(
-            "SELECT operation.response_json
-               FROM accounting_operation AS operation
-               JOIN provider_attempt_reservation AS attempt
-                 ON attempt.attempt_id=operation.attempt_id
-              WHERE attempt.thread_id=?1 AND operation.operation_kind='retry_advance'
-              ORDER BY attempt.turn, attempt.attempt_number
-              LIMIT 1",
-            rusqlite::params![thread_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    serde_json::from_str(&raw).ok()
+    let raw: Option<String> = ryeos_app::test_support::read_existing_accounting(
+        &accounting_db_path(state_path),
+        |connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT operation.response_json
+                       FROM accounting_operation AS operation
+                       JOIN provider_attempt_reservation AS attempt
+                         ON attempt.attempt_id=operation.attempt_id
+                      WHERE attempt.thread_id=?1 AND operation.operation_kind='retry_advance'
+                      ORDER BY attempt.turn, attempt.attempt_number
+                      LIMIT 1",
+                    rusqlite::params![thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        },
+    );
+    raw.map(|raw| serde_json::from_str(&raw).expect("decode the recorded retry advancement"))
 }
 
+/// Provider attempts of `thread_id` from the stopped node's accounting
+/// ledger through the native test gate.
 fn provider_attempts(state_path: &Path, thread_id: &str) -> Vec<(u32, u32, String)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn.prepare(
-        "SELECT turn, attempt_number, state
-           FROM provider_attempt_reservation
-          WHERE thread_id=?1
-          ORDER BY turn, attempt_number",
-    ) {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map(rusqlite::params![thread_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
+    ryeos_app::test_support::read_existing_accounting(
+        &accounting_db_path(state_path),
+        |connection| {
+            let mut statement = connection.prepare(
+                "SELECT turn, attempt_number, state
+               FROM provider_attempt_reservation
+              WHERE thread_id=?1
+              ORDER BY turn, attempt_number",
+            )?;
+            Ok(statement
+                .query_map(rusqlite::params![thread_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?)
+        },
+    )
 }
 
 fn event_count(events: &[(String, Value)], event_type: &str) -> usize {
@@ -498,7 +442,7 @@ async fn await_root_thread(
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut last_read_error = None;
     loop {
-        match root_thread_id(&harness.state_path) {
+        match root_thread_id(harness).await {
             Ok(Some(thread_id)) => return thread_id,
             Ok(None) => {}
             Err(error) => last_read_error = Some(format!("{error:#}")),
@@ -506,7 +450,7 @@ async fn await_root_thread(
         if Instant::now() >= deadline {
             let stderr = harness.drain_stderr_nonblocking().await;
             let pending = !request.is_finished();
-            let rows = describe_projection_threads(&harness.state_path);
+            let rows = describe_listed_threads(harness).await;
             panic!(
                 "directive root thread did not appear within 120 s (execute request still pending: {pending}; last read error: {last_read_error:?})\n{rows}\n--- daemon stderr ---\n{stderr}"
             );
@@ -553,24 +497,31 @@ async fn await_child_born_marker(
 
 async fn await_completed(harness: &mut DaemonHarness, thread_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last_read_error = None;
     loop {
-        match projection_thread_status(&harness.state_path, thread_id).as_deref() {
-            Some("completed") => return,
-            Some("failed" | "cancelled" | "killed" | "timed_out" | "continued") => {
-                let events = projection_events(&harness.state_path, thread_id);
+        match thread_status(harness, thread_id).await {
+            Ok(Some(status)) if status == "completed" => return,
+            Ok(Some(status))
+                if matches!(
+                    status.as_str(),
+                    "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+                ) =>
+            {
+                let events = projection_events(harness, thread_id).await;
                 let stderr = harness.drain_stderr_nonblocking().await;
                 panic!(
-                    "resumed directive reached a non-completed terminal; events={events:#?}\n\
+                    "resumed directive reached a non-completed terminal ({status}); events={events:#?}\n\
                      --- daemon stderr ---\n{stderr}"
                 );
             }
-            _ => {}
+            Ok(_) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
         if Instant::now() >= deadline {
-            let events = projection_events(&harness.state_path, thread_id);
+            let events = projection_events(harness, thread_id).await;
             let stderr = harness.drain_stderr_nonblocking().await;
             panic!(
-                "resumed directive did not complete; events={events:#?}\n\
+                "resumed directive did not complete (last read error: {last_read_error:?}); events={events:#?}\n\
                  --- daemon stderr ---\n{stderr}"
             );
         }
@@ -743,12 +694,20 @@ async fn run_crash_cut(cut: CrashCut) {
         .await
         .expect("respawn daemon without cut hook");
     await_completed(&mut harness, &root_thread_id).await;
+    let events = match projection_events(&harness, &root_thread_id).await {
+        Ok(events) => events,
+        Err(error) => {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            panic!(
+                "read the recovered directive's events: {error:#}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+    };
     harness
         .kill_daemon()
         .await
         .expect("stop recovered directive daemon before evidence inspection");
 
-    let events = projection_events(&harness.state_path, &root_thread_id);
     assert_eq!(
         event_count(&events, "thread_started"),
         1,
