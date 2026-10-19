@@ -125,8 +125,9 @@ pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
     DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, HeadOperation,
     PendingChainHeadTransition, PendingTransitionCursor, ProjectionRecoveryGeneration,
-    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredThreadHistoryDiscardMarker,
-    StagedCasRootHashes, StagedCasRootLease, ThreadHistoryDiscardAcknowledgementRefused,
+    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredChainFence,
+    RetiredThreadHistoryDiscardMarker, RetirementEvidenceDiscard, StagedCasRootHashes,
+    StagedCasRootLease, ThreadHistoryDiscardAcknowledgementRefused,
     ThreadHistoryDiscardOperationRef, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};

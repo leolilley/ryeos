@@ -34,6 +34,8 @@ pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
 pub const RECOVERY_DIRECTORY_NAME: &str = "recovery";
 /// The CAS mutation lock inside [`RECOVERY_DIRECTORY_NAME`].
 pub const CAS_MUTATION_LOCK_FILENAME: &str = "cas-mutation.lock";
+mod retirement_evidence;
+pub use retirement_evidence::{RetiredChainFence, RetirementEvidenceDiscard};
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
@@ -391,6 +393,9 @@ pub(crate) fn sweep_interrupted_state_publications(
         if let Some(directory) = directory {
             removed += sweep_state_temporaries_in(&directory)?;
         }
+    }
+    for directory in RecoveryStore::retirement_evidence_sweep_directories(thread_projection)? {
+        removed += sweep_state_temporaries_in(&directory)?;
     }
     Ok(removed)
 }

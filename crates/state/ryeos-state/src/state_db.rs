@@ -946,6 +946,8 @@ pub struct AuthoritativeThreadHistoryDiscardReport {
     pub chain_heads: usize,
     pub chain_ref_artifacts: usize,
     pub pending_transitions: usize,
+    pub retirement_fences: usize,
+    pub evidence_obligations: usize,
     pub superseded_projection_instances: usize,
     pub rebuilt_projection: Option<crate::rebuild::RebuildReport>,
 }
@@ -4622,12 +4624,19 @@ impl StateDb {
             .recovery
             .discard_all_pending_transitions(cas_mutation_guard, dry_run)?;
         debug_assert_eq!(pending_transitions, pending.len());
+        // Every head and pending transition is gone, so no live holder can
+        // still need a fence; marker absence then reads as an unknown root.
+        let retirement_evidence = self
+            .recovery
+            .discard_retirement_evidence(cas_mutation_guard, dry_run)?;
 
         if dry_run {
             return Ok(AuthoritativeThreadHistoryDiscardReport {
                 chain_heads: heads.len(),
                 chain_ref_artifacts,
                 pending_transitions,
+                retirement_fences: retirement_evidence.retirement_fences,
+                evidence_obligations: retirement_evidence.evidence_obligations,
                 superseded_projection_instances: projection_instances,
                 rebuilt_projection: None,
             });
@@ -4646,6 +4655,8 @@ impl StateDb {
             chain_heads: heads.len(),
             chain_ref_artifacts,
             pending_transitions,
+            retirement_fences: retirement_evidence.retirement_fences,
+            evidence_obligations: retirement_evidence.evidence_obligations,
             superseded_projection_instances: projection_instances,
             rebuilt_projection: Some(rebuilt_projection),
         })
@@ -8196,6 +8207,27 @@ mod tests {
         .unwrap();
         let old_selected = db.selected_projection_path().to_path_buf();
         drop(db);
+        // Retirement evidence the reset must remove with the heads.
+        {
+            let store = RecoveryStore::from_runtime_state_dir(dir.path()).unwrap();
+            let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
+            let refs = dir.path().join("refs");
+            let owner = crate::chain::ChainLock::acquire(&refs, "T-owner").unwrap();
+            let holder = crate::chain::ChainLock::acquire(&refs, "T-holder").unwrap();
+            store
+                .publish_retired_chain_fence(&guard, &owner, "T-owner", &"ab".repeat(32))
+                .unwrap();
+            store
+                .publish_evidence_obligation_then(
+                    &guard,
+                    &owner,
+                    &holder,
+                    "T-owner",
+                    "T-holder",
+                    || Ok(()),
+                )
+                .unwrap();
+        }
         let operation = crate::recovery::ThreadHistoryDiscardOperationRef {
             operation_id: "a".repeat(32),
             sha256: "b".repeat(64),
@@ -8212,6 +8244,8 @@ mod tests {
                 .discard_authoritative_thread_history_admitted(&guard, true)
                 .unwrap();
             assert_eq!(preview.chain_heads, 1);
+            assert_eq!(preview.retirement_fences, 1);
+            assert_eq!(preview.evidence_obligations, 1);
             assert!(preview.chain_ref_artifacts >= 2);
             assert!(old_selected.is_file());
             assert!(
@@ -8250,6 +8284,13 @@ mod tests {
                 .discard_authoritative_thread_history_admitted(&guard, false)
                 .unwrap();
             let rebuilt = report.rebuilt_projection.as_ref().unwrap();
+            assert_eq!(report.retirement_fences, 1);
+            assert_eq!(report.evidence_obligations, 1);
+            let recovery = RecoveryStore::from_runtime_state_dir(dir.path()).unwrap();
+            assert_eq!(
+                recovery.retired_chain_fence("T-owner").unwrap(),
+                crate::RetiredChainFence::Absent
+            );
             assert_eq!(rebuilt.chains_rebuilt, 0);
             assert_eq!(rebuilt.threads_restored, 0);
             assert!(report.superseded_projection_instances >= 1);
