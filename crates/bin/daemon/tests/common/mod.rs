@@ -419,17 +419,6 @@ async fn wait_for_daemon_discovery(
     }
 }
 
-/// Resolve the projection instance selected by the current recovery
-/// generation. Tests must follow the same pointer as production rather than
-/// assuming a mutable well-known SQLite filename.
-pub fn selected_projection_path(app_root: &Path) -> anyhow::Result<PathBuf> {
-    let runtime_state_dir = app_root.join(ryeos_engine::AI_DIR).join("state");
-    let generation = ryeos_state::RecoveryStore::from_runtime_state_dir(&runtime_state_dir)?
-        .read_generation()?
-        .context("thread projection has no selected recovery generation")?;
-    Ok(runtime_state_dir.join(generation.projection_file))
-}
-
 /// Path to the explicitly prepared `ryeos` CLI binary beside `ryeosd`.
 ///
 /// The validation queue builds this artifact with its declared source, lock,

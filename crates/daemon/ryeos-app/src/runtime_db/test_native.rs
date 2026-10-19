@@ -124,7 +124,27 @@ pub fn read_existing<T>(
     path: &Path,
     work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
 ) -> T {
-    with_bound_path(path, OriginalNativeBoundMode::Existing, work)
+    with_bound_path(
+        path,
+        OriginalNativeBoundMode::Existing,
+        OriginalNativeDomain::NodeRuntime,
+        work,
+    )
+}
+
+/// Run `work` on the existing accounting ledger at `path` through the native
+/// gate, on this thread's shared test host, without the live open's
+/// validation. The daemon that wrote it must already have exited.
+pub fn read_existing_accounting<T>(
+    path: &Path,
+    work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
+) -> T {
+    with_bound_path(
+        path,
+        OriginalNativeBoundMode::Existing,
+        OriginalNativeDomain::NodeAccounting,
+        work,
+    )
 }
 
 /// Create the database at `path` through the native gate, on this thread's
@@ -134,15 +154,21 @@ pub fn with_created<T>(
     path: &Path,
     work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
 ) -> T {
-    with_bound_path(path, OriginalNativeBoundMode::CreateExclusive, work)
+    with_bound_path(
+        path,
+        OriginalNativeBoundMode::CreateExclusive,
+        OriginalNativeDomain::NodeRuntime,
+        work,
+    )
 }
 
 /// Run `work` on one bound ticket for the database at `path`, opened in
-/// `mode`. The connection closes into the host's census even when `work`
-/// panics, so a failing test leaves no arena behind.
+/// `mode` under `domain`. The connection closes into the host's census even
+/// when `work` panics, so a failing test leaves no arena behind.
 fn with_bound_path<T>(
     path: &Path,
     mode: OriginalNativeBoundMode,
+    domain: OriginalNativeDomain,
     work: impl for<'c> FnOnce(&'c rusqlite::Connection) -> Result<T>,
 ) -> T {
     let root = Arc::new(
@@ -152,8 +178,7 @@ fn with_bound_path<T>(
     );
     let name = path.file_name().expect("test database basename");
     with_shared_host(|host| {
-        let connection = match host.open_bound(root, name, mode, OriginalNativeDomain::NodeRuntime)
-        {
+        let connection = match host.open_bound(root, name, mode, domain) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = format!("{failure:#}");

@@ -517,33 +517,6 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
         .expect("parent thread id")
         .to_string();
 
-    // Needs a read surface: the parent's workspace ownership is only
-    // observable while it is suspended at the follow handoff, so this cannot
-    // move behind a stopped-node read, and no service exposes it. Until one
-    // exists this is a read-only open of the live Runtime store, which the
-    // native store refuses.
-    let runtime_db = h
-        .state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/runtime.sqlite3");
-    let runtime = rusqlite::Connection::open_with_flags(
-        runtime_db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open runtime database read-only");
-    let owned_workspaces: i64 = runtime
-        .query_row(
-            "SELECT COUNT(*) FROM execution_workspace \
-             WHERE thread_id = ?1 AND launch_owner IS NOT NULL",
-            [&parent_thread_id],
-            |row| row.get(0),
-        )
-        .expect("read parent workspace owner");
-    assert_eq!(
-        owned_workspaces, 1,
-        "the durable parent must own its pinned workspace before follow"
-    );
-
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let events = h.principal_events().await;
@@ -565,6 +538,29 @@ async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // The workspace row keeps the launch owner it was bound to after the
+    // workspace closes, so the stopped node's Runtime store, read through the
+    // native test gate, still shows that the parent owned its pinned
+    // workspace.
+    h.kill_daemon().await.expect("stop daemon");
+    let runtime_db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let owned_workspaces: i64 =
+        ryeos_app::test_support::read_existing_runtime(&runtime_db, |connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM execution_workspace \
+                 WHERE thread_id = ?1 AND launch_owner IS NOT NULL",
+                [&parent_thread_id],
+                |row| row.get(0),
+            )?)
+        });
+    assert_eq!(
+        owned_workspaces, 1,
+        "the durable parent must own its pinned workspace before follow"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

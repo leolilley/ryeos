@@ -131,7 +131,7 @@ pub mod test_support {
     pub use crate::runtime_db::test_native::{
         TestRuntime, live_open_refusal as runtime_live_open_refusal,
         open_live as open_live_runtime, read_existing as read_existing_runtime,
-        retire as retire_runtime, seed_node,
+        read_existing_accounting, retire as retire_runtime, seed_node,
     };
     pub use crate::state_store::test_native::{
         TEST_STATE_STORE_ENVELOPE, TestAccountingDb, TestStateStore, with_store_host,

@@ -499,59 +499,74 @@ execution_protocol: "protocol:ryeos/core/opaque"
     Ok(())
 }
 
-/// Read the exact persisted process attachment from the runtime DB.
-fn read_process_attachment(
+/// One thread as the daemon reports it through `service:threads/get`: its
+/// status, the pid of its attached process, and the persisted result's
+/// outcome code and error.
+struct ThreadObservation {
+    status: String,
+    pid: Option<i64>,
+    outcome_code: Option<String>,
+    error: Option<serde_json::Value>,
+}
+
+/// Read `thread_id` through the daemon's own route. `None` while the daemon
+/// does not know the thread; a refusal or a malformed answer is an error.
+async fn observe_thread(
+    h: &DaemonHarness,
+    thread_id: &str,
+) -> anyhow::Result<Option<ThreadObservation>> {
+    let Some(detail) = h.get_thread(thread_id).await? else {
+        return Ok(None);
+    };
+    let status = detail
+        .pointer("/thread/status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("threads/get returned no status: {detail}"))?
+        .to_owned();
+    Ok(Some(ThreadObservation {
+        status,
+        pid: detail
+            .pointer("/thread/runtime/pid")
+            .and_then(serde_json::Value::as_i64),
+        outcome_code: detail
+            .pointer("/result/outcome_code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        error: detail
+            .pointer("/result/error")
+            .filter(|error| !error.is_null())
+            .cloned(),
+    }))
+}
+
+/// The exact persisted process identity of `thread_id` from the stopped
+/// node's Runtime store through the native test gate. The daemon must already
+/// have exited.
+fn read_process_identity(
     state_path: &Path,
     thread_id: &str,
-) -> Option<(i64, ryeos_app::process::ExecutionProcessIdentity)> {
+) -> ryeos_app::process::ExecutionProcessIdentity {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let mut stmt = conn
-        .prepare("SELECT pid, process_identity FROM thread_runtime WHERE thread_id = ?1")
-        .ok()?;
-    let (pid, identity): (Option<i64>, Option<String>) = stmt
-        .query_row(rusqlite::params![thread_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .ok()?;
-    Some((pid?, serde_json::from_str(identity?.as_str()).ok()?))
-}
-
-/// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code, error_detail)` read directly from the
-/// persisted `thread_results` columns.
-fn read_thread_outcome_full(
-    state_path: &Path,
-    thread_id: &str,
-) -> Option<(String, Option<String>, Option<String>)> {
-    let db_path = common::selected_projection_path(state_path).ok()?;
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-
-    let mut stmt = conn
-        .prepare("SELECT status, outcome_code, error FROM thread_results WHERE thread_id = ?1")
-        .ok()?;
-    let (status, outcome_code, error_json) = stmt
-        .query_row(rusqlite::params![thread_id], |row| {
-            let status: String = row.get(0)?;
-            let outcome_code: Option<String> = row.get(1)?;
-            let error: Option<String> = row.get(2)?;
-            Ok((status, outcome_code, error))
-        })
-        .ok()?;
-
-    Some((status, outcome_code, error_json))
-}
-
-/// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code)` read from the persisted columns.
-fn read_thread_outcome(state_path: &Path, thread_id: &str) -> Option<(String, Option<String>)> {
-    read_thread_outcome_full(state_path, thread_id).map(|(s, oc, _)| (s, oc))
+    let identity: Option<String> =
+        ryeos_app::test_support::read_existing_runtime(&db_path, |connection| {
+            let mut statement = connection
+                .prepare("SELECT process_identity FROM thread_runtime WHERE thread_id = ?1")?;
+            let mut rows = statement.query([thread_id])?;
+            Ok(match rows.next()? {
+                Some(row) => row.get::<_, Option<String>>(0)?,
+                None => None,
+            })
+        });
+    let identity = identity.unwrap_or_else(|| {
+        panic!(
+            "process identity for {thread_id} never recorded in {}",
+            db_path.display()
+        )
+    });
+    serde_json::from_str(&identity)
+        .unwrap_or_else(|error| panic!("decode recorded process identity for {thread_id}: {error}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -644,32 +659,38 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // projection DB for early finalization (engine error, etc.)
     // so we get a useful diagnostic instead of a timeout.
     let pid_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let (pid, process_identity) = loop {
-        if let Some(attachment) = read_process_attachment(&h.state_path, &thread_id) {
-            break attachment;
-        }
-        // Check if the thread was already finalized (spawn failure).
-        if let Some((status, outcome, full_error)) =
-            read_thread_outcome_full(&h.state_path, &thread_id)
-            && (status == "failed" || status == "completed" || status == "killed")
-        {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "thread {thread_id} reached terminal status before PID appeared: \
-                 status={status} outcome_code={outcome:?} error={full_error:?}\n\
-                 Daemon stderr (tail):\n{}",
-                &stderr[stderr.len().saturating_sub(3000)..]
-            );
+    let mut last_read_error = None;
+    let pid = loop {
+        match observe_thread(&h, &thread_id).await {
+            Ok(Some(observed)) => {
+                if let Some(pid) = observed.pid {
+                    break pid;
+                }
+                // Check if the thread was already finalized (spawn failure).
+                if matches!(observed.status.as_str(), "failed" | "completed" | "killed") {
+                    let stderr = h.drain_stderr_nonblocking().await;
+                    panic!(
+                        "thread {thread_id} reached terminal status before PID appeared: \
+                         status={} outcome_code={:?} error={:?}\n\
+                         Daemon stderr (tail):\n{}",
+                        observed.status,
+                        observed.outcome_code,
+                        observed.error,
+                        &stderr[stderr.len().saturating_sub(3000)..]
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
         if std::time::Instant::now() > pid_deadline {
             let stderr = h.drain_stderr_nonblocking().await;
-            let (thread_state, _, full_error) = read_thread_outcome_full(&h.state_path, &thread_id)
-                .map(|(s, oc, e)| (Some(s), Some(oc), Some(e)))
-                .unwrap_or((None, None, None));
+            let observed = observe_thread(&h, &thread_id).await;
             panic!(
-                "PID never appeared in runtime DB for thread {thread_id} \
-                 (state={thread_state:?} error={full_error:?})\n\
+                "PID never appeared for thread {thread_id} \
+                 (last observation={:?}; last read error={last_read_error:?})\n\
                  Daemon stderr (tail):\n{}",
+                observed.map(|observed| observed.map(|o| (o.status, o.error))),
                 &stderr[stderr.len().saturating_sub(3000)..]
             );
         }
@@ -684,6 +705,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // descendant-group emptiness cannot be proven; that state must remain
     // quarantined rather than being used as a resume fixture.
     h.kill_daemon().await.expect("kill daemon");
+    let process_identity = read_process_identity(&h.state_path, &thread_id);
     assert!(
         ryeos_app::process::execution_group_alive(&process_identity),
         "resume fixture requires the exact orphan process group to remain live and pin-able"
@@ -705,53 +727,66 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // coupling. The reconciler should restart the native subprocess and
     // leave the thread running, not fail with required_secret_missing.
     let outcome_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut last_read_error = None;
+    let mut last_observed = None;
     let resumed_pid = loop {
-        if let Some((new_pid, _)) = read_process_attachment(&h.state_path, &thread_id)
-            && new_pid != pid
-        {
-            break new_pid;
-        }
-        if let Some((status, outcome, full_error)) =
-            read_thread_outcome_full(&h.state_path, &thread_id)
-        {
-            assert_ne!(
-                outcome.as_deref(),
-                Some("required_secret_missing"),
-                "generic tool resume must not require provider auth; error={full_error:?}"
-            );
-            if status == "failed" || status == "completed" || status == "killed" {
-                let stderr = h.drain_stderr_nonblocking().await;
-                panic!(
-                    "thread {thread_id} reached terminal status after resume; \
-                     status={status} outcome_code={outcome:?} error={full_error:?}\n\
-                     Daemon stderr (tail):\n{}",
-                    &stderr[stderr.len().saturating_sub(3000)..]
+        match observe_thread(&h, &thread_id).await {
+            Ok(Some(observed)) => {
+                if let Some(new_pid) = observed.pid
+                    && new_pid != pid
+                {
+                    break new_pid;
+                }
+                assert_ne!(
+                    observed.outcome_code.as_deref(),
+                    Some("required_secret_missing"),
+                    "generic tool resume must not require provider auth; error={:?}",
+                    observed.error
                 );
+                if matches!(observed.status.as_str(), "failed" | "completed" | "killed") {
+                    let stderr = h.drain_stderr_nonblocking().await;
+                    panic!(
+                        "thread {thread_id} reached terminal status after resume; \
+                         status={} outcome_code={:?} error={:?}\n\
+                         Daemon stderr (tail):\n{}",
+                        observed.status,
+                        observed.outcome_code,
+                        observed.error,
+                        &stderr[stderr.len().saturating_sub(3000)..]
+                    );
+                }
+                last_observed = Some((observed.status, observed.outcome_code));
             }
+            Ok(None) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
         if std::time::Instant::now() > outcome_deadline {
             let stderr = h.drain_stderr_nonblocking().await;
             panic!(
                 "thread {thread_id} did not get a replacement PID within 15s. \
-                 Last known state: {:?}. Daemon stderr (tail):\n{}",
-                read_thread_outcome(&h.state_path, &thread_id),
+                 Last known state: {last_observed:?}; last read error: {last_read_error:?}. \
+                 Daemon stderr (tail):\n{}",
                 &stderr[stderr.len().saturating_sub(2000)..]
             );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    if let Some((status, outcome_code)) = read_thread_outcome(&h.state_path, &thread_id) {
-        assert_ne!(
-            outcome_code.as_deref(),
-            Some("required_secret_missing"),
-            "generic tool resume must not fail with provider missing"
-        );
-        assert!(
-            status == "running" || status == "created",
-            "thread should remain non-terminal after generic tool resume; got status={status} outcome={outcome_code:?}"
-        );
-    }
+    let resumed = observe_thread(&h, &thread_id)
+        .await
+        .expect("read the resumed thread")
+        .expect("the daemon knows the resumed thread");
+    assert_ne!(
+        resumed.outcome_code.as_deref(),
+        Some("required_secret_missing"),
+        "generic tool resume must not fail with provider missing"
+    );
+    assert!(
+        resumed.status == "running" || resumed.status == "created",
+        "thread should remain non-terminal after generic tool resume; got status={} outcome={:?}",
+        resumed.status,
+        resumed.outcome_code
+    );
 
     // Clean up the resumed subprocess so test teardown does not leave a
     // sleeping child behind.

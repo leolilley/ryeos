@@ -686,52 +686,57 @@ async fn public_ordinary_external_tool_uses_captured_runtime_and_authenticated_c
     Ok(())
 }
 
-fn ordinary_linked_children(state: &Path, root: &str) -> anyhow::Result<Vec<String>> {
-    // Exact-parent authoritative launch links, not thread-list discovery.
-    let db = rusqlite::Connection::open_with_flags(
-        state.join(".ai/state/runtime.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let mut statement = db.prepare(
-        "SELECT child_thread_id FROM thread_child_link WHERE parent_thread_id=?1 ORDER BY child_thread_id",
-    )?;
-    Ok(statement
-        .query_map([root], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+fn ordinary_linked_children(state: &Path, root: &str) -> Vec<String> {
+    // Exact-parent authoritative launch links, not thread-list discovery,
+    // read from the stopped node's Runtime store through the native test gate.
+    ryeos_app::test_support::read_existing_runtime(
+        &state.join(".ai/state/runtime.sqlite3"),
+        |connection| {
+            let mut statement = connection.prepare(
+                "SELECT child_thread_id FROM thread_child_link WHERE parent_thread_id=?1 ORDER BY child_thread_id",
+            )?;
+            Ok(statement
+                .query_map([root], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        },
+    )
 }
 
 /// Read the daemon's one-shot scoped-producer testimony for an exact accepted
-/// verifier root. This is an operational assertion for the real-daemon fixture,
-/// not a substitute for the verifier's independent semantic claims.
+/// verifier root, read from the Runtime store through the native test gate
+/// once the attempt has reached its terminal retired phase. This is an
+/// operational assertion for the real-daemon fixture, not a substitute for the
+/// verifier's independent semantic claims.
 fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result<Value> {
     use anyhow::{Context as _, ensure};
 
-    let db = rusqlite::Connection::open_with_flags(
-        state.join(".ai/state/runtime.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let mut statement = db.prepare(
-        "SELECT attempt_id, recipe_digest, recipe_generation, scenario_digest, \
-         natural_empty_receipt_digest, observation_object_hash, phase, mount_preparation_evidence, \
-         recovery_death_evidence_digest, retirement_evidence_digest \
-         FROM scoped_child_attempt WHERE owner_thread_id=?1",
-    )?;
-    let rows = statement
-        .query_map([root], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = ryeos_app::test_support::read_existing_runtime(
+        &state.join(".ai/state/runtime.sqlite3"),
+        |connection| {
+            let mut statement = connection.prepare(
+                "SELECT attempt_id, recipe_digest, recipe_generation, scenario_digest, \
+                 natural_empty_receipt_digest, observation_object_hash, phase, mount_preparation_evidence, \
+                 recovery_death_evidence_digest, retirement_evidence_digest \
+                 FROM scoped_child_attempt WHERE owner_thread_id=?1",
+            )?;
+            Ok(statement
+                .query_map([root], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        },
+    );
     ensure!(
         rows.len() == 1,
         "expected exactly one scoped attempt for root {root}"
@@ -1828,13 +1833,15 @@ fn direct_scripted_turn_rejects_duplicate_error_and_foreign_completion() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a host-backed disposable harness plus exact Codex/producer/verifier binaries; current fast fixture refuses scope preflight"]
 async fn signed_independent_verifier_qualifies_direct_codex_diagnostic() -> anyhow::Result<()> {
-    let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
+    let (mut harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
         ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
         false,
         None,
     )
     .await?;
-    verify_direct_codex_diagnostic(&harness, &scenario, &captured_subject).await
+    let live = observe_direct_codex_diagnostic(&harness, &scenario, &captured_subject).await?;
+    harness.kill_daemon().await?;
+    check_direct_diagnostic_scoped(&harness.state_path, &scenario, &captured_subject, live)
 }
 
 /// Operational acceptance against an already prepared, disposable native
@@ -1927,7 +1934,11 @@ async fn host_backed_signed_direct_codex_diagnostic() -> anyhow::Result<()> {
         .await?;
     }
     require_completed_producer_root_refused_as_direct_verifier(&host, &captured_subject).await?;
-    verify_direct_codex_diagnostic(&host, &scenario, &captured_subject).await
+    // The disposable supervised node is owned by its supervisor and this
+    // endpoint exposes no stop, so its scoped attempt is read in place; the
+    // verifier root is terminal, so the attempt has retired.
+    let live = observe_direct_codex_diagnostic(&host, &scenario, &captured_subject).await?;
+    check_direct_diagnostic_scoped(host.state_path(), &scenario, &captured_subject, live)
 }
 
 /// The same signed product, relationship and admitted Bundle policy must not
@@ -2047,11 +2058,11 @@ fn preexisting_codex_producer_inputs(
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
-async fn verify_direct_codex_diagnostic(
+async fn observe_direct_codex_diagnostic(
     harness: &impl QualificationEndpoint,
     scenario: &independent_verifier_scenario::IndependentVerifierScenario,
     captured_subject: &Value,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DirectDiagnosticLive> {
     use anyhow::{Context as _, ensure};
 
     let launch_id = format!("L-{:032x}", rand::random::<u128>());
@@ -2119,7 +2130,72 @@ async fn verify_direct_codex_diagnostic(
             && result.subject_manifest_hash == scenario.subject_manifest_hash,
         "direct verifier did not propose the exact signed diagnostic claims"
     );
-    let scoped = exact_scoped_producer_observation(harness.state_path(), &root)?;
+    let published = production_service(
+        harness,
+        "service:external-content/qualify-product",
+        json!({
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "relationship_name":"runtime_to_external_authoring_worker",
+            "verifier_chain_root_id":root,
+            "verifier_thread_id":root,
+        }),
+    )
+    .await?;
+    let qualification_hash = published["qualification_hash"]
+        .as_str()
+        .filter(|hash| lillux::valid_hash(hash))
+        .context("direct diagnostic qualification was not published")?;
+    let cas = lillux::CasStore::new(harness.state_path().join(".ai/state/objects"));
+    let attestation: ryeos_state::objects::Attestation = serde_json::from_value(
+        cas.get_object(qualification_hash)?
+            .context("published direct diagnostic attestation is missing from CAS")?,
+    )?;
+    let evidence = ryeos_state::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)?;
+    Ok(DirectDiagnosticLive {
+        launch_id,
+        root,
+        terminal,
+        result,
+        qualification_hash: qualification_hash.to_owned(),
+        evidence,
+    })
+}
+
+/// What a direct diagnostic's live phase observed through the daemon's routes:
+/// the completed verifier root, its result, and the published qualification.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+struct DirectDiagnosticLive {
+    launch_id: String,
+    root: String,
+    terminal: Value,
+    result: ryeos_state::external_content::products::qualification::ProductQualificationResult,
+    qualification_hash: String,
+    evidence: ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+}
+
+/// Join a direct diagnostic's live observations to the daemon-retained scoped
+/// observation, read from the Runtime store at `state_path`. The node must
+/// already have exited; its verifier root is terminal, so the scoped attempt
+/// has retired.
+#[cfg(all(unix, feature = "handoff-test-support"))]
+fn check_direct_diagnostic_scoped(
+    state_path: &Path,
+    scenario: &independent_verifier_scenario::IndependentVerifierScenario,
+    captured_subject: &Value,
+    live: DirectDiagnosticLive,
+) -> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let DirectDiagnosticLive {
+        launch_id,
+        root,
+        terminal,
+        result,
+        qualification_hash,
+        evidence,
+    } = live;
+    let scoped = exact_scoped_producer_observation(state_path, &root)?;
     let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
         scoped["launch_owner"]["thread_id"] == root
@@ -2145,28 +2221,6 @@ async fn verify_direct_codex_diagnostic(
             }),
         "verifier result did not name the exact daemon-retained scoped observation"
     );
-    let published = production_service(
-        harness,
-        "service:external-content/qualify-product",
-        json!({
-            "witness_hash":captured_subject["witness_hash"],
-            "witness_source":{"kind":"local_capture"},
-            "relationship_name":"runtime_to_external_authoring_worker",
-            "verifier_chain_root_id":root,
-            "verifier_thread_id":root,
-        }),
-    )
-    .await?;
-    let qualification_hash = published["qualification_hash"]
-        .as_str()
-        .filter(|hash| lillux::valid_hash(hash))
-        .context("direct diagnostic qualification was not published")?;
-    let cas = lillux::CasStore::new(harness.state_path().join(".ai/state/objects"));
-    let attestation: ryeos_state::objects::Attestation = serde_json::from_value(
-        cas.get_object(qualification_hash)?
-            .context("published direct diagnostic attestation is missing from CAS")?,
-    )?;
-    let evidence = ryeos_state::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)?;
     let proof = evidence
         .execution_proof
         .subordinate_attempt
@@ -2207,7 +2261,7 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
     use anyhow::{Context as _, ensure};
 
     let (mut gate, child) = common::ScopedReservedAttemptGate::pair()?;
-    let (harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
+    let (mut harness, scenario, captured_subject) = prepare_signed_direct_qualification_fixture(
         ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
         true,
         Some(child),
@@ -2234,55 +2288,59 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
         .as_str()
         .context("accepted race verifier root absent")?
         .to_owned();
-    let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
-        loop {
-            let detail =
-                production_service(&harness, "service:threads/get", json!({"thread_id":root}))
-                    .await?;
-            ensure!(
-                detail.pointer("/thread/thread_id") == Some(&json!(root)),
-                "race qualification point read changed root identity"
-            );
-            let status = detail
-                .pointer("/thread/status")
-                .and_then(Value::as_str)
-                .context("race qualification root status absent")?;
-            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
-                .is_some_and(|status| status.is_terminal())
-            {
-                return Ok::<_, anyhow::Error>(detail);
+    // The polling future borrows the daemon; it ends before the daemon stops.
+    let (held, terminal) = {
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
+            loop {
+                let detail =
+                    production_service(&harness, "service:threads/get", json!({"thread_id":root}))
+                        .await?;
+                ensure!(
+                    detail.pointer("/thread/thread_id") == Some(&json!(root)),
+                    "race qualification point read changed root identity"
+                );
+                let status = detail
+                    .pointer("/thread/status")
+                    .and_then(Value::as_str)
+                    .context("race qualification root status absent")?;
+                if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+                    .is_some_and(|status| status.is_terminal())
+                {
+                    return Ok::<_, anyhow::Error>(detail);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    });
-    tokio::pin!(terminal);
-    let reached_result = {
-        let reached = gate.wait_reached();
-        tokio::pin!(reached);
-        tokio::select! {
-            evidence = &mut reached => evidence,
-            result = &mut terminal => {
-                anyhow::bail!("race root terminated before reserved RESUME gate: {}", result??);
+        });
+        tokio::pin!(terminal);
+        let reached_result = {
+            let reached = gate.wait_reached();
+            tokio::pin!(reached);
+            tokio::select! {
+                evidence = &mut reached => evidence,
+                result = &mut terminal => {
+                    anyhow::bail!("race root terminated before reserved RESUME gate: {}", result??);
+                }
             }
-        }
+        };
+        let held = match reached_result {
+            Ok(held) => held,
+            Err(error) => {
+                // The accepted root may still be parked at Reserved. Settle the
+                // test gate, then point-read that exact root instead of leaving
+                // a live accepted qualification behind an observation timeout.
+                let release = gate.release();
+                let observed = terminal.await;
+                return Err(error.context(format!(
+                    "reserved RESUME gate observation failed for {root}; release={release:?}; exact terminal={observed:?}"
+                )));
+            }
+        };
+        gate.release()?;
+        let terminal = terminal
+            .await
+            .context("accepted race qualification observation timed out; do not relaunch")??;
+        (held, terminal)
     };
-    let held = match reached_result {
-        Ok(held) => held,
-        Err(error) => {
-            // The accepted root may still be parked at Reserved. Settle the
-            // test gate, then point-read that exact root instead of leaving
-            // a live accepted qualification behind an observation timeout.
-            let release = gate.release();
-            let observed = terminal.await;
-            return Err(error.context(format!(
-                "reserved RESUME gate observation failed for {root}; release={release:?}; exact terminal={observed:?}"
-            )));
-        }
-    };
-    gate.release()?;
-    let terminal = terminal
-        .await
-        .context("accepted race qualification observation timed out; do not relaunch")??;
     ensure!(
         terminal.pointer("/thread/status") == Some(&json!("failed")),
         "incomplete verifier incorrectly qualified or failed to terminate"
@@ -2304,6 +2362,9 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
             && held["launch_owner"]["thread_id"] == root,
         "reserved RESUME gate differs from accepted verifier root"
     );
+    // The verifier root is terminal, so the scoped attempt has retired; its
+    // row is read while the daemon is stopped.
+    harness.kill_daemon().await?;
     let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;
     let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
@@ -2480,13 +2541,17 @@ fn ordinary_chain_distinguishes_spawned_children_from_continuations() {
     assert!(verify_ordinary_chain(&continued, root, &children).is_err());
 }
 
+/// One recorded launch observed through the daemon's services: its terminal
+/// detail, dispatch evidence, public chain and root thread. Its launch links
+/// are read from the stopped node by the caller.
 async fn ordinary_recorded_pass(
     fixture: &OrdinaryPublicFixture,
     launch_id: &str,
 ) -> anyhow::Result<(
     Value,
     ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
-    Vec<String>,
+    Value,
+    String,
 )> {
     let mut request = ordinary_direct::recorded_request(
         fixture.project.path(),
@@ -2545,11 +2610,10 @@ async fn ordinary_recorded_pass(
         json!({"thread_id":root}),
     )
     .await?;
-    let children = ordinary_linked_children(&fixture.harness.state_path, &root)?;
     eprintln!(
         "recorded external evidence: {}",
         json!({
-            "launch_id":launch_id,"detail":detail,"receipts":receipts,"chain":chain,"children":children,
+            "launch_id":launch_id,"detail":detail,"receipts":receipts,"chain":chain,
         })
     );
     anyhow::ensure!(
@@ -2566,7 +2630,6 @@ async fn ordinary_recorded_pass(
         detail["thread"]["project_authority"]["snapshot_hash"],
         fixture.snapshot_hash
     );
-    verify_ordinary_chain(&chain, &root, &children)?;
     let nodes = receipts["receipts"]
         .as_array()
         .context("recorded graph receipts")?;
@@ -2576,7 +2639,7 @@ async fn ordinary_recorded_pass(
     let dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence =
         serde_json::from_value(nodes[0]["dispatch"].clone())?;
     dispatch.validate()?;
-    Ok((detail, dispatch, children))
+    Ok((detail, dispatch, chain, root))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2586,13 +2649,45 @@ async fn recorded_external_tool_replays_after_real_daemon_restart() -> anyhow::R
         RuntimeDispatchEffectClass, RuntimeDispatchPublication, RuntimeDispatchSource,
     };
     let mut fixture = prepare_public_ordinary_fixture(true).await?;
-    let (first, executed, children) =
+    let (first, executed, first_chain, first_root) =
         ordinary_recorded_pass(&fixture, "L-f87889391aeb628e19d2cf0ab3444501").await?;
     assert_eq!(executed.source, RuntimeDispatchSource::Executed);
     assert_eq!(executed.effect_class, RuntimeDispatchEffectClass::Recorded);
     assert_eq!(executed.publication, RuntimeDispatchPublication::Inserted);
     assert!(executed.effect_identity.is_some() && executed.record_hash.is_some());
     assert_eq!(executed.replayed_from, None);
+    let provider = fixture.provider.path().join("provider");
+    let contacts = ordinary_lifecycle_contacts(&provider)?;
+    let first_result = first
+        .pointer("/result/result/result")
+        .context("recorded graph return")?;
+    assert!(
+        first_result
+            .to_string()
+            .contains("selected-runtime-program-v1")
+    );
+    assert!(
+        !fixture.relay.0.is_finished(),
+        "channel relay stopped before restart"
+    );
+
+    // Only after authoritative completion and independently proved guest
+    // death. Restart this disposable daemon, preserving its exact state,
+    // endpoint, source, product binding and action. No installed node changes.
+    // The launch links are read while it is stopped.
+    fixture.harness.kill_daemon().await?;
+    let children = ordinary_linked_children(&fixture.harness.state_path, &first_root);
+    fixture.harness.respawn_with(|_| {}).await?;
+    assert_eq!(
+        ordinary_lifecycle_contacts(&provider)?,
+        contacts,
+        "restart contacted provider lifecycle"
+    );
+    assert!(
+        !fixture.relay.0.is_finished(),
+        "channel relay stopped during restart"
+    );
+    verify_ordinary_chain(&first_chain, &first_root, &children)?;
     assert_eq!(
         children.len(),
         1,
@@ -2614,36 +2709,7 @@ async fn recorded_external_tool_replays_after_real_daemon_restart() -> anyhow::R
         &child["artifacts"],
         &fixture.snapshot_hash,
     )?;
-    let provider = fixture.provider.path().join("provider");
-    let contacts = ordinary_lifecycle_contacts(&provider)?;
-    let first_result = first
-        .pointer("/result/result/result")
-        .context("recorded graph return")?;
-    assert!(
-        first_result
-            .to_string()
-            .contains("selected-runtime-program-v1")
-    );
-    assert!(
-        !fixture.relay.0.is_finished(),
-        "channel relay stopped before restart"
-    );
-
-    // Only after authoritative completion and independently proved guest
-    // death. Restart this disposable daemon, preserving its exact state,
-    // endpoint, source, product binding and action. No installed node changes.
-    fixture.harness.kill_daemon().await?;
-    fixture.harness.respawn_with(|_| {}).await?;
-    assert_eq!(
-        ordinary_lifecycle_contacts(&provider)?,
-        contacts,
-        "restart contacted provider lifecycle"
-    );
-    assert!(
-        !fixture.relay.0.is_finished(),
-        "channel relay stopped during restart"
-    );
-    let (second, replayed, children) =
+    let (second, replayed, second_chain, second_root) =
         ordinary_recorded_pass(&fixture, "L-f87889391aeb628e19d2cf0ab3444502").await?;
     assert_eq!(replayed.source, RuntimeDispatchSource::EffectRecord);
     assert_eq!(replayed.effect_class, RuntimeDispatchEffectClass::Recorded);
@@ -2656,7 +2722,10 @@ async fn recorded_external_tool_replays_after_real_daemon_restart() -> anyhow::R
     assert_eq!(replayed.record_hash, executed.record_hash);
     assert_eq!(replayed.replayed_from, executed.record_hash);
     assert_eq!(second.pointer("/result/result/result"), Some(first_result));
-    assert!(children.is_empty(), "effect replay launched a child");
+    fixture.harness.kill_daemon().await?;
+    let replay_children = ordinary_linked_children(&fixture.harness.state_path, &second_root);
+    verify_ordinary_chain(&second_chain, &second_root, &replay_children)?;
+    assert!(replay_children.is_empty(), "effect replay launched a child");
     assert_eq!(
         ordinary_lifecycle_contacts(&provider)?,
         contacts,
@@ -3250,21 +3319,16 @@ async fn recorded_managed_realization_replays_after_daemon_restart() -> anyhow::
         let chain =
             production_service(&harness, "service:threads/chain", json!({"thread_id":root}))
                 .await?;
-        // Test-only, read-only observation of this exact parent's operational
-        // launch links. The public continuation chain is not a child-process
-        // inventory: a dispatched managed child has its own chain root.
-        let linked_children = {
-            let runtime = rusqlite::Connection::open_with_flags(
-                harness.state_path.join(".ai/state/runtime.sqlite3"),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let mut statement = runtime.prepare(
-                "SELECT child_thread_id FROM thread_child_link WHERE parent_thread_id=?1 ORDER BY child_thread_id",
-            )?;
-            statement
-                .query_map([&root], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        // Test-only observation of this exact parent's operational launch
+        // links. The public continuation chain is not a child-process
+        // inventory: a dispatched managed child has its own chain root. The
+        // links are read while the daemon is stopped; it restarts at once,
+        // with all node state kept, after authoritative completion. Both
+        // passes restart it, so the loop's closing stop acts on a live
+        // daemon.
+        harness.kill_daemon().await?;
+        let linked_children = ordinary_linked_children(&harness.state_path, &root);
+        harness.respawn_with(|_| {}).await?;
         eprintln!(
             "managed replay evidence: {}",
             json!({
@@ -3374,12 +3438,10 @@ async fn recorded_managed_realization_replays_after_daemon_restart() -> anyhow::
             assert_eq!(child["thread"]["status"], "completed");
             assert_eq!(child["thread"]["item_ref"], "graph:test/two-products");
             eprintln!("managed producer child evidence: {child}");
+            // The daemon was restarted above, after confirmed completion, with
+            // all node state and the unchanged source kept; the next pass is a
+            // new equivalent action, not retry of uncertain work.
             prior = Some((detail, dispatch));
-            // Restart only the disposable process owned by this test. Keep all
-            // node state and the unchanged source; this is a new equivalent
-            // action after confirmed completion, not retry of uncertain work.
-            harness.kill_daemon().await?;
-            harness.respawn_with(|_| {}).await?;
         }
     }
     harness.kill_daemon().await?;
