@@ -192,6 +192,21 @@ impl TestStateStore {
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<Self> {
+        Self::open_with_bundle_admission_trust(
+            app_root, signer, write_barrier, head_trust, BundleAdmissionTrust::unbound(),
+        )
+    }
+
+    /// [`Self::open_with_barrier`] bound to the Bundle admission trust a node
+    /// binds, so retained Bundle executors revalidate as they do live. The
+    /// other opens are unbound and refuse every retained Bundle executor.
+    pub fn open_with_bundle_admission_trust(
+        app_root: &Path,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
+    ) -> Result<Self> {
         let runtime_state_dir = Self::runtime_state_dir(app_root);
         lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
             .context("establish test State root")?;
@@ -214,13 +229,14 @@ impl TestStateStore {
             // factory; the operator lock of this exact App root is held by
             // the opening owner for the Store's whole life.
             let opened = unsafe {
-                StateStore::new_in_process_native(
+                StateStore::new_in_process_native_with_bundle_admission_trust(
                     app_root,
                     runtime_state_dir.clone(),
                     runtime_state_dir.join(RUNTIME_DB_FILENAME),
                     signer,
                     write_barrier,
                     head_trust,
+                    bundle_admission_trust,
                     lease,
                     Arc::clone(&open_factory),
                     lease_authority,

@@ -335,21 +335,48 @@ pub mod test_support {
     use anyhow::Result;
 
     use super::{AppState, CatalogHealth};
+    use crate::state_store::BundleAdmissionTrust;
     use crate::state_store::test_native::TestStateStore;
 
     pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |_| BundleAdmissionTrust::unbound())
+    }
+
+    /// [`build`] with the Store bound to the Bundle admission trust a node
+    /// binds: the live platform signers plus this node's own identity, which
+    /// is what the composed test Engine admits Bundles with.
+    pub fn build_bound(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |identity| {
+            let mut node_trust = ryeos_engine::test_support::live_trust_store();
+            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+                ryeos_engine::trust::TrustedSigner {
+                    fingerprint: identity.fingerprint().to_owned(),
+                    verifying_key: *identity.verifying_key(),
+                    label: Some("test node identity".into()),
+                },
+            ]));
+            BundleAdmissionTrust::bound(node_trust)
+        })
+    }
+
+    fn build_with_bundle_admission(
+        root: &std::path::Path,
+        admission: impl FnOnce(&ryeos_node_runtime::identity::NodeIdentity) -> BundleAdmissionTrust,
+    ) -> Result<(TestStateStore, AppState)> {
         let (config, identity) = test_identity(root)?;
+        let bundle_admission_trust = admission(&identity);
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = crate::write_barrier::WriteBarrier::new();
-        let store_owner = TestStateStore::open_with_barrier(
+        let store_owner = TestStateStore::open_with_bundle_admission_trust(
             root,
             signer,
             write_barrier.clone(),
             Arc::new(head_trust),
+            bundle_admission_trust,
         )?;
         let state_store = Arc::clone(store_owner.store());
         // The owner already holds this App root's operator lock; a second

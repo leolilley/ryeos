@@ -5579,12 +5579,35 @@ impl StateStore {
         lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
+        Self::new_in_process_native_with_bundle_admission_trust(
+            app_root, runtime_state_dir, runtime_db_path, signer, write_barrier, head_trust,
+            BundleAdmissionTrust::unbound(), exclusion, factory, lease_authority, deadline,
+        )
+    }
+
+    /// [`Self::new_in_process_native`] bound to the Bundle admission trust a
+    /// node would bind, so retained Bundle executors revalidate against it.
+    /// # Safety
+    /// The same as [`Self::new_in_process_native`].
+    pub unsafe fn new_in_process_native_with_bundle_admission_trust(
+        app_root: PathBuf,
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
         let original = live_native::LiveStateOpen::capture(
             &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
             Arc::clone(&signer), Arc::clone(&head_trust), deadline,
         )?;
         Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
-            write_barrier, head_trust, BundleAdmissionTrust::unbound(), None, original)
+            write_barrier, head_trust, bundle_admission_trust, None, original)
     }
 
     /// Close a Store opened by [`StateStore::new_in_process_native`] into its
