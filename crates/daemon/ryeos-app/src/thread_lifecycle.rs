@@ -45,6 +45,7 @@ use ryeos_state::objects::ThreadStatus;
 pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
 
 mod direct_execution;
+mod fenced_retirement;
 pub mod managed_runtime_identity;
 mod sealed_request;
 mod validation;
@@ -122,6 +123,8 @@ pub struct ThreadLifecycleService {
     /// Retention gate and sealed pin sources shared by every path that
     /// deletes or fences thread chain state.
     retention: crate::retention_exclusion::RetentionCoordinator,
+    /// Keyset position of the fenced-kind retirement pass.
+    fenced_retirement_after: std::sync::Mutex<Option<String>>,
     /// Operator live-input staging, shared with `AppState`. Wired once after
     /// construction (`set_live_input_queue`) so the existing constructor call
     /// sites stay unchanged. Finalization closes the per-thread entry after the
@@ -3864,14 +3867,14 @@ impl ThreadLifecycleService {
         ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)
             .context("node identity produced a non-canonical site id")?;
 
-        Ok(Self::new_with_site_id(
+        Self::new_with_site_id(
             state_store,
             engine,
             kind_profiles,
             _events,
             event_hub,
             current_site_id.to_owned(),
-        ))
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3884,14 +3887,14 @@ impl ThreadLifecycleService {
         current_site_id: &str,
     ) -> anyhow::Result<Self> {
         ryeos_node_runtime::identity::validate_canonical_site_id(current_site_id)?;
-        Ok(Self::new_with_site_id(
+        Self::new_with_site_id(
             state_store,
             engine,
             kind_profiles,
             events,
             event_hub,
             current_site_id.to_string(),
-        ))
+        )
     }
 
     fn new_with_site_id(
@@ -3901,8 +3904,9 @@ impl ThreadLifecycleService {
         events: Arc<EventStoreService>,
         event_hub: Arc<ThreadEventHub>,
         current_site_id: String,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        state_store.install_fenced_chain_kinds(kind_profiles.fenced_chain_kinds()?)?;
+        Ok(Self {
             state_store,
             engine,
             kind_profiles,
@@ -3911,8 +3915,9 @@ impl ThreadLifecycleService {
             current_site_id,
             scheduler: std::sync::RwLock::new(SchedulerParticipantSlot::Available),
             retention: crate::retention_exclusion::RetentionCoordinator::new(),
+            fenced_retirement_after: std::sync::Mutex::new(None),
             live_input: std::sync::RwLock::new(None),
-        }
+        })
     }
 
     /// Wire the shared operator live-input queue. Called once after

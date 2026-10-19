@@ -4,6 +4,7 @@ use ryeos_state::object_closure::{
     EventPayloadContractRegistration, ObjectContractRegistration, RegisteredObjectEdge,
     RegisteredObjectExpectation, RegisteredObjectLinks,
 };
+use ryeos_state::objects::ThreadEvent;
 use serde_json::Value;
 use std::sync::OnceLock;
 
@@ -47,6 +48,43 @@ pub fn install_with_event_contracts(
         "application event contracts were already installed with a different selector set"
     );
     Ok(())
+}
+
+/// The composition's judgement of one retained evidence event: it decides
+/// what the event means for a retiring chain, which State never does.
+pub type RetainedEvidenceValidator = fn(&ThreadEvent) -> anyhow::Result<()>;
+
+/// The single process-wide validator the composition root installed.
+static EVIDENCE_VALIDATOR: OnceLock<RetainedEvidenceValidator> = OnceLock::new();
+
+/// Install the composition's retained-evidence validator. It installs once
+/// per process: repeating the same validator is accepted, a different one is
+/// refused rather than replaced.
+pub fn install_retained_evidence_validator(
+    validator: RetainedEvidenceValidator,
+) -> anyhow::Result<()> {
+    let installed = EVIDENCE_VALIDATOR.get_or_init(|| validator);
+    anyhow::ensure!(
+        std::ptr::fn_addr_eq(*installed, validator),
+        "a retained-evidence validator was already installed with a different function"
+    );
+    Ok(())
+}
+
+/// Test validator shared by every test of this process: the installation is
+/// process-wide, so all tests must install the same function.
+#[cfg(test)]
+pub(crate) fn accept_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// The installed validator, or a refusal: retained evidence is never admitted
+/// without the composition that owns its meaning.
+pub fn retained_evidence_validator() -> anyhow::Result<RetainedEvidenceValidator> {
+    EVIDENCE_VALIDATOR
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no composition installed a retained-evidence validator"))
 }
 
 fn install_objects() -> anyhow::Result<()> {
@@ -536,5 +574,21 @@ mod tests {
                 .iter()
                 .all(|edge| edge.hash != predecessor)
         );
+    }
+
+    fn refuse_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+        anyhow::bail!("refused")
+    }
+
+    #[test]
+    fn retained_evidence_validator_installs_once_and_refuses_a_different_one() {
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        let refused = install_retained_evidence_validator(refuse_evidence).unwrap_err();
+        assert!(refused.to_string().contains("different function"));
+        assert!(std::ptr::fn_addr_eq(
+            retained_evidence_validator().unwrap(),
+            accept_evidence as RetainedEvidenceValidator
+        ));
     }
 }

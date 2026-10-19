@@ -205,6 +205,7 @@ impl RetentionGate {
         }
         Ok(RetentionExclusion {
             guards: PinGuards::Owned(guards),
+            mode: self.mode,
             owner: self.owner,
             _gate: self._held,
         })
@@ -231,6 +232,7 @@ impl RetentionGate {
         }
         Ok(RetentionExclusion {
             guards: PinGuards::Held(held),
+            mode: self.mode,
             owner: self.owner,
             _gate: self._held,
         })
@@ -253,6 +255,7 @@ pub struct RetentionGateHold {
 pub struct RetentionExclusion<'a> {
     // Source guards drop before the App gate.
     guards: PinGuards<'a>,
+    mode: ExclusionMode,
     owner: Arc<Inner>,
     _gate: Box<dyn std::any::Any + Send + Sync>,
 }
@@ -274,6 +277,15 @@ impl RetentionExclusion<'_> {
             PinGuards::Held(guards) => guards.iter().try_for_each(|guard| add(*guard))?,
         }
         Ok(total)
+    }
+
+    /// Refuse unless the App gate is held exclusively: work that removes or
+    /// fences chain state must not share the gate with another holder.
+    pub fn require_exclusive(&self) -> Result<()> {
+        if self.mode != ExclusionMode::Exclusive {
+            bail!("retention exclusion is not held exclusively");
+        }
+        Ok(())
     }
 
     /// End the pin checks but keep the App gate held until the returned hold
@@ -413,6 +425,7 @@ mod tests {
             .unwrap();
         assert_eq!(exclusion.count_thread_pins(&ids()).unwrap(), 0);
         exclusion.validate_owner(&coordinator).unwrap();
+        exclusion.require_exclusive().unwrap();
         assert!(
             exclusion
                 .validate_owner(&RetentionCoordinator::new())
@@ -655,5 +668,19 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn shared_exclusion_is_refused_for_exclusive_work() {
+        let coordinator = RetentionCoordinator::new();
+        coordinator.seal().unwrap();
+        let exclusion = coordinator
+            .acquire_retention_gate(ExclusionMode::Shared)
+            .await
+            .unwrap()
+            .acquire_sealed_pins()
+            .await
+            .unwrap();
+        assert!(exclusion.require_exclusive().is_err());
     }
 }

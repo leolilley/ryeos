@@ -2356,6 +2356,7 @@ fn advance_close(
                 write_barrier,
                 process_attachment_admission_open,
                 process_attachment_admission_closed,
+                fenced_chain_kinds: _,
                 attached_processes,
                 live_workers,
                 selected_invocations,

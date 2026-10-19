@@ -114,7 +114,18 @@ pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
         ),
         Vec::new(),
     ));
-    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
+    let kind_profiles = Arc::new(
+        ryeos_app::kind_profiles::KindProfileRegistry::build(None).with_test_profile(
+            "seat_session",
+            ryeos_app::kind_profiles::ThreadKindProfile {
+                root_executable: false,
+                supports_interrupt: false,
+                supports_continuation: false,
+                supports_operator_followup: false,
+                retirement_fence: true,
+            },
+        ),
+    );
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
@@ -162,9 +173,19 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStor
     let (store_owner, node) = native.into_parts();
     let (config, identity, write_barrier) = node.into_parts();
     let engine = Arc::new(build_live_bundle_engine());
-    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
-        &engine.kinds,
-    )));
+    let kind_profiles = Arc::new(
+        ryeos_app::kind_profiles::KindProfileRegistry::build(Some(&engine.kinds))
+            .with_test_profile(
+                "seat_session",
+                ryeos_app::kind_profiles::ThreadKindProfile {
+                    root_executable: false,
+                    supports_interrupt: false,
+                    supports_continuation: false,
+                    supports_operator_followup: false,
+                    retirement_fence: true,
+                },
+            ),
+    );
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));

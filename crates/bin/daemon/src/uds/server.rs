@@ -2270,6 +2270,7 @@ mod tests {
                         supports_interrupt: false,
                         supports_continuation: true,
                         supports_operator_followup: false,
+                        retirement_fence: false,
                     },
                 )
                 .with_test_profile(
@@ -2279,6 +2280,7 @@ mod tests {
                         supports_interrupt: true,
                         supports_continuation: true,
                         supports_operator_followup: true,
+                        retirement_fence: false,
                     },
                 ),
         );

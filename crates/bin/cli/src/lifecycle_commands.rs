@@ -1188,6 +1188,11 @@ fn run_execution_history_reset_command(
             "chain/recovery artifacts",
             (report.chain_ref_artifacts + report.pending_transitions).to_string(),
         ),
+        crate::tty::Row::key_value("retirement fences", report.retirement_fences.to_string()),
+        crate::tty::Row::key_value(
+            "evidence obligations",
+            report.evidence_obligations.to_string(),
+        ),
         crate::tty::Row::key_value(
             "runtime rows",
             report.runtime_rows.total_rows().map_or_else(

@@ -875,6 +875,11 @@ pub struct ThreadProfileDecl {
     /// machine-only kinds opt out.
     #[serde(default = "default_true")]
     pub supports_operator_followup: bool,
+    /// Whether terminal chains of this kind retire through a fenced
+    /// retained-evidence manifest instead of immediate removal. Defaults
+    /// `false`; only a kind that declares it is fenced.
+    #[serde(default)]
+    pub retirement_fence: bool,
 }
 
 fn default_true() -> bool {
