@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
+pub mod compose;
+
 use crate::node_config::{
     CompiledNodeConfigItem, NodeConfigSection, NodeConfigSourceScope, NodeItemContext,
     SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,

@@ -15,6 +15,7 @@ pub mod help;
 pub mod lifecycle_commands;
 mod lifecycle_external_credential;
 mod lifecycle_external_compose;
+mod lifecycle_external_snapshot_compose;
 pub mod node_descriptors;
 pub mod offline_dispatch;
 pub mod presenter;

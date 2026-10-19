@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use ryeos_app::node_config::sections::external_execution::provision::{
-    MAX_PLACEMENT_SECRET_BYTES, ProvisionOutcome, ProvisionReport,
-    provision_installed_placement_credential,
+    MAX_PLACEMENT_SECRET_BYTES, ProvisionOutcome, ProvisionReport, ProvisionSection,
+    provision_installed_credential,
 };
 use zeroize::Zeroizing;
 
@@ -26,9 +26,14 @@ use zeroize::Zeroizing;
     no_binary_name = true
 )]
 struct ExternalProvisionCredentialArgs {
-    /// Installed binding id (the file stem under `.ai/node/external_execution/`).
+    /// Installed binding id (the file stem under the section directory).
     #[arg(long)]
     binding: String,
+
+    /// Section the binding is installed under: `external_execution` or
+    /// `runtime_snapshot_production`.
+    #[arg(long, default_value = "external_execution")]
+    section: String,
 
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
@@ -59,6 +64,7 @@ pub fn run_external_provision_credential(
             _ => bail!("{error}"),
         },
     };
+    let section = ProvisionSection::parse(&args.section)?;
     let secret = match args.secret_fd {
         Some(fd) => read_secret_from_sealed_fd(fd)?,
         None => {
@@ -68,7 +74,7 @@ pub fn run_external_provision_credential(
         }
     };
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
-    let report = provision_installed_placement_credential(&app_root, &args.binding, &secret)?;
+    let report = provision_installed_credential(&app_root, section, &args.binding, &secret)?;
     if args.json {
         crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "provision": report }))?;
         return Ok(());
@@ -94,6 +100,7 @@ fn provision_banner(
     let mut banner = crate::tty::StatusBanner::new(tone, heading);
     for (key, value) in [
         ("app root", app_root.display().to_string()),
+        ("section", report.section.clone()),
         ("binding", report.binding_id.clone()),
         ("owner", report.owner.clone()),
         ("generation", report.generation.clone()),
@@ -106,10 +113,7 @@ fn provision_banner(
     banner
 }
 
-fn read_secret_from_stdin(
-    is_terminal: bool,
-    stdin: &mut impl Read,
-) -> Result<Zeroizing<String>> {
+fn read_secret_from_stdin(is_terminal: bool, stdin: &mut impl Read) -> Result<Zeroizing<String>> {
     ensure!(
         !is_terminal,
         "pipe the secret on stdin; refusing interactive echo"
@@ -161,6 +165,28 @@ mod tests {
     }
 
     #[test]
+    fn section_defaults_to_external_execution_and_is_validated() {
+        let args = ExternalProvisionCredentialArgs::try_parse_from(["--binding", "b"]).unwrap();
+        assert_eq!(args.section, "external_execution");
+        assert_eq!(
+            ProvisionSection::parse(&args.section).unwrap(),
+            ProvisionSection::ExternalExecution
+        );
+        let args = ExternalProvisionCredentialArgs::try_parse_from([
+            "--binding",
+            "b",
+            "--section",
+            "runtime_snapshot_production",
+        ])
+        .unwrap();
+        assert_eq!(
+            ProvisionSection::parse(&args.section).unwrap(),
+            ProvisionSection::RuntimeSnapshotProduction
+        );
+        assert!(ProvisionSection::parse("nonsense").is_err());
+    }
+
+    #[test]
     fn a_terminal_stdin_is_refused_without_reading() {
         let error = read_secret_from_stdin(true, &mut stdin(b"secret\n")).unwrap_err();
         assert_eq!(
@@ -202,7 +228,8 @@ mod tests {
 
     #[test]
     fn secret_fd_accepts_only_a_sealed_memfd() {
-        let sealed = lillux::sealed_memfd(c"provision-credential-test", b"sealed-secret\n").unwrap();
+        let sealed =
+            lillux::sealed_memfd(c"provision-credential-test", b"sealed-secret\n").unwrap();
         let fd = sealed.inherited_descriptor().unwrap();
         assert_eq!(
             read_secret_from_sealed_fd(fd).unwrap().as_str(),
@@ -213,10 +240,7 @@ mod tests {
         let file = tempfile::tempfile().unwrap();
         let coordinate = lillux::inherited_descriptor_coordinate(&file).unwrap();
         let error = read_secret_from_sealed_fd(coordinate).unwrap_err();
-        assert!(
-            error.to_string().contains("sealed memfd"),
-            "{error:#}"
-        );
+        assert!(error.to_string().contains("sealed memfd"), "{error:#}");
         // Standard streams and closed descriptors are refused too.
         assert!(read_secret_from_sealed_fd(0).is_err());
         assert!(read_secret_from_sealed_fd(1_000_000).is_err());
@@ -225,6 +249,7 @@ mod tests {
     #[test]
     fn the_report_banner_carries_coordinates_and_no_secret() {
         let report = ProvisionReport {
+            section: "external_execution".into(),
             binding_id: "b".into(),
             owner: "a".repeat(64),
             generation: "c".repeat(64),
@@ -243,6 +268,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {key} row"))
         };
         assert_eq!(value("outcome"), "inserted");
+        assert_eq!(value("section"), "external_execution");
         assert_eq!(value("account"), "acct");
     }
 }
