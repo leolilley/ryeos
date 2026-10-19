@@ -3460,6 +3460,10 @@ impl RecoveryStore {
         self.ensure_chain_lock(chain_lock, chain_root_id)?;
         validate_chain_root_id(chain_root_id)?;
         validate_hash("target_hash", target_hash)?;
+        anyhow::ensure!(
+            self.retired_chain_fence(chain_root_id)? == RetiredChainFence::Absent,
+            "chain {chain_root_id} is fenced as retired and can never publish a head again"
+        );
 
         let (current, current_file) = self
             .read_pending_with_file(chain_root_id)?

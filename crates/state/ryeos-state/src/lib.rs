@@ -155,4 +155,7 @@ pub use state_db::{
     ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RetiredChainDependency,
     RuntimeLivenessInspector, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
 };
+pub use state_db::{
+    ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,
+};
 pub use sync::ImportAttribution;

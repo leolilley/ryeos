@@ -67,6 +67,9 @@ mod destination_join;
 mod original_close;
 #[cfg(test)]
 mod rebuild_recovery_tests;
+mod retirement_driver;
+#[cfg(test)]
+mod retirement_driver_tests;
 pub(crate) use destination_join::OriginalStateDestinationJoin;
 pub use destination_join::{
     maximum_state_destination_leaves, quote_generated_root_registration,
@@ -78,6 +81,9 @@ pub use original_close::{
     ClosedOriginalState, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority,
     OriginalStateRetirementFailure, ReleasedOriginalStateRetirement, STATE_ACK_EFFECT_PREPAY,
     STATE_ACK_REPLAY_PREPAY,
+};
+pub use retirement_driver::{
+    ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,
 };
 
 /// State of the rebuildable projection after an authoritative CAS write.
@@ -1430,6 +1436,12 @@ fn replay_pending_into(
                     report.removals_awaiting_runtime_cleanup += 1;
                 }
                 Some(head) => {
+                    anyhow::ensure!(
+                        recovery.retired_chain_fence(&current.chain_root_id)?
+                            == crate::recovery::RetiredChainFence::Absent,
+                        "fenced chain {} has a head its pending Remove does not name",
+                        current.chain_root_id
+                    );
                     // A trusted head different from the Remove's expected
                     // predecessor is newer authority. First verify its CAS
                     // closure, then atomically turn the stale Remove journal
@@ -4469,6 +4481,11 @@ impl StateDb {
                 }
             },
             HeadOperation::Remove => {
+                anyhow::ensure!(
+                    self.recovery.retired_chain_fence(chain_root_id)?
+                        == crate::recovery::RetiredChainFence::Absent,
+                    "cannot publish chain {chain_root_id}: its pending Remove belongs to a fenced retirement"
+                );
                 if !invalidates_retirement {
                     anyhow::bail!(
                         "cannot publish chain {chain_root_id} while a still-eligible Remove is pending"
@@ -4896,6 +4913,20 @@ impl StateDb {
             anyhow::bail!("repaired projection did not converge for {chain_root_id}");
         }
         Ok(report)
+    }
+
+    /// What the fence store records for this chain identity.
+    pub fn retired_chain_fence(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<crate::recovery::RetiredChainFence> {
+        self.recovery.retired_chain_fence(chain_root_id)
+    }
+
+    /// Every fenced chain whose closure is not yet released, with the manifest
+    /// its fence binds.
+    pub fn unreleased_retired_chains(&self) -> anyhow::Result<BTreeMap<String, String>> {
+        self.recovery.unreleased_retired_chains()
     }
 
     pub fn pending_chain_transitions(&self) -> anyhow::Result<Vec<PendingChainHeadTransition>> {
@@ -7564,6 +7595,11 @@ impl StateDb {
             Some(_) => anyhow::bail!("chain {chain_root_id} pending transition is not Remove"),
             None => return Ok(false),
         };
+        anyhow::ensure!(
+            self.recovery.retired_chain_fence(chain_root_id)?
+                == crate::recovery::RetiredChainFence::Absent,
+            "cannot cancel the removal of fenced chain {chain_root_id}; its retirement only moves forward"
+        );
         let head = chain_lock
             .read_verified_head(self.trust_store.as_ref())?
             .ok_or_else(|| anyhow::anyhow!("cannot cancel removal after head unlink"))?;
