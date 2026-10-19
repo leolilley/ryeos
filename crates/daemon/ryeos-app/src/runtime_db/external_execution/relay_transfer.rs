@@ -288,16 +288,6 @@ pub(crate) enum RelayTransferPhase {
 }
 
 impl RelayTransferPhase {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Reserved => "reserved",
-            Self::Reading => "reading",
-            Self::UploadPossible => "upload_possible",
-            Self::Accepted => "accepted",
-            Self::Quarantined => "quarantined",
-            Self::TerminalClosed => "terminal_closed",
-        }
-    }
 
     fn parse(raw: &str) -> Result<Self> {
         match raw {
@@ -1385,51 +1375,6 @@ impl RuntimeDb {
             let current = read_transfer(&tx, intent)?.context("external relay readback disappeared")?;
             tx.commit()?;
             Ok(current)
-        })
-    }
-
-    /// The original provider occurrence has settled. This closes further
-    /// transfer contact without treating any transfer receipt as terminal
-    /// evidence. An incomplete transfer remains visibly incomplete forever.
-    pub(crate) fn close_external_relay_after_terminal(
-        &self,
-        intent: &RelayTransferIntent,
-    ) -> Result<RelayTransferRecord> {
-        self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-            let allocation = read(&tx, &intent.placement_thread_id)?
-                .context("external relay terminal closure lost allocation")?;
-            ensure!(
-                allocation.phase == ExternalAllocationPhase::Terminated
-                    && allocation
-                        .occurrence
-                        .as_ref()
-                        .map(|o| o.occurrence_id.as_str())
-                        == Some(intent.occurrence_id.as_str()),
-                "external relay closure requires exact provider terminal settlement"
-            );
-            let prior =
-                read_transfer(&tx, intent)?.context("external relay terminal closure lost transfer")?;
-            if prior.phase == RelayTransferPhase::TerminalClosed {
-                tx.commit()?;
-                return Ok(prior);
-            }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
-            tx.execute(
-                "UPDATE external_execution_relay_transfer SET phase='terminal_closed',updated_at_ms=?5
-             WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4",
-                params![
-                    intent.placement_thread_id,
-                    intent.kind.as_str(),
-                    intent.sequence,
-                    intent.direction.as_str(),
-                    now
-                ],
-            )?;
-            let closed =
-                read_transfer(&tx, intent)?.context("external relay terminal closure disappeared")?;
-            tx.commit()?;
-            Ok(closed)
         })
     }
 

@@ -24,28 +24,11 @@
 //! The internal path slot allows `disarm()` to transfer ordinary cleanup
 //! ownership without removing the directory.
 
-use anyhow::Context as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) const MAX_FINITE_SCRATCH_SHARED_ROOTS: usize = 4;
-
-pub fn quote_finite_scratch_shared_root_handoffs()
-    -> lillux_sqlite::original_physical_custody::OutsideWork {
-    lillux_sqlite::original_physical_custody::OutsideWork { bytes: 1024, steps: 8 }
-}
-
-pub fn quote_finite_scratch_outside_custody()
-    -> anyhow::Result<lillux_sqlite::original_physical_custody::OutsideWork> {
-    let bytes = std::mem::size_of::<OriginalFiniteScratchCustody>()
-        .checked_add(std::mem::size_of::<lillux::PinnedDirectory>())
-        .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
-        .context("finite scratch custody quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
-        bytes: u64::try_from(bytes)?, steps: 16,
-    })
-}
 
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
@@ -62,7 +45,6 @@ enum FiniteScratchRemoval {
 }
 
 struct PinnedRemoval {
-    process: u32,
     parent: lillux::PinnedDirectory,
     name: std::ffi::OsString,
     root: Arc<lillux::PinnedDirectory>,
@@ -108,166 +90,7 @@ pub struct TempDirGuard {
     owned_workspace_lifeline: Mutex<Option<Arc<TempDirGuard>>>,
 }
 
-const FINITE_SCRATCH_CUSTODY_KIND: &str = "ryeos-app::finite-scratch-custody";
-
-/// Everything the finite scratch owner holds, in the order its release drops
-/// it. Constructible only in this module, so no caller can swap the whole out
-/// from under its custody.
-struct OriginalFiniteScratchParts {
-    original: TempDirGuard,
-    parent: Option<Arc<lillux::PinnedDirectory>>,
-    root: Option<Arc<lillux::PinnedDirectory>>,
-    receipt: Option<Arc<lillux::secure_fs::RemovedEmptyChild>>,
-    receipt_parent: Option<Arc<lillux::PinnedDirectory>>,
-    receipt_child: Option<Arc<lillux::PinnedDirectory>>,
-    name: std::ffi::OsString,
-    receipt_name: Option<std::ffi::OsString>,
-    registrations: [Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>;
-        MAX_FINITE_SCRATCH_SHARED_ROOTS],
-}
-
-impl OriginalFiniteScratchParts {
-    /// Every directory owner and the removal receipt moved into retired
-    /// registrations. Allocation-free.
-    fn descriptors_retired(&self) -> bool {
-        if self.receipt.is_some() || self.receipt_name.is_none()
-            || self.parent.is_some() || self.root.is_some()
-            || self.receipt_parent.is_some() || self.receipt_child.is_some() { return false; }
-        self.registrations.iter().all(|binding| binding.as_ref().is_some_and(|binding| binding.retired()))
-    }
-}
-
-/// Actual completed finite scratch owner. The original guard shell and its
-/// semantic metadata remain retained; releasing it performs no removal or FD
-/// close. Settled exactly when descriptors are retired; otherwise the guard
-/// shell, directories, receipt and registrations stay retained together until
-/// the process exits.
-pub(crate) struct OriginalFiniteScratchCustody {
-    inner: lillux::custody::Held<OriginalFiniteScratchParts>,
-}
-impl OriginalFiniteScratchCustody {
-    fn from_parts(parts: OriginalFiniteScratchParts) -> Self {
-        Self {
-            inner: lillux::custody::Held::new(
-                FINITE_SCRATCH_CUSTODY_KIND,
-                parts,
-                OriginalFiniteScratchParts::descriptors_retired,
-            ),
-        }
-    }
-    pub(crate) fn require_removal_alias(&self,
-        alias: &Arc<lillux::secure_fs::RemovedEmptyChild>) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.inner.is_foreign(), "foreign original scratch removal alias");
-        let original = self.inner.receipt.as_ref().ok_or_else(|| anyhow::anyhow!("actual original scratch removal receipt already consumed"))?;
-        anyhow::ensure!(Arc::ptr_eq(original, alias), "scratch alias selects another actual removal receipt");
-        Ok(())
-    }
-    /// # Safety
-    /// The same original supervisor owns the complete inventory and prepays
-    /// these actual transfers. Partial success remains cached in this token.
-    pub(crate) unsafe fn register_shared_roots(
-        &mut self,
-        registry: &mut lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.inner.is_foreign(), "foreign finite scratch custody");
-        let parts = self.inner.get_mut();
-        if parts.receipt.is_some() {
-            let quote = quote_finite_scratch_shared_root_handoffs();
-            registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-            let receipt = parts.receipt.take().expect("same retained original removal receipt");
-            match receipt.try_into_original_parts() {
-                Ok((parent, child, name)) => {
-                    // Preserve both actual descriptor owners and exact removal
-                    // coordinate before any later registration can refuse.
-                    parts.receipt_parent = Some(Arc::new(parent));
-                    parts.receipt_child = Some(Arc::new(child));
-                    parts.receipt_name = Some(name);
-                }
-                Err(receipt) => {
-                    parts.receipt = Some(receipt);
-                    anyhow::bail!("actual finite removal receipt still has original aliases");
-                }
-            }
-        }
-        for index in 0..MAX_FINITE_SCRATCH_SHARED_ROOTS {
-            if parts.registrations[index].is_some() { continue; }
-            let source = match index {
-                0 => &mut parts.parent,
-                1 => &mut parts.root,
-                2 => &mut parts.receipt_parent,
-                _ => &mut parts.receipt_child,
-            };
-            let original = source.take().ok_or_else(|| anyhow::anyhow!("actual finite scratch directory owner absent"))?;
-            // SAFETY: genuine consumed original guard/removal receipt, not a
-            // reopened directory or matching inode interpreted as ownership.
-            match unsafe { registry.register_directory(original, prepay) } {
-                Ok(binding) => parts.registrations[index] = Some(binding),
-                Err((original, error)) => { *source = Some(original); return Err(error); }
-            }
-        }
-        Ok(())
-    }
-    pub(crate) fn descriptors_retired(&self) -> anyhow::Result<bool> {
-        anyhow::ensure!(!self.inner.is_foreign(), "foreign finite scratch receipt custody");
-        // The actual guard metadata/name/deadline remain in outside custody.
-        // This is descriptor retirement only, never account/map settlement.
-        Ok(self.inner.descriptors_retired())
-    }
-}
-
 impl TempDirGuard {
-    /// # Safety
-    /// Genuine original finite scratch cleanup has completed and the caller
-    /// retains this exact native removal receipt and original prepaid account.
-    /// This consumes the actual guard; it never infers removal from a path.
-    pub(crate) unsafe fn into_outside_finite_removal(
-        mut self,
-        receipt: &Arc<lillux::secure_fs::RemovedEmptyChild>,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
-    ) -> std::result::Result<OriginalFiniteScratchCustody, (Self, anyhow::Error)> {
-        let result = (|| -> anyhow::Result<()> {
-            let pinned = self.pinned_removal.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("finite scratch original pinned owner absent"))?;
-            anyhow::ensure!(pinned.process == std::process::id(), "foreign original finite scratch guard");
-            // Exclusive owned guard: get_mut does not acquire or hold mutexes
-            // across accounting callbacks. Poison refuses the whole owner.
-            anyhow::ensure!(self.owns_removal && self.explicit_cleanup.load(Ordering::Acquire)
-                && !self.remove_on_drop.load(Ordering::Acquire), "finite scratch guard not preserved for explicit cleanup");
-            anyhow::ensure!(self.workspace_view.get_mut().map_err(|_| anyhow::anyhow!("original scratch view poisoned"))?.is_none()
-                && self.owned_workspace_lifeline.get_mut().map_err(|_| anyhow::anyhow!("original scratch lifeline poisoned"))?.is_none()
-                && self.inner.get_mut().map_err(|_| anyhow::anyhow!("original scratch path poisoned"))?.is_none()
-                && self.leases.get_mut().map_err(|_| anyhow::anyhow!("original scratch leases poisoned"))?.is_empty()
-                && matches!(*self.finite_removal.get_mut().map_err(|_| anyhow::anyhow!("original scratch phase poisoned"))?, FiniteScratchRemoval::RootRemovedSynced)
-                && self.finite_native_pending.get_mut().map_err(|_| anyhow::anyhow!("original scratch pending custody poisoned"))?.is_none(),
-                "actual finite scratch removal has not completed");
-            let original = self.finite_native_receipt.get_mut()
-                .map_err(|_| anyhow::anyhow!("original scratch receipt poisoned"))?.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("actual scratch removal receipt absent"))?;
-            anyhow::ensure!(Arc::ptr_eq(original, receipt), "finite scratch transfer selects a different actual receipt");
-            let deadline = self.finite_cleanup_deadline.get_mut()
-                .map_err(|_| anyhow::anyhow!("original scratch deadline poisoned"))?.as_ref().copied()
-                .ok_or_else(|| anyhow::anyhow!("original finite scratch deadline absent"))?;
-            Self::require_original_cleanup_window(deadline)?;
-            let quote = quote_finite_scratch_outside_custody()?;
-            lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
-                prepay(quote.bytes, quote.steps)
-            })?;
-            Self::require_original_cleanup_window(deadline)
-        })();
-        if let Err(error) = result { return Err((self, error)); }
-        let pinned = self.pinned_removal.take().expect("prechecked actual finite scratch owner");
-        let receipt = self.finite_native_receipt.get_mut().unwrap().take();
-        Ok(OriginalFiniteScratchCustody::from_parts(OriginalFiniteScratchParts {
-            parent: Some(Arc::new(pinned.parent)),
-            root: Some(pinned.root),
-            name: pinned.name, receipt,
-            receipt_parent: None,
-            receipt_child: None, receipt_name: None,
-            registrations: std::array::from_fn(|_| None), original: self,
-        }))
-    }
-
     pub fn new(path: PathBuf) -> Self {
         Self {
             inner: Mutex::new(Some(path.clone())),
@@ -347,7 +170,7 @@ impl TempDirGuard {
             explicit_cleanup: AtomicBool::new(false),
             remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
-            pinned_removal: Some(PinnedRemoval { process: std::process::id(), parent, name, root }),
+            pinned_removal: Some(PinnedRemoval { parent, name, root }),
             finite_removal: Mutex::new(FiniteScratchRemoval::default()),
             finite_native_receipt: Mutex::new(None),
             finite_native_pending: Mutex::new(None),
@@ -659,7 +482,7 @@ impl TempDirGuard {
     /// Every lock/traversal step shares the original expiry. Partial error
     /// keeps the armed path and remaining aliases; it is no cleanup receipt.
     /// Caller must retain namespace-writer exclusion through removal and retry.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn remove_now_until(
         &self,
         budget: lillux::secure_fs::DirectoryTraversalBudget,
@@ -1288,50 +1111,6 @@ impl std::fmt::Debug for TempDirGuard {
 mod tests {
     use super::*;
     use std::sync::Arc;
-
-    #[test]
-    fn finite_scratch_outside_quotes_match_retained_frames() {
-        use lillux_sqlite::original_physical_custody::OutsideWork;
-        assert_eq!(quote_finite_scratch_shared_root_handoffs(), OutsideWork {
-            bytes: 1024, steps: 8,
-        });
-        assert_eq!(quote_finite_scratch_outside_custody().unwrap(), OutsideWork {
-            bytes: (std::mem::size_of::<OriginalFiniteScratchCustody>()
-                + std::mem::size_of::<lillux::PinnedDirectory>()
-                + 2 * std::mem::size_of::<usize>()) as u64,
-            steps: 16,
-        });
-    }
-
-    #[test]
-    fn dropped_finite_scratch_custody_before_registration_is_retained() {
-        let _serial = ryeos_state::test_support::abandoned_custody_serial();
-        const KIND: &str = "ryeos-app::finite-scratch-custody";
-        let parent = tempfile::tempdir().unwrap();
-        std::fs::create_dir(parent.path().join("scratch")).unwrap();
-        let parent_pin = lillux::PinnedDirectory::open(parent.path()).unwrap().unwrap();
-        let root = Arc::new(lillux::PinnedDirectory::open(&parent.path().join("scratch")).unwrap().unwrap());
-        // A guard shell whose path was already taken, as the completed
-        // finite removal leaves it: its Drop removes nothing.
-        let shell = TempDirGuard::new(parent.path().join("scratch"));
-        shell.inner.lock().unwrap().take();
-        let custody = OriginalFiniteScratchCustody::from_parts(OriginalFiniteScratchParts {
-            original: shell,
-            parent: Some(Arc::new(parent_pin)),
-            root: Some(Arc::clone(&root)),
-            name: std::ffi::OsString::from("scratch"),
-            receipt: None,
-            receipt_parent: None,
-            receipt_child: None,
-            receipt_name: None,
-            registrations: std::array::from_fn(|_| None),
-        });
-        assert!(!custody.descriptors_retired().unwrap());
-        let before = lillux::custody::abandoned_custody().count(KIND);
-        drop(custody);
-        assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
-        assert_eq!(Arc::strong_count(&root), 2, "the root alias stays retained");
-    }
 
     #[test]
     fn removes_dir_on_last_arc_drop() {

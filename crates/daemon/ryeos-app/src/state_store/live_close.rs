@@ -71,7 +71,7 @@ impl AuxiliaryDirectorySource {
         let owner = if let Some(owner) = self.shared.take() {
             owner
         } else {
-            let pinned = self.pinned.as_ref().context("Store metadata directory source absent")?;
+            anyhow::ensure!(self.pinned.is_some(), "Store metadata directory source absent");
             let bytes = std::mem::size_of::<lillux::PinnedDirectory>()
                 .checked_add(2 * std::mem::size_of::<usize>())
                 .context("Store metadata directory source quote overflow")?;

@@ -5276,14 +5276,12 @@ impl StateStore {
                 app_root, runtime_state_directory, namespace, runtime_db_path, signer,
                 write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, true,
                 move |directory, namespace| {
-                    // SAFETY: the caller holds the StateLock and `namespace`,
+                    // Covered by the unsafe block above: the caller holds the StateLock and `namespace`,
                     // the host was funded under that exclusion, and the lease
                     // authority admits only this host's factory.
-                    unsafe {
-                        StateDb::open_offline_native_for_rebuild(
-                            directory, namespace, head_trust, &state_factory, lease_authority,
-                        )
-                    }
+                    StateDb::open_offline_native_for_rebuild(
+                        directory, namespace, head_trust, &state_factory, lease_authority,
+                    )
                 },
             )
         }
@@ -5322,13 +5320,11 @@ impl StateStore {
                 app_root, runtime_state_directory, namespace, runtime_db_path, signer,
                 write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, false,
                 move |directory, namespace| {
-                    // SAFETY: the caller holds the StateLock and `namespace`;
+                    // Covered by the unsafe block above: the caller holds the StateLock and `namespace`;
                     // the lease authority admits only this host's factory.
-                    unsafe {
-                        StateDb::open_offline_native_verification(
-                            directory, namespace, head_trust, &state_factory, lease_authority,
-                        )
-                    }
+                    StateDb::open_offline_native_verification(
+                        directory, namespace, head_trust, &state_factory, lease_authority,
+                    )
                 },
             )
         }
@@ -17733,23 +17729,6 @@ impl StateStore {
             .external_direct_normal_settlement_output(placement)
     }
 
-    /// Read exact retained direct owner/program and authenticated raw terminal
-    /// output only after normal occurrence settlement, under one DB transaction.
-    /// Historical data only; no native limit/view or evaluator authority issued.
-    pub(crate) fn external_direct_settled_owner_output(
-        &self,
-        placement: &str,
-    ) -> Result<
-        Option<(
-            runtime_db::external_execution::ExternalAllocationRecord,
-            runtime_db::external_execution::ExternalDirectOutput,
-        )>,
-    > {
-        self.lock()?
-            .runtime_db
-            .external_direct_settled_owner_output(placement)
-    }
-
     pub(crate) fn external_connector_capability_generation(
         &self,
         placement: &str,
@@ -18935,18 +18914,6 @@ impl StateStore {
             )
     }
 
-    /// Full local batches for a later semantic verifier; this grants no
-    /// transport or qualification permit.
-    pub(crate) fn qualification_worker_observation_batches(
-        &self,
-        placement: &str,
-    ) -> Result<Vec<runtime_db::external_execution::QualificationWorkerObservationBatchRecord>>
-    {
-        self.lock()?
-            .runtime_db
-            .qualification_worker_observation_batches(placement)
-    }
-
     /// Freeze the exact death-settled Q Worker command and pushed batches as
     /// CAS objects, then bind the manifest as an immutable operator root.
     /// The returned row is structural evidence, never a qualification permit.
@@ -19424,16 +19391,6 @@ impl StateStore {
             .accept_external_relay_readback(intent, bytes)
     }
 
-    pub(crate) fn quarantine_external_relay_transfer(
-        &self,
-        intent: &runtime_db::external_execution::RelayTransferIntent,
-    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .quarantine_external_relay_transfer(intent)
-    }
-
     /// Author only the original bound occurrence's guest assignment with the
     /// node identity. The qualified guest must already pin this public root;
     /// signing here does not make a provider snapshot qualified or start it.
@@ -19580,20 +19537,6 @@ impl StateStore {
             .has_external_qualification_normal_termination_intent(placement)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn install_external_placement_test_fixture(
-        &self,
-        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
-        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
-    ) -> Result<()> {
-        self.install_external_placement_test_fixture_with_workspace(
-            reservation,
-            binding,
-            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
-            |_| external_placement_test_workspace_binding(reservation),
-        )
-    }
-
     /// Install the composed placement as a chain root admitted through the
     /// exact root launch metadata, so the production placement owner finds
     /// the same admitted launch capsule an ordinary launch would record.
@@ -19616,7 +19559,21 @@ impl StateStore {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
+    pub(crate) fn install_external_placement_test_fixture(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace(
+            reservation,
+            binding,
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            |_| external_placement_test_workspace_binding(reservation),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn install_external_placement_test_fixture_with_workspace(
         &self,
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
@@ -24922,7 +24879,6 @@ mod tests {
     fn abandoned_external_guest_package_is_removed_on_state_store_reopen() {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
-        let runtime_state_dir = app_root.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -28038,7 +27994,6 @@ mod tests {
     #[test]
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
-        let runtime_state_dir = tmp.path().join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
             .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -28808,7 +28763,6 @@ mod tests {
     #[test]
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -28865,7 +28819,6 @@ mod tests {
     #[test]
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -28932,7 +28885,6 @@ mod tests {
     #[test]
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -31720,7 +31672,6 @@ mod tests {
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let trust = Arc::new(trust);
-        let runtime = root.path().join(".ai/state");
         let open = || {
             TestStateStore::open(root.path(), signer.clone(), trust.clone())
             .unwrap()
@@ -32700,8 +32651,6 @@ mod tests {
     #[test]
     fn attached_process_registry_is_seeded_from_durable_runtime_state() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));

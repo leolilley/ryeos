@@ -20,6 +20,7 @@ use super::*;
 /// The largest frame a record holds, in bytes.
 pub(crate) const MAX_HELD_LEASE_FRAME_BYTES: usize = 64 * 1024;
 /// The longest refusal reason a record stores, in bytes.
+#[cfg(test)]
 const MAX_REFUSAL_REASON_BYTES: usize = 1024;
 /// The longest lease identifier a record stores, in bytes.
 const MAX_LEASE_ID_BYTES: usize = 256;
@@ -334,7 +335,7 @@ impl ExternalLeaseActivation {
 }
 
 impl ExternalLeaseAdmission {
-    fn validate(&self) -> Result<()> {
+    pub(in crate::runtime_db) fn validate(&self) -> Result<()> {
         validate_sha256("lease ready frame", &self.ready_frame_digest)?;
         validate_sha256("lease report frame", &self.report_frame_digest)?;
         ensure!(
@@ -440,6 +441,7 @@ impl RuntimeDb {
     }
 
     /// Activated to admitted: the adapter accepted the held frames.
+    #[cfg(test)]
     pub(crate) fn admit_external_lease_record(
         &self,
         placement: &str,
@@ -469,6 +471,7 @@ impl RuntimeDb {
 
     /// Any state to refused, terminally. Refusing a refused record keeps its
     /// first reason and succeeds.
+    #[cfg(test)]
     pub(crate) fn refuse_external_lease_record(
         &self,
         placement: &str,

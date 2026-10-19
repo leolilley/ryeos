@@ -40,6 +40,7 @@ pub(crate) struct RetainedExternalCandidateImport {
 /// The controller's exact signed guest observation. This is input to a later
 /// qualification join, not proof that the candidate executed successfully or
 /// that the external occurrence has settled.
+#[cfg(test)]
 pub(crate) struct RetainedExternalRuntimeApplied {
     pub binding: ExecutionChannelBinding,
     pub frame: AuthenticatedExecutionFrame,
@@ -146,7 +147,6 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
     );
     let Some((settlement_sequence, settlement_digest, settlement_wire, _)) = settlement_rows.pop()
     else {
-        drop(signed);
         return Ok(None);
     };
     ensure!(
@@ -260,7 +260,6 @@ pub(super) fn prepare_qualification_scope_settlement_tx(
             ),
         "Q native settlement preceded exact applied protocol EOF"
     );
-    drop(signed);
     let plan = qualification_fixture_receiver::QualificationScopeSettlementPlan {
         evidence: RetainedExternalQualificationScopeSettlement {
             binding,
@@ -292,6 +291,7 @@ impl RuntimeDb {
     /// Recover only the single applied, authenticated runtime receipt for this
     /// retained placement. A caller issuing a claim must recheck this evidence
     /// with its owner and qualification coordinates in the claim transaction.
+    #[cfg(test)]
     pub(crate) fn external_runtime_applied_observation(
         &self,
         placement: &str,
@@ -339,6 +339,47 @@ impl RuntimeDb {
                 "retained runtime observation contradicts its signed frame"
             );
             Ok(Some(RetainedExternalRuntimeApplied { binding, frame }))
+        })
+    }
+
+    /// Historical joined data from the SAME allocation/journal transaction.
+    /// Unlike normal-settlement recovery data, this requires observed occurrence
+    /// death. The retained program contains requested view/limits only: these
+    /// are not effective native receipts or B/C evaluation acceptance.
+    #[cfg(test)]
+    pub(crate) fn external_direct_settled_owner_output(
+        &self,
+        placement: &str,
+    ) -> Result<Option<(ExternalAllocationRecord, ExternalDirectOutput)>> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            let record = read(&tx, placement)?
+                .context("settled external direct output lost its retained allocation")?;
+            let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
+            else {
+                bail!("settled external direct output changed its retained owner kind");
+            };
+            let unstopped: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_runtime
+             WHERE thread_id=?1 AND chain_root_id=?2 AND stop_requested_at_ms IS NULL)",
+                params![placement, chain_root_id],
+                |row| row.get(0),
+            )?;
+            if record.phase != ExternalAllocationPhase::Terminated || !unstopped {
+                tx.commit()?;
+                return Ok(None);
+            }
+            // The normal reader already joins its DirectThread owner, exact intent,
+            // applied Release and raw terminal streams. Revalidate lifecycle death
+            // beside that same immutable program/capsule/occurrence, never separately
+            // sampled allocation facts or caller-supplied receipt JSON.
+            validate_lifecycle_evidence(&tx, &record)?;
+            tx.commit()?;
+            Ok(Some((record, output)))
         })
     }
 
@@ -411,46 +452,6 @@ impl RuntimeDb {
             let output = normal_settlement_output_tx(&tx, placement)?;
             tx.commit()?;
             Ok(output)
-        })
-    }
-
-    /// Historical joined data from the SAME allocation/journal transaction.
-    /// Unlike normal-settlement recovery data, this requires observed occurrence
-    /// death. The retained program contains requested view/limits only: these
-    /// are not effective native receipts or B/C evaluation acceptance.
-    pub(crate) fn external_direct_settled_owner_output(
-        &self,
-        placement: &str,
-    ) -> Result<Option<(ExternalAllocationRecord, ExternalDirectOutput)>> {
-        self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-            let Some(output) = normal_settlement_output_tx(&tx, placement)? else {
-                tx.commit()?;
-                return Ok(None);
-            };
-            let record = read(&tx, placement)?
-                .context("settled external direct output lost its retained allocation")?;
-            let ExternalAllocationOwner::DirectThread { chain_root_id, .. } = &record.reservation.owner
-            else {
-                bail!("settled external direct output changed its retained owner kind");
-            };
-            let unstopped: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM thread_runtime
-             WHERE thread_id=?1 AND chain_root_id=?2 AND stop_requested_at_ms IS NULL)",
-                params![placement, chain_root_id],
-                |row| row.get(0),
-            )?;
-            if record.phase != ExternalAllocationPhase::Terminated || !unstopped {
-                tx.commit()?;
-                return Ok(None);
-            }
-            // The normal reader already joins its DirectThread owner, exact intent,
-            // applied Release and raw terminal streams. Revalidate lifecycle death
-            // beside that same immutable program/capsule/occurrence, never separately
-            // sampled allocation facts or caller-supplied receipt JSON.
-            validate_lifecycle_evidence(&tx, &record)?;
-            tx.commit()?;
-            Ok(Some((record, output)))
         })
     }
 

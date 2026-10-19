@@ -26,6 +26,7 @@ impl RuntimeDb {
         admission: &ExternalLeaseAdmission,
         now_ms: i64,
     ) -> Result<()> {
+        admission.validate()?;
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
             let held: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = tx

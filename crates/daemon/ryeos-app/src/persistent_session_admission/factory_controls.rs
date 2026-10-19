@@ -330,7 +330,7 @@ session:
         &crate::build_info::get(),
     )
     .unwrap();
-    let mut extensions = (*state.extensions).clone();
+    let extensions = (*state.extensions).clone();
     extensions.insert(Arc::clone(&node));
     state.extensions = Arc::new(extensions);
     let selected = state.execution_resources.select(Some(&target)).unwrap();

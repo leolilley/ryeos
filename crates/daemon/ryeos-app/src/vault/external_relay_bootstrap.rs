@@ -88,14 +88,6 @@ impl ExternalRelayBootstrapAccess {
         MASTER_KEY
     }
 
-    pub(super) fn placement(&self) -> &str {
-        &self.placement
-    }
-
-    pub(super) fn request_digest(&self) -> &str {
-        &self.request_digest
-    }
-
     pub(super) fn artifact_name(&self) -> &OsStr {
         OsStr::new(&self.artifact_name)
     }

@@ -8075,6 +8075,7 @@ impl SqliteInspectionClosed {
             &self.sql,
         )
     }
+    #[cfg(test)]
     pub(crate) fn lease(&self) -> &std::sync::Arc<SqliteInspectionCopyLease> {
         &self.lease
     }
@@ -17886,12 +17887,6 @@ impl RuntimeDb {
         self.delete_thread_runtime_unchecked(thread_id)
     }
 
-    // Ordinary SQL fixture only; never an App/native selected capability.
-    #[cfg(test)]
-    pub(crate) fn fixture_delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
-        self.delete_thread_runtime_unchecked(thread_id)
-    }
-
     fn delete_thread_runtime_unchecked(&self, thread_id: &str) -> Result<usize> {
         self.conn.with_sql(|conn| {
             Ok(conn.execute(
@@ -22966,7 +22961,6 @@ mod tests {
 
     use super::*;
     use crate::launch_metadata::RuntimeLaunchMetadata;
-    use rusqlite::OpenFlags;
     use std::fs;
     use ryeos_engine::contracts::CancellationMode;
     use tempfile::TempDir;

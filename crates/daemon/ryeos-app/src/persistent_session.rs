@@ -5347,22 +5347,21 @@ fn append_stream_event(
         .buffer
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    loop {
-        while (buffer.events.len() >= backlog_limit
-            || buffer.backlog_bytes.saturating_add(event_bytes) > record.max_backlog_bytes)
-            && !record.cancelled.load(Ordering::Acquire)
-        {
-            buffer = record
-                .changed
-                .wait(buffer)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        if record.cancelled.load(Ordering::Acquire) && !terminal {
-            drop(buffer);
-            release_backlog_bytes(&record.backlog, event_bytes);
-            bail!("persistent-session stream was cancelled");
-        }
-        break;
+    // Wait until the queue has room or the stream is cancelled; cancellation
+    // refuses a non-terminal event but still lets the terminal event through.
+    while (buffer.events.len() >= backlog_limit
+        || buffer.backlog_bytes.saturating_add(event_bytes) > record.max_backlog_bytes)
+        && !record.cancelled.load(Ordering::Acquire)
+    {
+        buffer = record
+            .changed
+            .wait(buffer)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    if record.cancelled.load(Ordering::Acquire) && !terminal {
+        drop(buffer);
+        release_backlog_bytes(&record.backlog, event_bytes);
+        bail!("persistent-session stream was cancelled");
     }
     if buffer.terminal {
         drop(buffer);
@@ -5850,7 +5849,7 @@ fn safe_checked_reap(
 fn refuse_ready_process(
     running: ryeos_engine::dispatch::RunningExecution,
     mut error: anyhow::Error,
-    mut custody: ExclusiveUnprovedStartCustody,
+    custody: ExclusiveUnprovedStartCustody,
 ) -> ReadyProcessFailure {
     let relay_join = safe_relay_join(custody.relay_owner.as_ref()).err();
     if let Some(join) = relay_join.as_ref() {
@@ -6833,7 +6832,6 @@ mod tests {
         assert!(retained.original_manifest_restored.is_none());
         assert!(retained.phase == super::PooledStartPhase::Unsettled);
     }
-    use super::*;
 
     // Genuine NEGATIVES only, all UNCOMPILED/UNRUN. No original backend,
     // qualified manifest product or Prepared-positive owner is fabricated.

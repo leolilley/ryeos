@@ -487,15 +487,6 @@ impl RuntimeDb {
         })
     }
 
-    /// Typed no-permit read for restartable semantic verification.
-    pub(crate) fn qualification_worker_observation_batches(
-        &self,
-        placement: &str,
-    ) -> Result<Vec<QualificationWorkerObservationBatchRecord>> {
-        self.conn.with_sql(|conn| {
-            read_batches(&conn, placement)
-        })
-    }
 }
 
 #[cfg(test)]
