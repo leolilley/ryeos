@@ -328,6 +328,14 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         bail!("external lifecycle adapter does not verify runtime qualification probes")
     }
 
+    /// Whether this backend's signed provider spec declares that activation
+    /// uploads the guest runtime itself, so the controller must produce that
+    /// runtime's sealed tar alongside the guest package. Fixed by the captured
+    /// spec; never consulted for any other operation.
+    fn stages_guest_runtime_upload(&self) -> bool {
+        false
+    }
+
     /// Prepare and locally re-import the exact secret-bearing guest package
     /// before the durable activation/contact claim. No provider contact is
     /// permitted here. The returned commitment is inserted with that claim.
@@ -456,6 +464,9 @@ pub(crate) struct ExternalSupervisorActivation {
     bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
     guest_package: Option<SupervisorGuestPackage>,
+    /// Sealed tar of the qualified guest runtime, present exactly when the
+    /// selected provider's activation uploads the runtime itself.
+    guest_runtime: Option<ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload>,
     import_authorization: Option<SignedGuestImportAuthorization>,
     signed_assignment: Option<SignedGuestOccurrenceAssignment>,
 }
@@ -1067,6 +1078,12 @@ impl ExternalSupervisorActivation {
         }
     }
 
+    pub(crate) fn guest_runtime_upload(
+        &self,
+    ) -> Option<&ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload> {
+        self.guest_runtime.as_ref()
+    }
+
     pub(crate) fn signed_import_authorization(&self) -> Result<&SignedGuestImportAuthorization> {
         self.import_authorization
             .as_ref()
@@ -1104,6 +1121,9 @@ impl ExternalSupervisorActivation {
     }
 
     fn discard_guest_package(&mut self) -> Result<()> {
+        // The runtime tar is a sealed in-memory descriptor; dropping it is
+        // its whole cleanup.
+        self.guest_runtime = None;
         self.guest_package
             .take()
             .context("external activation lost its prepared guest package")?
@@ -1134,9 +1154,30 @@ pub(crate) struct InstalledLifecycleGeneration {
 pub struct ExternalPlacementBackendRegistry {
     backends: BTreeMap<(String, String), Arc<dyn ExternalPlacementBackend>>,
     contact_gates: Mutex<BTreeMap<String, Weak<AtomicBool>>>,
+    guest_runtime_upload: Option<Arc<dyn crate::guest_runtime_upload::GuestRuntimeUploadSource>>,
 }
 
 impl ExternalPlacementBackendRegistry {
+    /// Install the composition root's source of guest runtime uploads. Absent,
+    /// a provider that stages its runtime refuses activation before any claim.
+    #[must_use]
+    pub fn with_guest_runtime_upload_source(
+        mut self,
+        source: Arc<dyn crate::guest_runtime_upload::GuestRuntimeUploadSource>,
+    ) -> Self {
+        self.guest_runtime_upload = Some(source);
+        self
+    }
+
+    fn guest_runtime_upload_binding(
+        &self,
+        state: &AppState,
+    ) -> Option<crate::guest_runtime_upload::GuestRuntimeUploadBinding> {
+        self.guest_runtime_upload.as_ref().map(|source| {
+            crate::guest_runtime_upload::GuestRuntimeUploadBinding::new(source.clone(), state)
+        })
+    }
+
     pub(crate) fn seal_restoration_verifier_upload(
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -1436,6 +1477,7 @@ impl ExternalPlacementBackendRegistry {
         Ok(Self {
             backends: by_id,
             contact_gates: Mutex::new(BTreeMap::new()),
+            guest_runtime_upload: None,
         })
     }
 
@@ -1618,8 +1660,13 @@ impl ExternalPlacementBackendRegistry {
                             .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
                     "external runtime qualification relationship differs from installed adapter admission"
                 ),
+                // A provider whose activation stages the runtime itself admits
+                // it independently of any prior qualification; the session
+                // being qualified is then the product it stages.
                 RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
-                    !effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                    backend.stages_guest_runtime_upload()
+                        || !effective
+                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
                     "qualification-only startup cannot satisfy adapter independent guest runtime admission"
                 ),
             }
@@ -4489,6 +4536,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -4563,6 +4611,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -4654,6 +4703,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -4769,6 +4819,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program,
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -4997,6 +5048,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program: generic_program,
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -5323,6 +5375,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             program: AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Policy(
                 Arc::clone(&self.state.node_policy),
             ),
@@ -5510,7 +5563,12 @@ impl ExternalQualificationStart<'_> {
             let inputs = self.guest_inputs.take().context(
                 "external qualification startup lost original activation input lifelines; cleanup required",
             )?;
-            prepared = prepared.with_guest_inputs(inputs)?;
+            prepared = prepared.with_guest_inputs(
+                inputs,
+                self.state
+                    .external_placement_backends
+                    .guest_runtime_upload_binding(self.state),
+            )?;
         } else if activation_exists {
             // A retained activation can only be reconciled; it cannot accept
             // another descriptor inventory, even from the same local owner.
@@ -6063,7 +6121,12 @@ impl ExternalDirectStart<'_> {
                 if !activation_exists {
                     let inputs = self.guest_inputs.take()
                         .context("external direct recovery has no original activation input lifelines; cleanup required")?;
-                    prepared = prepared.with_guest_inputs(inputs)?;
+                    prepared = prepared.with_guest_inputs(
+                        inputs,
+                        self.state
+                            .external_placement_backends
+                            .guest_runtime_upload_binding(self.state),
+                    )?;
                 } else {
                     // Retained activation can only be reconciled. Never inject
                     // even an exact-looking replacement descriptor inventory.
@@ -6183,7 +6246,14 @@ pub fn advance_external_candidate_start_with_guest_inputs(
 ) -> std::result::Result<ExternalCandidateStartProgress, ExternalCandidateStartFailure> {
     let prepared = ExternalPlacementOwner::new(state)
         .prepare(placement)
-        .and_then(|prepared| prepared.with_guest_inputs(guest_inputs))
+        .and_then(|prepared| {
+            prepared.with_guest_inputs(
+                guest_inputs,
+                state
+                    .external_placement_backends
+                    .guest_runtime_upload_binding(state),
+            )
+        })
         .map_err(|error| classify_external_start_failure(state, placement, error))?;
     advance_prepared_external_start(prepared, live_deadline)
         .map_err(|error| classify_external_start_failure(state, placement, error))
@@ -7019,6 +7089,7 @@ pub(crate) struct PreparedExternalPlacement {
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
     qualification_activation: Option<QualificationActivationAdmission>,
+    runtime_upload: Option<crate::guest_runtime_upload::GuestRuntimeUploadBinding>,
     native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource,
     record: ExternalAllocationRecord,
 }
@@ -7027,6 +7098,7 @@ impl PreparedExternalPlacement {
     fn with_guest_inputs(
         mut self,
         guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        runtime_upload: Option<crate::guest_runtime_upload::GuestRuntimeUploadBinding>,
     ) -> Result<Self> {
         ensure!(
             self.record.phase == ExternalAllocationPhase::Bound,
@@ -7046,6 +7118,7 @@ impl PreparedExternalPlacement {
             "external guest inputs cannot be supplied to activation reconciliation"
         );
         self.guest_inputs = Some(guest_inputs);
+        self.runtime_upload = runtime_upload;
         Ok(self)
     }
 
@@ -7199,6 +7272,7 @@ impl PreparedExternalPlacement {
                         program: self.program,
                         guest_inputs: self.guest_inputs,
                         qualification_activation: self.qualification_activation,
+                        runtime_upload: self.runtime_upload,
                         native_journal: self.native_journal,
                         _controller_lifetime: self.controller_lifetime,
                         record,
@@ -7246,6 +7320,7 @@ pub(crate) struct ExternalPlacementReconciliation {
     program: AdmittedExternalExecutionProgram,
     guest_inputs: Option<ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
     qualification_activation: Option<QualificationActivationAdmission>,
+    runtime_upload: Option<crate::guest_runtime_upload::GuestRuntimeUploadBinding>,
     native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource,
     // Reconciliation and termination are provider mutations/observations too;
     // they must not overlap a replacement controller generation.
@@ -7526,6 +7601,33 @@ impl ExternalPlacementReconciliation {
                 .native_journal
                 .envelope(&self.contract, current.reservation.timeout_seconds)?;
             let package_parent = self.state_store.external_guest_package_parent()?;
+            let guest_runtime = if self.backend.stages_guest_runtime_upload() {
+                let binding = self.runtime_upload.as_ref().context(
+                    "external provider stages its guest runtime but no upload source is installed",
+                )?;
+                let basis = match (
+                    &current.reservation.owner,
+                    self.qualification_activation.as_ref(),
+                ) {
+                    (ExternalAllocationOwner::DedicatedSession(_), _) => {
+                        crate::guest_runtime_upload::GuestRuntimeBasis::Ordinary
+                    }
+                    (ExternalAllocationOwner::QualificationCandidate(_), Some(admission)) => {
+                        crate::guest_runtime_upload::GuestRuntimeBasis::QualificationCandidate(
+                            &admission.root,
+                        )
+                    }
+                    (ExternalAllocationOwner::QualificationCandidate(_), None) => bail!(
+                        "qualification activation has no live invoking owner to name its guest runtime"
+                    ),
+                    (ExternalAllocationOwner::DirectThread { .. }, _) => {
+                        bail!("a direct thread has no guest runtime to stage")
+                    }
+                };
+                Some(binding.produce(&self.contract, basis)?)
+            } else {
+                None
+            };
             let guest_inputs = self
                 .guest_inputs
                 .take()
@@ -7538,6 +7640,7 @@ impl ExternalPlacementReconciliation {
                 &self.program,
                 guest_inputs,
                 self.backend.as_ref(),
+                guest_runtime,
                 &package_parent,
                 deadline,
                 native_journal,
@@ -8125,6 +8228,7 @@ fn supervisor_activation(
     program: &AdmittedExternalExecutionProgram,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
     backend: &dyn ExternalPlacementBackend,
+    guest_runtime: Option<ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload>,
     package_parent: &lillux::PinnedDirectory,
     deadline: lillux::time::MonotonicDeadline,
     native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope,
@@ -8204,6 +8308,12 @@ fn supervisor_activation(
             channel_max_bytes,
             &guest_input_identity,
         )?;
+    // A provider that uploads the runtime itself needs its sealed tar, produced
+    // by the caller before the claim and before any input lifeline is taken.
+    ensure!(
+        backend.stages_guest_runtime_upload() == guest_runtime.is_some(),
+        "external activation guest runtime upload differs from the provider's declaration"
+    );
     let guest_package = backend.prepare_guest_package(
         contract,
         reservation,
@@ -8270,6 +8380,7 @@ fn supervisor_activation(
             bootstrap,
             guest_inputs,
             guest_package: Some(guest_package),
+            guest_runtime,
             import_authorization,
             signed_assignment: None,
         },
@@ -9749,6 +9860,8 @@ mod tests {
         reconciled_termination: &'static str,
         late_allocation: bool,
         late_activation: bool,
+        stages_runtime: bool,
+        prepare_calls: AtomicUsize,
     }
 
     impl FaultBackend {
@@ -9768,6 +9881,8 @@ mod tests {
                 reconciled_termination: "terminal",
                 late_allocation: false,
                 late_activation: false,
+                stages_runtime: false,
+                prepare_calls: AtomicUsize::new(0),
             }
         }
 
@@ -9782,6 +9897,10 @@ mod tests {
     impl ExternalPlacementBackend for FaultBackend {
         fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability> {
             self.capabilities.clone()
+        }
+
+        fn stages_guest_runtime_upload(&self) -> bool {
+            self.stages_runtime
         }
 
         fn backend_id(&self) -> &str {
@@ -9834,6 +9953,7 @@ mod tests {
             _parent: &lillux::PinnedDirectory,
             _deadline: lillux::time::MonotonicDeadline,
         ) -> Result<SupervisorGuestPackage> {
+            self.prepare_calls.fetch_add(1, Ordering::SeqCst);
             fixture_guest_package(
                 contract,
                 reservation,
@@ -10316,6 +10436,7 @@ mod tests {
             &AdmittedExternalExecutionProgram::StructuredSession(program()),
             inputs,
             &FaultBackend::new(),
+            None,
             &package_parent,
             reservation.startup_deadline().unwrap(),
             crate::external_supervisor_native::test_supervisor_journal_envelope(),
@@ -10669,6 +10790,7 @@ mod tests {
             program: AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs: None,
             qualification_activation: None,
+            runtime_upload: None,
             native_journal: crate::external_supervisor_native::SupervisorJournalEnvelopeSource::Fixed(
                 crate::external_supervisor_native::test_supervisor_journal_envelope(),
             ),
@@ -10696,10 +10818,10 @@ mod tests {
             gate,
             controller_lifetime,
         )
-        .with_guest_inputs(guest_input_authority(
-            guest_root,
-            &reservation.base_snapshot_hash,
-        ))
+        .with_guest_inputs(
+            guest_input_authority(guest_root, &reservation.base_snapshot_hash),
+            None,
+        )
         .unwrap()
     }
 
@@ -12233,6 +12355,7 @@ mod tests {
             &AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs,
             &FaultBackend::new(),
+            None,
             &package_parent,
             reservation.startup_deadline().unwrap(),
             crate::external_supervisor_native::test_supervisor_journal_envelope(),
@@ -12443,6 +12566,7 @@ mod tests {
             &AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs,
             &backend,
+            None,
             &package_parent,
             reservation.startup_deadline().unwrap(),
             crate::external_supervisor_native::test_supervisor_journal_envelope(),
@@ -12809,6 +12933,73 @@ mod tests {
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_staged_activation_without_an_upload_source_is_a_plain_refusal_before_any_claim() {
+        let (_owner, store, reservation, binding, lifetime, _lock_path) = placement_store_fixture();
+        let backend = Arc::new(FaultBackend {
+            stages_runtime: true,
+            ..FaultBackend::new()
+        });
+        let gate = Arc::new(AtomicBool::new(false));
+        let guest_root = tempfile::tempdir().unwrap();
+        let ExternalPlacementContactDecision::Contact(contact) = prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
+            panic!("fresh reservation lost its contact permit");
+        };
+        assert!(contact.contact(test_startup_deadline()).is_err());
+        let ExternalPlacementContactDecision::Reconcile(allocation) = prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
+            panic!("ambiguous allocation lost reconciliation authority");
+        };
+        allocation
+            .reconcile_with_deadline(test_startup_deadline(), test_observation_timing())
+            .unwrap();
+        let ExternalPlacementContactDecision::Reconcile(activation) =
+            prepared_fixture_with_guest_inputs(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &binding,
+                gate,
+                lifetime,
+                guest_root.path(),
+            )
+            .claim()
+            .unwrap()
+        else {
+            panic!("bound occurrence lost activation authority");
+        };
+        let refusal = format!("{:#}", activation.activate_or_reconcile().unwrap_err());
+        assert!(
+            refusal.contains("no upload source is installed"),
+            "{refusal}"
+        );
+        assert_eq!(backend.prepare_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

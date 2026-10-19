@@ -48,6 +48,7 @@ pub mod external_qualification_invocation;
 pub mod external_qualification_local;
 pub mod external_qualification_transcript;
 pub mod federated_follow;
+pub mod guest_runtime_upload;
 pub mod handler_context;
 pub mod handler_error;
 pub mod hosted_candidate_result;

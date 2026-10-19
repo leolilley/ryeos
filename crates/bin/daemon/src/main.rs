@@ -4135,7 +4135,11 @@ async fn run(
                 services,
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
-                external_placement_backends: Arc::new(external_artifacts.placement_backends),
+                external_placement_backends: Arc::new(
+                    external_artifacts.placement_backends.with_guest_runtime_upload_source(Arc::new(
+                        ryeos_executor::execution::external_guest_runtime_product::ExecutorGuestRuntimeUploadSource,
+                    )),
+                ),
                 // External connector generations must be supplied by signed
                 // bundle composition. No ambient sibling-binary discovery is
                 // permitted; absent composition keeps external admission
@@ -7647,7 +7651,11 @@ async fn run_service_standalone(
         services,
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
-        external_placement_backends: Arc::new(external_artifacts.placement_backends),
+        external_placement_backends: Arc::new(
+            external_artifacts.placement_backends.with_guest_runtime_upload_source(Arc::new(
+                ryeos_executor::execution::external_guest_runtime_product::ExecutorGuestRuntimeUploadSource,
+            )),
+        ),
         // External connector generations must be supplied by signed bundle
         // composition; an empty registry refuses external profiles.
         external_candidate_connectors: Arc::new(external_artifacts.connectors),

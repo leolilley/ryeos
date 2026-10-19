@@ -335,12 +335,55 @@ pub fn stage_current_guest_owner_runtime_product(
     })
 }
 
+fn require_requested_manifest(staged: &str, requested: &str) -> Result<()> {
+    ensure!(
+        staged == requested,
+        "staged guest runtime is not the runtime the placement contract names"
+    );
+    Ok(())
+}
+
+/// Produces a provider's guest runtime upload from the retained product the
+/// node qualified, for activations that stage the runtime themselves.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutorGuestRuntimeUploadSource;
+
+impl ryeos_app::guest_runtime_upload::GuestRuntimeUploadSource
+    for ExecutorGuestRuntimeUploadSource
+{
+    fn produce(
+        &self,
+        state: &ryeos_app::state::AppState,
+        context: &ryeos_app::handler_context::HandlerContext,
+        request: &ryeos_app::guest_runtime_upload::GuestRuntimeUploadRequest<'_>,
+    ) -> Result<GuestOwnerSnapshotUpload> {
+        let staged = stage_current_guest_owner_runtime_product(
+            state,
+            context,
+            request.witness_hash,
+            request.witness_source,
+            request.maximum_bytes,
+            request.stage.root(),
+            request.stage.product_name(),
+        )?;
+        require_requested_manifest(&staged.identity().manifest_hash, request.manifest_hash)?;
+        staged.sealed_snapshot_upload()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_staged_runtime_must_be_the_requested_manifest() {
+        let manifest = "a".repeat(64);
+        require_requested_manifest(&manifest, &manifest).unwrap();
+        assert!(require_requested_manifest(&manifest, &"b".repeat(64)).is_err());
+    }
 
     #[test]
     fn staged_source_refuses_drift_before_provider_transfer() {
