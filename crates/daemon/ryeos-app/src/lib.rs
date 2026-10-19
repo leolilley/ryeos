@@ -84,6 +84,7 @@ pub mod qualification_workspace_custody;
 pub mod recovery_execution_gate;
 pub mod resolution_cache;
 mod retained_bundle_evidence;
+pub mod retention_exclusion;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_capability_admission;

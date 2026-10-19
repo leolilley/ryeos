@@ -14669,7 +14669,7 @@ impl StateStore {
     fn inspect_terminal_chain_pins<F>(
         g: &Inner,
         chain: &ryeos_state::AuthoritativeTerminalChain,
-        scheduler_pin_count: &F,
+        pin_count: &F,
     ) -> Result<runtime_db::ChainRecoveryPins>
     where
         F: Fn(&[String]) -> Result<u64>,
@@ -14712,7 +14712,7 @@ impl StateStore {
                     .ok_or_else(|| anyhow!("child-link recovery pin count overflow"))?;
             }
         }
-        pins.scheduler_fires = scheduler_pin_count(&chain.thread_ids)?;
+        pins.scheduler_fires = pin_count(&chain.thread_ids)?;
         Ok(pins)
     }
 
@@ -14765,7 +14765,7 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: &F,
+        pin_count: &F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
@@ -14874,7 +14874,7 @@ impl StateStore {
                 continue;
             };
             let due = chain.is_due_at(now)?;
-            let pins = Self::inspect_terminal_chain_pins(&g, &chain, scheduler_pin_count)?;
+            let pins = Self::inspect_terminal_chain_pins(&g, &chain, pin_count)?;
             if !due || !pins.is_empty() {
                 result.pending_retirements_recovered += 1;
                 if !dry_run {
@@ -14908,13 +14908,13 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: F,
+        pin_count: F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
     {
         let result =
-            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count);
+            self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count);
         match self
             .lock()
             .and_then(|g| Ok(g.state_db.pending_chain_transitions()?.len()))
@@ -14935,14 +14935,14 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: F,
+        pin_count: F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
     {
         const CANDIDATE_BATCH: usize = 128;
         let mut result =
-            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count)?;
+            self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count)?;
         let mut cursor: Option<ryeos_state::DueTerminalChainCursor> = None;
         loop {
             let candidates = {
@@ -15000,7 +15000,7 @@ impl StateStore {
                 {
                     continue;
                 }
-                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &scheduler_pin_count)?;
+                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &pin_count)?;
                 if !pins.is_empty() {
                     continue;
                 }

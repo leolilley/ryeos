@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use ryeos_app::retention_exclusion::{
+    ExclusionMode, PinFuture, PinSourceId, ThreadPinGuard, ThreadPinSource,
+};
 use ryeos_app::scheduler_boundary::{
     DurableThreadTerminal, SchedulerParticipant, SchedulerRetentionGuard,
     TerminalObservationDisposition,
@@ -7,7 +10,8 @@ use ryeos_scheduler::{
     classify_result_payload, fire_outcome_for_terminal, fire_status_for_thread_status, projection,
 };
 use ryeos_state::gc::retention::FireRetentionTarget;
-use tokio::sync::OwnedRwLockWriteGuard;
+use std::sync::Arc;
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 
 use crate::retention::{SchedulerService, SchedulerServiceRetention};
 
@@ -87,6 +91,10 @@ impl SchedulerParticipant for SchedulerService {
         Ok(TerminalObservationDisposition::Recorded)
     }
 
+    fn pin_source(self: Arc<Self>) -> Arc<dyn ThreadPinSource> {
+        self
+    }
+
     fn acquire_retention(
         &self,
     ) -> ryeos_app::scheduler_boundary::SchedulerFuture<'_, Box<dyn SchedulerRetentionGuard>> {
@@ -99,6 +107,7 @@ impl SchedulerParticipant for SchedulerService {
                 );
             }
             Ok(Box::new(SchedulerServiceRetention::new(
+                PinSourceId::of(self),
                 gate,
                 self.db.clone(),
                 self.runtime_directory.clone(),
@@ -108,19 +117,72 @@ impl SchedulerParticipant for SchedulerService {
     }
 }
 
-impl SchedulerRetentionGuard for SchedulerServiceRetention {
-    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
-        let mut pins = 0u64;
-        for thread_id in thread_ids {
-            if self.db.find_fire_by_thread(thread_id)?.is_some() {
-                pins = pins
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow::anyhow!("scheduler pin count overflow"))?;
+impl ThreadPinSource for SchedulerService {
+    fn acquire_pins(&self, mode: ExclusionMode) -> PinFuture<'_, Box<dyn ThreadPinGuard>> {
+        Box::pin(async move {
+            match mode {
+                ExclusionMode::Exclusive => {
+                    let guard = SchedulerParticipant::acquire_retention(self).await?;
+                    Ok(guard as Box<dyn ThreadPinGuard>)
+                }
+                ExclusionMode::Shared => {
+                    let gate = self.runtime_gate.clone().read_owned().await;
+                    self.require_dispatch_available()?;
+                    if !self.db.fire_projection_is_current()? {
+                        anyhow::bail!(
+                            "scheduler retention requires a current fire projection before pin inspection"
+                        );
+                    }
+                    Ok(Box::new(SchedulerSharedPins {
+                        source: PinSourceId::of(self),
+                        _gate: gate,
+                        db: self.db.clone(),
+                    }) as Box<dyn ThreadPinGuard>)
+                }
             }
-        }
-        Ok(pins)
+        })
     }
+}
 
+/// Read side of the scheduler runtime gate with a verified-current fire
+/// projection, for work that only needs stable pin counts.
+struct SchedulerSharedPins {
+    source: PinSourceId,
+    _gate: OwnedRwLockReadGuard<()>,
+    db: Arc<ryeos_scheduler::db::SchedulerDb>,
+}
+
+fn count_fire_pins(db: &ryeos_scheduler::db::SchedulerDb, thread_ids: &[String]) -> Result<u64> {
+    let mut pins = 0u64;
+    for thread_id in thread_ids {
+        if db.find_fire_by_thread(thread_id)?.is_some() {
+            pins = pins
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("scheduler pin count overflow"))?;
+        }
+    }
+    Ok(pins)
+}
+
+impl ThreadPinGuard for SchedulerSharedPins {
+    fn source(&self) -> PinSourceId {
+        self.source
+    }
+    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
+        count_fire_pins(&self.db, thread_ids)
+    }
+}
+
+impl ThreadPinGuard for SchedulerServiceRetention {
+    fn source(&self) -> PinSourceId {
+        self.source
+    }
+    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
+        count_fire_pins(&self.db, thread_ids)
+    }
+}
+
+impl SchedulerRetentionGuard for SchedulerServiceRetention {
     fn operational_snapshot_roots(&self) -> Result<Vec<String>> {
         self.db.operational_snapshot_roots()
     }

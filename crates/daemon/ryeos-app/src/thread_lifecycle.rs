@@ -119,6 +119,9 @@ pub struct ThreadLifecycleService {
     event_hub: Arc<ThreadEventHub>,
     current_site_id: String,
     scheduler: std::sync::RwLock<SchedulerParticipantSlot>,
+    /// Retention gate and sealed pin sources shared by every path that
+    /// deletes or fences thread chain state.
+    retention: crate::retention_exclusion::RetentionCoordinator,
     /// Operator live-input staging, shared with `AppState`. Wired once after
     /// construction (`set_live_input_queue`) so the existing constructor call
     /// sites stay unchanged. Finalization closes the per-thread entry after the
@@ -3907,6 +3910,7 @@ impl ThreadLifecycleService {
             event_hub,
             current_site_id,
             scheduler: std::sync::RwLock::new(SchedulerParticipantSlot::Available),
+            retention: crate::retention_exclusion::RetentionCoordinator::new(),
             live_input: std::sync::RwLock::new(None),
         }
     }
@@ -3962,6 +3966,10 @@ impl ThreadLifecycleService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*slot {
             SchedulerParticipantSlot::Available => {
+                // Registered with the slot write, so an installed scheduler is
+                // always counted by retention.
+                self.retention
+                    .register(Arc::clone(&participant).pin_source())?;
                 *slot = SchedulerParticipantSlot::Installed(participant);
                 Ok(())
             }
@@ -3980,6 +3988,7 @@ impl ThreadLifecycleService {
     pub fn take_scheduler_participant_for_shutdown(
         &self,
     ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.retention.withdraw();
         let mut slot = self
             .scheduler
             .write()
@@ -3988,6 +3997,10 @@ impl ThreadLifecycleService {
             SchedulerParticipantSlot::Installed(participant) => Some(participant),
             SchedulerParticipantSlot::Available | SchedulerParticipantSlot::Withdrawn => None,
         }
+    }
+
+    pub fn retention(&self) -> &crate::retention_exclusion::RetentionCoordinator {
+        &self.retention
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {

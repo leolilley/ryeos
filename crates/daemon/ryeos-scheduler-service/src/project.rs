@@ -1956,6 +1956,80 @@ mod deploy_recovery_tests {
     }
 
     #[tokio::test]
+    async fn scheduler_is_one_registered_pin_source_in_both_modes() {
+        use ryeos_app::retention_exclusion::{
+            ExclusionMode, PinSourceId, RetentionCoordinator, ThreadPinGuard, ThreadPinSource,
+        };
+        use ryeos_app::scheduler_boundary::SchedulerParticipant;
+
+        let host = TestSchedulerHost::acquire();
+        let fixture = Fixture::new();
+        let node = fixture.open(&host);
+        let participant: Arc<dyn SchedulerParticipant> = node.service.clone();
+        let source: Arc<dyn ThreadPinSource> = participant.clone().pin_source();
+        assert_eq!(PinSourceId::of(&*source), PinSourceId::of(&*node.service));
+
+        let coordinator = RetentionCoordinator::new();
+        coordinator.register(source).unwrap();
+        coordinator.seal().unwrap();
+        let unpinned = vec!["thread-without-fire".to_owned()];
+
+        let shared = coordinator
+            .acquire_retention_gate(ExclusionMode::Shared)
+            .await
+            .unwrap()
+            .acquire_sealed_pins()
+            .await
+            .unwrap();
+        assert_eq!(shared.count_thread_pins(&unpinned).unwrap(), 0);
+        // Shared holds the runtime gate's read side: the retention guard
+        // cannot be taken until it drops.
+        assert!(node.service.runtime_gate.clone().try_write_owned().is_err());
+        drop(shared);
+
+        let retention = participant.acquire_retention().await.unwrap();
+        let held: &dyn ThreadPinGuard = &*retention;
+        let exclusion = coordinator
+            .acquire_retention_gate(ExclusionMode::Exclusive)
+            .await
+            .unwrap()
+            .with_held_pins(vec![held])
+            .unwrap();
+        assert_eq!(exclusion.count_thread_pins(&unpinned).unwrap(), 0);
+        drop(exclusion);
+        drop(retention);
+
+        let exclusive = coordinator
+            .acquire_retention_gate(ExclusionMode::Exclusive)
+            .await
+            .unwrap()
+            .acquire_sealed_pins()
+            .await
+            .unwrap();
+        assert_eq!(exclusive.count_thread_pins(&unpinned).unwrap(), 0);
+        drop(exclusive);
+
+        node.db.begin_fire_projection_rebuild().unwrap();
+        for mode in [ExclusionMode::Shared, ExclusionMode::Exclusive] {
+            let error = coordinator
+                .acquire_retention_gate(mode)
+                .await
+                .unwrap()
+                .acquire_sealed_pins()
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("current fire projection"),
+                "{error}"
+            );
+        }
+        drop(coordinator);
+        drop(participant);
+        fixture.close(&host, node);
+    }
+
+    #[tokio::test]
     async fn before_images_are_exact_signed_source_bytes_and_record_absence() {
         let host = TestSchedulerHost::acquire();
         let fixture = Fixture::new();

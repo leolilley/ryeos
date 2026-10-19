@@ -14,6 +14,9 @@ use std::ffi::OsStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use ryeos_app::retention_exclusion::{
+    ExclusionMode, PinFuture, PinSourceId, ThreadPinGuard, ThreadPinSource,
+};
 use ryeos_app::scheduler_boundary::{
     DurableThreadTerminal, SchedulerFuture, SchedulerParticipant, SchedulerRetentionGuard,
     TerminalObservationDisposition,
@@ -25,7 +28,7 @@ use ryeos_scheduler_contract::{
 };
 use ryeos_state::gc::retention::FireRetentionTarget;
 use ryeos_state::operational::CarriedOwners;
-use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 /// The scheduler store of a stopped node, open for one projection rebuild.
 pub struct StoppedNodeScheduler {
@@ -285,6 +288,10 @@ impl SchedulerParticipant for StoppedNodeScheduler {
         )
     }
 
+    fn pin_source(self: Arc<Self>) -> Arc<dyn ThreadPinSource> {
+        self
+    }
+
     fn acquire_retention(&self) -> SchedulerFuture<'_, Box<dyn SchedulerRetentionGuard>> {
         Box::pin(async move {
             let gate: OwnedRwLockWriteGuard<()> = self.gate.clone().write_owned().await;
@@ -294,6 +301,7 @@ impl SchedulerParticipant for StoppedNodeScheduler {
                 );
             }
             Ok(Box::new(StoppedNodeRetention {
+                source: PinSourceId::of(self),
                 _gate: gate,
                 db: Arc::clone(&self.db),
             }) as Box<dyn SchedulerRetentionGuard>)
@@ -304,23 +312,75 @@ impl SchedulerParticipant for StoppedNodeScheduler {
 /// Pin and snapshot-root reads over the stopped node's fire projection.
 /// Fire retention is a live-node mutation and is refused here.
 struct StoppedNodeRetention {
+    source: PinSourceId,
     _gate: OwnedRwLockWriteGuard<()>,
     db: Arc<SchedulerDb>,
 }
 
-impl SchedulerRetentionGuard for StoppedNodeRetention {
-    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
-        let mut pins = 0u64;
-        for thread_id in thread_ids {
-            if self.db.find_fire_by_thread(thread_id)?.is_some() {
-                pins = pins
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow!("scheduler pin count overflow"))?;
-            }
-        }
-        Ok(pins)
-    }
+/// Read side of the stopped node's gate with a current fire projection.
+struct StoppedNodeSharedPins {
+    source: PinSourceId,
+    _gate: OwnedRwLockReadGuard<()>,
+    db: Arc<SchedulerDb>,
+}
 
+fn count_fire_pins(db: &SchedulerDb, thread_ids: &[String]) -> Result<u64> {
+    let mut pins = 0u64;
+    for thread_id in thread_ids {
+        if db.find_fire_by_thread(thread_id)?.is_some() {
+            pins = pins
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("scheduler pin count overflow"))?;
+        }
+    }
+    Ok(pins)
+}
+
+impl ThreadPinSource for StoppedNodeScheduler {
+    fn acquire_pins(&self, mode: ExclusionMode) -> PinFuture<'_, Box<dyn ThreadPinGuard>> {
+        Box::pin(async move {
+            match mode {
+                ExclusionMode::Exclusive => {
+                    let guard = SchedulerParticipant::acquire_retention(self).await?;
+                    Ok(guard as Box<dyn ThreadPinGuard>)
+                }
+                ExclusionMode::Shared => {
+                    let gate = self.gate.clone().read_owned().await;
+                    if !self.db.fire_projection_is_current()? {
+                        anyhow::bail!(
+                            "stopped-node scheduler retention requires a current fire projection before pin inspection"
+                        );
+                    }
+                    Ok(Box::new(StoppedNodeSharedPins {
+                        source: PinSourceId::of(self),
+                        _gate: gate,
+                        db: Arc::clone(&self.db),
+                    }) as Box<dyn ThreadPinGuard>)
+                }
+            }
+        })
+    }
+}
+
+impl ThreadPinGuard for StoppedNodeSharedPins {
+    fn source(&self) -> PinSourceId {
+        self.source
+    }
+    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
+        count_fire_pins(&self.db, thread_ids)
+    }
+}
+
+impl ThreadPinGuard for StoppedNodeRetention {
+    fn source(&self) -> PinSourceId {
+        self.source
+    }
+    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64> {
+        count_fire_pins(&self.db, thread_ids)
+    }
+}
+
+impl SchedulerRetentionGuard for StoppedNodeRetention {
     fn operational_snapshot_roots(&self) -> Result<Vec<String>> {
         self.db.operational_snapshot_roots()
     }
@@ -375,6 +435,45 @@ mod tests {
         // Every alias of the store ends before the test store settles it.
         drop(guard);
         drop(participant);
+        drop(scheduler);
+        drop(runtime);
+        drop(store);
+    }
+
+    #[test]
+    fn stopped_node_is_a_pin_source_in_both_modes_and_refuses_a_stale_projection() {
+        let store = ryeos_scheduler::test_native::TestSchedulerDb::open();
+        let scheduler = StoppedNodeScheduler::over_store(store.shared());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build test runtime");
+        let unpinned = ["thread-without-fire".to_string()];
+        let source = Arc::clone(&scheduler).pin_source();
+        assert_eq!(PinSourceId::of(&*source), PinSourceId::of(&*scheduler));
+        drop(source);
+
+        for mode in [ExclusionMode::Shared, ExclusionMode::Exclusive] {
+            let guard = runtime
+                .block_on(scheduler.acquire_pins(mode))
+                .expect("acquire pins");
+            assert_eq!(guard.source(), PinSourceId::of(&*scheduler));
+            assert_eq!(guard.count_thread_pins(&unpinned).expect("count pins"), 0);
+        }
+
+        scheduler
+            .db
+            .begin_fire_projection_rebuild()
+            .expect("invalidate fire projection");
+        for mode in [ExclusionMode::Shared, ExclusionMode::Exclusive] {
+            let error = runtime
+                .block_on(scheduler.acquire_pins(mode))
+                .err()
+                .expect("stale projection refuses");
+            assert!(
+                error.to_string().contains("current fire projection"),
+                "{error}"
+            );
+        }
         drop(scheduler);
         drop(runtime);
         drop(store);

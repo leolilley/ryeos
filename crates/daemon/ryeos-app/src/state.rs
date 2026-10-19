@@ -241,6 +241,29 @@ impl AppState {
         self.threads.install_scheduler_participant(participant)
     }
 
+    /// Register a composition part that may hold durable thread references.
+    /// Allowed only before [`Self::seal_thread_pin_sources`].
+    pub fn register_thread_pin_source(
+        &self,
+        source: Arc<dyn crate::retention_exclusion::ThreadPinSource>,
+    ) -> anyhow::Result<()> {
+        self.threads.retention().register(source)
+    }
+
+    /// Close the pin-source set exactly once, before any recovery and before
+    /// readiness. A composition with no pin holders seals an empty set.
+    pub fn seal_thread_pin_sources(&self) -> anyhow::Result<()> {
+        self.threads.retention().seal()
+    }
+
+    /// Take the retention gate; complete it with the sealed sources' pins.
+    pub async fn acquire_retention_gate(
+        &self,
+        mode: crate::retention_exclusion::ExclusionMode,
+    ) -> anyhow::Result<crate::retention_exclusion::RetentionGate> {
+        self.threads.retention().acquire_retention_gate(mode).await
+    }
+
     /// Withdraw the same participant after request and scheduler-task drain.
     /// This is part of native shutdown custody, not ordinary capability removal.
     pub fn take_scheduler_participant_for_shutdown(

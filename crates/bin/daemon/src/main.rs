@@ -4865,6 +4865,7 @@ async fn run(
                 app_state.install_scheduler_participant(scheduler_service.clone()
                     as Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>)?;
             }
+            app_state.seal_thread_pin_sources()?;
             // Move the completed AppState under outer custody before the
             // fallible generation arm and recovery sequence. This preserves
             // the exact pool allocation installed above.
@@ -8478,6 +8479,28 @@ async fn run_service_standalone(
         | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting
         | ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
     };
+    // Every composition seals its retention pin sources, with or without a
+    // stopped-node scheduler, before the service runs.
+    if let Err(error) = app_state.seal_thread_pin_sources() {
+        drop(app_state);
+        #[cfg(feature = "scheduling")]
+        let error = match (standalone_scheduler, standalone_native.as_ref()) {
+            (Some(scheduler), Some(host)) => match scheduler.settle(host) {
+                Ok(()) => error,
+                Err(settle) => ryeos_state::operational::CarriedOwners::carry(
+                    error.context(format!("stopped-node scheduler did not settle: {settle:#}")),
+                    settle,
+                ),
+            },
+            _ => error,
+        };
+        return Err(settle_standalone_setup_failure(
+            standalone_native,
+            standalone_state_access,
+            state_store,
+            error,
+        ));
+    }
 
     let ctx = ExecutionContext {
         principal_fingerprint: standalone_principal,

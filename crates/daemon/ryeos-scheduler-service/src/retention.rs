@@ -255,6 +255,7 @@ async fn acquire_checked_write_gate(
 }
 
 pub(crate) struct SchedulerServiceRetention {
+    pub(crate) source: ryeos_app::retention_exclusion::PinSourceId,
     _runtime_gate: OwnedRwLockWriteGuard<()>,
     pub(crate) db: Arc<SchedulerDb>,
     pub(crate) runtime_directory: Arc<lillux::PinnedDirectory>,
@@ -267,12 +268,14 @@ pub(crate) struct SchedulerServiceRetention {
 
 impl SchedulerServiceRetention {
     pub(crate) fn new(
+        source: ryeos_app::retention_exclusion::PinSourceId,
         runtime_gate: OwnedRwLockWriteGuard<()>,
         db: Arc<SchedulerDb>,
         runtime_directory: Arc<lillux::PinnedDirectory>,
         runtime_identity: lillux::PinnedDirectoryIdentity,
     ) -> Self {
         Self {
+            source,
             _runtime_gate: runtime_gate,
             db,
             runtime_directory,
