@@ -15,6 +15,9 @@ paths = [
   '''^crates/.*/tests/.*\.rs$''',
   '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/tokenizer\.py$''',
   '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/cuda_lifecycle/nvml_qualification\.md$''',
+  # A test fixture PEM made of repeated A's, and a bake secret id.
+  '''^crates/daemon/ryeos-app/src/node_config/sections/external_execution/compose\.rs$''',
+  '''^docker-bake\.composition\.hcl$''',
 ]
 regexes = [
   '''id=publisher-key,src=''',
