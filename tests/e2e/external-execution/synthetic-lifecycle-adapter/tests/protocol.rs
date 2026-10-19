@@ -1205,6 +1205,7 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -2546,6 +2547,7 @@ fn production_loader_resolves_the_fixture_only_from_signed_bundle_authority() {
     ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         std::slice::from_ref(&bundle),
         &trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .expect("signed test lifecycle generation should resolve and self-inspect");
 
@@ -2553,6 +2555,7 @@ fn production_loader_resolves_the_fixture_only_from_signed_bundle_authority() {
     let error = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         std::slice::from_ref(&bundle),
         &trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .expect_err("changed lifecycle bytes must not retain signed executable authority");
     let message = format!("{error:#}");
@@ -2597,6 +2600,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -2783,6 +2787,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             payload: ryeos_state::external_execution::ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         },
         &binding,
@@ -3267,6 +3272,7 @@ async fn run_production_tls_candidate(
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -5742,6 +5748,7 @@ fn exercise_activation_fault(fault: &str) {
             cleanup_millis: 120_000,
             cleanup_steps: 3_000_000,
         },
+        report_capabilities: false,
     };
     let activation = SupervisorActivationIntent {
         activation_request_digest: "6".repeat(64),
