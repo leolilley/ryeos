@@ -564,7 +564,7 @@ fi
     hold_status=0
     RYEOS_OPERATOR_HOLD=yes operator_hold_requested 2>/dev/null || hold_status=$?
     [[ "$hold_status" -eq 2 ]]
-    ! RYEOS_OPERATOR_HOLD= operator_hold_requested
+    ! RYEOS_OPERATOR_HOLD='' operator_hold_requested
     RYEOS_OPERATOR_HOLD=1
     operator_hold_requested
     OPERATOR_HOLD_POLL_SECONDS=1
