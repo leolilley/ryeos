@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-10-01T11:01:14Z:57a90625ec2a7a2d348c2df30769c8404fe7a719c24211bfecfd707eeb4dfc55:yxSsLF6/qDKqO28fAGFeNQyGR+8y6sov7GlgGFdwBgm2oyukDQ8XIv8+qWKC/ma1zCoIGdRaJ5G0+E0lyuGnCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T06:04:35Z:41aac179b05512fe821948802cc1536317ac6b915c68b94d9b334e626cd10f05:Y6Bd1OkD+pNdUUFlHz5631vm8H8Uo/fxHxkOA5F8mlXzpmSSoVyrJJXExH64CrvqmUY8sx/omWVqMRohK5UEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -20,6 +22,7 @@ SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 PROFILE_PATH = SOURCE / "structured-session.profile.json"
 WORKER_PATH = BUNDLE / ".ai/workers/codex/hosted.yaml"
 TRUSTED_WORKER_PATH = BUNDLE / ".ai/workers/codex/trusted-hosted.yaml"
+MERGE_DIR = BUNDLE / ".ai/tools/codex/qualification/lib/consumer-context-merge"
 ACTIVATION_PATH = BUNDLE / ".ai/config/codex/activation.yaml"
 TRUSTED_ACTIVATION_PATH = BUNDLE / ".ai/config/codex/trusted-activation.yaml"
 ENVIRONMENT_ACTIVATION_PATH = (
@@ -71,6 +74,23 @@ def source_manifest_digest() -> str:
         manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def load_path(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def policy_path_for(ref: str) -> Path:
+    kind, _, name = ref.partition(":")
+    assert kind == "config", ref
+    for root in sorted(BUNDLE.parent.glob("*/.ai/config")):
+        candidate = root / (name + ".yaml")
+        if candidate.is_file():
+            return candidate
+    raise AssertionError("policy ref resolves to no bundle config: " + ref)
 
 
 class CodexContractTests(unittest.TestCase):
@@ -154,6 +174,42 @@ class CodexContractTests(unittest.TestCase):
             worker = yaml.safe_load(path.read_text())
             self.assertEqual(worker["external_product_slots"], [], path)
 
+    def assert_unqualified_or_populated(self, qualification: dict) -> None:
+        """Either no policy yet (before a derivation) or a populated one."""
+        if qualification == {"policy_ref": None, "required_claims": []}:
+            return
+        self.assertEqual(sorted(qualification), ["policy_ref", "required_claims"])
+        self.assertTrue(qualification["required_claims"])
+        merge = load_path("consumer_context_merge", MERGE_DIR / "merge.py")
+        policy = yaml.safe_load(
+            merge.strip_header(policy_path_for(qualification["policy_ref"]).read_text())
+        )["product_qualification_policy"]
+        parameters = policy["verifier_parameters"]
+        merge.validate_schema(parameters, merge.verifier_config_schema(), "verifier_parameters")
+        self.assertLessEqual(set(qualification["required_claims"]), set(policy["allowed_claims"]))
+        self.assertIn(parameters["controller"]["scenario_id"], policy["producer_scenarios"])
+        self.assertIn("consumer_execution_context", policy)
+
+    def test_merge_tool_output_is_the_populated_state(self) -> None:
+        merge = load_path("consumer_context_merge", MERGE_DIR / "merge.py")
+        fixtures = load_path("consumer_context_merge_tests", MERGE_DIR / "tests/test_merge.py")
+        policy = {"product_qualification_policy": copy.deepcopy(
+            fixtures.TEMPLATE["product_qualification_policy"])}
+        merge.merge(policy, merge.parse_emitted(copy.deepcopy(fixtures.EMITTED)), False,
+                    merge.verifier_config_schema())
+        section = policy["product_qualification_policy"]
+        parameters = section["verifier_parameters"]
+        merge.validate_schema(parameters, merge.verifier_config_schema(), "verifier_parameters")
+        self.assertEqual(
+            parameters["external_candidate_qualification_context"],
+            fixtures.EMITTED["verifier_parameters"]["external_candidate_qualification_context"],
+        )
+        self.assertEqual(
+            section["consumer_execution_context"],
+            fixtures.EMITTED["consumer_execution_context"],
+        )
+        self.assertIn(parameters["controller"]["scenario_id"], section["producer_scenarios"])
+
     def test_external_authoring_profile_is_distinct_and_fail_closed(self) -> None:
         worker = yaml.safe_load(
             (BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text()
@@ -178,10 +234,7 @@ class CodexContractTests(unittest.TestCase):
             "canonical_ref": "worker:codex/external-hosted-authoring",
             "declaration_id": "guest-runtime",
         })
-        self.assertEqual(relationship["qualification"], {
-            "policy_ref": None,
-            "required_claims": [],
-        })
+        self.assert_unqualified_or_populated(relationship["qualification"])
         verifier = yaml.safe_load(
             (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
         )
@@ -196,9 +249,7 @@ class CodexContractTests(unittest.TestCase):
             "canonical_ref": "tool:codex/qualification/consumer-runtime-verifier",
             "declaration_id": slot["id"],
         })
-        self.assertEqual(verifier_relationship["qualification"], {
-            "policy_ref": None, "required_claims": [],
-        })
+        self.assert_unqualified_or_populated(verifier_relationship["qualification"])
         self.assertEqual(verifier_relationship["producer"], relationship["producer"])
         self.assertEqual(verifier_relationship["required_product"], relationship["required_product"])
         self.assertEqual(environment["worker_ref"], "worker:codex/external-hosted-authoring")
