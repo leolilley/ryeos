@@ -260,6 +260,17 @@ pub struct GcResult {
     /// Interrupted journaled removals completed before the candidate sweep.
     #[serde(default)]
     pub pending_retirements_recovered: usize,
+    /// Fenced chains whose retirement was refused this run because no
+    /// composition supplied the means to retire them.
+    #[serde(default)]
+    pub refused_fenced_chain_retirements: usize,
+    /// Retired chains whose closure was released before the sweep.
+    #[serde(default)]
+    pub released_retired_chains: usize,
+    /// Retired chains whose release is not yet possible and stays for the
+    /// next run.
+    #[serde(default)]
+    pub deferred_retired_chain_releases: usize,
     /// Abandoned durable CAS upload stages retired by an explicit signed age.
     #[serde(default)]
     pub retired_durable_cas_uploads: usize,

@@ -14708,6 +14708,34 @@ impl StateStore {
         g.runtime_db.expired_seat_leases(cutoff_ms)
     }
 
+    pub fn expired_seat_leases_slice(
+        &self,
+        cutoff_ms: i64,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<runtime_db::SeatLeaseMaintenancePage> {
+        let g = self.lock()?;
+        g.runtime_db
+            .expired_seat_leases_slice(cutoff_ms, after_id, cycle_max_id, limit)
+    }
+
+    pub fn max_seat_lease_id(&self) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db.max_seat_lease_id()
+    }
+
+    pub fn claimed_seat_leases_slice(
+        &self,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .claimed_seat_leases_slice(after_id, cycle_max_id, limit)
+    }
+
     pub fn claim_expired_seat_lease(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
