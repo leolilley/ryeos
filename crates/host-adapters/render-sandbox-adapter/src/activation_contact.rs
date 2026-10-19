@@ -169,9 +169,9 @@ impl RenderContact<'_> {
     ) -> Result<BoundConnectToken> {
         let (route, file_path) = match operation {
             ProxyOperation::UploadFile { remote_path } => {
-                (RouteName::SandboxFileUploadTokenById, Some(remote_path))
+                (RouteName::FileUploadTokenById, Some(remote_path))
             }
-            ProxyOperation::RunStream => (RouteName::SandboxRunStreamTokenById, None),
+            ProxyOperation::RunStream => (RouteName::RunStreamTokenById, None),
             ProxyOperation::DownloadFile { .. } => {
                 anyhow::bail!("one-shot activation cannot mint a relay download token")
             }
@@ -415,21 +415,21 @@ mod tests {
         .unwrap();
         for (route, operation, file_path) in [
             (
-                RouteName::SandboxFileUploadTokenById,
+                RouteName::FileUploadTokenById,
                 ProxyOperation::UploadFile {
                     remote_path: "/ryeos/activation/guest-package",
                 },
                 Some("/ryeos/activation/guest-package"),
             ),
             (
-                RouteName::SandboxFileDownloadTokenById,
+                RouteName::FileDownloadTokenById,
                 ProxyOperation::DownloadFile {
                     remote_path: "/ryeos/relay/attach-request",
                 },
                 Some("/ryeos/relay/attach-request"),
             ),
             (
-                RouteName::SandboxRunStreamTokenById,
+                RouteName::RunStreamTokenById,
                 ProxyOperation::RunStream,
                 None,
             ),

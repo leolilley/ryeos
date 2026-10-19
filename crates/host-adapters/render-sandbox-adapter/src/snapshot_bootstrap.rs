@@ -270,7 +270,7 @@ pub(crate) fn observe_source_readiness(
     );
     let (url, target) = crate::api_url(
         &spec,
-        RouteName::SandboxById,
+        RouteName::ById,
         Some(&request.occurrence.occurrence_id),
         &settings,
         None,
@@ -417,8 +417,8 @@ pub(crate) fn terminate_source_sandbox(
             == settings.owner_id,
         "bootstrap termination changed original owner scope"
     );
-    let mutation = RouteName::SandboxTerminateById;
-    let observation = RouteName::SandboxById;
+    let mutation = RouteName::TerminateById;
+    let observation = RouteName::ById;
     for route in [mutation, observation] {
         let (url, target) = crate::api_url(
             &spec,

@@ -31,6 +31,286 @@ struct ParticularSaveContext {
     project_local_id: Option<String>,
 }
 
+impl RyeOsCore {
+    pub(crate) fn open_view_set_record(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        value: Value,
+    ) -> Vec<RyeOsEffect> {
+        let Some(attachment_id) = self
+            .binding_attachment_for_instance(instance)
+            .map(|attachment| attachment.binding_attachment_id.clone())
+        else {
+            self.notice(
+                "Cannot open saved view set: its admitted binding is unavailable.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        let result = (|| -> Result<Vec<RyeOsEffect>, String> {
+            let template = serde_json::from_value::<SavedViewSetTemplate>(value)
+                .map_err(|error| error.to_string())?;
+            validate_saved_view_set_templates(std::slice::from_ref(&template))?;
+            let saved_sets = if template.relationships.iter().any(|relationship| {
+                matches!(
+                    &relationship.source,
+                    SavedViewSelectionSource::FollowSet { .. }
+                )
+            }) {
+                self.live_saved_set_resolutions()?
+            } else {
+                BTreeMap::new()
+            };
+            self.open_saved_view_set_template_with_policy(
+                &template,
+                &attachment_id,
+                &BTreeMap::new(),
+                &saved_sets,
+                crate::ui::layout_preferences::RequiredSubjectMountPolicy::AllowUnresolved,
+            )
+        })();
+        match result {
+            Ok(effects) => effects,
+            Err(error) => {
+                self.notice(
+                    format!("Cannot open saved view set: {error}"),
+                    RyeOsTone::Warn,
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    pub(crate) fn save_view_set_record(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        view_ref: &str,
+        persist_id: &str,
+        value: Value,
+    ) -> Vec<RyeOsEffect> {
+        // The companion must be executable, never another local operation:
+        // this prevents cycles and leaves its target solely in signed content.
+        let companion = self
+            .binding_for_instance(instance, view_ref)
+            .and_then(|binding| {
+                binding
+                    .affordances
+                    .iter()
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(persist_id))
+            });
+        if !companion.is_some_and(|a| {
+            a.pointer("/invoke/plane").and_then(Value::as_str) == Some("rye")
+                && a.pointer("/invoke/ref").and_then(Value::as_str).is_some()
+                && a.get("producer")
+                    .and_then(Value::as_str)
+                    .unwrap_or("selection")
+                    == "selection"
+        }) {
+            self.notice(
+                "Saved-set persistence is not admitted by this view.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
+        let prepared = (|| -> Result<Value, String> {
+            let mut context: SaveContext =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            validate_saved_view_set_templates(&context.saved_view_sets)?;
+            let title = self.view_sets[self.active_view_set].title.clone();
+            let id = format!("{:x}", Sha256::digest(title.as_bytes()));
+            if context
+                .saved_view_sets
+                .iter()
+                .any(|template| template.id == id || template.name == title)
+            {
+                return Err("that name is already saved; rename the open set before saving a new composition".into());
+            }
+            context
+                .saved_view_sets
+                .push(self.capture_view_set_template_with_relationships(
+                    id,
+                    title,
+                    Some(instance),
+                    &self.view_set_template_ids,
+                )?);
+            validate_saved_view_set_templates(&context.saved_view_sets)?;
+            Ok(
+                json!({ "captured": true, "expected_revision": context.expected_revision, "saved_view_sets": context.saved_view_sets }),
+            )
+        })();
+        match prepared {
+            Ok(record) => {
+                // The durable library ceiling is not the session's transport
+                // allowance. Check the complete envelope against compiled
+                // bounds, rather than hardcoding a guessed payload reserve.
+                let Some((request, bounds)) = self.compiled_binding_operation(
+                    instance,
+                    crate::ui::binding::UiBindingCoordinate::Affordance {
+                        view_ref: view_ref.into(),
+                        affordance_id: persist_id.into(),
+                    },
+                    crate::ui::binding::UiBindingPayload::Selection {
+                        record: record.clone(),
+                    },
+                ) else {
+                    self.notice(
+                        "Cannot save view set: its admitted binding is unavailable.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                };
+                if let Err(error) = request.validate_bounds(bounds) {
+                    self.notice(
+                        format!("Cannot save view set through this session: {error:?}"),
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
+                self.invoke_affordance(instance, view_ref, persist_id, &record)
+            }
+            Err(error) => {
+                self.notice(format!("Cannot save view set: {error}"), RyeOsTone::Warn);
+                Vec::new()
+            }
+        }
+    }
+
+    pub(crate) fn save_particular_view_set_record(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        view_ref: &str,
+        persist_id: &str,
+        value: Value,
+    ) -> Vec<RyeOsEffect> {
+        let companion = self
+            .binding_for_instance(instance, view_ref)
+            .and_then(|binding| {
+                binding.affordances.iter().find(|affordance| {
+                    affordance.get("id").and_then(Value::as_str) == Some(persist_id)
+                })
+            });
+        if !companion.is_some_and(|affordance| {
+            affordance.pointer("/invoke/plane").and_then(Value::as_str) == Some("rye")
+                && affordance
+                    .pointer("/invoke/ref")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && affordance
+                    .get("producer")
+                    .and_then(Value::as_str)
+                    .unwrap_or("selection")
+                    == "selection"
+        }) {
+            self.notice(
+                "Particular-set persistence is not admitted by this view.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
+
+        let prepared = (|| -> Result<Value, String> {
+            let mut context: ParticularSaveContext =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            validate_particular_view_set_resumes(&context.particular_view_sets)?;
+            let (view_set_id, title) = self
+                .view_sets
+                .get(self.active_view_set)
+                .map(|view_set| (view_set.id, view_set.title.clone()))
+                .ok_or("active view set is unavailable")?;
+            let id = format!("{:x}", Sha256::digest(title.as_bytes()));
+            if context
+                .particular_view_sets
+                .iter()
+                .any(|candidate| candidate.id == id || candidate.name == title)
+            {
+                return Err(
+                    "that name is already retained; rename the open set before retaining another"
+                        .into(),
+                );
+            }
+            let template = self.capture_view_set_template_with_relationships(
+                id.clone(),
+                title.clone(),
+                Some(instance),
+                &self.view_set_template_ids,
+            )?;
+            let work = crate::ui::seat::selection_storage_key(view_set_id, "selection.work")
+                .and_then(|key| self.seat.fold().get(&key).cloned())
+                .and_then(|selection| {
+                    selection
+                        .get("chain_root")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(|chain_root_id| ParticularWorkRef {
+                            chain_root_id: chain_root_id.to_owned(),
+                        })
+                });
+            let project = context
+                .project_local_id
+                .take()
+                .filter(|value| !value.is_empty())
+                .map(|local_id| ParticularProjectRef { local_id });
+            if project.is_none() && work.is_none() {
+                return Err(
+                    "a particular view set requires a registered project or selected logical work"
+                        .into(),
+                );
+            }
+            context.particular_view_sets.push(ParticularViewSetResume {
+                id,
+                name: title,
+                composition: template.composition,
+                relationships: template.relationships,
+                context: ParticularViewSetContext { project, work },
+            });
+            validate_particular_view_set_resumes(&context.particular_view_sets)?;
+            Ok(json!({
+                "captured": true,
+                "expected_revision": context.expected_revision,
+                "particular_view_sets": context.particular_view_sets,
+            }))
+        })();
+
+        match prepared {
+            Ok(record) => {
+                let Some((request, bounds)) = self.compiled_binding_operation(
+                    instance,
+                    crate::ui::binding::UiBindingCoordinate::Affordance {
+                        view_ref: view_ref.into(),
+                        affordance_id: persist_id.into(),
+                    },
+                    crate::ui::binding::UiBindingPayload::Selection {
+                        record: record.clone(),
+                    },
+                ) else {
+                    self.notice(
+                        "Cannot retain particular view set: its admitted binding is unavailable.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                };
+                if let Err(error) = request.validate_bounds(bounds) {
+                    self.notice(
+                        format!(
+                            "Cannot retain particular view set through this session: {error:?}"
+                        ),
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
+                self.invoke_affordance(instance, view_ref, persist_id, &record)
+            }
+            Err(error) => {
+                self.notice(
+                    format!("Cannot retain particular view set: {error}"),
+                    RyeOsTone::Warn,
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,286 +615,6 @@ mod tests {
                 json!({"expected_revision": 0, "saved_view_sets": []}),
             );
             assert_eq!(effects.len(), expected_count);
-        }
-    }
-}
-
-impl RyeOsCore {
-    pub(crate) fn open_view_set_record(
-        &mut self,
-        instance: &RyeOsViewInstanceKey,
-        value: Value,
-    ) -> Vec<RyeOsEffect> {
-        let Some(attachment_id) = self
-            .binding_attachment_for_instance(instance)
-            .map(|attachment| attachment.binding_attachment_id.clone())
-        else {
-            self.notice(
-                "Cannot open saved view set: its admitted binding is unavailable.",
-                RyeOsTone::Warn,
-            );
-            return Vec::new();
-        };
-        let result = (|| -> Result<Vec<RyeOsEffect>, String> {
-            let template = serde_json::from_value::<SavedViewSetTemplate>(value)
-                .map_err(|error| error.to_string())?;
-            validate_saved_view_set_templates(std::slice::from_ref(&template))?;
-            let saved_sets = if template.relationships.iter().any(|relationship| {
-                matches!(
-                    &relationship.source,
-                    SavedViewSelectionSource::FollowSet { .. }
-                )
-            }) {
-                self.live_saved_set_resolutions()?
-            } else {
-                BTreeMap::new()
-            };
-            self.open_saved_view_set_template_with_policy(
-                &template,
-                &attachment_id,
-                &BTreeMap::new(),
-                &saved_sets,
-                crate::ui::layout_preferences::RequiredSubjectMountPolicy::AllowUnresolved,
-            )
-        })();
-        match result {
-            Ok(effects) => effects,
-            Err(error) => {
-                self.notice(
-                    format!("Cannot open saved view set: {error}"),
-                    RyeOsTone::Warn,
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    pub(crate) fn save_view_set_record(
-        &mut self,
-        instance: &RyeOsViewInstanceKey,
-        view_ref: &str,
-        persist_id: &str,
-        value: Value,
-    ) -> Vec<RyeOsEffect> {
-        // The companion must be executable, never another local operation:
-        // this prevents cycles and leaves its target solely in signed content.
-        let companion = self
-            .binding_for_instance(instance, view_ref)
-            .and_then(|binding| {
-                binding
-                    .affordances
-                    .iter()
-                    .find(|a| a.get("id").and_then(Value::as_str) == Some(persist_id))
-            });
-        if !companion.is_some_and(|a| {
-            a.pointer("/invoke/plane").and_then(Value::as_str) == Some("rye")
-                && a.pointer("/invoke/ref").and_then(Value::as_str).is_some()
-                && a.get("producer")
-                    .and_then(Value::as_str)
-                    .unwrap_or("selection")
-                    == "selection"
-        }) {
-            self.notice(
-                "Saved-set persistence is not admitted by this view.",
-                RyeOsTone::Warn,
-            );
-            return Vec::new();
-        }
-        let prepared = (|| -> Result<Value, String> {
-            let mut context: SaveContext =
-                serde_json::from_value(value).map_err(|e| e.to_string())?;
-            validate_saved_view_set_templates(&context.saved_view_sets)?;
-            let title = self.view_sets[self.active_view_set].title.clone();
-            let id = format!("{:x}", Sha256::digest(title.as_bytes()));
-            if context
-                .saved_view_sets
-                .iter()
-                .any(|template| template.id == id || template.name == title)
-            {
-                return Err("that name is already saved; rename the open set before saving a new composition".into());
-            }
-            context
-                .saved_view_sets
-                .push(self.capture_view_set_template_with_relationships(
-                    id,
-                    title,
-                    Some(instance),
-                    &self.view_set_template_ids,
-                )?);
-            validate_saved_view_set_templates(&context.saved_view_sets)?;
-            Ok(
-                json!({ "captured": true, "expected_revision": context.expected_revision, "saved_view_sets": context.saved_view_sets }),
-            )
-        })();
-        match prepared {
-            Ok(record) => {
-                // The durable library ceiling is not the session's transport
-                // allowance. Check the complete envelope against compiled
-                // bounds, rather than hardcoding a guessed payload reserve.
-                let Some((request, bounds)) = self.compiled_binding_operation(
-                    instance,
-                    crate::ui::binding::UiBindingCoordinate::Affordance {
-                        view_ref: view_ref.into(),
-                        affordance_id: persist_id.into(),
-                    },
-                    crate::ui::binding::UiBindingPayload::Selection {
-                        record: record.clone(),
-                    },
-                ) else {
-                    self.notice(
-                        "Cannot save view set: its admitted binding is unavailable.",
-                        RyeOsTone::Warn,
-                    );
-                    return Vec::new();
-                };
-                if let Err(error) = request.validate_bounds(bounds) {
-                    self.notice(
-                        format!("Cannot save view set through this session: {error:?}"),
-                        RyeOsTone::Warn,
-                    );
-                    return Vec::new();
-                }
-                self.invoke_affordance(instance, view_ref, persist_id, &record)
-            }
-            Err(error) => {
-                self.notice(format!("Cannot save view set: {error}"), RyeOsTone::Warn);
-                Vec::new()
-            }
-        }
-    }
-
-    pub(crate) fn save_particular_view_set_record(
-        &mut self,
-        instance: &RyeOsViewInstanceKey,
-        view_ref: &str,
-        persist_id: &str,
-        value: Value,
-    ) -> Vec<RyeOsEffect> {
-        let companion = self
-            .binding_for_instance(instance, view_ref)
-            .and_then(|binding| {
-                binding.affordances.iter().find(|affordance| {
-                    affordance.get("id").and_then(Value::as_str) == Some(persist_id)
-                })
-            });
-        if !companion.is_some_and(|affordance| {
-            affordance.pointer("/invoke/plane").and_then(Value::as_str) == Some("rye")
-                && affordance
-                    .pointer("/invoke/ref")
-                    .and_then(Value::as_str)
-                    .is_some()
-                && affordance
-                    .get("producer")
-                    .and_then(Value::as_str)
-                    .unwrap_or("selection")
-                    == "selection"
-        }) {
-            self.notice(
-                "Particular-set persistence is not admitted by this view.",
-                RyeOsTone::Warn,
-            );
-            return Vec::new();
-        }
-
-        let prepared = (|| -> Result<Value, String> {
-            let mut context: ParticularSaveContext =
-                serde_json::from_value(value).map_err(|error| error.to_string())?;
-            validate_particular_view_set_resumes(&context.particular_view_sets)?;
-            let (view_set_id, title) = self
-                .view_sets
-                .get(self.active_view_set)
-                .map(|view_set| (view_set.id, view_set.title.clone()))
-                .ok_or("active view set is unavailable")?;
-            let id = format!("{:x}", Sha256::digest(title.as_bytes()));
-            if context
-                .particular_view_sets
-                .iter()
-                .any(|candidate| candidate.id == id || candidate.name == title)
-            {
-                return Err(
-                    "that name is already retained; rename the open set before retaining another"
-                        .into(),
-                );
-            }
-            let template = self.capture_view_set_template_with_relationships(
-                id.clone(),
-                title.clone(),
-                Some(instance),
-                &self.view_set_template_ids,
-            )?;
-            let work = crate::ui::seat::selection_storage_key(view_set_id, "selection.work")
-                .and_then(|key| self.seat.fold().get(&key).cloned())
-                .and_then(|selection| {
-                    selection
-                        .get("chain_root")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(|chain_root_id| ParticularWorkRef {
-                            chain_root_id: chain_root_id.to_owned(),
-                        })
-                });
-            let project = context
-                .project_local_id
-                .take()
-                .filter(|value| !value.is_empty())
-                .map(|local_id| ParticularProjectRef { local_id });
-            if project.is_none() && work.is_none() {
-                return Err(
-                    "a particular view set requires a registered project or selected logical work"
-                        .into(),
-                );
-            }
-            context.particular_view_sets.push(ParticularViewSetResume {
-                id,
-                name: title,
-                composition: template.composition,
-                relationships: template.relationships,
-                context: ParticularViewSetContext { project, work },
-            });
-            validate_particular_view_set_resumes(&context.particular_view_sets)?;
-            Ok(json!({
-                "captured": true,
-                "expected_revision": context.expected_revision,
-                "particular_view_sets": context.particular_view_sets,
-            }))
-        })();
-
-        match prepared {
-            Ok(record) => {
-                let Some((request, bounds)) = self.compiled_binding_operation(
-                    instance,
-                    crate::ui::binding::UiBindingCoordinate::Affordance {
-                        view_ref: view_ref.into(),
-                        affordance_id: persist_id.into(),
-                    },
-                    crate::ui::binding::UiBindingPayload::Selection {
-                        record: record.clone(),
-                    },
-                ) else {
-                    self.notice(
-                        "Cannot retain particular view set: its admitted binding is unavailable.",
-                        RyeOsTone::Warn,
-                    );
-                    return Vec::new();
-                };
-                if let Err(error) = request.validate_bounds(bounds) {
-                    self.notice(
-                        format!(
-                            "Cannot retain particular view set through this session: {error:?}"
-                        ),
-                        RyeOsTone::Warn,
-                    );
-                    return Vec::new();
-                }
-                self.invoke_affordance(instance, view_ref, persist_id, &record)
-            }
-            Err(error) => {
-                self.notice(
-                    format!("Cannot retain particular view set: {error}"),
-                    RyeOsTone::Warn,
-                );
-                Vec::new()
-            }
         }
     }
 }

@@ -61,12 +61,18 @@ enum OriginProfile {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RouteName {
-    SandboxCollection,
-    SandboxById,
-    SandboxTerminateById,
-    SandboxFileUploadTokenById,
-    SandboxFileDownloadTokenById,
-    SandboxRunStreamTokenById,
+    #[serde(rename = "sandbox_collection")]
+    Collection,
+    #[serde(rename = "sandbox_by_id")]
+    ById,
+    #[serde(rename = "sandbox_terminate_by_id")]
+    TerminateById,
+    #[serde(rename = "sandbox_file_upload_token_by_id")]
+    FileUploadTokenById,
+    #[serde(rename = "sandbox_file_download_token_by_id")]
+    FileDownloadTokenById,
+    #[serde(rename = "sandbox_run_stream_token_by_id")]
+    RunStreamTokenById,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -509,7 +515,7 @@ impl ProviderSpec {
         let allocate = &self.operations.allocate;
         ensure!(
             allocate.kind == OperationKind::CreateOnce
-                && allocate.route == Some(RouteName::SandboxCollection)
+                && allocate.route == Some(RouteName::Collection)
                 && allocate.precondition_profile
                     == Some(PreconditionProfile::RenderConfiguredRuntimeSnapshotV1)
                 && allocate.body.as_ref() == Some(&expected_create_body_mapping())
@@ -524,7 +530,7 @@ impl ProviderSpec {
         let bootstrap = &self.operations.bootstrap_create;
         ensure!(
             bootstrap.kind == OperationKind::CreateOnce
-                && bootstrap.route == Some(RouteName::SandboxCollection)
+                && bootstrap.route == Some(RouteName::Collection)
                 && bootstrap.precondition_profile
                     == Some(PreconditionProfile::RenderMaterializationBootstrapV1)
                 && bootstrap.body.as_ref() == Some(&expected_bootstrap_create_body_mapping())
@@ -539,7 +545,7 @@ impl ProviderSpec {
         let qualification = &self.operations.qualification_create;
         ensure!(
             qualification.kind == OperationKind::CreateOnce
-                && qualification.route == Some(RouteName::SandboxCollection)
+                && qualification.route == Some(RouteName::Collection)
                 && qualification.precondition_profile
                     == Some(PreconditionProfile::RenderBoundRuntimeSnapshotV1)
                 && qualification.body.as_ref()
@@ -562,8 +568,8 @@ impl ProviderSpec {
                 && verifier.body.is_none()
                 && verifier.bind_proof_profile.is_none()
                 && verifier.no_occurrence_proof_profile.is_none()
-                && verifier.mutation_route == Some(RouteName::SandboxFileUploadTokenById)
-                && verifier.observation_route == Some(RouteName::SandboxRunStreamTokenById)
+                && verifier.mutation_route == Some(RouteName::FileUploadTokenById)
+                && verifier.observation_route == Some(RouteName::RunStreamTokenById)
                 && verifier.terminal_proof_profile.is_none(),
             "provider spec restored verifier operation is unsupported"
         );
@@ -615,8 +621,8 @@ impl ProviderSpec {
                 && terminate.body.is_none()
                 && terminate.bind_proof_profile.is_none()
                 && terminate.no_occurrence_proof_profile.is_none()
-                && terminate.mutation_route == Some(RouteName::SandboxTerminateById)
-                && terminate.observation_route == Some(RouteName::SandboxById)
+                && terminate.mutation_route == Some(RouteName::TerminateById)
+                && terminate.observation_route == Some(RouteName::ById)
                 && terminate.terminal_proof_profile
                     == Some(TerminalProofProfile::RenderSandboxTerminalV1),
             "provider spec termination operation is unsupported"
@@ -624,7 +630,7 @@ impl ProviderSpec {
         let reconcile = &self.operations.reconcile_termination;
         ensure!(
             reconcile.kind == OperationKind::ObserveExactOccurrence
-                && reconcile.route == Some(RouteName::SandboxById)
+                && reconcile.route == Some(RouteName::ById)
                 && reconcile.precondition_profile.is_none()
                 && reconcile.body.is_none()
                 && reconcile.bind_proof_profile.is_none()
@@ -638,7 +644,7 @@ impl ProviderSpec {
         let terminal_list = &self.operations.bootstrap_terminated_list;
         ensure!(
             terminal_list.kind == OperationKind::ObserveExactOccurrence
-                && terminal_list.route == Some(RouteName::SandboxCollection)
+                && terminal_list.route == Some(RouteName::Collection)
                 && terminal_list.precondition_profile.is_none()
                 && terminal_list.body.is_none()
                 && terminal_list.bind_proof_profile.is_none()
@@ -856,14 +862,12 @@ impl ProviderSpec {
         file_path: Option<&str>,
     ) -> Result<RouteTarget> {
         let route = match name {
-            RouteName::SandboxCollection => &self.routes.sandbox_collection,
-            RouteName::SandboxById => &self.routes.sandbox_by_id,
-            RouteName::SandboxTerminateById => &self.routes.sandbox_terminate_by_id,
-            RouteName::SandboxFileUploadTokenById => &self.routes.sandbox_file_upload_token_by_id,
-            RouteName::SandboxFileDownloadTokenById => {
-                &self.routes.sandbox_file_download_token_by_id
-            }
-            RouteName::SandboxRunStreamTokenById => &self.routes.sandbox_run_stream_token_by_id,
+            RouteName::Collection => &self.routes.sandbox_collection,
+            RouteName::ById => &self.routes.sandbox_by_id,
+            RouteName::TerminateById => &self.routes.sandbox_terminate_by_id,
+            RouteName::FileUploadTokenById => &self.routes.sandbox_file_upload_token_by_id,
+            RouteName::FileDownloadTokenById => &self.routes.sandbox_file_download_token_by_id,
+            RouteName::RunStreamTokenById => &self.routes.sandbox_run_stream_token_by_id,
         };
         let mut path_segments = Vec::with_capacity(route.segments.len());
         let mut has_occurrence_binding = false;
@@ -1071,8 +1075,8 @@ impl OperationSpec {
             && self.body.is_none()
             && self.bind_proof_profile.is_none()
             && self.no_occurrence_proof_profile.is_none()
-            && self.mutation_route == Some(RouteName::SandboxFileUploadTokenById)
-            && self.observation_route == Some(RouteName::SandboxFileDownloadTokenById)
+            && self.mutation_route == Some(RouteName::FileUploadTokenById)
+            && self.observation_route == Some(RouteName::FileDownloadTokenById)
             && self.terminal_proof_profile.is_none()
     }
 
@@ -1299,11 +1303,11 @@ mod tests {
         assert!(spec.relay_file_enabled());
         assert_eq!(
             spec.relay_file_upload_route().unwrap(),
-            RouteName::SandboxFileUploadTokenById
+            RouteName::FileUploadTokenById
         );
         assert_eq!(
             spec.relay_file_download_route().unwrap(),
-            RouteName::SandboxFileDownloadTokenById
+            RouteName::FileDownloadTokenById
         );
         assert!(
             spec.operations
@@ -1440,11 +1444,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             selected.relay_file_upload_route().unwrap(),
-            RouteName::SandboxFileUploadTokenById
+            RouteName::FileUploadTokenById
         );
         assert_eq!(
             selected.relay_file_download_route().unwrap(),
-            RouteName::SandboxFileDownloadTokenById
+            RouteName::FileDownloadTokenById
         );
         assert_eq!(
             selected.effective_capabilities(),
@@ -1519,13 +1523,8 @@ mod tests {
         );
         assert!(!spec.one_shot_activation_enabled());
         assert_eq!(
-            spec.route_target(
-                RouteName::SandboxById,
-                Some("sbx-fixture-1"),
-                "owner-1",
-                None
-            )
-            .unwrap(),
+            spec.route_target(RouteName::ById, Some("sbx-fixture-1"), "owner-1", None)
+                .unwrap(),
             RouteTarget {
                 path_segments: vec!["v1".into(), "sandboxes".into(), "sbx-fixture-1".into()],
                 owner_id_query: Some("owner-1".into()),
@@ -1534,7 +1533,7 @@ mod tests {
         );
         assert_eq!(
             spec.route_target(
-                RouteName::SandboxFileUploadTokenById,
+                RouteName::FileUploadTokenById,
                 Some("sbx-fixture-1"),
                 "owner-1",
                 Some("/ryeos/activation/guest-package"),
@@ -1555,7 +1554,7 @@ mod tests {
         );
         assert_eq!(
             spec.route_target(
-                RouteName::SandboxFileDownloadTokenById,
+                RouteName::FileDownloadTokenById,
                 Some("sbx-fixture-1"),
                 "owner-1",
                 Some("/ryeos/relay/attach-request"),
@@ -1576,7 +1575,7 @@ mod tests {
         );
         assert!(
             spec.route_target(
-                RouteName::SandboxRunStreamTokenById,
+                RouteName::RunStreamTokenById,
                 Some("sbx-fixture-1"),
                 "owner-1",
                 Some("/ryeos/activation/guest-package"),
@@ -1667,7 +1666,7 @@ mod tests {
         let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
         assert_eq!(
             spec.qualification_create_route(),
-            Some(RouteName::SandboxCollection)
+            Some(RouteName::Collection)
         );
         let projection = spec
             .qualification_create_projection(
@@ -1716,10 +1715,7 @@ mod tests {
     #[test]
     fn bootstrap_create_is_unsnapshotted_and_closed_to_other_field_sources() {
         let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
-        assert_eq!(
-            spec.bootstrap_create_route(),
-            Some(RouteName::SandboxCollection)
-        );
+        assert_eq!(spec.bootstrap_create_route(), Some(RouteName::Collection));
         let projected = spec
             .bootstrap_create_projection("owner-1", PlanValue::Starter, "oregon", 900)
             .unwrap();
@@ -1751,13 +1747,13 @@ mod tests {
         assert_eq!(
             spec.qualification_verifier_routes(),
             (
-                RouteName::SandboxFileUploadTokenById,
-                RouteName::SandboxRunStreamTokenById,
+                RouteName::FileUploadTokenById,
+                RouteName::RunStreamTokenById,
             )
         );
         assert!(
             spec.route_target(
-                RouteName::SandboxFileUploadTokenById,
+                RouteName::FileUploadTokenById,
                 Some("sbx-restored"),
                 "owner-1",
                 Some("/ryeos/qualification"),
