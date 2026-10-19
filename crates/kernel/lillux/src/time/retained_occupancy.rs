@@ -258,7 +258,7 @@ impl RetainedOccupancyClock {
         tick: u64,
     ) -> Result<OccupancyWindowState, &'static str> {
         if limit.start != self.start || limit.maximum_occupancy_ns == 0 {
-            return Err("retained clock limit has another start or empty duration".into());
+            return Err("retained clock limit has another start or empty duration");
         }
         limit
             .start
@@ -271,7 +271,7 @@ impl RetainedOccupancyClock {
         let cleanup_ns =
             u64::try_from(cleanup.as_nanos()).map_err(|_| "cleanup allowance overflow")?;
         if cleanup_ns >= limit.maximum_occupancy_ns {
-            return Err("cleanup consumes original limit".into());
+            return Err("cleanup consumes original limit");
         }
         let service = limit.maximum_occupancy_ns - cleanup_ns;
         if elapsed < service {

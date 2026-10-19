@@ -1366,17 +1366,14 @@ impl OriginalProjectionLease {
                             admission_failure,
                             inputs,
                             producer,
-                            native,
-                            fork_reservation,
-                            fork_registration,
+                            native: _,
+                            fork_reservation: _,
+                            fork_registration: _,
                         } = parts;
                         drop(producer);
                         inputs.release_consumed_metadata();
-                        drop(fork_registration);
-                        drop(fork_reservation);
                         drop(admission_failure);
                         drop(self.factory);
-                        drop(native);
                         Ok(receipt)
                     }
                     Err(held) => {
@@ -1766,6 +1763,14 @@ pub unsafe trait OriginalOutsideDestinationContinuation: Send + Sync {
         aggregate: &OriginalNativeTerminal,
         prepay: &dyn Fn(u64, u64) -> Result<()>,
     ) -> Result<()>;
+    /// Register this domain's shared physical roots into the supervisor registry.
+    ///
+    /// # Safety
+    /// `registry` must be the SAME actual original supervisor registry whose
+    /// complete inventory this continuation was admitted against, and `prepay`
+    /// must be that supervisor's irreversible prepayment. A different registry
+    /// or a prepay that can be refunded would let the roots be counted twice
+    /// or released while still held.
     unsafe fn register_shared_roots(
         &mut self,
         registry: &mut crate::original_physical_custody::OriginalPhysicalRegistry,
@@ -1796,7 +1801,7 @@ struct OriginalDestinationOutsideParts {
 /// counted, until the process exits. No continuation callback runs in a copy
 /// in another process.
 fn destination_outside_settled(parts: &OriginalDestinationOutsideParts) -> bool {
-    if !(parts.roots_registered && parts.native_references_retired) || !parts.sources.is_empty() {
+    if !(parts.roots_registered && parts.native_references_retired && parts.sources.is_empty()) {
         return false;
     }
     let Some(registrations) = &parts.registrations else {

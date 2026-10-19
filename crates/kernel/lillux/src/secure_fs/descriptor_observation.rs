@@ -110,26 +110,23 @@ mod tests {
     fn observes_additional_duplicate_and_retains_file_after_original_closes() {
         let file = tempfile::tempfile().unwrap();
         let observation = RetainedFileDescriptorObservation::capture(&file).unwrap();
-        assert_eq!(
-            observation
+        assert!(
+            !observation
                 .observe_additional_matching_descriptor()
-                .unwrap(),
-            false
+                .unwrap()
         );
         let duplicate = file.try_clone().unwrap();
         drop(file);
-        assert_eq!(
+        assert!(
             observation
                 .observe_additional_matching_descriptor()
-                .unwrap(),
-            true
+                .unwrap()
         );
         drop(duplicate);
-        assert_eq!(
-            observation
+        assert!(
+            !observation
                 .observe_additional_matching_descriptor()
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 
@@ -139,11 +136,10 @@ mod tests {
         let file = tempfile::tempfile().unwrap();
         let observation = RetainedFileDescriptorObservation::capture(&file).unwrap();
         let unrelated = tempfile::tempfile().unwrap();
-        assert_eq!(
-            observation
+        assert!(
+            !observation
                 .observe_additional_matching_descriptor()
-                .unwrap(),
-            false
+                .unwrap()
         );
         drop(unrelated);
     }
@@ -174,7 +170,7 @@ mod tests {
         let result = observation.observe_additional_matching_descriptor();
         release_tx.send(()).unwrap();
         worker.join().unwrap();
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[cfg(not(target_os = "linux"))]

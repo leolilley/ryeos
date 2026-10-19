@@ -75,9 +75,9 @@ impl SnapshotFile {
             if fd < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
-            return Ok(Self {
+            Ok(Self {
                 file: Some(unsafe { File::from_raw_fd(fd) }),
-            });
+            })
         }
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("bounded CAS kind selection requires sealed Linux anonymous snapshots")
@@ -98,7 +98,7 @@ impl SnapshotFile {
             if result < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         anyhow::bail!("bounded CAS kind selection requires sealed Linux anonymous snapshots")

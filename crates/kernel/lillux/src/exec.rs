@@ -1598,7 +1598,7 @@ impl InheritedDescriptorAuthority {
                 .file_identity()
                 .map_err(|error| format!("inspect pipe writer identity: {error}"))?;
             require_time(original_deadline)?;
-            if identity.file_type() != libc::S_IFIFO as u32 {
+            if identity.file_type() != libc::S_IFIFO {
                 return Err("pipe writer descriptor is not a FIFO".to_owned());
             }
 
@@ -1690,7 +1690,7 @@ impl InheritedDescriptorAuthority {
             require_time()?;
             // SAFETY: the successful fstat above initialized the complete stat.
             let stat = unsafe { stat.assume_init() };
-            if identity.device() == stat.st_dev as u64 && identity.inode() == stat.st_ino as u64 {
+            if identity.device() == stat.st_dev && identity.inode() == stat.st_ino {
                 return Err("pipe writer aliases an inherited role or stdio endpoint".into());
             }
             require_time()?;
@@ -1715,7 +1715,7 @@ impl InheritedDescriptorAuthority {
         record: &[u8],
         original_deadline: crate::time::MonotonicDeadline,
     ) -> std::io::Result<usize> {
-        if record.is_empty() || record.len() > libc::PIPE_BUF as usize {
+        if record.is_empty() || record.len() > libc::PIPE_BUF {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "atomic pipe record must contain 1..=PIPE_BUF bytes",
@@ -5184,19 +5184,21 @@ impl QuiescedForkSensitiveDescriptors {
         {
             return Err("child barrier cannot preserve native/control custody".into());
         }
-        let mut child_state = DescriptorForkBarrierState::default();
-        child_state.fork_child_close_fds = state
-            .fork_child_close_fds
-            .intersection(preserved)
-            .copied()
-            .collect();
-        child_state.next_owned_registration_generation = state.next_owned_registration_generation;
-        child_state.owned_registration_generations = state
-            .owned_registration_generations
-            .iter()
-            .filter(|(fd, _)| preserved.contains(fd))
-            .map(|(fd, generation)| (*fd, *generation))
-            .collect();
+        let child_state = DescriptorForkBarrierState {
+            fork_child_close_fds: state
+                .fork_child_close_fds
+                .intersection(preserved)
+                .copied()
+                .collect(),
+            next_owned_registration_generation: state.next_owned_registration_generation,
+            owned_registration_generations: state
+                .owned_registration_generations
+                .iter()
+                .filter(|(fd, _)| preserved.contains(fd))
+                .map(|(fd, generation)| (*fd, *generation))
+                .collect(),
+            ..DescriptorForkBarrierState::default()
+        };
         Ok(PreparedForkChildDescriptorBarrier {
             barrier: Box::new(DescriptorForkBarrier {
                 state: Mutex::new(child_state),
@@ -5533,18 +5535,18 @@ fn selected_close_inherited_copies(
         return Ok(false);
     }
     for copy in copies.iter_mut() {
-        if let Some(handle) = Arc::get_mut(&mut copy.handle) {
-            if handle.file.is_some() {
-                if original.has_elapsed() {
-                    return Ok(false);
-                }
-                state.owned_registration_generations.remove(&handle.fd);
-                if !state.fork_child_close_fds.remove(&handle.fd) {
-                    return Err("selected inherited descriptor registration missing".into());
-                }
-                // Drop ONLY the uniquely owned plain File, under same barrier.
-                handle.file.take();
+        if let Some(handle) = Arc::get_mut(&mut copy.handle)
+            && handle.file.is_some()
+        {
+            if original.has_elapsed() {
+                return Ok(false);
             }
+            state.owned_registration_generations.remove(&handle.fd);
+            if !state.fork_child_close_fds.remove(&handle.fd) {
+                return Err("selected inherited descriptor registration missing".into());
+            }
+            // Drop ONLY the uniquely owned plain File, under same barrier.
+            handle.file.take();
         }
     }
     let closed = copies.iter().all(|copy| copy.handle.file.is_none());
@@ -7286,7 +7288,7 @@ impl SelectedScopedCustody {
                 return Err("selected release nonblocking setup failed".into());
             }
             let live =
-                || !bounds.service.has_elapsed() && !expiry.is_some_and(|d| Instant::now() >= d);
+                || !bounds.service.has_elapsed() && expiry.is_none_or(|d| Instant::now() < d);
             if !live() {
                 return Err("selected prewrite expired".into());
             }
@@ -7451,14 +7453,13 @@ impl SelectedScopedCustody {
                         .as_ref()
                         .ok_or("selected actual scope absent")?
                         .is_empty()?
+                    && !self.termination_attempted
                 {
-                    if !self.termination_attempted {
-                        self.termination_attempted = true; // poison before write, including uncertainty
-                        self.scope
-                            .as_ref()
-                            .expect("same scope")
-                            .request_selected_termination_until(cleanup)?;
-                    }
+                    self.termination_attempted = true; // poison before write, including uncertainty
+                    self.scope
+                        .as_ref()
+                        .expect("same scope")
+                        .request_selected_termination_until(cleanup)?;
                 }
             }
             self.advance_local_observation(true)
@@ -7501,20 +7502,20 @@ impl SelectedScopedCustody {
                 return Ok(false);
             }
         }
-        if let Some(child) = self.setup_child.as_mut() {
-            if !self.setup_reaped {
-                if !matches!(
-                    poll_wrapper(child).map_err(|e| e.to_string())?,
-                    WrapperPoll::ExitedUnreaped
-                ) {
-                    return Ok(false);
-                }
-                let Some(status) = child.try_wait().map_err(|e| e.to_string())? else {
-                    return Ok(false);
-                };
-                self.terminal = Some(status);
-                self.setup_reaped = true;
+        if let Some(child) = self.setup_child.as_mut()
+            && !self.setup_reaped
+        {
+            if !matches!(
+                poll_wrapper(child).map_err(|e| e.to_string())?,
+                WrapperPoll::ExitedUnreaped
+            ) {
+                return Ok(false);
             }
+            let Some(status) = child.try_wait().map_err(|e| e.to_string())? else {
+                return Ok(false);
+            };
+            self.terminal = Some(status);
+            self.setup_reaped = true;
         }
         let Some(running) = self.running.as_mut() else {
             // No Child is never no-contact. Actual retained scope emptiness is
@@ -7543,25 +7544,23 @@ impl SelectedScopedCustody {
             self.terminal = Some(status);
             running.wrapper_reaped = true;
         }
-        if let Some(pin) = running.attachment_target_lifetime.as_ref() {
-            if !selected_scoped_pin_exited(pin)? {
+        if let Some(pin) = running.attachment_target_lifetime.as_ref()
+            && !selected_scoped_pin_exited(pin)?
+        {
+            return Ok(false);
+        }
+        if let Some(watchdog) = self.watchdog.as_mut()
+            && watchdog.pid > 0
+        {
+            let mut status = 0;
+            let observed = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
+            if observed == 0 {
                 return Ok(false);
             }
-        }
-        if let Some(watchdog) = self.watchdog.as_mut() {
-            if watchdog.pid > 0 {
-                let mut status = 0;
-                let observed = unsafe { libc::waitpid(watchdog.pid, &mut status, libc::WNOHANG) };
-                if observed == 0 {
-                    return Ok(false);
-                }
-                if observed != watchdog.pid
-                    || !(libc::WIFEXITED(status) || libc::WIFSIGNALED(status))
-                {
-                    return Err("selected watchdog exclusive natural reap uncertain".into());
-                }
-                watchdog.pid = -1;
+            if observed != watchdog.pid || !(libc::WIFEXITED(status) || libc::WIFSIGNALED(status)) {
+                return Err("selected watchdog exclusive natural reap uncertain".into());
             }
+            watchdog.pid = -1;
         }
         // Keep workers until terminal scope/wrapper/pin/helper facts. Natural
         // collection does not truncate drains; cleanup may stop them only live.
@@ -7595,10 +7594,10 @@ impl SelectedScopedCustody {
             if slot.as_ref().is_some_and(|handle| !handle.is_finished()) {
                 return Ok(false);
             }
-            if let Some(handle) = slot.take() {
-                if handle.join().is_err() {
-                    running.selected_worker_panics[index] = true;
-                }
+            if let Some(handle) = slot.take()
+                && handle.join().is_err()
+            {
+                running.selected_worker_panics[index] = true;
             }
         }
         if running.attachment_release.as_ref().is_some_and(|boundary| {
@@ -7625,10 +7624,10 @@ impl SelectedScopedCustody {
                 .state
                 .try_lock()
                 .map_err(|_| "selected stderr unavailable")?;
-            if let Some(channel) = running.native_settlement.as_mut() {
-                if channel.retained_drains.is_none() {
-                    channel.retained_drains = Some((out.clone(), err.clone()));
-                }
+            if let Some(channel) = running.native_settlement.as_mut()
+                && channel.retained_drains.is_none()
+            {
+                channel.retained_drains = Some((out.clone(), err.clone()));
             }
             let code = self
                 .terminal
@@ -7721,10 +7720,10 @@ impl SelectedScopedCustody {
         channel
             .frame
             .extend_from_slice(&bytes[..count.min(remaining)]);
-        if channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES || count > remaining {
-            if channel.failure.is_none() {
-                channel.failure = Some("selected native frame exceeded cap".into());
-            }
+        if (channel.frame.len() > MAX_NATIVE_TERMINAL_FRAME_BYTES || count > remaining)
+            && channel.failure.is_none()
+        {
+            channel.failure = Some("selected native frame exceeded cap".into());
         }
         Ok(false)
     }
@@ -8433,10 +8432,10 @@ impl SelectedSupervisedFailureOwner {
             if !self.held_boundary_revoked {
                 let running = self.running_mut()?;
                 // EOF revokes this one-shot boundary; it does not authorize exec.
-                if let Some(boundary) = running.attachment_release.as_mut() {
-                    if let Some(writer) = boundary.writer.as_mut() {
-                        writer.close_selected_until(deadline, mode)?;
-                    }
+                if let Some(boundary) = running.attachment_release.as_mut()
+                    && let Some(writer) = boundary.writer.as_mut()
+                {
+                    writer.close_selected_until(deadline, mode)?;
                 }
                 running.attachment_release.take();
                 self.held_boundary_revoked = true;
@@ -8789,10 +8788,10 @@ impl RunningProcess {
                 mode.pause(deadline);
             }
             mode.check(deadline)?;
-            if let Some(handle) = slot.take() {
-                if handle.join().is_err() {
-                    self.selected_worker_panics[index] = true;
-                }
+            if let Some(handle) = slot.take()
+                && handle.join().is_err()
+            {
+                self.selected_worker_panics[index] = true;
             }
         }
         mode.check(deadline)?;
@@ -8806,10 +8805,10 @@ impl RunningProcess {
             .state
             .try_lock()
             .map_err(|_| "selected stderr capture unavailable".to_owned())?;
-        if let Some(channel) = self.native_settlement.as_mut() {
-            if channel.retained_drains.is_none() {
-                channel.retained_drains = Some((out.clone(), err.clone()));
-            }
+        if let Some(channel) = self.native_settlement.as_mut()
+            && channel.retained_drains.is_none()
+        {
+            channel.retained_drains = Some((out.clone(), err.clone()));
         }
         mode.check(deadline)?;
         Ok(())
@@ -10197,32 +10196,29 @@ impl RunningProcess {
         timeout: Duration,
         retain_selected_result: bool,
     ) -> NaturalWaitCoreOutcome {
-        if retain_selected_result {
-            if let Some(channel) = self.native_settlement.as_ref() {
-                match channel.selected_wait_phase {
-                    SelectedNativeTerminalWaitPhase::Collected => {
-                        // Historical timely collection is not invalidated by
-                        // later diagnostic expiry; never receive here again.
-                        if self.applied_receipt_failure.is_some()
-                            || !self.applied_receipt_returned
-                            || !matches!(self.applied_receipt_observation, Some(Ok(_)))
-                        {
-                            if let Some(channel) = self.native_settlement.as_mut() {
-                                channel.failure = Some(
-                                    "cached collected state lacks accepted applied receipt".into(),
-                                );
-                                channel.selected_wait_phase =
-                                    SelectedNativeTerminalWaitPhase::Failed;
-                            }
-                            return NaturalWaitCoreOutcome::Failed(self);
+        if retain_selected_result && let Some(channel) = self.native_settlement.as_ref() {
+            match channel.selected_wait_phase {
+                SelectedNativeTerminalWaitPhase::Collected => {
+                    // Historical timely collection is not invalidated by
+                    // later diagnostic expiry; never receive here again.
+                    if self.applied_receipt_failure.is_some()
+                        || !self.applied_receipt_returned
+                        || !matches!(self.applied_receipt_observation, Some(Ok(_)))
+                    {
+                        if let Some(channel) = self.native_settlement.as_mut() {
+                            channel.failure = Some(
+                                "cached collected state lacks accepted applied receipt".into(),
+                            );
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
                         }
-                        return NaturalWaitCoreOutcome::Completed(self, None);
-                    }
-                    SelectedNativeTerminalWaitPhase::Failed => {
                         return NaturalWaitCoreOutcome::Failed(self);
                     }
-                    SelectedNativeTerminalWaitPhase::Pending => {}
+                    return NaturalWaitCoreOutcome::Completed(self, None);
                 }
+                SelectedNativeTerminalWaitPhase::Failed => {
+                    return NaturalWaitCoreOutcome::Failed(self);
+                }
+                SelectedNativeTerminalWaitPhase::Pending => {}
             }
         }
         let Some(deadline) = Instant::now().checked_add(timeout) else {
@@ -10300,12 +10296,12 @@ impl RunningProcess {
                             if retain_selected_result && slice_timeout && !original_expired {
                                 return NaturalWaitCoreOutcome::Incomplete(self);
                             }
-                            if retain_selected_result {
-                                if let Some(channel) = self.native_settlement.as_mut() {
-                                    channel.failure = Some(error);
-                                    channel.selected_wait_phase =
-                                        SelectedNativeTerminalWaitPhase::Failed;
-                                }
+                            if retain_selected_result
+                                && let Some(channel) = self.native_settlement.as_mut()
+                            {
+                                channel.failure = Some(error);
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
                             }
                             return NaturalWaitCoreOutcome::Failed(self);
                         }
@@ -10318,12 +10314,11 @@ impl RunningProcess {
                         return NaturalWaitCoreOutcome::Failed(self);
                     }
                     if let Err(error) = self.settle_processes_before_drains() {
-                        if retain_selected_result {
-                            if let Some(channel) = self.native_settlement.as_mut() {
-                                channel.failure = Some(error);
-                                channel.selected_wait_phase =
-                                    SelectedNativeTerminalWaitPhase::Failed;
-                            }
+                        if retain_selected_result
+                            && let Some(channel) = self.native_settlement.as_mut()
+                        {
+                            channel.failure = Some(error);
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
                         }
                         return NaturalWaitCoreOutcome::Failed(self);
                     }
@@ -10365,13 +10360,12 @@ impl RunningProcess {
                             }
                         }
                         Err(error) => {
-                            if retain_selected_result {
-                                if let Some(channel) = self.native_settlement.as_mut() {
-                                    channel.failure =
-                                        Some(format!("reap settled wrapper: {error}"));
-                                    channel.selected_wait_phase =
-                                        SelectedNativeTerminalWaitPhase::Failed;
-                                }
+                            if retain_selected_result
+                                && let Some(channel) = self.native_settlement.as_mut()
+                            {
+                                channel.failure = Some(format!("reap settled wrapper: {error}"));
+                                channel.selected_wait_phase =
+                                    SelectedNativeTerminalWaitPhase::Failed;
                             }
                             NaturalWaitCoreOutcome::Failed(self)
                         }
@@ -10416,11 +10410,10 @@ impl RunningProcess {
                     thread::sleep(bound);
                 }
                 Err(error) => {
-                    if retain_selected_result {
-                        if let Some(channel) = self.native_settlement.as_mut() {
-                            channel.failure = Some(format!("observe supervised wrapper: {error}"));
-                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
-                        }
+                    if retain_selected_result && let Some(channel) = self.native_settlement.as_mut()
+                    {
+                        channel.failure = Some(format!("observe supervised wrapper: {error}"));
+                        channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
                     }
                     return NaturalWaitCoreOutcome::Failed(self);
                 }
@@ -10619,14 +10612,12 @@ impl RunningProcess {
             .and_then(|channel| channel.failure.clone());
         if self.native_settlement.as_ref().is_some_and(|channel| {
             channel.selected_wait_phase == SelectedNativeTerminalWaitPhase::Collected
-        }) {
-            if let Some(result) = self
-                .native_settlement
-                .as_mut()
-                .and_then(|channel| channel.retained_terminal_result.take())
-            {
-                return result;
-            }
+        }) && let Some(result) = self
+            .native_settlement
+            .as_mut()
+            .and_then(|channel| channel.retained_terminal_result.take())
+        {
+            return result;
         }
         if let Some(failure) = retained_failure
             && let Some(mut result) = self
@@ -12189,11 +12180,11 @@ impl Drop for SpawnRunningGuard<'_> {
             return;
         }
         #[cfg(target_os = "linux")]
-        if let SpawnFailureCustodyMode::Selected(bounds) = self.mode {
-            if let Some(running) = self.running.take() {
-                // Selected terminal Drop, including arbitrary setup unwind.
-                drop(SelectedSupervisedFailureOwner::running(running, bounds));
-            }
+        if let SpawnFailureCustodyMode::Selected(bounds) = self.mode
+            && let Some(running) = self.running.take()
+        {
+            // Selected terminal Drop, including arbitrary setup unwind.
+            drop(SelectedSupervisedFailureOwner::running(running, bounds));
         }
     }
 }
@@ -12216,16 +12207,15 @@ impl SelectedSupervisedSetupGuard<'_> {
         deadline: crate::time::MonotonicDeadline,
         mode: SelectedCleanupMode,
     ) -> Result<(), String> {
-        if let Some(status) = self.supervised_status.as_mut() {
-            if let SupervisedProcessStatusState::AwaitingAttachment {
+        if let Some(status) = self.supervised_status.as_mut()
+            && let SupervisedProcessStatusState::AwaitingAttachment {
                 attachment_release, ..
             } = &mut status.state
-            {
-                if let Some(writer) = attachment_release.writer.as_mut() {
-                    writer.close_selected_until(deadline, mode)?;
-                }
-                attachment_release.writer.take();
+        {
+            if let Some(writer) = attachment_release.writer.as_mut() {
+                writer.close_selected_until(deadline, mode)?;
             }
+            attachment_release.writer.take();
         }
         Ok(())
     }
@@ -12378,17 +12368,14 @@ fn lib_spawn_with_stdio_custody_into(
         scoped,
     };
     #[cfg(target_os = "linux")]
-    if setup.scoped.is_some() {
-        if let Some(status) = setup.supervised_status.as_mut() {
-            if let SupervisedProcessStatusState::AwaitingAttachment {
-                attachment_release, ..
-            } = &mut status.state
-            {
-                if let Some(writer) = attachment_release.writer.as_mut() {
-                    writer.selected_scoped_borrowed = true;
-                }
-            }
-        }
+    if setup.scoped.is_some()
+        && let Some(status) = setup.supervised_status.as_mut()
+        && let SupervisedProcessStatusState::AwaitingAttachment {
+            attachment_release, ..
+        } = &mut status.state
+        && let Some(writer) = attachment_release.writer.as_mut()
+    {
+        writer.selected_scoped_borrowed = true;
     }
     #[cfg(target_os = "linux")]
     let inherited_fds = &setup.inherited_fds;
@@ -12420,7 +12407,7 @@ fn lib_spawn_with_stdio_custody_into(
     }
 
     #[cfg(unix)]
-    let raw_inherited_fds = normalize_inherited_descriptors(&inherited_fds)
+    let raw_inherited_fds = normalize_inherited_descriptors(inherited_fds)
         .map_err(|error| spawn_failure(start, format!("Failed to spawn: {error}")))?;
     #[cfg(not(unix))]
     if !inherited_fds.is_empty() || !inherited_fd_mappings.is_empty() {
@@ -12458,7 +12445,7 @@ fn lib_spawn_with_stdio_custody_into(
         match prepared {
             Some(prepared) => prepared,
             None => prepare_inherited_fd_mappings(
-                &inherited_fd_mappings,
+                inherited_fd_mappings,
                 &raw_inherited_fds,
                 &forbidden_mapping_targets,
                 absolute_deadline,
@@ -13092,12 +13079,11 @@ fn lib_spawn_with_stdio_custody_into(
     }
     // Retain stdin through configuration and worker-creation failure/unwind.
     #[cfg(target_os = "linux")]
-    if running.scoped.is_some() {
-        if let Some(stdin) = running.child.stdin.as_ref() {
-            if let Err(error) = configure_nonblocking_fd(stdin) {
-                return Err(running.into_spawn_failure(spawn_failure(start, error.to_string())));
-            }
-        }
+    if running.scoped.is_some()
+        && let Some(stdin) = running.child.stdin.as_ref()
+        && let Err(error) = configure_nonblocking_fd(stdin)
+    {
+        return Err(running.into_spawn_failure(spawn_failure(start, error.to_string())));
     }
     let stdin_handle = running.child.stdin.take().map(|stdin| {
         #[cfg(target_os = "linux")]
@@ -13234,7 +13220,7 @@ fn spawn_stdin_writer(
     let (Some(mut stdin), Some(data)) = (stdin, data) else {
         return Ok(None);
     };
-    configure_nonblocking_fd(&mut stdin)?;
+    configure_nonblocking_fd(&stdin)?;
     Ok(Some(thread::spawn(move || {
         let bytes = data.as_bytes();
         let mut written = 0;
@@ -13669,7 +13655,7 @@ mod applied_status_tests {
         let (initial, exact) = run(&[pid.clone(), applied.clone()]);
         assert!(matches!(initial, InitialLauncherStatus::Target(42, None)));
         assert_eq!(exact.unwrap(), receipt(42));
-        assert!(run(&[pid.clone()]).1.is_err());
+        assert!(run(std::slice::from_ref(&pid)).1.is_err());
         assert!(run(&[pid.clone(), applied.clone(), applied]).1.is_err());
         let wrong = format!(
             "{}\n",
@@ -17760,8 +17746,8 @@ mod native_terminal_existing_wait_tests {
         let (mut running, writer) = negative_owner();
         let mut file = writer.file();
         file.write_all(b"{\"schema\":").unwrap();
-        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
-        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.poll_native_terminal_testimony().unwrap());
+        assert!(!running.poll_native_terminal_testimony().unwrap());
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
         drop(writer);
         let failure = running.poll_native_terminal_testimony().unwrap_err();
@@ -17780,7 +17766,7 @@ mod native_terminal_existing_wait_tests {
         let (mut running, writer) = negative_owner();
         let alias = writer.duplicate_at_or_above(64).unwrap();
         drop(writer);
-        assert_eq!(running.poll_native_terminal_testimony().unwrap(), false);
+        assert!(!running.poll_native_terminal_testimony().unwrap());
         assert!(!running.native_settlement.as_ref().unwrap().exact_eof);
         drop(alias);
         assert!(running.poll_native_terminal_testimony().is_err());
@@ -18181,7 +18167,6 @@ mod native_terminal_existing_wait_tests {
                 .as_raw_fd(),
             reader_fd
         );
-        drop(first);
         let running = match selected_wait(running, Duration::from_secs(3)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             _ => panic!("cached selected result changed phase on reentry"),
@@ -18442,7 +18427,7 @@ mod native_terminal_atomic_pipe_write_tests {
     #[test]
     fn atomic_pipe_write_returns_actual_count_and_invalid_sizes_write_nothing() {
         let (held, writer, deadline) = pipe();
-        let record = vec![b'x'; libc::PIPE_BUF as usize];
+        let record = vec![b'x'; libc::PIPE_BUF];
         assert_eq!(
             writer
                 .write_atomic_pipe_record_until(&record, deadline)
@@ -18468,7 +18453,7 @@ mod native_terminal_atomic_pipe_write_tests {
         );
         assert_eq!(
             writer
-                .write_atomic_pipe_record_until(&vec![b'x'; libc::PIPE_BUF as usize + 1], deadline,)
+                .write_atomic_pipe_record_until(&vec![b'x'; libc::PIPE_BUF + 1], deadline,)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidInput

@@ -2400,8 +2400,8 @@ impl PinnedRegularFile {
         observation: &OpenRegularFileObservation,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        let mut file = self.file.try_clone()?;
-        read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+        let file = self.file.try_clone()?;
+        read_open_regular_file_stable_bounded(&file, observation, max_bytes)
     }
 
     /// Read at most `max_bytes` from the start of this exact observed file.
@@ -2458,8 +2458,8 @@ impl PinnedRegularFile {
     /// The descriptor clone used by the digest implementation does not escape
     /// this typed authority boundary.
     pub fn digest_stable_exact(&self, observation: &OpenRegularFileObservation) -> Result<String> {
-        let mut file = self.file.try_clone()?;
-        let (digest, after) = digest_open_regular_file_stable_exact(&mut file, observation.size())?;
+        let file = self.file.try_clone()?;
+        let (digest, after) = digest_open_regular_file_stable_exact(&file, observation.size())?;
         if !same_regular_file_observation(&observation.metadata, &after) {
             anyhow::bail!(
                 "pinned regular file changed while it was being digested: {}",
@@ -3495,17 +3495,19 @@ impl PinnedDirectory {
                 {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if {
+            } else {
                 self.ensure_entry_same_mount(&entry)?;
                 check_original_traversal_deadline(deadline)?;
-                (unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) }) != 0
-            } {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!(
-                        "remove pinned entry {}",
-                        self.path.join(&entry.name).display()
-                    )
-                });
+                let unlink_failed =
+                    unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0;
+                if unlink_failed {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "remove pinned entry {}",
+                            self.path.join(&entry.name).display()
+                        )
+                    });
+                }
             }
             #[cfg(all(test, target_os = "linux"))]
             original_removal_step_control::checkpoint();
@@ -3538,16 +3540,18 @@ impl PinnedDirectory {
                 {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if {
+            } else {
                 self.ensure_entry_same_mount(&entry)?;
-                (unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) }) != 0
-            } {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!(
-                        "remove pinned entry {}",
-                        self.path.join(&entry.name).display()
-                    )
-                });
+                let unlink_failed =
+                    unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0;
+                if unlink_failed {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "remove pinned entry {}",
+                            self.path.join(&entry.name).display()
+                        )
+                    });
+                }
             }
         }
         self.directory.sync_all()?;
@@ -3620,12 +3624,12 @@ impl PinnedDirectory {
                     .context("read descriptor-relative filesystem capacity");
             }
             let stats = unsafe { stats.assume_init() };
-            let fragment_size = (stats.f_frsize as u64).max(1);
+            let fragment_size = stats.f_frsize.max(1);
             Ok(FilesystemCapacity {
-                total_bytes: (stats.f_blocks as u64).saturating_mul(fragment_size),
-                available_bytes: (stats.f_bavail as u64).saturating_mul(fragment_size),
+                total_bytes: stats.f_blocks.saturating_mul(fragment_size),
+                available_bytes: stats.f_bavail.saturating_mul(fragment_size),
                 allocation_unit_bytes: fragment_size,
-                available_files: stats.f_favail as u64,
+                available_files: stats.f_favail,
             })
         }
     }
@@ -6783,7 +6787,7 @@ impl PinnedDirectory {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let marker_name = Self::conditional_byte_recovery_name(target_name);
-        let Some(mut marker) = self
+        let Some(marker) = self
             .open_regular(&marker_name, false)
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?
         else {
@@ -6793,9 +6797,8 @@ impl PinnedDirectory {
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
         let marker_identity = regular_file_identity(&marker)
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
-        let bytes =
-            read_open_regular_file_stable_bounded(&mut marker, &marker_observation, 16 * 1024)
-                .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
+        let bytes = read_open_regular_file_stable_bounded(&marker, &marker_observation, 16 * 1024)
+            .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
         let recovery: ConditionalByteReplacementRecovery = serde_json::from_slice(&bytes)
             .context("decode conditional authoring recovery record")
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
@@ -7204,6 +7207,17 @@ impl PinnedDirectory {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn sync_directory_after_planned_restore(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if FAIL_PLANNED_RESTORE_SYNC.with(|flag| flag.replace(false)) {
+            return Err(std::io::Error::other(
+                "injected planned restore directory-sync failure",
+            ));
+        }
+        self.directory.sync_all()
+    }
+
     /// Move only the exact retained original into a prepublished coordinate.
     /// NOREPLACE preserves any quarantine occupant; mismatches restore without
     /// replacing a public-name occupant. Expected File remains caller-owned.
@@ -7280,15 +7294,7 @@ impl PinnedDirectory {
                             "unexpected object preserved at quarantine; restore rename failed: {error:#}; {restore:#}"
                         ),
                     )),
-                    Ok(()) => match (|| -> std::io::Result<()> {
-                        #[cfg(test)]
-                        if FAIL_PLANNED_RESTORE_SYNC.with(|flag| flag.replace(false)) {
-                            return Err(std::io::Error::other(
-                                "injected planned restore directory-sync failure",
-                            ));
-                        }
-                        self.directory.sync_all()
-                    })() {
+                    Ok(()) => match self.sync_directory_after_planned_restore() {
                         Ok(()) => Err(fail(
                             PlannedQuarantineDisposition::BeforeCommit,
                             PlannedQuarantineStage::RestoredUnexpected,
@@ -7326,17 +7332,15 @@ impl PinnedDirectory {
         #[cfg(target_os = "linux")]
         {
             #[cfg(feature = "crash-qualification-test-support")]
-            if let Some(hook) = PLANNED_REMOVAL_HOOK.get() {
-                if hook(name, quarantine) == PlannedRemovalCut::FailUnlink {
-                    return Err(PlannedQuarantineFailure {
-                        disposition: PlannedQuarantineDisposition::DurabilityUncertain,
-                        stage: PlannedQuarantineStage::QuarantinedOriginal,
-                        quarantine_name: quarantine.to_os_string(),
-                        error: anyhow::anyhow!(
-                            "injected failure after planned move, before unlink"
-                        ),
-                    });
-                }
+            if let Some(hook) = PLANNED_REMOVAL_HOOK.get()
+                && hook(name, quarantine) == PlannedRemovalCut::FailUnlink
+            {
+                return Err(PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::QuarantinedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: anyhow::anyhow!("injected failure after planned move, before unlink"),
+                });
             }
             let name_c = std::ffi::CString::new(quarantine.as_bytes()).expect("validated child");
             if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
@@ -7455,15 +7459,7 @@ impl PinnedDirectory {
                             "unexpected object preserved at quarantine; restore rename failed: {error:#}; {restore:#}"
                         ),
                     )),
-                    Ok(()) => match (|| -> std::io::Result<()> {
-                        #[cfg(test)]
-                        if FAIL_PLANNED_RESTORE_SYNC.with(|flag| flag.replace(false)) {
-                            return Err(std::io::Error::other(
-                                "injected planned restore directory-sync failure",
-                            ));
-                        }
-                        self.directory.sync_all()
-                    })() {
+                    Ok(()) => match self.sync_directory_after_planned_restore() {
                         Ok(()) => Err(fail(
                             PlannedQuarantineDisposition::BeforeCommit,
                             PlannedQuarantineStage::RestoredUnexpected,
@@ -8370,7 +8366,7 @@ pub fn read_open_regular_file_bounded(mut file: File, max_bytes: u64) -> Result<
 /// without growing beyond the caller's reservation. The descriptor identity
 /// and metadata must remain stable, and the sentinel must remain unused.
 pub fn read_open_regular_file_exact_bounded(
-    mut file: File,
+    file: File,
     expected_bytes: u64,
     max_bytes: u64,
 ) -> Result<Vec<u8>> {
@@ -8388,7 +8384,7 @@ pub fn read_open_regular_file_exact_bounded(
         );
     }
     read_open_regular_file_stable_bounded(
-        &mut file,
+        &file,
         &OpenRegularFileObservation { metadata: before },
         max_bytes,
     )
@@ -9407,14 +9403,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("value");
         std::fs::write(&path, b"exact").unwrap();
-        let mut file = File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         let (digest, metadata) =
-            digest_open_regular_file_stable_exact(&mut file, b"exact".len() as u64).unwrap();
+            digest_open_regular_file_stable_exact(&file, b"exact".len() as u64).unwrap();
         assert_eq!(digest, crate::sha256_hex(b"exact"));
         assert_eq!(metadata.len(), b"exact".len() as u64);
 
-        let mut file = File::open(&path).unwrap();
-        assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+        let file = File::open(&path).unwrap();
+        assert!(digest_open_regular_file_stable_exact(&file, 1).is_err());
     }
 
     #[test]
@@ -9823,10 +9819,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("value");
         std::fs::write(&path, b"first").unwrap();
-        let mut file = File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         let observed = observe_open_regular_file(&file).unwrap();
         std::fs::write(&path, b"second-value").unwrap();
-        assert!(read_open_regular_file_stable_bounded(&mut file, &observed, 1024).is_err());
+        assert!(read_open_regular_file_stable_bounded(&file, &observed, 1024).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -9878,14 +9874,13 @@ mod tests {
         file.write_all(b"exact retained bytes").unwrap();
         file.seek(std::io::SeekFrom::Start(4)).unwrap();
         let observed = observe_open_regular_file(&file).unwrap();
-        let mut clone = file.try_clone().unwrap();
+        let clone = file.try_clone().unwrap();
         assert_eq!(
-            read_open_regular_file_stable_bounded(&mut clone, &observed, 128).unwrap(),
+            read_open_regular_file_stable_bounded(&clone, &observed, 128).unwrap(),
             b"exact retained bytes"
         );
         assert_eq!(file.stream_position().unwrap(), 4);
-        let (digest, _) =
-            digest_open_regular_file_stable_exact(&mut clone, observed.size()).unwrap();
+        let (digest, _) = digest_open_regular_file_stable_exact(&clone, observed.size()).unwrap();
         assert_eq!(digest, crate::cas::sha256_hex(b"exact retained bytes"));
         assert_eq!(file.stream_position().unwrap(), 4);
         assert_eq!(

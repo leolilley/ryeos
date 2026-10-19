@@ -147,7 +147,7 @@ impl<'a> DeadlinePipeStream<'a> {
     /// the prior signal mask; pending SIGPIPE delivery then remains uncertain.
     #[cfg(target_os = "linux")]
     pub(crate) fn write_atomic_record(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if buffer.is_empty() || buffer.len() > libc::PIPE_BUF as usize {
+        if buffer.is_empty() || buffer.len() > libc::PIPE_BUF {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "atomic pipe record must contain 1..=PIPE_BUF bytes",
@@ -283,7 +283,9 @@ pub(crate) fn wait_ready(fd: RawFd, events: i16, deadline: MonotonicDeadline) ->
         }
         let timeout_ms = remaining
             .as_millis()
-            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .saturating_add(u128::from(
+                !remaining.subsec_nanos().is_multiple_of(1_000_000),
+            ))
             .min(i32::MAX as u128) as i32;
         let mut descriptor = libc::pollfd {
             fd,
@@ -339,7 +341,9 @@ fn wait_pair_ready(
         }
         let timeout_ms = remaining
             .as_millis()
-            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .saturating_add(u128::from(
+                !remaining.subsec_nanos().is_multiple_of(1_000_000),
+            ))
             .min(i32::MAX as u128) as i32;
         let mut descriptors = [
             libc::pollfd {
@@ -506,10 +510,8 @@ mod tests {
         let mut bytes = [0; 4];
         input.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"pipe");
-        drop(output);
         drop(writer);
         assert_eq!(input.read(&mut bytes).unwrap(), 0);
-        drop(input);
         drop(reader);
 
         let (reader, writer) = pipe(true);

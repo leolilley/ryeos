@@ -1362,7 +1362,6 @@ impl RetainedOriginalWitnessFile {
             ensure_original_deadline(deadline)?;
             Ok(())
         });
-        drop(progress);
         let phase = original.phase;
         let quarantine_name = if result.is_err() {
             original.quarantine.as_ref().cloned().unwrap_or_default()
@@ -3313,8 +3312,8 @@ impl DrainedSqliteProjection {
             let binding = self.binding.as_ref().expect("same stopped context");
             let facts = snapshot_role_facts(binding, plan.generation, self.stopped_ready)?;
             let mut links = [None; 3];
-            for i in 0..3 {
-                links[i] = binding.with_retirement_role(i, |file| {
+            for (i, link) in links.iter_mut().enumerate() {
+                *link = binding.with_retirement_role(i, |file| {
                     file.map(|file| {
                         file.metadata()
                             .map(|metadata| metadata.nlink())
@@ -3397,16 +3396,13 @@ impl DrainedSqliteProjection {
                 ),
             }
         }
-        for i in 0..3 {
-            ensure!(copies[i] <= 1, "duplicate stopped role candidates");
+        for (i, copy) in copies.iter().enumerate() {
+            ensure!(*copy <= 1, "duplicate stopped role candidates");
             if matches!(
                 self.states[i],
                 RetirementRoleState::Absent | RetirementRoleState::Removed
             ) {
-                ensure!(
-                    copies[i] == 0,
-                    "terminal stopped role coordinate reappeared"
-                );
+                ensure!(*copy == 0, "terminal stopped role coordinate reappeared");
             }
         }
         Ok(())
@@ -9286,7 +9282,9 @@ mod stopped_intake_scope_controls {
             "intake charged {intake} cleanup steps, beyond its bound {}",
             crate::STOPPED_INTAKE_CLEANUP_STEPS
         );
-        assert!(crate::STOPPED_INTAKE_CLEANUP_STEPS <= crate::NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS);
+        const _: () = assert!(
+            crate::STOPPED_INTAKE_CLEANUP_STEPS <= crate::NATIVE_LAYOUT_CLEANUP_MARGIN_STEPS
+        );
         assert_eq!(
             required, reserved,
             "the host reserves exactly the layout quote"
