@@ -259,7 +259,7 @@ jobs:
         # image's preinstalled SDKs take the space those binaries need.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h / /mnt/ryeos-tmp
+          df -h /
 
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
@@ -388,7 +388,7 @@ jobs:
         # image's preinstalled SDKs take the space those binaries need.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h / /mnt/ryeos-tmp
+          df -h /
 
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
