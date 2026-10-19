@@ -884,10 +884,15 @@ fn main() {
         sealed_exec_child(args.get(2).map(String::as_str).unwrap_or(""))
     } else if args.get(1).is_some_and(|arg| arg == "child-sandbox-target") {
         sandbox_target(args.get(2).map(String::as_str).unwrap_or(""))
+    } else if args.iter().any(|arg| arg == "--list") {
+        // A harness-free test binary answers the runner's listing request
+        // with its one test and nothing else on stdout.
+        println!("private_source_owner: test");
+        Ok(())
     } else if std::env::var("LILLUX_PRIVATE_SOURCE_NATIVE").as_deref() == Ok("1") {
         parent()
     } else {
-        println!("private source native probe skipped; set LILLUX_PRIVATE_SOURCE_NATIVE=1");
+        eprintln!("private source native probe skipped; set LILLUX_PRIVATE_SOURCE_NATIVE=1");
         Ok(())
     };
     if let Err(error) = result {
