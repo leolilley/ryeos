@@ -254,6 +254,13 @@ jobs:
           cargo --version
           cargo nextest --version
 
+      - name: Free runner disk for the test binaries
+        # The gate links one large debug test binary per crate; the hosted
+        # image's preinstalled SDKs take the space those binaries need.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h / /mnt/ryeos-tmp
+
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
         # root disk.
@@ -375,6 +382,13 @@ jobs:
           rustc --version
           cargo --version
           cargo nextest --version
+
+      - name: Free runner disk for the test binaries
+        # The gate links one large debug test binary per crate; the hosted
+        # image's preinstalled SDKs take the space those binaries need.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h / /mnt/ryeos-tmp
 
       - name: Place scratch on the attached volume
         # The durable-root probe refuses an app root on a virtual machine's
