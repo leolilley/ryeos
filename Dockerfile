@@ -81,6 +81,13 @@ RUN groupadd --gid 10000 ryeos && \
       --shell /usr/sbin/nologin ryeos && \
     install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
+# Platform shells (Render's SSH and dashboard shell) attach as the image's
+# running user, which is root here because tini and the entrypoint start as
+# root, and they require that user's ~/.ssh to exist with mode 0700. Without
+# it the session is closed right after the platform authenticates the
+# operator. The directory stays empty in the image.
+RUN install -d -m 0700 /root/.ssh
+
 # Daemon + ops CLI + core tools (authorize-client, sign, identity, etc.).
 COPY --from=builder /build/target/release/ryeosd             /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos              /usr/local/bin/ryeos
