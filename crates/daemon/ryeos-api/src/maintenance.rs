@@ -11,19 +11,472 @@
 //!
 //! If quiesce times out, GC is aborted without running.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use ryeos_state::gc::{self, GcParams, GcResult};
+use ryeos_state::object_closure::EventPayloadContractRegistration;
 
+use ryeos_app::object_contracts::RetainedEvidenceValidator;
+use ryeos_app::retention_exclusion::RetentionExclusion;
+use ryeos_app::runtime_db::SeatLeaseMaintenancePage;
 use ryeos_app::scheduler_boundary::SchedulerRetentionGuard;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::NodeIdentitySigner;
+use ryeos_app::state_store::{
+    FencedChainRetirementPlan, NodeIdentitySigner, StateStore, TerminalChainRetirement,
+};
 
 /// Default quiesce timeout: 30 seconds.
 const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Seat lease rows examined per maintenance slice. Within the store bound.
+const SEAT_LEASE_SLICE: usize = 64;
+
+/// A composition's decision for one fenced chain root: `None` leaves the
+/// chain for a later pass, a plan retires it.
+pub type FencedChainQualifier =
+    Arc<dyn Fn(&str) -> Result<Option<FencedChainRetirementPlan>> + Send + Sync>;
+
+/// A composition's settlement of seat leases that are already claimed for
+/// reaping. It runs under the exclusive retention exclusion, receives the
+/// claimed seat roots, and returns how many it fully settled (the rest stay
+/// claimed and are offered again by a later pass).
+pub type ClaimedSeatSettler =
+    Arc<dyn Fn(&AppState, &RetentionExclusion<'_>, &[String]) -> Result<usize> + Send + Sync>;
+
+/// Everything a domain composition supplies to the retention paths, through
+/// the one injection point the daemon root calls
+/// ([`install_retention_composition`]). The substrate never interprets any of
+/// it: the contracts and validator decide what retained evidence means, the
+/// qualifier decides which fenced chains retire, the settler decides when a
+/// claimed seat is finished.
+pub struct RetentionComposition {
+    pub event_contracts: Vec<EventPayloadContractRegistration>,
+    pub evidence_validator: RetainedEvidenceValidator,
+    pub qualify: FencedChainQualifier,
+    pub settle_claimed_seats: ClaimedSeatSettler,
+}
+
+/// The installed hooks the retention paths read.
+pub(crate) struct InstalledRetention {
+    pub(crate) qualify: FencedChainQualifier,
+    pub(crate) settle_claimed_seats: ClaimedSeatSettler,
+}
+
+/// `Some` when a composition was installed, `None` when the root installed
+/// the plain object contracts alone.
+static INSTALLED: OnceLock<Option<InstalledRetention>> = OnceLock::new();
+
+/// The composition root's single retention installation, called once before
+/// readiness. With a composition it installs the event contracts and the
+/// retained-evidence validator together with the hooks maintenance reads;
+/// with `None` it installs the plain object contracts only, no validator and
+/// no hooks, so retirement of fenced kinds refuses rather than runs on a
+/// stand-in. A second installation is refused.
+pub fn install_retention_composition(composition: Option<RetentionComposition>) -> Result<()> {
+    let installed = match composition {
+        None => {
+            ryeos_app::object_contracts::install()
+                .context("install application object contracts")?;
+            None
+        }
+        Some(composition) => {
+            let RetentionComposition {
+                event_contracts,
+                evidence_validator,
+                qualify,
+                settle_claimed_seats,
+            } = composition;
+            anyhow::ensure!(
+                !event_contracts.is_empty(),
+                "a retention composition must supply its event contracts"
+            );
+            ryeos_app::object_contracts::install_with_event_contracts(event_contracts)
+                .context("install application object and event contracts")?;
+            ryeos_app::object_contracts::install_retained_evidence_validator(evidence_validator)
+                .context("install retained-evidence validator")?;
+            Some(InstalledRetention {
+                qualify,
+                settle_claimed_seats,
+            })
+        }
+    };
+    INSTALLED
+        .set(installed)
+        .map_err(|_| anyhow::anyhow!("the retention composition was already installed"))
+}
+
+fn installed_retention() -> Option<&'static InstalledRetention> {
+    INSTALLED.get().and_then(Option::as_ref)
+}
+
+/// One mechanical step of the retention phase, recorded in the order it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetentionStep {
+    Replay,
+    FencedRetirement,
+    FencedRetirementRefused,
+    OrdinaryRetirement,
+    RecoverPending,
+    SeatReaping,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RetentionPhaseReport {
+    pub(crate) retirement: TerminalChainRetirement,
+    pub(crate) reaped_seats: usize,
+    /// Due fenced chains left alone because no composition is installed.
+    pub(crate) refused_fenced_chains: usize,
+    pub(crate) steps: Vec<RetentionStep>,
+}
+
+pub(crate) struct RetentionPhaseParams<'a> {
+    pub(crate) now: &'a str,
+    pub(crate) dry_run: bool,
+    /// Retire due chain history (ordinary and fenced kinds).
+    pub(crate) retire_history: bool,
+    /// Lease-expiry cutoff when seat reaping is requested.
+    pub(crate) seat_cutoff_ms: Option<i64>,
+}
+
+fn add_retirement(total: &mut TerminalChainRetirement, part: &TerminalChainRetirement) {
+    total.candidate_chains += part.candidate_chains;
+    total.retired_chains += part.retired_chains;
+    total.deleted_projection_rows += part.deleted_projection_rows;
+    total.deleted_runtime_rows += part.deleted_runtime_rows;
+    total.deleted_runtime_files += part.deleted_runtime_files;
+    total.pending_retirements_recovered += part.pending_retirements_recovered;
+}
+
+/// The retention work that runs under the exclusive exclusion, in its one
+/// order: interrupted fenced retirements replay, due fenced chains retire,
+/// ordinary history retires, pending removals recover, expired seats reap.
+/// The release pass and the sweep follow under the CAS guard.
+pub(crate) fn run_retention_phase(
+    state: &AppState,
+    exclusion: &RetentionExclusion<'_>,
+    hooks: Option<&InstalledRetention>,
+    params: &RetentionPhaseParams<'_>,
+) -> Result<RetentionPhaseReport> {
+    exclusion.require_exclusive()?;
+    let pin_count = |thread_ids: &[String]| exclusion.count_thread_pins(thread_ids);
+    let mut report = RetentionPhaseReport::default();
+    if !params.dry_run {
+        state.threads.replay_fenced_chain_retirements(exclusion)?;
+        report.steps.push(RetentionStep::Replay);
+    }
+    if params.retire_history {
+        match hooks {
+            Some(hooks) => {
+                let fenced = state.threads.retire_due_fenced_chains(
+                    exclusion,
+                    params.now,
+                    params.dry_run,
+                    |root| (hooks.qualify)(root),
+                )?;
+                add_retirement(&mut report.retirement, &fenced);
+                report.steps.push(RetentionStep::FencedRetirement);
+            }
+            None => {
+                // Counting due chains is a dry pass that qualifies nothing.
+                let due = state
+                    .threads
+                    .retire_due_fenced_chains(exclusion, params.now, true, |_| Ok(None))?
+                    .candidate_chains;
+                report.refused_fenced_chains = due;
+                if due != 0 {
+                    tracing::warn!(
+                        due,
+                        "fenced chain retirement refused: no composition installed a \
+                         retained-evidence validator and qualifier"
+                    );
+                }
+                report.steps.push(RetentionStep::FencedRetirementRefused);
+            }
+        }
+        let ordinary =
+            state
+                .state_store
+                .retire_due_terminal_chains(params.now, params.dry_run, pin_count)?;
+        add_retirement(&mut report.retirement, &ordinary);
+        report.steps.push(RetentionStep::OrdinaryRetirement);
+    }
+    let recovered = state.state_store.recover_pending_terminal_chain_removals(
+        params.now,
+        params.dry_run,
+        pin_count,
+    )?;
+    report.retirement.pending_retirements_recovered += recovered.pending_retirements_recovered;
+    report.steps.push(RetentionStep::RecoverPending);
+    if let Some(cutoff_ms) = params.seat_cutoff_ms
+        && !params.dry_run
+    {
+        let claimed = claim_expired_seats(&*state.state_store, cutoff_ms)?;
+        report.reaped_seats = settle_claimed_seats(state, exclusion, hooks, &claimed)?;
+        report.steps.push(RetentionStep::SeatReaping);
+    }
+    Ok(report)
+}
+
+/// The seat-lease slices maintenance walks. A trait so the paging is
+/// testable without lease rows, which only a composition can create.
+trait SeatLeases {
+    fn max_id(&self) -> Result<Option<String>>;
+    fn expired_slice(
+        &self,
+        cutoff_ms: i64,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+    ) -> Result<SeatLeaseMaintenancePage>;
+    fn claim(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool>;
+    fn claimed_slice(&self, after_id: Option<&str>, cycle_max_id: &str) -> Result<Vec<String>>;
+}
+
+impl SeatLeases for StateStore {
+    fn max_id(&self) -> Result<Option<String>> {
+        self.max_seat_lease_id()
+    }
+
+    fn expired_slice(
+        &self,
+        cutoff_ms: i64,
+        after_id: Option<&str>,
+        cycle_max_id: &str,
+    ) -> Result<SeatLeaseMaintenancePage> {
+        self.expired_seat_leases_slice(cutoff_ms, after_id, cycle_max_id, SEAT_LEASE_SLICE)
+    }
+
+    fn claim(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+        self.claim_expired_seat_lease(thread_id, cutoff_ms)
+    }
+
+    fn claimed_slice(&self, after_id: Option<&str>, cycle_max_id: &str) -> Result<Vec<String>> {
+        self.claimed_seat_leases_slice(after_id, cycle_max_id, SEAT_LEASE_SLICE)
+    }
+}
+
+/// Claim every expired lease in this cycle: rows up to the highest id seen at
+/// the start, so rows created meanwhile wait for the next cycle. Claiming
+/// marks rather than deletes the lease: a failed settlement stays retryable
+/// and a racing heartbeat cannot resurrect it.
+fn claim_expired_seats(leases: &impl SeatLeases, cutoff_ms: i64) -> Result<Vec<String>> {
+    let Some(cycle_max_id) = leases.max_id()? else {
+        return Ok(Vec::new());
+    };
+    let mut claimed = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = leases.expired_slice(cutoff_ms, after.as_deref(), &cycle_max_id)?;
+        for thread_id in page.eligible_ids {
+            if leases.claim(&thread_id, cutoff_ms)? {
+                claimed.push(thread_id);
+            }
+        }
+        if page.exhausted {
+            return Ok(claimed);
+        }
+        after = page.last_examined_id;
+    }
+}
+
+/// Every lease already claimed for reaping, as a restart finds them.
+fn collect_claimed_seats(leases: &impl SeatLeases) -> Result<Vec<String>> {
+    let Some(cycle_max_id) = leases.max_id()? else {
+        return Ok(Vec::new());
+    };
+    let mut claimed = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = leases.claimed_slice(after.as_deref(), &cycle_max_id)?;
+        let exhausted = page.len() < SEAT_LEASE_SLICE;
+        after = page.last().cloned();
+        claimed.extend(page);
+        if exhausted {
+            return Ok(claimed);
+        }
+    }
+}
+
+/// Settle claimed leases through the composition's settler when one is
+/// installed, otherwise by the plain lease contract: a claimed lease whose
+/// thread is gone or no longer running is removed, a running one is completed
+/// and then removed.
+fn settle_claimed_seats(
+    state: &AppState,
+    exclusion: &RetentionExclusion<'_>,
+    hooks: Option<&InstalledRetention>,
+    claimed: &[String],
+) -> Result<usize> {
+    if claimed.is_empty() {
+        return Ok(0);
+    }
+    if let Some(hooks) = hooks {
+        return (hooks.settle_claimed_seats)(state, exclusion, claimed);
+    }
+    let mut reaped = 0usize;
+    for thread_id in claimed {
+        let Some(detail) = state.state_store.get_thread(thread_id)? else {
+            state.state_store.remove_seat_lease(thread_id)?;
+            continue;
+        };
+        // The claimed lease row is the structural authority that this
+        // thread participates in lease expiry. Maintenance must not
+        // rediscover that relationship from an authored kind string.
+        if detail.status != "running" {
+            state.state_store.remove_seat_lease(thread_id)?;
+            continue;
+        }
+        state
+            .threads
+            .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                thread_id: thread_id.clone(),
+                status: "completed".to_string(),
+                outcome_code: Some("seat_lease_expired".to_string()),
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })?;
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
+        reaped += 1;
+    }
+    Ok(reaped)
+}
+
+/// What startup recovery did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StartupRetentionRecovery {
+    pub fences_checked: usize,
+    pub heads_unlinked: usize,
+    pub pending_retirements_recovered: usize,
+    pub seats_settled: usize,
+}
+
+/// Startup recovery under the exclusive exclusion, after the pin sources are
+/// sealed and the lifecycle service is built, before readiness: replay
+/// interrupted fenced retirements, finish pending removals, then offer
+/// already-claimed seat leases to the installed settler. `pin_count` is the
+/// caller's pin count for pending-removal recovery. Claimed seats are left
+/// alone when no composition is installed: nothing then owns their meaning.
+pub fn recover_retention_at_startup(
+    state: &AppState,
+    exclusion: &RetentionExclusion<'_>,
+    now: &str,
+    pin_count: impl Fn(&[String]) -> Result<u64>,
+) -> Result<StartupRetentionRecovery> {
+    recover_retention(state, exclusion, installed_retention(), now, pin_count)
+}
+
+fn recover_retention(
+    state: &AppState,
+    exclusion: &RetentionExclusion<'_>,
+    hooks: Option<&InstalledRetention>,
+    now: &str,
+    pin_count: impl Fn(&[String]) -> Result<u64>,
+) -> Result<StartupRetentionRecovery> {
+    exclusion.require_exclusive()?;
+    let replay = state.threads.replay_fenced_chain_retirements(exclusion)?;
+    let recovered = state
+        .state_store
+        .recover_pending_terminal_chain_removals(now, false, pin_count)?;
+    let seats_settled = if hooks.is_some() {
+        let claimed = collect_claimed_seats(&*state.state_store)?;
+        settle_claimed_seats(state, exclusion, hooks, &claimed)?
+    } else {
+        0
+    };
+    Ok(StartupRetentionRecovery {
+        fences_checked: replay.fences_checked,
+        heads_unlinked: replay.heads_unlinked,
+        pending_retirements_recovered: recovered.pending_retirements_recovered,
+        seats_settled,
+    })
+}
+
+/// The release pass's view of the fenced chains. A trait so the retry-later
+/// behaviour is testable without constructing retired closures.
+trait ChainReleaser {
+    fn unreleased(&self) -> Result<Vec<String>>;
+    fn release(&self, owner: &str) -> Result<()>;
+}
+
+struct StoreReleaser<'a> {
+    state_store: &'a StateStore,
+    authority: &'a ryeos_state::PinnedStateAuthority,
+    cas_guard: &'a ryeos_state::CasMutationGuard,
+}
+
+impl ChainReleaser for StoreReleaser<'_> {
+    fn unreleased(&self) -> Result<Vec<String>> {
+        self.state_store
+            .with_state_db(|db| Ok(db.unreleased_retired_chains()?.into_keys().collect()))
+    }
+
+    fn release(&self, owner: &str) -> Result<()> {
+        let lock = self.state_store.with_state_db(|db| {
+            db.acquire_existing_chain_lock(owner)
+                .with_context(|| format!("lock retired chain {owner}"))
+        })?;
+        let recovery = self
+            .authority
+            .recovery()
+            .context("the pinned state authority has no recovery store")?;
+        recovery.release_retired_chain(&self.authority.cas_store()?, self.cas_guard, &lock, owner)
+    }
+}
+
+/// What the release pass did: chains released, and owners whose release was
+/// refused and is left for the next maintenance run.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReleaseReport {
+    pub(crate) released: usize,
+    pub(crate) deferred: Vec<String>,
+}
+
+/// Whether a release refusal is one of the two documented not-yet cases the
+/// State release reports as plain messages: the owner's head or pending
+/// removal still exists, or a counterpart is not yet fenced. Any other error
+/// is a real failure.
+fn release_not_yet_possible(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.starts_with("cannot release ")
+        && (message.ends_with("its head or pending transition still exists")
+            || message.contains(" is not fenced"))
+}
+
+/// Release every fenced chain's closure. A not-yet-possible release (see
+/// [`release_not_yet_possible`]) is retry-later: the fence and closure stay
+/// rooted and the refusal is logged. Any other error aborts the run before
+/// the sweep. A second pass re-reads the unreleased set, so an obstacle that
+/// cleared meanwhile releases in the same run; what still refuses is
+/// reported as deferred for the next run.
+fn run_release_pass(releaser: &impl ChainReleaser) -> Result<ReleaseReport> {
+    let mut released = 0usize;
+    let mut deferred = Vec::new();
+    for pass in 0..2 {
+        deferred.clear();
+        for owner in releaser.unreleased()? {
+            match releaser.release(&owner) {
+                Ok(()) => released += 1,
+                Err(error) if release_not_yet_possible(&error) => {
+                    tracing::warn!(%owner, pass, %error, "retired chain release deferred");
+                    deferred.push(owner);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("release retired chain {owner}"));
+                }
+            }
+        }
+        if deferred.is_empty() {
+            break;
+        }
+    }
+    Ok(ReleaseReport { released, deferred })
+}
 
 enum GcWorkerCommand {
     Run(WriteBarrierResume),
@@ -133,16 +586,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         "maintenance GC: lock acquired"
     );
 
-    // Seat settlement is a normal braid write, so reap before quiescing the
-    // write barrier. Claiming marks (rather than deletes) the lease: failed
-    // settlement remains retryable and racing heartbeats cannot resurrect it.
-    let mut reaped_seats = 0usize;
-    let mut terminal_chain_candidates = 0usize;
-    let mut retired_terminal_chains = 0usize;
-    let mut deleted_thread_projection_rows = 0usize;
-    let mut deleted_thread_runtime_rows = 0usize;
-    let mut deleted_thread_runtime_files = 0usize;
-    let mut pending_retirements_recovered = 0usize;
+    // Retention work runs under the exclusive exclusion and before the write
+    // barrier quiesces, because settlement and retirement are ordinary
+    // writes. The release pass and the sweep follow under the CAS guard.
     let held_pins: Vec<&dyn ryeos_app::retention_exclusion::ThreadPinGuard> = scheduler_guard
         .iter()
         .map(|guard| {
@@ -151,60 +597,32 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         })
         .collect();
     let exclusion = retention_gate.with_held_pins(held_pins)?;
-    if params.deep || params.prune_runtime_history {
-        let retirement = state.state_store.retire_due_terminal_chains(
-            &lillux::time::iso8601_now(),
-            params.dry_run,
-            |thread_ids| exclusion.count_thread_pins(thread_ids),
-        )?;
-        terminal_chain_candidates = retirement.candidate_chains;
-        retired_terminal_chains = retirement.retired_chains;
-        deleted_thread_projection_rows = retirement.deleted_projection_rows;
-        deleted_thread_runtime_rows = retirement.deleted_runtime_rows;
-        deleted_thread_runtime_files = retirement.deleted_runtime_files;
-        pending_retirements_recovered = retirement.pending_retirements_recovered;
-    }
+    let seat_cutoff_ms = if params.dry_run {
+        None
+    } else {
+        seat_lease_grace_ms
+            .map(|grace_ms| lillux::time::timestamp_millis().saturating_sub(grace_ms))
+    };
+    let phase = run_retention_phase(
+        state,
+        &exclusion,
+        installed_retention(),
+        &RetentionPhaseParams {
+            now: &lillux::time::iso8601_now(),
+            dry_run: params.dry_run,
+            retire_history: params.deep || params.prune_runtime_history,
+            seat_cutoff_ms,
+        },
+    )?;
     let retention_hold = exclusion.into_gate_hold();
-    if !params.dry_run
-        && let Some(grace_ms) = seat_lease_grace_ms
-    {
-        let now_ms = lillux::time::timestamp_millis();
-        let cutoff = now_ms.saturating_sub(grace_ms);
-        for thread_id in state.state_store.expired_seat_leases(cutoff)? {
-            if !state
-                .state_store
-                .claim_expired_seat_lease(&thread_id, cutoff)?
-            {
-                continue;
-            }
-            let Some(detail) = state.state_store.get_thread(&thread_id)? else {
-                state.state_store.remove_seat_lease(&thread_id)?;
-                continue;
-            };
-            // The claimed lease row is the structural authority that this
-            // thread participates in lease expiry. Maintenance must not
-            // rediscover that relationship from an authored kind string.
-            if detail.status != "running" {
-                state.state_store.remove_seat_lease(&thread_id)?;
-                continue;
-            }
-            state
-                .threads
-                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id,
-                    status: "completed".to_string(),
-                    outcome_code: Some("seat_lease_expired".to_string()),
-                    result: None,
-                    error: None,
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                })?;
-            state.state_store.remove_seat_lease(&detail.thread_id)?;
-            reaped_seats += 1;
-        }
-    }
+    let reaped_seats = phase.reaped_seats;
+    let refused_fenced_chains = phase.refused_fenced_chains;
+    let terminal_chain_candidates = phase.retirement.candidate_chains;
+    let retired_terminal_chains = phase.retirement.retired_chains;
+    let deleted_thread_projection_rows = phase.retirement.deleted_projection_rows;
+    let deleted_thread_runtime_rows = phase.retirement.deleted_runtime_rows;
+    let deleted_thread_runtime_files = phase.retirement.deleted_runtime_files;
+    let pending_retirements_recovered = phase.retirement.pending_retirements_recovered;
 
     // The global mutation order is cross-process CAS guard, then in-process
     // write permit/barrier. A dedicated blocking worker can hold the !Send file
@@ -246,28 +664,52 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         let _ = guard_ready_tx.send(Ok(()));
         let command = command_rx.recv();
         match command {
-            Ok(GcWorkerCommand::Run(_write_barrier_resume)) => run_gc_and_log(GcRunInput {
-                state_authority: &state_authority,
-                cas_guard: &cas_guard,
-                signer: &signer,
-                params: &params_clone,
-                external_content_limits,
-                state_store: &state_store,
-                accounting: accounting.as_deref(),
-                scheduler: match scheduler_guard.as_mut() {
-                    Some(guard) => Some(guard.as_mut()),
-                    None => None,
-                },
-                fire_retention,
-                reaped_seats,
-                terminal_chain_candidates,
-                retired_terminal_chains,
-                deleted_thread_projection_rows,
-                deleted_thread_runtime_rows,
-                deleted_thread_runtime_files,
-                pending_retirements_recovered,
-            })
-            .map(Some),
+            Ok(GcWorkerCommand::Run(_write_barrier_resume)) => {
+                // Released closures stop being roots, so release precedes the
+                // sweep that may collect them.
+                let release = if params_clone.dry_run {
+                    ReleaseReport::default()
+                } else {
+                    run_release_pass(&StoreReleaser {
+                        state_store: &state_store,
+                        authority: &state_authority,
+                        cas_guard: &cas_guard,
+                    })?
+                };
+                if release.released != 0 || !release.deferred.is_empty() {
+                    tracing::info!(
+                        released = release.released,
+                        deferred = release.deferred.len(),
+                        "retired chain release pass"
+                    );
+                }
+                run_gc_and_log(GcRunInput {
+                    state_authority: &state_authority,
+                    cas_guard: &cas_guard,
+                    signer: &signer,
+                    params: &params_clone,
+                    external_content_limits,
+                    state_store: &state_store,
+                    accounting: accounting.as_deref(),
+                    scheduler: match scheduler_guard.as_mut() {
+                        Some(guard) => Some(guard.as_mut()),
+                        None => None,
+                    },
+                    fire_retention,
+                    reaped_seats,
+                    terminal_chain_candidates,
+                    retired_terminal_chains,
+                    deleted_thread_projection_rows,
+                    deleted_thread_runtime_rows,
+                    deleted_thread_runtime_files,
+                    pending_retirements_recovered,
+                })
+                .map(|mut result| {
+                    result.released_retired_chains = release.released;
+                    result.deferred_retired_chain_releases = release.deferred.len();
+                    Some(result)
+                })
+            }
             Ok(GcWorkerCommand::Abort) | Err(_) => Ok(None),
         }
     });
@@ -329,6 +771,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         }
     };
     gc_result.reaped_seats = reaped_seats;
+    gc_result.refused_fenced_chain_retirements = refused_fenced_chains;
     gc_result.terminal_chain_candidates = terminal_chain_candidates;
     gc_result.retired_terminal_chains = retired_terminal_chains;
     gc_result.deleted_thread_projection_rows = deleted_thread_projection_rows;
@@ -655,11 +1098,511 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
 
     #[test]
     fn quiesce_timeout_is_reasonable() {
         // Verify the default timeout is reasonable for production use
         assert!(DEFAULT_QUIESCE_TIMEOUT >= Duration::from_secs(10));
         assert!(DEFAULT_QUIESCE_TIMEOUT <= Duration::from_secs(120));
+    }
+
+    struct FakeReleaser {
+        unreleased: RefCell<BTreeSet<String>>,
+        /// Releases each owner refuses before it succeeds (`u32::MAX` never).
+        refusals: RefCell<BTreeMap<String, u32>>,
+        released: RefCell<Vec<String>>,
+        listing_fails: bool,
+        /// Owners whose release fails for a reason that is not "not yet".
+        hard_failures: BTreeSet<String>,
+        /// Refuse with the counterpart wording instead of the head wording.
+        counterpart_wording: bool,
+    }
+
+    impl FakeReleaser {
+        fn new(owners: &[(&str, u32)]) -> Self {
+            Self {
+                unreleased: RefCell::new(owners.iter().map(|o| o.0.to_string()).collect()),
+                refusals: RefCell::new(owners.iter().map(|o| (o.0.to_string(), o.1)).collect()),
+                released: RefCell::new(Vec::new()),
+                listing_fails: false,
+                hard_failures: BTreeSet::new(),
+                counterpart_wording: false,
+            }
+        }
+    }
+
+    impl ChainReleaser for FakeReleaser {
+        fn unreleased(&self) -> Result<Vec<String>> {
+            anyhow::ensure!(!self.listing_fails, "fence listing unavailable");
+            Ok(self.unreleased.borrow().iter().cloned().collect())
+        }
+
+        fn release(&self, owner: &str) -> Result<()> {
+            anyhow::ensure!(
+                !self.hard_failures.contains(owner),
+                "retired chain manifest is corrupt"
+            );
+            let mut refusals = self.refusals.borrow_mut();
+            let remaining = refusals.get_mut(owner).unwrap();
+            if *remaining > 0 {
+                if *remaining != u32::MAX {
+                    *remaining -= 1;
+                }
+                if self.counterpart_wording {
+                    anyhow::bail!("cannot release {owner:?}: counterpart \"T-peer\" is not fenced");
+                }
+                anyhow::bail!(
+                    "cannot release {owner:?}: its head or pending transition still exists"
+                );
+            }
+            self.unreleased.borrow_mut().remove(owner);
+            self.released.borrow_mut().push(owner.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn release_pass_releases_every_unreleased_chain() {
+        let releaser = FakeReleaser::new(&[("T-a", 0), ("T-b", 0)]);
+        let report = run_release_pass(&releaser).unwrap();
+        assert_eq!(
+            report,
+            ReleaseReport {
+                released: 2,
+                deferred: Vec::new()
+            }
+        );
+        assert_eq!(*releaser.released.borrow(), ["T-a", "T-b"]);
+    }
+
+    #[test]
+    fn release_pass_retries_a_refused_chain_once_in_the_same_run() {
+        let releaser = FakeReleaser::new(&[("T-a", 1), ("T-b", 0)]);
+        let report = run_release_pass(&releaser).unwrap();
+        assert_eq!(report.released, 2);
+        assert!(report.deferred.is_empty());
+        assert_eq!(*releaser.released.borrow(), ["T-b", "T-a"]);
+    }
+
+    #[test]
+    fn release_pass_defers_a_chain_that_keeps_refusing_and_releases_the_rest() {
+        let releaser = FakeReleaser::new(&[("T-a", u32::MAX), ("T-b", 0)]);
+        let report = run_release_pass(&releaser).unwrap();
+        assert_eq!(report.released, 1);
+        assert_eq!(report.deferred, ["T-a"]);
+        assert!(releaser.unreleased.borrow().contains("T-a"));
+    }
+
+    #[test]
+    fn release_pass_defers_a_counterpart_not_yet_fenced() {
+        let mut releaser = FakeReleaser::new(&[("T-a", u32::MAX)]);
+        releaser.counterpart_wording = true;
+        let report = run_release_pass(&releaser).unwrap();
+        assert_eq!(report.deferred, ["T-a"]);
+    }
+
+    #[test]
+    fn release_pass_propagates_an_error_that_is_not_a_documented_not_yet_case() {
+        let mut releaser = FakeReleaser::new(&[("T-a", 0), ("T-b", 0)]);
+        releaser.hard_failures.insert("T-a".to_string());
+        let error = run_release_pass(&releaser).unwrap_err();
+        assert!(format!("{error:#}").contains("manifest is corrupt"));
+        assert!(releaser.released.borrow().is_empty());
+    }
+
+    #[test]
+    fn release_classification_matches_only_the_two_documented_messages() {
+        let not_yet = |m: &str| release_not_yet_possible(&anyhow::anyhow!("{m}"));
+        assert!(not_yet(
+            "cannot release \"T-a\": its head or pending transition still exists"
+        ));
+        assert!(not_yet(
+            "cannot release \"T-a\": counterpart \"T-b\" is not fenced"
+        ));
+        assert!(!not_yet("chain \"T-a\" has no retirement fence to release"));
+        assert!(!not_yet("retired chain manifest is corrupt"));
+    }
+
+    #[test]
+    fn release_pass_with_nothing_unreleased_does_nothing() {
+        let report = run_release_pass(&FakeReleaser::new(&[])).unwrap();
+        assert_eq!(report, ReleaseReport::default());
+    }
+
+    #[test]
+    fn release_pass_fails_when_the_fences_cannot_be_listed() {
+        let mut releaser = FakeReleaser::new(&[("T-a", 0)]);
+        releaser.listing_fails = true;
+        assert!(run_release_pass(&releaser).is_err());
+    }
+
+    struct FakeSeats {
+        /// (id, last_seen_ms, claimed), sorted by id.
+        rows: RefCell<Vec<(String, i64, bool)>>,
+    }
+
+    impl FakeSeats {
+        fn new(rows: &[(&str, i64, bool)]) -> Self {
+            let mut rows: Vec<_> = rows.iter().map(|r| (r.0.to_string(), r.1, r.2)).collect();
+            rows.sort();
+            Self {
+                rows: RefCell::new(rows),
+            }
+        }
+
+        fn claimed_ids(&self) -> Vec<String> {
+            self.rows
+                .borrow()
+                .iter()
+                .filter(|r| r.2)
+                .map(|r| r.0.clone())
+                .collect()
+        }
+    }
+
+    impl SeatLeases for FakeSeats {
+        fn max_id(&self) -> Result<Option<String>> {
+            Ok(self.rows.borrow().last().map(|r| r.0.clone()))
+        }
+
+        fn expired_slice(
+            &self,
+            cutoff_ms: i64,
+            after_id: Option<&str>,
+            cycle_max_id: &str,
+        ) -> Result<SeatLeaseMaintenancePage> {
+            let rows: Vec<_> = self
+                .rows
+                .borrow()
+                .iter()
+                .filter(|r| {
+                    after_id.is_none_or(|a| r.0.as_str() > a) && r.0.as_str() <= cycle_max_id
+                })
+                .take(SEAT_LEASE_SLICE)
+                .cloned()
+                .collect();
+            Ok(SeatLeaseMaintenancePage {
+                exhausted: rows.len() < SEAT_LEASE_SLICE,
+                last_examined_id: rows.last().map(|r| r.0.clone()),
+                eligible_ids: rows
+                    .into_iter()
+                    .filter(|r| r.2 || r.1 < cutoff_ms)
+                    .map(|r| r.0)
+                    .collect(),
+            })
+        }
+
+        fn claim(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+            let mut rows = self.rows.borrow_mut();
+            let Some(row) = rows.iter_mut().find(|r| r.0 == thread_id) else {
+                return Ok(false);
+            };
+            if row.2 || row.1 < cutoff_ms {
+                row.2 = true;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        fn claimed_slice(&self, after_id: Option<&str>, cycle_max_id: &str) -> Result<Vec<String>> {
+            Ok(self
+                .rows
+                .borrow()
+                .iter()
+                .filter(|r| {
+                    r.2 && after_id.is_none_or(|a| r.0.as_str() > a) && r.0.as_str() <= cycle_max_id
+                })
+                .take(SEAT_LEASE_SLICE)
+                .map(|r| r.0.clone())
+                .collect())
+        }
+    }
+
+    #[test]
+    fn seat_claiming_pages_past_one_slice_and_claims_only_expired_rows() {
+        let ids: Vec<String> = (0..150).map(|n| format!("T-{n:04}")).collect();
+        // Even rows are stale, odd rows are fresh.
+        let rows: Vec<(&str, i64, bool)> = ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| (id.as_str(), if n % 2 == 0 { 10 } else { 1_000 }, false))
+            .collect();
+        let seats = FakeSeats::new(&rows);
+        let claimed = claim_expired_seats(&seats, 500).unwrap();
+        assert_eq!(claimed.len(), 75);
+        assert_eq!(claimed, seats.claimed_ids());
+        assert!(
+            claimed
+                .iter()
+                .all(|id| { id.trim_start_matches("T-").parse::<usize>().unwrap() % 2 == 0 })
+        );
+    }
+
+    #[test]
+    fn seat_claiming_includes_leases_claimed_by_an_earlier_run() {
+        let seats = FakeSeats::new(&[("T-a", 1_000, true), ("T-b", 1_000, false)]);
+        assert_eq!(claim_expired_seats(&seats, 500).unwrap(), ["T-a"]);
+    }
+
+    #[test]
+    fn seat_claiming_with_no_leases_claims_nothing() {
+        assert!(
+            claim_expired_seats(&FakeSeats::new(&[]), 500)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn claimed_collection_pages_past_one_slice_and_skips_unclaimed_rows() {
+        let ids: Vec<String> = (0..130).map(|n| format!("T-{n:04}")).collect();
+        let rows: Vec<(&str, i64, bool)> = ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| (id.as_str(), 10, n != 7))
+            .collect();
+        let claimed = collect_claimed_seats(&FakeSeats::new(&rows)).unwrap();
+        assert_eq!(claimed.len(), 129);
+        assert!(!claimed.contains(&"T-0007".to_string()));
+    }
+
+    fn no_validation_hooks(
+        qualified: Arc<Mutex<Vec<String>>>,
+        settled: Arc<Mutex<Vec<String>>>,
+    ) -> InstalledRetention {
+        InstalledRetention {
+            qualify: Arc::new(move |root| {
+                qualified.lock().unwrap().push(root.to_string());
+                Ok(None)
+            }),
+            settle_claimed_seats: Arc::new(move |_, _, claimed| {
+                settled.lock().unwrap().extend(claimed.iter().cloned());
+                Ok(claimed.len())
+            }),
+        }
+    }
+
+    async fn exclusion_for(
+        state: &AppState,
+        mode: ryeos_app::retention_exclusion::ExclusionMode,
+    ) -> RetentionExclusion<'static> {
+        state.seal_thread_pin_sources().unwrap();
+        state
+            .acquire_retention_gate(mode)
+            .await
+            .unwrap()
+            .acquire_sealed_pins()
+            .await
+            .unwrap()
+    }
+
+    fn phase_params(
+        dry_run: bool,
+        retire_history: bool,
+        seats: bool,
+    ) -> RetentionPhaseParams<'static> {
+        RetentionPhaseParams {
+            now: "2030-01-01T00:00:00Z",
+            dry_run,
+            retire_history,
+            seat_cutoff_ms: seats.then_some(500),
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_phase_runs_replay_fenced_ordinary_recovery_then_seats_in_order() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let hooks = no_validation_hooks(Default::default(), Default::default());
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let report = run_retention_phase(
+            &state,
+            &exclusion,
+            Some(&hooks),
+            &phase_params(false, true, true),
+        )
+        .unwrap();
+        assert_eq!(
+            report.steps,
+            [
+                RetentionStep::Replay,
+                RetentionStep::FencedRetirement,
+                RetentionStep::OrdinaryRetirement,
+                RetentionStep::RecoverPending,
+                RetentionStep::SeatReaping,
+            ]
+        );
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn retention_phase_without_a_composition_refuses_fenced_retirement_and_never_qualifies() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let report =
+            run_retention_phase(&state, &exclusion, None, &phase_params(false, true, false))
+                .unwrap();
+        assert_eq!(report.refused_fenced_chains, 0);
+        assert_eq!(
+            report.steps,
+            [
+                RetentionStep::Replay,
+                RetentionStep::FencedRetirementRefused,
+                RetentionStep::OrdinaryRetirement,
+                RetentionStep::RecoverPending,
+            ]
+        );
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn retention_phase_dry_run_neither_replays_nor_reaps() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let hooks = no_validation_hooks(Default::default(), Default::default());
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let report = run_retention_phase(
+            &state,
+            &exclusion,
+            Some(&hooks),
+            &phase_params(true, true, true),
+        )
+        .unwrap();
+        assert_eq!(
+            report.steps,
+            [
+                RetentionStep::FencedRetirement,
+                RetentionStep::OrdinaryRetirement,
+                RetentionStep::RecoverPending,
+            ]
+        );
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn retention_phase_without_history_retirement_still_replays_and_recovers() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let report =
+            run_retention_phase(&state, &exclusion, None, &phase_params(false, false, false))
+                .unwrap();
+        assert_eq!(
+            report.steps,
+            [RetentionStep::Replay, RetentionStep::RecoverPending]
+        );
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn retention_phase_refuses_a_shared_exclusion() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Shared,
+        )
+        .await;
+        assert!(
+            run_retention_phase(&state, &exclusion, None, &phase_params(false, true, true))
+                .is_err()
+        );
+        assert!(
+            recover_retention(&state, &exclusion, None, "2030-01-01T00:00:00Z", |_| Ok(0)).is_err()
+        );
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn claimed_seats_go_to_the_installed_settler_and_an_empty_set_does_not() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let settled = Arc::new(Mutex::new(Vec::new()));
+        let hooks = no_validation_hooks(Default::default(), settled.clone());
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let claimed = vec!["T-a".to_string(), "T-b".to_string()];
+        assert_eq!(
+            settle_claimed_seats(&state, &exclusion, Some(&hooks), &claimed).unwrap(),
+            2
+        );
+        assert_eq!(*settled.lock().unwrap(), claimed);
+        assert_eq!(
+            settle_claimed_seats(&state, &exclusion, Some(&hooks), &[]).unwrap(),
+            0
+        );
+        assert_eq!(settled.lock().unwrap().len(), 2);
+        drop(exclusion);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_replays_then_recovers_and_settles_nothing_without_a_composition() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let exclusion = exclusion_for(
+            &state,
+            ryeos_app::retention_exclusion::ExclusionMode::Exclusive,
+        )
+        .await;
+        let report = recover_retention(&state, &exclusion, None, "2030-01-01T00:00:00Z", |ids| {
+            exclusion.count_thread_pins(ids)
+        })
+        .unwrap();
+        assert_eq!(report, StartupRetentionRecovery::default());
+        drop(exclusion);
+    }
+
+    #[test]
+    fn a_composition_without_event_contracts_is_refused_before_anything_installs() {
+        fn accept(_: &ryeos_state::objects::ThreadEvent) -> Result<()> {
+            Ok(())
+        }
+        let error = install_retention_composition(Some(RetentionComposition {
+            event_contracts: Vec::new(),
+            evidence_validator: accept,
+            qualify: Arc::new(|_| Ok(None)),
+            settle_claimed_seats: Arc::new(|_, _, _| Ok(0)),
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("event contracts"));
+        assert!(
+            ryeos_app::object_contracts::retained_evidence_validator().is_err(),
+            "a refused composition installs no validator"
+        );
+        assert!(installed_retention().is_none());
+    }
+
+    #[test]
+    fn retention_composition_installs_once_and_a_plain_root_installs_no_hooks() {
+        install_retention_composition(None).unwrap();
+        assert!(installed_retention().is_none());
+        assert!(
+            ryeos_app::object_contracts::retained_evidence_validator().is_err(),
+            "a plain root installs no validator"
+        );
+        assert!(install_retention_composition(None).is_err());
     }
 }

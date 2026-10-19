@@ -57,10 +57,7 @@ pub async fn handle(
     let cursors = db.get_cursors_batch(&schedule_ids)?;
 
     // Batch-load fire counts
-    let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
-        .iter()
-        .filter_map(|id| db.count_fires(id, None).ok().map(|c| (id.clone(), c)))
-        .collect();
+    let fire_counts = load_fire_counts(&schedule_ids, |id| db.count_fires(id, None))?;
 
     let now = lillux::time::timestamp_millis();
     let schedules: Vec<Value> = specs
@@ -143,3 +140,40 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+/// A failed count read fails the listing: a missing count must never be
+/// reported as zero fires or silently dropped from the response.
+fn load_fire_counts(
+    schedule_ids: &[String],
+    count: impl Fn(&str) -> Result<usize>,
+) -> Result<std::collections::HashMap<String, usize>> {
+    schedule_ids
+        .iter()
+        .map(|id| count(id).map(|total| (id.clone(), total)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fire_counts_are_loaded_for_every_schedule() {
+        let ids = vec!["one".to_string(), "two".to_string()];
+        let counts = load_fire_counts(&ids, |id| Ok(id.len())).unwrap();
+        assert_eq!(counts["one"], 3);
+        assert_eq!(counts["two"], 3);
+    }
+
+    #[test]
+    fn failed_fire_count_read_is_not_returned_as_zero_or_partial_success() {
+        let ids = vec!["one".to_string(), "two".to_string()];
+        let result = load_fire_counts(&ids, |id| {
+            if id == "two" {
+                anyhow::bail!("count unavailable")
+            }
+            Ok(1)
+        });
+        assert!(result.is_err());
+    }
+}

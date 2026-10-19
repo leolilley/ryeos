@@ -12,23 +12,19 @@ mod transport;
 /// Pre-launch messages go to stderr before the alternate screen opens, in the
 /// same plain line form as the CLI's non-terminal diagnostics.
 fn exit_with_error(message: impl Into<String>, hint: Option<&str>) -> ! {
-    eprintln!("ryeos: {}", message.into());
-    if let Some(hint) = hint {
-        eprintln!("ryeos: hint: {hint}");
-    }
-    std::process::exit(1);
+    ryeos_client_base::diagnostic::fatal(&message.into(), hint)
 }
 
 fn emit_info(message: impl Into<String>) {
-    eprintln!("ryeos: info: {}", message.into());
+    ryeos_client_base::diagnostic::info(&message.into());
 }
 
 fn emit_warning(message: impl Into<String>) {
-    eprintln!("ryeos: warning: {}", message.into());
+    ryeos_client_base::diagnostic::warning(&message.into());
 }
 
 fn print_help() {
-    println!(
+    ryeos_client_base::diagnostic::stdout_line(
         "ryeos-tui
 
 USAGE
@@ -39,7 +35,7 @@ OPTIONS
 --surface-file <PATH>: Load a surface spec from a local file (untrusted preview)
 --views-root <DIR>: Resolve view refs from local YAML under DIR first (with --surface-file)
 --project <PATH>: Project root for daemon-backed resolution
---help: Show this help"
+--help: Show this help",
     );
 }
 

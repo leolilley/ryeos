@@ -519,7 +519,7 @@ mod tests {
                     "emphasis": "normal", "motion": "flow"
                 },
                 "badges": [], "preview_ids": [], "selected": true, "selectable": true,
-                "select_intent": null, "activate_intent": null,
+                "select_intent": null, "activate_intent": null, "compare_available": false,
                 "accessibility_label": "Observe; running", "detail": []
             }],
             "relations": [], "previews": [], "metrics": [],

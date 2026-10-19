@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
     }
 
     // Open the browser at the daemon-returned launch URL.
-    eprintln!("ryeos: info: opening browser · {}", mint_resp.launch_url);
+    ryeos_client_base::diagnostic::info(&format!("opening browser · {}", mint_resp.launch_url));
     open_browser(&mint_resp.launch_url)?;
 
     Ok(())

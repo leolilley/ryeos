@@ -3280,6 +3280,16 @@ async fn complete_shutdown_drain<T>(
     }
 }
 
+/// The one injection point for the domain composition's retention hooks: its
+/// event payload contracts, retained-evidence validator, fenced-chain
+/// qualifier and claimed-seat settler, supplied together or not at all. The
+/// UI composition supplies them by returning `Some` here; until it does the
+/// root installs the plain object contracts and no validator, so retirement
+/// of fenced kinds refuses instead of running on a stand-in.
+fn retention_composition() -> Option<ryeos_api::maintenance::RetentionComposition> {
+    None
+}
+
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
         once_cell::sync::Lazy::new(|| {
@@ -3638,7 +3648,8 @@ fn main() -> Result<()> {
     #[cfg(feature = "crash-qualification-test-support")]
     ryeos_app::dedicated_session_service::test_support::initialize_from_env()
         .context("initialize exact command-settlement crash gate")?;
-    ryeos_app::object_contracts::install().context("install application object contracts")?;
+    ryeos_api::maintenance::install_retention_composition(retention_composition())
+        .context("install the retention composition")?;
     // Recovery and launch reconstruction deserialize the complete retained
     // authority envelope on a runtime worker. Unoptimized builds can exceed
     // Tokio's 2 MiB default while doing that work (the real-process test
@@ -4944,41 +4955,25 @@ async fn run(
             } else {
                 Some(require_absent_scheduler_history(&config.app_root)?)
             };
-            #[cfg(feature = "scheduling")]
-            let _startup_retention_guard = match &scheduler_runtime {
-                Some((_, scheduler_runtime_gate, _)) => {
-                    Some(scheduler_runtime_gate.clone().write_owned().await)
-                }
-                None => None,
-            };
-            let cleanup_store = app_state.state_store.clone();
-            #[cfg(feature = "scheduling")]
-            let cleanup_scheduler = scheduler_runtime
-                .as_ref()
-                .map(|(scheduler_db, _, _)| scheduler_db.clone());
-            let recovered_removals = tokio::task::spawn_blocking(move || {
-                let recovered = cleanup_store.recover_pending_terminal_chain_removals(
+            // The exclusive retention exclusion takes the App gate and every
+            // sealed pin source's own gate (the scheduler's, when selected),
+            // so pin counts below are current and nothing else retires.
+            let startup_exclusion = app_state
+                .acquire_retention_gate(ryeos_app::retention_exclusion::ExclusionMode::Exclusive)
+                .await?
+                .acquire_sealed_pins()
+                .await?;
+            let recovery_state: &AppState = app_state;
+            let recovered_removals = tokio::task::block_in_place(|| {
+                let recovered = ryeos_api::maintenance::recover_retention_at_startup(
+                    recovery_state,
+                    &startup_exclusion,
                     &lillux::time::iso8601_now(),
-                    false,
                     |thread_ids| {
-                        #[cfg(feature = "scheduling")]
-                        if let Some(cleanup_scheduler) = &cleanup_scheduler {
-                            let mut pins = 0_u64;
-                            for thread_id in thread_ids {
-                                if cleanup_scheduler.find_fire_by_thread(thread_id)?.is_some() {
-                                    pins = pins.checked_add(1).ok_or_else(|| {
-                                        anyhow::anyhow!("scheduler recovery pin count overflow")
-                                    })?;
-                                }
-                            }
-                            return Ok(pins);
+                        if let Some(scheduler_absence) = &scheduler_absence {
+                            scheduler_absence.verify_absent()?;
                         }
-                        let _ = thread_ids;
-                        scheduler_absence
-                            .as_ref()
-                            .context("scheduler-free cleanup lost its absence proof")?
-                            .verify_absent()?;
-                        Ok(0)
+                        startup_exclusion.count_thread_pins(thread_ids)
                     },
                 )?;
                 if let Some(scheduler_absence) = &scheduler_absence {
@@ -4986,10 +4981,13 @@ async fn run(
                 }
                 Ok::<_, anyhow::Error>(recovered)
             })
-            .await
-            .context("interrupted terminal-history cleanup task failed")??;
+            .context("interrupted terminal-history cleanup failed")?;
+            drop(startup_exclusion);
             tracing::info!(
                 recovered = recovered_removals.pending_retirements_recovered,
+                fences_checked = recovered_removals.fences_checked,
+                fenced_heads_unlinked = recovered_removals.heads_unlinked,
+                seats_settled = recovered_removals.seats_settled,
                 "finished interrupted terminal-history removals"
             );
             let pending_heads = app_state.state_store.pending_head_transition_status()?;
@@ -4999,8 +4997,6 @@ async fn run(
                     pending_heads.pending
                 );
             }
-            #[cfg(feature = "scheduling")]
-            drop(_startup_retention_guard);
             let webhook_dedupe =
                 Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
 
