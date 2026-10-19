@@ -6,39 +6,10 @@ import type { RyeOsStackMoveDirection } from "./RyeOsStackMoveDirection";
 import type { RyeOsViewInstanceKey } from "./RyeOsViewInstanceKey";
 import type { SplitBranch } from "./SplitBranch";
 import type { ThreadControlCommand } from "./ThreadControlCommand";
-import type { TransferIdentity } from "./TransferIdentity";
-import type { UiBindingAttachmentCoordinate } from "./UiBindingAttachmentCoordinate";
-import type { UiTransferContactIntent } from "./UiTransferContactIntent";
-import type { UiTransferExport } from "./UiTransferExport";
-import type { UiTransferExportMode } from "./UiTransferExportMode";
-import type { UiTransferSourceSelection } from "./UiTransferSourceSelection";
 import type { ViewSpec } from "./ViewSpec";
 
 export type RyeOsUiIntent =
   | { type: "refresh" }
-  /**
-   * Ask the presentation host to open a fresh document under the same
-   * authenticated session. Preparation precedes an explicit link; the child
-   * independently claims its seat. No bearer authority enters the link.
-   */
-  | { type: "open_new_presentation_document" }
-  | { type: "open_surface_in_new_presentation"; surface_instance_id: string; binding: UiBindingAttachmentCoordinate; dialog_id: string; dialog_binding: UiBindingAttachmentCoordinate }
-  /**
-   * Rust selects and freezes the exact source inventory before asking the
-   * existing authenticated seat observer for a destination frontier.
-   * The renderer supplies neither a phase hash nor an export commitment.
-   */
-  | { type: "begin_transfer"; mode: UiTransferExportMode; source: UiTransferSourceSelection; destination_presentation_id: string }
-  /**
-   * A local contact request only. Canonical evidence is selected from a
-   * completed authenticated paired replay, never supplied by this intent.
-   */
-  | { type: "contact_transfer"; transfer: TransferIdentity; action: UiTransferContactIntent }
-  /**
-   * Closed source inventory and immutable two-seat identity. The actor
-   * captures live values and refuses a changed commitment, never rebases it.
-   */
-  | { type: "prepare_transfer"; transfer: TransferIdentity; export: UiTransferExport }
   /**
    * Run a content-declared affordance against a projected row: the
    * ONE generic row interaction. The engine resolves the binding's
@@ -46,24 +17,14 @@ export type RyeOsUiIntent =
    * facet write or rye token dispatch). No product verbs in code.
    */
   | { type: "invoke_affordance"; instance_key: RyeOsViewInstanceKey; view_ref: string; affordance_id: string; record: unknown }
-  /**
-   * A Rust-projected local row, not a browser-supplied executable intent.
-   */
-  | { type: "activate_local_projection"; instance_key: RyeOsViewInstanceKey; record_id: string; projection_guard: string }
   | { type: "open_view"; view: ViewSpec }
   | { type: "open_new_view"; view: ViewSpec }
+  | { type: "open_overlay"; overlay_id: string }
   /**
-   * Open one admitted View as a fresh tab at the captured insertion owner.
-   * Subject-dependent Views stay unresolved; this never copies ambient work.
+   * Fold or unfold one launcher group. The overlay stays open — this
+   * mutates presentation state, never launches anything.
    */
-  | { type: "open_view_in_new_tab"; surface_instance_id: string; view_set_id: bigint; binding: UiBindingAttachmentCoordinate; view_ref: string }
-  | { type: "open_composition_in_new_surface"; surface_instance_id: string; view_set_id: bigint; binding: UiBindingAttachmentCoordinate; view_ref: string | null; dialog_id: string; dialog_binding: UiBindingAttachmentCoordinate }
-  | { type: "open_launcher" }
-  | { type: "select_surface"; surface_instance_id: string; binding: UiBindingAttachmentCoordinate }
-  | { type: "close_surface"; surface_instance_id: string; binding: UiBindingAttachmentCoordinate }
-  | { type: "rename_surface"; surface_instance_id: string; binding: UiBindingAttachmentCoordinate; title: string }
-  | { type: "open_dialog"; dialog_id: string }
-  | { type: "close_dialog"; instance_key: RyeOsViewInstanceKey }
+  | { type: "toggle_overlay_group"; group: string }
   | { type: "close_focused" }
   | { type: "close_tile"; tile_id: string }
   | { type: "toggle_tile_maximized"; tile_id: string }
@@ -89,7 +50,6 @@ export type RyeOsUiIntent =
   | { type: "duplicate_view_set"; view_set_id: bigint }
   | { type: "close_view_set"; view_set_id: bigint }
   | { type: "move_tile_to_view_set"; layout_guard: string; tile_id: string; view_set_id: bigint }
-  | { type: "move_tile_to_surface_view_set"; layout_guard: string; tile_id: string; surface_instance_id: string; view_set_id: bigint }
   | { type: "pin_view_selection"; instance_key: RyeOsViewInstanceKey }
   | { type: "open_pinned_view_alongside"; instance_key: RyeOsViewInstanceKey }
   | { type: "follow_view_set_selection"; instance_key: RyeOsViewInstanceKey; view_set_id: bigint }

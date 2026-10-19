@@ -3,15 +3,10 @@
 import type { SeatEventKind } from "./SeatEventKind";
 
 /**
- * One local or retained seat event. `seq` is provisional local order until
- * authoritative replay supplies chain order. It is NEVER the producer-event
- * engine sequence used to reserve or authenticate a preparation.
+ * One event on the seat braid. `seq` mirrors the braid's chain sequence:
+ * monotonic, assigned by whoever holds append authority (this log while
+ * engine-local; the daemon once the seat thread lands).
  */
 export type SeatEvent = SeatEventKind & {
   seq: bigint;
-  /**
-   * Original retained producer position. Provisional events reserve it via
-   * the core's authenticated frontier; initialization has no such position.
-   */
-  producer_engine_seq?: bigint | null;
 };

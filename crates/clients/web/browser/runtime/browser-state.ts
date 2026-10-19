@@ -1,6 +1,5 @@
 interface FocusSnapshot {
   readonly key: string;
-  readonly inDialog: boolean;
   readonly selectionStart: number | null;
   readonly selectionEnd: number | null;
 }
@@ -24,8 +23,6 @@ export function captureBrowserPresentation(root: Element): BrowserPresentationSn
     ? active.dataset.focusKey ?? null : null;
   const focus = key === null ? null : {
     key,
-    inDialog: active instanceof HTMLElement
-      && active.closest('[role="dialog"][aria-modal="true"]') !== null,
     selectionStart: selection(active, "selectionStart"),
     selectionEnd: selection(active, "selectionEnd"),
   };
@@ -50,9 +47,7 @@ export function restoreBrowserPresentation(root: Element, snapshot: BrowserPrese
     node.scrollLeft = state.left;
   }
   if (root.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"]')) {
-    // Ordinary dialog Views use the same input/view focus keys as every
-    // other mount. Track actual frame ownership, not a widget-name prefix.
-    if (snapshot.focus && !snapshot.focus.inDialog) {
+    if (snapshot.focus && !snapshot.focus.key.startsWith("overlay:")) {
       modalReturnFocus.set(root, snapshot.focus);
     }
     return;

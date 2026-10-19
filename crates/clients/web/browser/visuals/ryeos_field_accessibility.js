@@ -1,4 +1,4 @@
-export function fieldAccessibilityModel(vm, instanceKey) {
+export function fieldAccessibilityModel(vm) {
   const byId = new Map((vm.entities || []).map((entity) => [entity.id, entity]));
   const groups = new Map((vm.groups || []).map((group) => [group.id, group]));
   const neighbors = new Map((vm.entities || []).map((entity) => [entity.id, []]));
@@ -19,7 +19,7 @@ export function fieldAccessibilityModel(vm, instanceKey) {
     const group = entity.group_id ? groups.get(entity.group_id) : null;
     return {
       id: entity.id,
-      domId: `ryeos-field-option-${safeId(instanceKey)}--${safeId(entity.id)}`,
+      domId: `ryeos-field-option-${safeId(entity.id)}`,
       label: entity.accessibility_label || entity.label || entity.id,
       selected: vm.selected === entity.id,
       position: index + 1,
@@ -49,7 +49,9 @@ function entityLevel(entity, byId) {
 }
 
 function safeId(value) {
-  // Encode every code point so literal escape-looking IDs cannot collide with
-  // punctuation. The double separator above separates mount from entity.
-  return [...String(value)].map((character) => character.codePointAt(0).toString(16)).join("-");
+  return [...String(value)].map((character) => (
+    /[a-zA-Z0-9-]/.test(character)
+      ? character
+      : `_${character.codePointAt(0).toString(16)}_`
+  )).join("");
 }

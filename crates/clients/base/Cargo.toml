@@ -6,7 +6,6 @@ license.workspace = true
 description = "Renderer-neutral client model, layout, views, text surfaces, scene primitives"
 
 [dependencies]
-ryeos-ui-presentation-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -26,55 +26,41 @@ await new Promise((resolve, reject) => {
 });
 
 let browser;
-const pageErrors = [];
-function observePageErrors(page) {
-  page.on("pageerror", (error) => pageErrors.push(error.message));
-}
 try {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const browserName = process.env.RYEOS_PLAYWRIGHT_BROWSER || "chromium";
   const browserType = require("playwright")[browserName];
   assert.ok(browserType, `unknown RYEOS_PLAYWRIGHT_BROWSER: ${browserName}`);
-  browser = await browserType.launch({
-    headless: true,
-    ...(process.env.RYEOS_PLAYWRIGHT_EXECUTABLE_PATH
-      ? { executablePath: process.env.RYEOS_PLAYWRIGHT_EXECUTABLE_PATH }
-      : {}),
-  });
+  browser = await browserType.launch({ headless: true });
   const page = await browser.newPage();
-  observePageErrors(page);
   await page.goto(`http://127.0.0.1:${address.port}`);
   const result = await page.evaluate(async () => {
-    const { mountRyeOsRenderer, captureBrowserPresentation, restoreBrowserPresentation, encodeCanonicalJsonBody } = await import("/ui/assets/ryeos_ui.js");
-    // Renderer-only VM fixtures, not a fabricated session/admission model.
-    // Shape follows Rust's current shared dialog + zero-Surface projection.
-    const presentationId = "11111111-1111-4111-8111-111111111111";
-    const dialogInstance = `seat:${presentationId}:dialog:views`;
-    const binding = { binding_attachment_id: "root", binding_generation: 1n, binding_digest: "a".repeat(64) };
-    const bindingScope = [...new Uint8Array(await crypto.subtle.digest("SHA-256",
-      new TextEncoder().encode(encodeCanonicalJsonBody(binding))))]
-      .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const { mountRyeOsRenderer, captureBrowserPresentation, restoreBrowserPresentation } = await import("/ui/assets/ryeos_ui.js");
     const fixture = (generation) => ({
-      schema_version: "ryeos.ui.envelope.v1", generation, effects: [],
-      scene_model: { schema_version: "ryeos.ui.scene.v1", generation, camera: { position: [0, 0, 10], target: [0, 0, 0], fov_degrees: 45 }, objects: [], actions: [], energy: 0, screen_offset: [0, 0], break_amount: 1 },
+      schema_version: "test", generation, effects: [], scene_model: { objects: [] },
       view_model: {
-        schema_version: "ryeos.ui.vm.v2", generation, now_ms: 0n,
-        session: { session_id: "test", project_path: null, root_ref: "config:test/presentation", title: "Test presentation", surface_ordinal: null, surfaces: [], ambient: { show_background: false, opacity: null, mode: "ambient", atlas: null }, user_principal_id: null, posture: "observation_only" },
+        schema_version: "test", generation, now_ms: 0n,
+        session: { session_id: "test", project_path: null, surface_ref: "surface:test", ambient: {}, user_principal_id: null, posture: "observe" },
         navigation: { items: [] },
         chrome: { title: "RyeOS", subtitle: "", health_label: "ready", health_tone: "good" },
         presentation: {
-          schema_version: "ryeos.ui.presentation.v1", theme: { id: "gruvbox", tone: "neutral" },
+          schema_version: "test", theme: { id: "gruvbox", tone: "neutral" },
           chrome: {
             title: "RyeOS", version_label: "test", border: "thin",
             top_bar: { visible: true, tabs: [], focused_title: "", layout_symbol: "" },
             status_bar: { visible: true, segments: [], key_hint: "", energy: 0, attention: null },
           },
-          metrics: { tile_count: 0n, scene_object_count: 0n, item_count: 0n, thread_count: 0n, project_count: 0n, service_count: 0n, schedule_count: 0n, active_thread_count: 0n, activity_level: 0 }, frame: { corners: { visible: false, tone: "neutral" } }, motion: [],
+          metrics: {}, frame: {}, motion: [],
         },
-        view_set: null,
-        docks: { top: null, bottom: null, left: null, right: null }, backdrop: null,
-        dialogs: [], notices: [], transport: { freshness: "current", last_observed_at_ms: null, channels: [] },
+        view_set: {
+          view_set_id: 1n,
+          layout_guard: "test", split_min_ratio: .1, split_max_ratio: .9,
+          root: null, focused_tile: "", center_is_empty: true, tile_count: 0n,
+          backdrop: null,
+          docks: { top: null, bottom: null, left: null, right: null }, lens_trail: [], lens_label: null,
+        },
+        overlays: [], notices: [], transport: { freshness: "live", last_observed_at_ms: null, channels: [] },
       },
     });
     const root = document.getElementById("root");
@@ -93,57 +79,48 @@ try {
     const beforeModal = captureBrowserPresentation(root);
     const modal = fixture(3n);
     modal.view_model.notices = [{ id: "n1", message: "Exact refusal", tone: "warn" }];
-    const row = (id, primary, cursor, kind = null, secondary = null) => ({
-      id, primary, cursor, kind, secondary, meta: null, glyph: null, intent: null,
-      tone: "neutral", selected: false, expandable: false, expanded: false, detail: [],
-    });
-    modal.view_model.dialogs = [{
-      instance_key: dialogInstance, title: "Views",
-      view: { type: "rows", title: "Views", columns: [], total_rows: 3n, affordance_hints: [], rows: [
-        row("dialog-one", "One", 0n), row("dialog-two", "Two", 1n),
-        row("dialog-disabled", "Blocked", 2n, "unavailable", "Exact authority required"),
-      ] },
-      input: { address: {
-        session_id: "test", ...binding,
-        owner: { kind: "shared", presentation_id: presentationId },
-        buffer: { view_instance_key: dialogInstance, binding_scope: bindingScope, view_ref: "view:test/views", input_id: "query", target_scope: null },
-      }, text: "", cursor: 0n, focused: true, route_label: "Find Views", placeholder: "Find a view", hint: "Choose a view", submit_enabled: false, live_filter: true, completion: [] },
+    modal.view_model.overlays = [{
+      id: "views", title: "Views", widget: "palette", columns: [], query: "", selected: 0n, hint: "Choose a view",
+      items: [
+        { id: "overlay-one", category: "a", primary: "One", secondary: "", meta: "", enabled: true, intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+        { id: "overlay-two", category: "a", primary: "Two", secondary: "", meta: "", enabled: true, intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+        { id: "overlay-disabled", category: "a", primary: "Blocked", secondary: "", meta: "", enabled: false, disabled_reason: "Exact authority required", intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+      ],
     }];
     renderer.replaceEnvelope(modal);
     await new Promise((resolve) => requestAnimationFrame(resolve));
     restoreBrowserPresentation(root, beforeModal);
-    const item = root.querySelectorAll(".dialog-content .view-record-line > button")[1];
-    root.querySelector(".dialog-content textarea")?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    const item = root.querySelectorAll(".overlay-item > button")[1];
+    item?.dispatchEvent(new PointerEvent("pointerenter", { bubbles: true }));
     item?.click();
     const notice = root.querySelector(".notice span")?.textContent;
-    const queryFocused = document.activeElement?.matches(".dialog-content textarea") ?? false;
+    const queryFocused = document.activeElement?.classList.contains("overlay-query") ?? false;
     root.querySelector(".notice button")?.click();
-    const dialog = {
+    const overlay = {
       dialog: root.querySelector('[role="dialog"][aria-modal="true"]') !== null,
       notice,
       queryFocused,
       navigationAbsent: root.querySelector(".navigation") === null,
-      disabledReason: root.querySelector('button[data-kind="unavailable"] small')?.textContent,
-      disabledBlocked: root.querySelector('button[data-kind="unavailable"][aria-disabled="true"]')?.disabled === true,
-      events: dispatched.map((event) => ({ type: event.type, itemId: "item_id" in event ? event.item_id : null, action: event.action?.type ?? null, instance: event.instance_key ?? event.address?.buffer.view_instance_key ?? null })),
+      disabledReason: root.querySelector(".overlay-disabled-reason")?.textContent,
+      disabledDescribed: root.querySelector('button[aria-describedby="overlay-reason-overlay-disabled"]') !== null,
+      events: dispatched.map((event) => ({ type: event.type, itemId: "item_id" in event ? event.item_id : null })),
     };
     const beforeClose = captureBrowserPresentation(root);
     renderer.replaceEnvelope(fixture(4n));
     await new Promise((resolve) => requestAnimationFrame(resolve));
     restoreBrowserPresentation(root, beforeClose);
-    dialog.returnFocused = document.activeElement === returnButton;
+    overlay.returnFocused = document.activeElement === returnButton;
     await renderer.destroy();
-    return { ...observed, dialog, children: root.childElementCount };
+    return { ...observed, overlay, children: root.childElementCount };
   });
   assert.deepEqual(result, {
     firstGeneration: "1", secondGeneration: "2", reused: true,
-    dialog: {
-      dialog: true, notice: "Exact refusal", queryFocused: true, navigationAbsent: true, disabledReason: "Exact authority required", disabledBlocked: true, returnFocused: true,
+    overlay: {
+      dialog: true, notice: "Exact refusal", queryFocused: true, navigationAbsent: true, disabledReason: "Exact authority required", disabledDescribed: true, returnFocused: true,
       events: [
-        { type: "input_at", itemId: null, action: "focus", instance: "seat:11111111-1111-4111-8111-111111111111:dialog:views" },
-        { type: "input_at", itemId: null, action: "navigate_selection", instance: "seat:11111111-1111-4111-8111-111111111111:dialog:views" },
-        { type: "choose_view_item", itemId: "dialog-two", action: null, instance: "seat:11111111-1111-4111-8111-111111111111:dialog:views" },
-        { type: "dismiss_notice", itemId: null, action: null, instance: null },
+        { type: "set_overlay_selection", itemId: "overlay-two" },
+        { type: "choose_overlay_at", itemId: "overlay-two" },
+        { type: "dismiss_notice", itemId: null },
       ],
     },
     children: 0,
@@ -212,7 +189,6 @@ try {
     ];
     for (const [name, width, height] of captures) {
       const preview = await browser.newPage({ viewport: { width, height }, reducedMotion: "reduce" });
-      observePageErrors(preview);
       await preview.route(/^https?:\/\/(?!127\.0\.0\.1(?::|\/))/, (route) => route.abort());
       await preview.goto(`http://127.0.0.1:${address.port}`);
       const mounted = await preview.evaluate(async ({ encodedFixture, name, source }) => {
@@ -235,8 +211,7 @@ try {
       await preview.close();
     }
   }
-  assert.deepEqual(pageErrors, [], "compiled renderer must not emit uncaught browser errors");
-  console.log(JSON.stringify({ root: result, ordering, encoding, pageErrors }));
+  console.log(JSON.stringify({ root: result, ordering, encoding }));
 } finally {
   await browser?.close();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

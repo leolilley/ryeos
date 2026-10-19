@@ -106,7 +106,7 @@ async fn run_session_stream(
 pub fn spawn_thread_tail(
     client: Arc<DaemonClient>,
     chain_root_id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<(String, String, String)>,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Same reconnect contract as the session stream: a braid tail that
@@ -117,10 +117,7 @@ pub fn spawn_thread_tail(
             if let Ok(mut stream) = client.open_thread_events(&chain_root_id).await {
                 backoff_ms = 500;
                 while let Some(frame) = stream.next_event().await {
-                    if tx
-                        .send((chain_root_id.clone(), frame.event_type, frame.data))
-                        .is_err()
-                    {
+                    if tx.send((frame.event_type, frame.data)).is_err() {
                         return;
                     }
                 }

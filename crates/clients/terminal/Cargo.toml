@@ -10,7 +10,6 @@ name = "ryeos-tui"
 path = "src/main.rs"
 
 [dependencies]
-ryeos-ui-presentation-contract = { workspace = true }
 ryeos-client-base = { workspace = true }
 ryeos-client-transport = { workspace = true }
 lillux = { workspace = true }
@@ -22,7 +21,6 @@ futures-util = { workspace = true }
 crossterm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }

@@ -11,7 +11,6 @@ members = [
     "crates/bin/daemon",
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
-    "crates/clients/presentation-contract",
     "crates/clients/terminal",
     "crates/clients/transport",
     "crates/clients/web",
@@ -127,7 +126,6 @@ ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
 ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
 ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
-ryeos-ui-presentation-contract = { path = "crates/clients/presentation-contract" }
 ryeos-project-capture = { path = "crates/engine/ryeos-project-capture" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }

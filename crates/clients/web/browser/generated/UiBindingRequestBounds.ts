@@ -7,9 +7,4 @@
 export interface UiBindingRequestBounds {
   max_request_bytes: bigint;
   max_input_bytes: bigint;
-  /**
-   * Existing signed seat/append route body limit. Admission write-ahead
-   * charges its full event envelope before creating a provisional record.
-   */
-  max_seat_append_bytes: bigint;
 }

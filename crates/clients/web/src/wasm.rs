@@ -12,6 +12,7 @@ use ryeos_client_base::ui::{
     BrowserSession as RyeOsBrowserSession, BrowserViewport, RyeOsCore, RyeOsEffectResult,
     RyeOsEnvelope, RyeOsEvent, RyeOsKeyCommand, RyeOsKeyEvent, ryeos_key_command,
 };
+use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use std::cell::RefCell;
 
@@ -92,239 +93,6 @@ fn define_data_property(target: &js_sys::Object, key: &str, value: JsValue) -> R
 
 thread_local! {
     static RYEOS_UI: RefCell<Option<RyeOsCore>> = const { RefCell::new(None) };
-    // Cold history is never applied to the visible core. A failed or truncated
-    // stream drops this candidate without publishing effects or a view model.
-    static RYEOS_REPLAY_CANDIDATE: RefCell<Option<ColdReplayCandidate>> = const { RefCell::new(None) };
-}
-
-struct ColdReplayCandidate {
-    core: RyeOsCore,
-    staged: ryeos_client_base::ui::cold_replay::ColdSeatReplay,
-    refresh: Option<ryeos_client_base::ui::AuthenticatedReproofGuard>,
-}
-
-#[wasm_bindgen]
-pub fn ryeos_begin_seat_replay(
-    session_json: JsValue,
-    presentation_id: &str,
-    viewport_json: JsValue,
-    now_ms: u64,
-) -> Result<(), JsValue> {
-    let session: RyeOsBrowserSession = serde_wasm_bindgen::from_value(session_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS browser session: {e}")))?;
-    if session.ui_binding_contract_revision != ryeos_client_base::UI_BINDING_CONTRACT_REVISION {
-        return Err(JsValue::from_str(
-            "UI binding contract mismatch during replay",
-        ));
-    }
-    let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS viewport: {e}")))?;
-    let mut core = RyeOsCore::new(session, presentation_id, viewport, now_ms);
-    core.supports_independent_documents = true;
-    RYEOS_REPLAY_CANDIDATE.with(|state| {
-        *state.borrow_mut() = Some(ColdReplayCandidate {
-            core,
-            staged: ryeos_client_base::ui::cold_replay::ColdSeatReplay::new(),
-            refresh: None,
-        });
-    });
-    Ok(())
-}
-
-/// Same-producer refresh stages into the existing private replay lane. The
-/// live Core is neither replaced nor reset before authenticated completion.
-#[wasm_bindgen]
-pub fn ryeos_begin_seat_reproof(
-    session_json: JsValue,
-    presentation_id: &str,
-    viewport_json: JsValue,
-    now_ms: u64,
-) -> Result<(), JsValue> {
-    RYEOS_REPLAY_CANDIDATE.with(|state| *state.borrow_mut() = None);
-    let guard = RYEOS_UI.with(|state| {
-        state
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("live core absent"))?
-            .begin_authenticated_reproof()
-            .map_err(|error| JsValue::from_str(&error))
-    })?;
-    ryeos_begin_seat_replay(session_json, presentation_id, viewport_json, now_ms)?;
-    RYEOS_REPLAY_CANDIDATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let candidate = state
-            .as_mut()
-            .ok_or_else(|| JsValue::from_str("reproof candidate absent"))?;
-        candidate.refresh = Some(guard);
-        Ok(())
-    })
-}
-
-#[wasm_bindgen]
-pub fn ryeos_stage_seat_replay_events(events_json: JsValue) -> Result<(), JsValue> {
-    RYEOS_REPLAY_CANDIDATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let candidate = state
-            .take()
-            .ok_or_else(|| JsValue::from_str("seat replay was not begun"))?;
-        // Taking ownership first makes every parse/staging failure discard the
-        // private candidate, never leaving a partial prefix available to commit.
-        let events: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(events_json)
-            .map_err(|e| JsValue::from_str(&format!("invalid RyeOS seat replay batch: {e}")))?;
-        let mut candidate = candidate;
-        candidate
-            .staged
-            .append_authenticated_records(&mut candidate.core, &events)
-            .map_err(|e| JsValue::from_str(&e))?;
-        *state = Some(candidate);
-        Ok(())
-    })
-}
-
-#[wasm_bindgen]
-pub fn ryeos_stage_seat_transfer_proof(proof_json: JsValue) -> Result<(), JsValue> {
-    RYEOS_REPLAY_CANDIDATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let mut candidate = state
-            .take()
-            .ok_or_else(|| JsValue::from_str("seat replay was not begun"))?;
-        let proof = serde_wasm_bindgen::from_value(proof_json).map_err(|error| {
-            JsValue::from_str(&format!("invalid paired transfer proof: {error}"))
-        })?;
-        candidate
-            .staged
-            .stage_transfer_proof(&candidate.core, proof)
-            .map_err(|error| JsValue::from_str(&error))?;
-        *state = Some(candidate);
-        Ok(())
-    })
-}
-
-#[wasm_bindgen]
-pub fn ryeos_stage_seat_move_freeze_cancellation_proof(proof_json: JsValue) -> Result<(), JsValue> {
-    RYEOS_REPLAY_CANDIDATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let mut candidate = state
-            .take()
-            .ok_or_else(|| JsValue::from_str("seat replay was not begun"))?;
-        let proof = serde_wasm_bindgen::from_value(proof_json).map_err(|error| {
-            JsValue::from_str(&format!("invalid move freeze cancellation proof: {error}"))
-        })?;
-        candidate
-            .staged
-            .stage_move_freeze_cancellation_proof(&candidate.core, proof)
-            .map_err(|error| JsValue::from_str(&error))?;
-        *state = Some(candidate);
-        Ok(())
-    })
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplayCompletion {
-    tip_hash: String,
-    thread_seq: u64,
-    event_count: u64,
-}
-
-#[wasm_bindgen]
-pub fn ryeos_commit_seat_replay(completion_json: JsValue) -> Result<JsValue, JsValue> {
-    RYEOS_REPLAY_CANDIDATE.with(|candidate| {
-        let mut candidate = candidate.borrow_mut();
-        let candidate = candidate
-            .take()
-            .ok_or_else(|| JsValue::from_str("seat replay was not begun"))?;
-        let completion: ReplayCompletion = serde_wasm_bindgen::from_value(completion_json)
-            .map_err(|error| {
-                JsValue::from_str(&format!("invalid seat replay completion: {error}"))
-            })?;
-        let mut core = candidate.core;
-        let effects = candidate
-            .staged
-            .finish_at_authenticated_tip(
-                &mut core,
-                &completion.tip_hash,
-                completion.thread_seq,
-                completion.event_count,
-            )
-            .map_err(|e| JsValue::from_str(&e))?;
-        core.require_replayed_initialization()
-            .map_err(|e| JsValue::from_str(&e))?;
-        if let Some(guard) = candidate.refresh {
-            return RYEOS_UI.with(|state| {
-                let mut state = state.borrow_mut();
-                let live = state
-                    .as_mut()
-                    .ok_or_else(|| JsValue::from_str("live core absent"))?;
-                let effects = live
-                    .promote_authenticated_reproof(core, &guard)
-                    .map_err(|error| JsValue::from_str(&error))?;
-                ryeos_envelope(live, effects)
-            });
-        }
-        core.bump_generation();
-        let effects = core.initial_effects_after_cold_replay(effects);
-        let response = ryeos_envelope(&core, effects)?;
-        RYEOS_UI.with(|state| *state.borrow_mut() = Some(core));
-        Ok(response)
-    })
-}
-
-#[wasm_bindgen]
-pub fn ryeos_abort_seat_replay() {
-    RYEOS_REPLAY_CANDIDATE.with(|state| *state.borrow_mut() = None);
-}
-
-#[wasm_bindgen]
-pub fn ryeos_commit_seat_reproof(completion_json: JsValue) -> Result<JsValue, JsValue> {
-    let refresh = RYEOS_REPLAY_CANDIDATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if state
-            .as_ref()
-            .is_some_and(|candidate| candidate.refresh.is_some())
-        {
-            true
-        } else {
-            *state = None;
-            false
-        }
-    });
-    if !refresh {
-        return Err(JsValue::from_str("same-producer reproof was not begun"));
-    }
-    ryeos_commit_seat_replay(completion_json)
-}
-
-#[wasm_bindgen]
-pub fn ryeos_acknowledged_seat_prefix_len() -> Result<u64, JsValue> {
-    RYEOS_UI.with(|state| {
-        let state = state.borrow();
-        let core = state
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("live core absent"))?;
-        u64::try_from(core.acknowledged_seat_prefix_len())
-            .map_err(|_| JsValue::from_str("acknowledged prefix exceeds native u64"))
-    })
-}
-
-/// Browser readiness is a positive reducer fact, not the absence of an error
-/// from an event whose mismatch path intentionally emits no effects.
-#[wasm_bindgen]
-pub fn ryeos_require_presentation_producer_ready(
-    producer_json: JsValue,
-    next_engine_seq: u64,
-) -> Result<(), JsValue> {
-    let producer: ryeos_client_base::ui::UiPresentationProducer =
-        serde_wasm_bindgen::from_value(producer_json)
-            .map_err(|error| JsValue::from_str(&format!("invalid producer coordinate: {error}")))?;
-    RYEOS_UI.with(|state| {
-        let state = state.borrow();
-        let core = state
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("RyeOS core has not started"))?;
-        core.require_presentation_producer_ready(&producer, next_engine_seq)
-            .map_err(|error| JsValue::from_str(&error))
-    })
 }
 
 fn ryeos_envelope(
@@ -339,17 +107,13 @@ fn ryeos_envelope(
 // ---------------------------------------------------------------------------
 
 #[wasm_bindgen]
-pub fn ryeos_layout_preference_key() -> Result<Option<String>, JsValue> {
+pub fn ryeos_layout_preference_key() -> Result<String, JsValue> {
     RYEOS_UI.with(|state| {
-        let state = state.borrow();
-        let core = state
+        state
+            .borrow()
             .as_ref()
-            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        if core.active_surface().is_none() {
-            return Ok(None);
-        }
-        core.layout_preference_key()
-            .map(Some)
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?
+            .layout_preference_key()
             .map_err(|e| JsValue::from_str(&e))
     })
 }
@@ -414,7 +178,6 @@ pub fn ryeos_open_saved_view_set_template(encoded: &str) -> Result<JsValue, JsVa
 #[wasm_bindgen]
 pub fn ryeos_start(
     session_json: JsValue,
-    presentation_id: &str,
     viewport_json: JsValue,
     now_ms: u64,
 ) -> Result<JsValue, JsValue> {
@@ -430,10 +193,10 @@ pub fn ryeos_start(
     let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS viewport: {e}")))?;
 
-    let mut core = RyeOsCore::new(session, presentation_id, viewport, now_ms);
-    core.supports_independent_documents = true;
+    let mut core = RyeOsCore::new(session, viewport, now_ms);
     core.bump_generation();
-    let response = ryeos_envelope(&core, Vec::new())?;
+    let effects = core.initial_effects();
+    let response = ryeos_envelope(&core, effects)?;
 
     RYEOS_UI.with(|state| {
         *state.borrow_mut() = Some(core);
@@ -561,81 +324,41 @@ pub fn ryeos_seat_events() -> Result<JsValue, JsValue> {
     })
 }
 
-/// Derive the identity of one frozen transport batch in the shared Rust owner.
-#[wasm_bindgen]
-pub fn ryeos_seat_append_identity(identity: JsValue) -> Result<String, JsValue> {
-    let identity: ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity =
-        serde_wasm_bindgen::from_value(identity).map_err(|error| {
-            JsValue::from_str(&format!("invalid seat append identity: {error}"))
-        })?;
-    identity.derive_identity().map_err(JsValue::from_str)
-}
-
-/// Derive an exact control intent in the same Rust owner used by its verifier.
-#[wasm_bindgen]
-pub fn ryeos_seat_control_identity(request: JsValue) -> Result<String, JsValue> {
-    let request: ryeos_client_base::ui::UiSeatControlRequest =
-        serde_wasm_bindgen::from_value(request).map_err(|error| {
-            JsValue::from_str(&format!("invalid seat control request: {error}"))
-        })?;
-    request.derive_identity().map_err(JsValue::from_str)
-}
-
 /// Replay durable seat braid events into the in-memory RyeOs engine.
 #[wasm_bindgen]
-pub fn ryeos_replay_acknowledged_seat_events(
-    producer_json: JsValue,
-    captured_json: JsValue,
-    events_json: JsValue,
-) -> Result<JsValue, JsValue> {
-    let producer = serde_wasm_bindgen::from_value(producer_json)
-        .map_err(|error| JsValue::from_str(&format!("invalid acknowledged producer: {error}")))?;
-    let captured = serde_wasm_bindgen::from_value(captured_json)
-        .map_err(|error| JsValue::from_str(&format!("invalid captured seat prefix: {error}")))?;
-    let mut events: Vec<serde_json::Value> =
-        serde_wasm_bindgen::from_value(events_json).map_err(|error| {
-            JsValue::from_str(&format!("invalid acknowledged seat interval: {error}"))
-        })?;
-    let retained = events
-        .iter_mut()
-        .map(|row| {
-            for field in ["chain_seq", "thread_seq"] {
-                if let Some(value) = row.get(field).and_then(serde_json::Value::as_str) {
-                    let position = value
-                        .parse::<u64>()
-                        .map_err(|_| "invalid original seat position")?;
-                    if position.to_string() != value {
-                        return Err("noncanonical original seat position".to_owned());
-                    }
-                    row[field] = serde_json::json!(position);
-                }
-            }
-            if let Some(value) = row
-                .get("payload")
-                .and_then(|payload| payload.get("seq"))
-                .and_then(serde_json::Value::as_str)
-            {
-                let position = value
-                    .parse::<u64>()
-                    .map_err(|_| "invalid original producer position")?;
-                if position.to_string() != value {
-                    return Err("noncanonical original producer position".to_owned());
-                }
-                row["payload"]["seq"] = serde_json::json!(position);
-            }
-            ryeos_client_base::ui::seat::retained_seat_event_with_evidence(row)?
-                .ok_or_else(|| "acknowledged interval contains a nonproducer row".to_owned())
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|error| JsValue::from_str(&error))?;
+pub fn ryeos_replay_seat_events(events_json: JsValue) -> Result<JsValue, JsValue> {
+    let events: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(events_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS seat replay: {e}")))?;
     RYEOS_UI.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        let effects = core
-            .acknowledge_canonical_seat_prefix(&producer, captured, retained)
-            .map_err(|error| JsValue::from_str(&error))?;
+        let replayed = events
+            .iter()
+            .filter_map(seat_event_from_replay)
+            .collect::<Vec<_>>();
+        let effects = core.replay_seat_events(replayed);
         ryeos_envelope(core, effects)
+    })
+}
+
+fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {
+    let event_type = event.get("event_type")?.as_str()?;
+    if event_type != "seat.facet" {
+        return None;
+    }
+    let payload = event.get("payload")?;
+    let facet = payload.get("payload").unwrap_or(payload);
+    let key = facet.get("key")?.as_str()?.to_string();
+    let value = facet.get("value")?.clone();
+    let seq = payload
+        .get("seq")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| event.get("chain_seq").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+    Some(SeatEvent {
+        seq,
+        kind: SeatEventKind::Facet { key, value },
     })
 }

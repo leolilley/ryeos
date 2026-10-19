@@ -2818,7 +2818,6 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "ryeos-engine",
- "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2842,7 +2841,6 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
- "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2851,7 +2849,6 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-width",
- "uuid",
 ]
 
 [[package]]
@@ -3726,16 +3723,6 @@ dependencies = [
  "prettyplease 0.3.0",
  "syn 3.0.3",
  "ts-typegen-build",
-]
-
-[[package]]
-name = "ryeos-ui-presentation-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
 ]
 
 [[package]]

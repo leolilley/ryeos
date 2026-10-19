@@ -11,9 +11,4 @@ export interface RyeOsFieldSourceStatusVm {
   truncated: boolean;
   error: string | null;
   evidence: string[];
-  /**
-   * Entity provenance references omitted from the bounded UI list. This
-   * does not describe source-document truncation or artifact availability.
-   */
-  evidence_omitted: bigint;
 }

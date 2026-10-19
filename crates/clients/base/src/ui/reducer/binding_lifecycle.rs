@@ -1,9 +1,9 @@
 use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::model::RyeOsCore;
-use super::view_model::{RyeOsCommandChoice, RyeOsTone};
+use super::view_model::{RyeOsOverlayChoice, RyeOsTone};
 
 impl RyeOsCore {
-    pub(crate) fn releasable_binding_attachment_items(&self) -> Vec<RyeOsCommandChoice> {
+    pub(crate) fn releasable_binding_attachment_items(&self) -> Vec<RyeOsOverlayChoice> {
         self.binding_attachments
             .values()
             .filter(|attachment| {
@@ -18,8 +18,8 @@ impl RyeOsCore {
                 let subject = descriptor
                     .project_path
                     .as_deref()
-                    .unwrap_or(&descriptor.root_ref);
-                RyeOsCommandChoice {
+                    .unwrap_or(&descriptor.surface_ref);
+                RyeOsOverlayChoice {
                     label: format!("Release project context · {subject}"),
                     hint: "session-wide release; affects other browser tabs; does not stop work"
                         .into(),
@@ -41,7 +41,7 @@ impl RyeOsCore {
         generation: u64,
         digest: &str,
     ) -> bool {
-        if attachment_id == self.root_attachment_id {
+        if attachment_id == self.surface_attachment_id {
             return false;
         }
         let Some(attachment) = self.binding_attachment(attachment_id) else {
@@ -50,22 +50,19 @@ impl RyeOsCore {
         if attachment.binding_generation != generation || attachment.binding_digest != digest {
             return false;
         }
-        !self.mounted_instances().any(|instance| {
-            self.binding_attachment_for_instance(&instance)
-                .is_some_and(|binding| binding.binding_attachment_id == attachment_id)
-        }) && !self.presentation.as_ref().is_some_and(|presentation| {
-            presentation
-                .surfaces()
-                .values()
-                .any(|surface| surface.binding().binding_attachment_id == attachment_id)
-        }) && !self
-            .view_set_insertion_attachments
+        !self
+            .instance_binding_attachments
             .values()
             .any(|id| id == attachment_id)
-            && !self.retained_lens_frames.values().flatten().any(|frame| {
-                frame.binding.binding_attachment_id == attachment_id
-                    && frame.binding.binding_generation == generation
-                    && frame.binding.binding_digest == digest
+            && !self
+                .view_set_insertion_attachments
+                .values()
+                .any(|id| id == attachment_id)
+            && !self.view_sets.iter().any(|view_set| {
+                view_set
+                    .lens_stack
+                    .iter()
+                    .any(|frame| frame.binding_attachment_id == attachment_id)
             })
             && !self.pending_effects.values().any(|effect| match effect {
                 RyeOsEffectKind::FetchSource { request, .. }
@@ -177,11 +174,8 @@ mod tests {
             Some("/projects/seven"),
             serde_json::json!({"name":"project"}),
         );
-        let mut session = session_with_attachments("surface", vec![surface]);
-        session.binding_attachments.push(project);
-        core_for_presentation(
-            session,
-            FIXTURE_PRESENTATION_ID,
+        RyeOsCore::new(
+            session_with_attachments("surface", vec![surface, project]),
             BrowserViewport::default(),
             0,
         )
@@ -195,7 +189,7 @@ mod tests {
         assert!(items[0].label.contains("/projects/seven"));
 
         core.view_set_insertion_attachments
-            .insert(core.active_view_set().unwrap().id, "project".into());
+            .insert(core.view_sets[0].id, "project".into());
         assert!(core.releasable_binding_attachment_items().is_empty());
     }
 
@@ -224,18 +218,10 @@ mod tests {
         assert!(core.binding_attachments.contains_key("surface"));
         assert!(!core.binding_attachments.contains_key("project"));
         let session = core.data.session.as_ref().expect("session retained");
-        assert_eq!(session.binding_attachments.len(), 2);
-        assert!(
-            session
-                .binding_attachments
-                .iter()
-                .any(|entry| entry.binding_attachment_id == "surface")
-        );
-        assert!(
-            session
-                .binding_attachments
-                .iter()
-                .any(|entry| entry.binding_attachment_id == session.root_attachment_id)
+        assert_eq!(session.binding_attachments.len(), 1);
+        assert_eq!(
+            session.binding_attachments[0].binding_attachment_id,
+            "surface"
         );
     }
 

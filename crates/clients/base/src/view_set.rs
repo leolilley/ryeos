@@ -4,15 +4,12 @@
 //! it must never flatten a nested layout on an ordinary open/close/move edit.
 //! Traversal order is derived, not a second mutable placement authority.
 
-#[cfg(test)]
-use crate::ids::ViewGroupId;
-use crate::ids::{RyeOsViewInstanceKey, TileId};
+use crate::ids::{RyeOsViewInstanceKey, TileId, ViewGroupId};
 use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
 use crate::surface::{ArrangeSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -308,12 +305,49 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
 // ViewSet
 // ---------------------------------------------------------------------------
 
+/// One frame on the lens stack: the view a step-in left behind, plus the
+/// seat-facet context it read. Popping re-appends the captured facets
+/// (last-writer-wins over the seat log, so no history rewrite) and restores
+/// the view — the "return" half of the debugger step-in. Frames are recorded
+/// on single-lens surfaces, where the center is swapped in place, so the stack
+/// is the only record of where a drill came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LensFrame {
+    /// Exact retained binding of the replaced lens; placement is not authority.
+    pub binding_attachment_id: String,
+    /// The view the step-in replaced.
+    pub view: ViewSpec,
+    /// Snapshot of the seat facet fold at push time, keyed by facet name. On
+    /// pop, any facet whose current value differs is re-appended to this value,
+    /// restoring the braid/selection context the leaving view was reading.
+    pub facets: BTreeMap<String, Option<Value>>,
+    /// Human label for the level this frame represents (the cognition/thread it
+    /// was showing — e.g. `study`), for the breadcrumb. `None` falls back to the
+    /// view's title. Because a single-lens braid shows *which* execution via a
+    /// facet (not the view), this label is what makes `threads ▸ ar25 ▸ study`
+    /// legible instead of `threads ▸ timeline ▸ timeline`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Effective selection subject of the lens being left. This runtime-only
+    /// frame state lets pop restore the prior lens without silently attaching
+    /// it to whatever selection the drilled lens currently follows.
+    #[serde(default)]
+    pub attachment: Option<crate::ui::attachment::SelectionAttachment>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewSet {
     /// Presentation identity, independent of tab order or authored label.
     pub id: crate::ids::ViewSetId,
     pub title: String,
+    /// Placement and editor ephemera belong to this view set, not to the
+    /// shell. Switching view sets must not retarget another view set's draft.
+    pub docks: crate::ui::model::RyeOsDockState,
+    pub dock_local: BTreeMap<RyeOsViewInstanceKey, ViewLocalState>,
     pub focus_target: Option<crate::ui::model::RyeOsFocusTarget>,
+    /// Layout-neutral InputBufferKey values; never execution authority.
+    pub input_buffers: BTreeMap<String, crate::ui::model::RyeOsInputState>,
+    pub field_query_editing: Option<RyeOsViewInstanceKey>,
     /// The tiling algorithm (from the surface).
     pub tiling: TilingSpec,
     /// Canonical placement authority. Ordering is derived from this tree;
@@ -326,17 +360,23 @@ pub struct ViewSet {
     /// Presentation-only isolation of one mounted tile. The canonical layout
     /// remains intact, so restore is exact and distinct from master promotion.
     pub maximized_tile: Option<TileId>,
+    /// Step-in return stack (single-lens surfaces). A drill pushes the view it
+    /// left and the facet context it read; a pop restores them. Empty at the
+    /// top of the tree. The default is part of the optional lens contract,
+    /// not a compatibility path for predecessor view-set schemas.
+    #[serde(default)]
+    pub lens_stack: Vec<LensFrame>,
+    /// Human label for the CURRENT focused level (the cognition/thread stepped
+    /// into — e.g. `study`), the tail of the breadcrumb. `None` at the top of
+    /// the tree, where the focused view's own title stands. Set on drill,
+    /// restored on pop.
+    #[serde(default)]
+    pub lens_label: Option<String>,
 }
 
 impl ViewSet {
     /// Build a view set from a tiling spec and ordered initial views.
-    #[cfg(test)]
-    pub fn from_tiling(
-        tiling: TilingSpec,
-        views: Vec<ViewSpec>,
-        presentation: &crate::ids::PresentationId,
-        surface: &crate::ids::SurfaceInstanceId,
-    ) -> Self {
+    pub fn from_tiling(tiling: TilingSpec, views: Vec<ViewSpec>) -> Self {
         let mut center_tiles = Vec::with_capacity(views.len());
         let mut tiles = HashMap::new();
         for view in views {
@@ -347,7 +387,7 @@ impl ViewSet {
             tiles.insert(
                 id,
                 TileState {
-                    instance_key: RyeOsViewInstanceKey::surface_tile(presentation, surface, id),
+                    instance_key: RyeOsViewInstanceKey::view_set_tile(id),
                     local: view.initial_local_state(),
                     view,
                 },
@@ -364,30 +404,29 @@ impl ViewSet {
                 crate::ids::ViewSetId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
             },
             title: String::new(),
+            docks: crate::ui::model::RyeOsDockState::default(),
+            dock_local: BTreeMap::new(),
             focus_target: None,
+            input_buffers: BTreeMap::new(),
+            field_query_editing: None,
             tiling,
             root,
             tiles,
             focused_tile,
             maximized_tile: None,
+            lens_stack: Vec::new(),
+            lens_label: None,
         }
     }
 
     /// Copy only reusable composition. Mounted identities, drafts, transient
     /// observations, focus ephemera and the lens return stack are deliberately
     /// not cloned: those belong to one open set instance.
-    #[cfg(test)]
-    pub fn duplicate_composition(
-        &self,
-        presentation: &crate::ids::PresentationId,
-        surface: &crate::ids::SurfaceInstanceId,
-    ) -> Self {
+    pub fn duplicate_composition(&self) -> Self {
         fn duplicate_tree(
             tree: &LayoutTree,
             source: &HashMap<TileId, TileState>,
             destination: &mut HashMap<TileId, TileState>,
-            presentation: &crate::ids::PresentationId,
-            surface: &crate::ids::SurfaceInstanceId,
         ) -> LayoutTree {
             match tree {
                 LayoutTree::Group {
@@ -409,11 +448,7 @@ impl ViewSet {
                         destination.insert(
                             next_id,
                             TileState {
-                                instance_key: RyeOsViewInstanceKey::surface_tile(
-                                    presentation,
-                                    surface,
-                                    next_id,
-                                ),
+                                instance_key: RyeOsViewInstanceKey::view_set_tile(next_id),
                                 local: source_tile.view.initial_local_state(),
                                 view: source_tile.view.clone(),
                             },
@@ -435,36 +470,19 @@ impl ViewSet {
                 } => LayoutTree::Split {
                     axis: *axis,
                     ratio: *ratio,
-                    first: Box::new(duplicate_tree(
-                        first,
-                        source,
-                        destination,
-                        presentation,
-                        surface,
-                    )),
-                    second: Box::new(duplicate_tree(
-                        second,
-                        source,
-                        destination,
-                        presentation,
-                        surface,
-                    )),
+                    first: Box::new(duplicate_tree(first, source, destination)),
+                    second: Box::new(duplicate_tree(second, source, destination)),
                 },
             }
         }
 
-        let mut duplicate =
-            ViewSet::from_tiling(self.tiling.clone(), Vec::new(), presentation, surface);
+        let mut duplicate = ViewSet::from_tiling(self.tiling.clone(), Vec::new());
         duplicate.title = self.title.clone();
-        duplicate.root = self.root.as_ref().map(|root| {
-            duplicate_tree(
-                root,
-                &self.tiles,
-                &mut duplicate.tiles,
-                presentation,
-                surface,
-            )
-        });
+        duplicate.docks = self.docks.clone();
+        duplicate.root = self
+            .root
+            .as_ref()
+            .map(|root| duplicate_tree(root, &self.tiles, &mut duplicate.tiles));
         duplicate.focused_tile = duplicate
             .root
             .as_ref()
@@ -478,6 +496,37 @@ impl ViewSet {
                     tile_id: duplicate.focused_tile.0.to_string(),
                 });
         duplicate
+    }
+
+    /// Push a return frame: the view a step-in is leaving, the facet context it
+    /// read, and the human label of that level. Recorded before the drill's
+    /// facet write + center swap so a pop can restore the pre-drill state.
+    pub fn push_lens_frame(
+        &mut self,
+        binding_attachment_id: String,
+        view: ViewSpec,
+        facets: BTreeMap<String, Option<Value>>,
+        label: Option<String>,
+        attachment: Option<crate::ui::attachment::SelectionAttachment>,
+    ) {
+        self.lens_stack.push(LensFrame {
+            binding_attachment_id,
+            view,
+            facets,
+            label,
+            attachment,
+        });
+    }
+
+    /// Pop the most recent return frame, if any. The caller restores its facets
+    /// and view.
+    pub fn pop_lens_frame(&mut self) -> Option<LensFrame> {
+        self.lens_stack.pop()
+    }
+
+    /// Depth of the step-in stack (0 at the top of the tree).
+    pub fn lens_depth(&self) -> usize {
+        self.lens_stack.len()
     }
 
     /// A projection of the canonical layout. None when the center is empty.
@@ -565,7 +614,14 @@ impl ViewSet {
         if self.id == destination.id || destination.tiles.contains_key(&tile) {
             return false;
         }
-        if !self.tiles.contains_key(&tile) {
+        let Some(state) = self.tiles.get(&tile) else {
+            return false;
+        };
+        let instance = state.instance_key.clone();
+        if self.input_buffers.keys().any(|key| {
+            crate::ui::model::InputBufferKey::storage_key_belongs_to(key, &instance)
+                && destination.input_buffers.contains_key(key)
+        }) {
             return false;
         }
         let Some(source_root) = self.root.as_ref() else {
@@ -597,8 +653,21 @@ impl ViewSet {
         }
         destination.root = target_root;
         destination.tiles.insert(tile, state);
-        // Drafts/query editing are owned by the presented core and addressed
-        // by this preserved mount identity, not carried in tab-layout state.
+        let keys: Vec<_> = self
+            .input_buffers
+            .keys()
+            .filter(|key| crate::ui::model::InputBufferKey::storage_key_belongs_to(key, &instance))
+            .cloned()
+            .collect();
+        for key in keys {
+            destination.input_buffers.insert(
+                key.clone(),
+                self.input_buffers.remove(&key).expect("collected input"),
+            );
+        }
+        if self.field_query_editing.as_ref() == Some(&instance) {
+            destination.field_query_editing = self.field_query_editing.take();
+        }
         if self.focused_tile == tile {
             if let Some(next) = self
                 .root
@@ -695,7 +764,6 @@ impl ViewSet {
     }
 
     /// Allocate a fresh TileId.
-    #[cfg(test)]
     fn next_tile_id() -> TileId {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         TileId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
@@ -703,13 +771,7 @@ impl ViewSet {
 
     /// Open alongside the last region without rearranging existing splits.
     /// Explicit arrange operations, not ordinary insertion, own full reflow.
-    #[cfg(test)]
-    pub fn add_tile(
-        &mut self,
-        view: ViewSpec,
-        presentation: &crate::ids::PresentationId,
-        surface: &crate::ids::SurfaceInstanceId,
-    ) -> Option<TileId> {
+    pub fn add_tile(&mut self, view: ViewSpec) -> Option<TileId> {
         let id = Self::next_tile_id();
         if let Some(root) = &mut self.root {
             let target = *root.tile_ids().last().expect("nonempty tree");
@@ -726,7 +788,7 @@ impl ViewSet {
         self.tiles.insert(
             id,
             TileState {
-                instance_key: RyeOsViewInstanceKey::surface_tile(presentation, surface, id),
+                instance_key: RyeOsViewInstanceKey::view_set_tile(id),
                 local: view.initial_local_state(),
                 view,
             },
@@ -974,28 +1036,33 @@ mod tests {
         ViewSet::from_tiling(
             TilingSpec::default(),
             (0..n).map(|i| bound(&format!("v{i}"))).collect(),
-            &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
         )
     }
 
     #[test]
-    fn cross_view_set_move_retains_instance_and_local_state() {
+    fn cross_view_set_move_retains_instance_local_state_and_all_subject_drafts() {
+        use crate::ui::model::{InputBufferKey, RyeOsInputState};
         let mut source = view_set_with(1);
         let mut target = view_set_with(1);
         let tile = source.focused_tile;
         let instance = source.tiles[&tile].instance_key.clone();
-        let local = ViewLocalState::Field(FieldLocalState {
-            query: "retained query".into(),
-            ..Default::default()
-        });
-        source.tiles.get_mut(&tile).unwrap().local = local.clone();
+        let key = InputBufferKey::new(instance.clone(), "view:test/v0", "message").storage_key();
+        source.input_buffers.insert(
+            key.clone(),
+            RyeOsInputState {
+                text: "unsent".into(),
+                ..Default::default()
+            },
+        );
+        source.field_query_editing = Some(instance.clone());
         assert!(source.move_tile_to_view_set(&mut target, tile));
         assert!(source.root.is_none());
         assert!(source.focus_target.is_none());
+        assert!(source.input_buffers.is_empty());
         assert_eq!(target.focused_tile, tile);
         assert_eq!(target.tiles[&tile].instance_key, instance);
-        assert_eq!(target.tiles[&tile].local, local);
+        assert_eq!(target.field_query_editing, Some(instance));
+        assert_eq!(target.input_buffers[&key].text, "unsent");
         assert!(target.root.as_ref().unwrap().validate().is_ok());
     }
 
@@ -1019,13 +1086,7 @@ mod tests {
         let second = view_set_with(128);
         let second_ids = second.tile_ids();
         assert!(first.tile_ids().iter().all(|id| !second_ids.contains(id)));
-        let added = first
-            .add_tile(
-                bound("later"),
-                &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-                &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
-            )
-            .unwrap();
+        let added = first.add_tile(bound("later")).unwrap();
         assert!(!second_ids.contains(&added));
         assert_eq!(first.tiles.len(), 129);
         assert_eq!(first.root.as_ref().unwrap().validate(), Ok(()));
@@ -1145,11 +1206,7 @@ mod tests {
         let mut ws = view_set_with(2);
         let order_before = ws.tile_ids();
         let new_id = ws
-            .add_tile(
-                bound("new"),
-                &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-                &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
-            )
+            .add_tile(bound("new"))
             .expect("fixture layout accepts view");
         let order = ws.tile_ids();
         assert_eq!(order.len(), 3);
@@ -1166,13 +1223,7 @@ mod tests {
         ));
         assert_eq!(
             ws.tiles.get(&new_id).map(|tile| tile.instance_key.as_str()),
-            Some(
-                format!(
-                    "seat:fixture-presentation:surface:fixture-surface:tile:{}",
-                    new_id.0
-                )
-                .as_str()
-            )
+            Some(format!("tile:{}", new_id.0).as_str())
         );
     }
 
@@ -1181,8 +1232,6 @@ mod tests {
         let mut ws = ViewSet::from_tiling(
             TilingSpec::default(),
             vec![bound("view:test/same"), bound("view:test/same")],
-            &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
         );
         let ids = ws.tile_ids();
         let first = ws.tiles.get(&ids[0]).unwrap().instance_key.clone();
@@ -1200,20 +1249,11 @@ mod tests {
 
     #[test]
     fn first_added_tile_takes_the_full_center() {
-        let mut ws = ViewSet::from_tiling(
-            TilingSpec::default(),
-            Vec::new(),
-            &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
-        );
+        let mut ws = ViewSet::from_tiling(TilingSpec::default(), Vec::new());
         assert!(ws.center_is_empty());
         assert!(ws.layout().is_none());
         let id = ws
-            .add_tile(
-                bound("solo"),
-                &crate::ids::PresentationId::try_new("fixture-presentation").unwrap(),
-                &crate::ids::SurfaceInstanceId::try_new("fixture-surface").unwrap(),
-            )
+            .add_tile(bound("solo"))
             .expect("fixture layout accepts view");
         assert!(!ws.center_is_empty());
         assert_eq!(ws.layout(), Some(LayoutTree::single(id)));

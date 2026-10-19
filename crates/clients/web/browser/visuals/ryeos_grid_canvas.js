@@ -37,38 +37,8 @@ export function indexedGridAccessibilityLabel(preview, label = preview?.label ||
   const cells = (grid.cells || []).slice(0, 64).map(
     (index) => glyphs.get(index) || String(index),
   );
-  const suffix = (grid.cells || []).length > cells.length
-    ? "; remaining cells available in the grid transcript" : "";
+  const suffix = (grid.cells || []).length > cells.length ? "; remaining cells omitted" : "";
   return `${label}; ${grid.width} by ${grid.height} indexed grid; cells ${cells.join(" ")}${suffix}`;
-}
-
-// The canvas label is deliberately short. The complete admitted grid remains
-// inspectable a bounded row page at a time, without a second data source.
-export function indexedGridTranscriptPage(preview, requestedRow = 0, pageSize = 16) {
-  const grid = preview?.grid;
-  if (!grid || !Number.isInteger(grid.width) || !Number.isInteger(grid.height)
-    || grid.width < 1 || grid.height < 1 || grid.width > 512 || grid.height > 512
-    || !Array.isArray(grid.cells) || grid.cells.length > 262144
-    || grid.cells.length !== grid.width * grid.height) return null;
-  const size = Number.isInteger(pageSize) && pageSize > 0 ? Math.min(pageSize, 16) : 16;
-  const start = Number.isInteger(requestedRow)
-    ? Math.max(0, Math.min(requestedRow, grid.height - 1)) : 0;
-  const end = Math.min(start + size, grid.height);
-  const palette = new Map((grid.palette || []).map((entry) => [entry.index, entry]));
-  const changed = new Set(grid.changed || []);
-  const rows = [];
-  for (let row = start; row < end; row += 1) {
-    const cells = [];
-    for (let column = 0; column < grid.width; column += 1) {
-      const offset = row * grid.width + column;
-      const index = grid.cells[offset];
-      const entry = palette.get(index);
-      const name = entry?.label || entry?.glyph || String(index);
-      cells.push(`column ${column + 1}: ${name}${changed.has(offset) ? " (changed)" : ""}`);
-    }
-    rows.push({ number: row + 1, cells });
-  }
-  return { rows, start, end, height: grid.height };
 }
 
 function contrastingTextColor(color) {

@@ -1,4 +1,4 @@
-import type { RyeOsFieldVm, RyeOsUiIntent, RyeOsViewInstanceKey } from "../generated";
+import type { RyeOsFieldVm, RyeOsUiIntent } from "../generated";
 
 export interface FieldAccessibilityItem {
   id: string;
@@ -17,4 +17,4 @@ export interface FieldAccessibilityItem {
   compare: boolean;
 }
 
-export function fieldAccessibilityModel(vm: RyeOsFieldVm, instanceKey: RyeOsViewInstanceKey): FieldAccessibilityItem[];
+export function fieldAccessibilityModel(vm: RyeOsFieldVm): FieldAccessibilityItem[];

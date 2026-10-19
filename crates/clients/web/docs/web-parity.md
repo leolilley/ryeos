@@ -22,15 +22,9 @@ shared-core behavior the adapter cannot currently originate.
 | --- | --- | --- | --- |
 | [x] `FetchSource` | native | native | Same closed binding request. |
 | [x] `InvokeBinding` | native | native | Same bounded compiled binding. |
-| [x] `InvokePresentationOperation` | native | native | Execute an acknowledged prepared admission operation with its retained identity. |
-| [x] `OpenNewPresentationDocument` | native | gap | Browser prepares exact retained membership before offering an explicit same-origin link; no popup reservation or parent-side producer claim. Terminal returns explicit unsupported-native-effect error. |
-| [x] `ShowPreparedPresentationDocument` | native | gap | Completion ACK exposes the already-prepared nonbearer presentation link; no second preparation, producer claim or parent mount publication. Terminal reports unsupported independent-document hosting. |
-| [x] `ObserveTransferDestination` | native | native | Bounded destination observation under the exact current source producer; no attachment or grant follows from observation. |
-| [x] `PrepareTransfer` | native | native | Existing transfer ingress carries exact producer/anchors and retained export/freeze evidence; completion returns to Core. |
-| [x] `ContactTransfer` | native | native | Existing transfer contact/reconciliation transport; no adapter-owned transfer state machine. |
-| [x] `SetLocationHash` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
-| [x] `CopyToClipboard` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
-| [x] `OpenUrl` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
+| [x] `SetLocationHash` | native | neutral | No terminal location hash. |
+| [x] `CopyToClipboard` | native | neutral | No terminal clipboard owner. |
+| [x] `OpenUrl` | native | neutral | No terminal browser navigation. |
 | [x] `ReplaceSession` | native | native | Both redeem the one-shot successor session. |
 | [x] `ReleaseBindingAttachment` | native | native | Same exact session-bound attachment triple; explicit release only. |
 <!-- parity:RyeOsEffectKind:end -->
@@ -43,7 +37,6 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `Start` | native | native | Initialize the same core. |
 | [x] `Ui` | native | native | Translate native input to shared UI events. |
 | [x] `EffectResult` | native | native | Return every effect to the reducer. |
-| [x] `PresentationProducerReady` | native | native | Report authenticated producer and next engine sequence after claim or replay. |
 | [x] `DaemonEvent` | native | native | Forward observation payloads unchanged. |
 | [x] `HintReceived` | native | native | Forward lossy hints unchanged. |
 | [x] `HintFlushBatch` | native | native | Reconcile coalesced dirty kinds. |
@@ -57,14 +50,6 @@ shared-core behavior the adapter cannot currently originate.
 Those two `gap` rows are the only recorded root-event gaps. Svelte migration
 must not hide or widen them.
 
-Seat acknowledgement is not a serialized root event. The closed event router
-rejects `seat_append_acknowledged`; the existing authenticated receipt owner
-alone confirms exact retained prefixes. Prepared operations wait for that ACK;
-neither replayed semantic JSON nor effect completion can manufacture it. Cold
-replay remains provisional until its fixed-anchor completion fence. Browser
-disposal returns promptly while its separate settlement promise fences successor
-attachment; disposal is not proof that remote execution has settled.
-
 ## UI intents
 
 All intents are reducer-owned. Browser buttons and pointer gestures are native
@@ -75,23 +60,10 @@ producers of the same intents, not a second command vocabulary.
 | --- | --- | --- | --- |
 | [x] `Refresh` | shared | shared | shared command |
 | [x] `InvokeAffordance` | shared | shared | content-declared affordance |
-| [x] `ActivateLocalProjection` | shared | shared | guarded Rust-projected local row activation |
 | [x] `OpenView` | shared | shared | compiled view activation |
 | [x] `OpenNewView` | shared | shared | compiled view activation |
-| [x] `OpenViewInNewTab` | shared | shared | Launcher row captures exact insertion tab/binding; existing retained InsertTab publishes only after ACK, with fresh required subjects. |
-| [x] `OpenCompositionInNewSurface` | shared | shared | Exact source tab/binding is recaptured portably; ordinary shared catalogue dialog invokes its signed composed-opening affordance. Admission remains ACK-gated. |
-| [x] `OpenSurfaceInNewPresentation` | shared | gap | Captures the exact selected Surface and each portable tab origin under ordinary signed admission. Only completed ACK reveals a prepared independent-document link; native document hosting remains unsupported. |
-| [x] `OpenLauncher` | shared | shared | shared launcher command |
-| [x] `OpenNewPresentationDocument` | shared | shared | Shared launcher choice; browser hosts the new document, terminal reports unsupported hosting instead of success. |
-| [x] `BeginTransfer` | shared | shared | Shared projected destination choice starts observation/capture through Core. |
-| [x] `ContactTransfer` | shared | shared | Shared projected transfer reconciliation action. |
-| [x] `PrepareTransfer` | gap | gap | Retained reducer ingress has no independent ordinary control producer; normal transfer preparation uses Core capture/freeze flow. |
-| [x] `RenameSurface` | shared | shared | Shared projected Surface rename action. |
-| [x] `MoveTileToSurfaceViewSet` | shared | shared | Shared projected exact destination action; Core owns the composition edit. |
-| [x] `SelectSurface` | shared | shared | Web strip and shared launcher use the same projected exact-attachment action; terminal reaches it through the launcher. |
-| [x] `CloseSurface` | shared | shared | Web strip and shared launcher use the same guarded exact-attachment close; terminal reaches it through the launcher. |
-| [x] `OpenDialog` | shared | shared | projected dialog action |
-| [x] `CloseDialog` | shared | shared | exact mounted dialog close |
+| [x] `OpenOverlay` | shared | shared | shared overlay command |
+| [x] `ToggleOverlayGroup` | shared | shared | presentation state |
 | [x] `CloseFocused` | shared | shared | shared close command |
 | [x] `CloseTile` | shared | shared | exact tile close |
 | [x] `ToggleTileMaximized` | shared | shared | render-only focused tile projection |
@@ -112,7 +84,6 @@ producers of the same intents, not a second command vocabulary.
 | [x] `PinViewSelection` | shared | shared | exact mounted-view selection snapshot; shared command overlay and web tile menu |
 | [x] `OpenPinnedViewAlongside` | shared | shared | fresh mount pinned to the originating view's captured selection |
 | [x] `FollowViewSetSelection` | shared | shared | explicit retained selection owner; shared command overlay and web tile menu |
-| [x] `SupplyRequiredSubject` | shared | shared | Browser acts inline; terminal reaches the exact focused-mount compatible-selection action through the shared launcher. |
 | [x] `ReleaseBindingAttachment` | shared | shared | explicit command for a locally unused non-surface attachment; session-wide effect |
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
@@ -167,9 +138,10 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `FocusChanged` | native | gap | TUI reaches focus through directional shared commands |
 | [x] `FocusDock` | native | shared | dock focus |
 | [x] `FocusDirection` | native | shared | directional focus |
-| [x] `OpenLauncher` | native | shared | launcher button or shared key command |
-| [x] `OpenDialog` | shared | shared | projected dialog action |
-| [x] `CloseDialog` | native | shared | mounted dialog close |
+| [x] `OpenOverlay` | native | shared | exact overlay |
+| [x] `CloseOverlay` | native | shared | close overlay |
+| [x] `SetOverlayQuery` | native | shared | native/key input |
+| [x] `SetOverlaySelection` | native | gap | exact pointer-facing overlay row selection |
 | [x] `FocusInput` | native | shared | input focus |
 | [x] `BlurInput` | native | shared | input blur |
 | [x] `InsertInputChar` | shared | native | character key path |
@@ -181,6 +153,10 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `InterruptHead` | shared | shared | shared keymap |
 | [x] `SubmitInput` | shared | shared | shared keymap |
 | [x] `SubmitInputInterrupt` | shared | shared | shared keymap |
+| [x] `MoveOverlaySelection` | shared | shared | shared keymap |
+| [x] `ChooseOverlay` | shared | shared | shared keymap |
+| [x] `ChooseOverlayAt` | native | gap | atomic exact pointer selection and choice |
+| [x] `FoldOverlayGroup` | shared | shared | shared keymap |
 | [x] `SetTileCursor` | native | shared | pointer/key selection |
 | [x] `SetViewCursor` | native | gap | exact tile-or-dock instance pointer selection |
 | [x] `ChooseViewItem` | native | gap | atomic semantic-identity selection and current-intent activation |
@@ -191,7 +167,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetViewFold` | native | gap | exact tile-or-dock instance fold |
 | [x] `ExpandSelectedRow` | shared | shared | shared keymap |
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
-| [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
 | [x] `PopLens` | shared | shared | drill return |
 <!-- parity:RyeOsUiEvent:end -->
@@ -203,8 +178,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetText` | native | gap | Rust validates browser byte cursor |
 | [x] `Complete` | native | gap | TUI uses `CompleteInput` |
 | [x] `Submit` | native | gap | TUI uses shared submit events |
-| [x] `NavigateSelection` | native | gap | addressed browser live-filter selection; TUI uses focused keys |
-| [x] `ActivateSelection` | native | gap | addressed browser live-filter activation; TUI uses focused keys |
 <!-- parity:RyeOsInputAction:end -->
 
 ## Layout and views
@@ -229,7 +202,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `Sections` | presentation | presentation | Same foldable sections. |
 | [x] `Table` | presentation | presentation | Same columns, rows and affordances. |
 | [x] `Placeholder` | presentation | presentation | Same title and message. |
-| [x] `RequiredSubject` | presentation | presentation | Both display unresolved input and required facets; web acts inline, terminal through the shared launcher. |
 <!-- parity:RyeOsViewVm:end -->
 
 ## Explicit platform exceptions

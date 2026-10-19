@@ -1,31 +1,24 @@
 # Real-browser component checks
 
-`svelte-root.mjs` starts a loopback-only static server for the compiled browser
-renderer, launches Playwright Chromium, and exercises the modules through the same
+`run.mjs` starts a loopback-only static server for the checked-in browser asset
+tree, launches Playwright Chromium, and exercises the modules through the same
 `/ui/assets/` namespace used by an installed RyeOS node. It does not start or
 modify a RyeOS daemon.
 
 Run from `crates/clients/web`:
 
 ```text
-RYEOS_UI_SVELTE_STAGE="$PWD/pkg" npm run test:browser
+npm run test:browser
 ```
 
 The runner uses the exact `playwright` package selected by this crate's
-`package-lock.json` and, by default, the browser revision retained by that package. It does
+`package-lock.json` and the browser revision retained by that package. It does
 not download dependencies while running and never searches global npm state.
 Set `PLAYWRIGHT_BROWSERS_PATH` to the exact retained browser realization.
 
 `RYEOS_PLAYWRIGHT_BROWSER` may select `chromium`, `firefox`, or `webkit`; the
 default is `chromium`. Missing packages or browser executables fail with an
 actionable message rather than silently skipping the browser gate.
-
-`RYEOS_PLAYWRIGHT_EXECUTABLE_PATH` may explicitly select an already-installed
-headless browser executable. This is not an automatic fallback: record the
-selected revision with results, since it does not qualify the package's default
-browser revision. No browser is downloaded by the runner. `RYEOS_UI_SVELTE_STAGE`
-selects the directory containing `ryeos_ui.js` and `ryeos_ui.css`; use the freshly
-published `pkg` directory to test the closed production renderer.
 
 Pure transformation and layout tests remain in `tests/*.test.js`. Put focus,
 native events, accessibility-tree, lifecycle, and computed-layout checks here,
@@ -48,9 +41,8 @@ Then run the browser checks with `RYEOS_UI_VISUAL_FIXTURE` set to that file.
 `RYEOS_UI_SCREENSHOT_DIR` optionally selects the generated screenshot directory
 (default `/tmp/ryeos-ui-production-preview`). The runner captures the work,
 overview and launcher arrangements at 1600×1000, plus work at 1024×768 and
-390×844 with reduced motion requested. These captures support visual review;
-they do not assert narrow focus reachability or composer/content separation.
-External HTTP(S) requests are blocked for this preview.
+390×844. It checks narrow focus reachability, composer/content separation and
+reduced motion. External HTTPS requests are blocked for this preview.
 
 The runner reads those envelopes with the production exact-integer JSON decoder;
 it does not recreate or patch their semantics in JavaScript. The mounted root is

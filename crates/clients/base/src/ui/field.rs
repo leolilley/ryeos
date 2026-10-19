@@ -235,14 +235,6 @@ pub struct RyeOsFieldBadgeVm {
     pub tone: RyeOsTone,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RyeOsFieldArtifactRefVm {
-    pub thread_id: String,
-    pub artifact_id: i64,
-    pub content_hash: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsFieldEntityVm {
     pub id: String,
@@ -261,9 +253,6 @@ pub struct RyeOsFieldEntityVm {
     pub tone: RyeOsTone,
     pub traits: RyeOsFieldEntityTraitsVm,
     pub badges: Vec<RyeOsFieldBadgeVm>,
-    /// Exact retained-artifact identity supplied by the source. This is
-    /// evidence only; renderers must not infer an authority or fetch action.
-    pub artifact_ref: Option<RyeOsFieldArtifactRefVm>,
     pub preview_ids: Vec<String>,
     /// Whether the exact current comparison selection admits toggling this
     /// entity. Renderers consume this projection; they do not reproduce grid
@@ -325,7 +314,6 @@ pub struct RyeOsFieldSubjectVm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RyeOsSourcePhase {
-    Unresolved,
     Loading,
     Ready,
     Refreshing,
@@ -342,9 +330,6 @@ pub struct RyeOsFieldSourceStatusVm {
     pub truncated: bool,
     pub error: Option<String>,
     pub evidence: Vec<String>,
-    /// Entity provenance references omitted from the bounded UI list. This
-    /// does not describe source-document truncation or artifact availability.
-    pub evidence_omitted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,30 +478,6 @@ pub struct RyeOsFieldVm {
     pub provenance: Vec<String>,
 }
 
-impl RyeOsFieldVm {
-    /// The terminal's Enter target for the current selection. A lone
-    /// actionable adjacent relation is usable when the entity has no direct
-    /// action; multiple relations must be chosen explicitly.
-    pub fn selected_activation_intent(&self) -> Option<RyeOsUiIntent> {
-        let selected = self.selected.as_deref()?;
-        if let Some(intent) = self
-            .entities
-            .iter()
-            .find(|entity| entity.id == selected)
-            .and_then(|entity| entity.activate_intent.clone())
-        {
-            return Some(intent);
-        }
-        let mut adjacent = self.relations.iter().filter_map(|relation| {
-            (relation.source_id == selected || relation.target_id == selected)
-                .then(|| relation.activate_intent.clone())
-                .flatten()
-        });
-        let intent = adjacent.next()?;
-        adjacent.next().is_none().then_some(intent)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FieldSourceInput<'a> {
     pub channel: &'a str,
@@ -525,9 +486,6 @@ pub struct FieldSourceInput<'a> {
     pub response: Option<&'a Value>,
     pub parsed: Option<&'a Result<FieldFactsDocument, String>>,
     pub error: Option<&'a str>,
-    /// True when the authored source parameters still contain a required
-    /// facet/field reference which resolved to null for this exact mount.
-    pub unresolved: bool,
     pub refreshing: bool,
 }
 
@@ -795,20 +753,21 @@ pub fn project_field(
     source_inputs: &[FieldSourceInput<'_>],
     local: Option<&FieldLocalState>,
 ) -> RyeOsFieldVm {
-    project_field_impl(
+    project_field_for_instance(
         field_id,
         title,
         view_ref,
         binding,
         source_inputs,
         local,
-        None,
+        &crate::ids::RyeOsViewInstanceKey::view_set_tile(crate::ids::TileId::new(0)),
     )
 }
 
 /// Project a mounted field. The exact host identity is carried into every
 /// row/relation affordance so browser activation can be fenced to the view set
-/// which produced it. Unmounted projection deliberately produces no intents.
+/// which produced it. The unmounted wrapper above remains useful for pure
+/// contract fixtures, whose intents are never dispatched.
 pub fn project_field_for_instance(
     field_id: &str,
     title: &str,
@@ -817,26 +776,6 @@ pub fn project_field_for_instance(
     source_inputs: &[FieldSourceInput<'_>],
     local: Option<&FieldLocalState>,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
-) -> RyeOsFieldVm {
-    project_field_impl(
-        field_id,
-        title,
-        view_ref,
-        binding,
-        source_inputs,
-        local,
-        Some(instance_key),
-    )
-}
-
-fn project_field_impl(
-    field_id: &str,
-    title: &str,
-    view_ref: &str,
-    binding: &ViewBinding,
-    source_inputs: &[FieldSourceInput<'_>],
-    local: Option<&FieldLocalState>,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
 ) -> RyeOsFieldVm {
     let local = local.cloned().unwrap_or_default();
     let projection = match serde_json::from_value::<FieldProjection>(binding.projections.clone()) {
@@ -873,20 +812,12 @@ fn project_field_impl(
             .or_else(|| input.response.map(parse_field_document));
         match parsed {
             Some(Ok(document)) => {
-                const SOURCE_EVIDENCE_DISPLAY_LIMIT: usize = 32;
-                let evidence_count = document
-                    .entities
-                    .iter()
-                    .map(|entity| entity.provenance.evidence.len())
-                    .sum::<usize>();
                 source_status.push(RyeOsFieldSourceStatusVm {
                     name: input.channel.to_string(),
                     source_ref: input.source_ref.to_string(),
                     subject_fingerprint: input.subject_fingerprint.map(str::to_string),
                     revision: Some(document.revision.clone()),
-                    phase: if input.error.is_some() {
-                        RyeOsSourcePhase::Error
-                    } else if input.refreshing {
+                    phase: if input.refreshing {
                         RyeOsSourcePhase::Refreshing
                     } else {
                         RyeOsSourcePhase::Ready
@@ -897,10 +828,9 @@ fn project_field_impl(
                         .entities
                         .iter()
                         .flat_map(|entity| entity.provenance.evidence.iter())
-                        .take(SOURCE_EVIDENCE_DISPLAY_LIMIT)
+                        .take(32)
                         .map(compact_value)
                         .collect(),
-                    evidence_omitted: evidence_count.saturating_sub(SOURCE_EVIDENCE_DISPLAY_LIMIT),
                 });
                 documents.push((input.channel.to_string(), document));
             }
@@ -915,7 +845,6 @@ fn project_field_impl(
                     truncated: false,
                     error: Some(error),
                     evidence: Vec::new(),
-                    evidence_omitted: 0,
                 });
             }
             None => source_status.push(RyeOsFieldSourceStatusVm {
@@ -925,15 +854,12 @@ fn project_field_impl(
                 revision: None,
                 phase: if input.error.is_some() {
                     RyeOsSourcePhase::Error
-                } else if input.unresolved {
-                    RyeOsSourcePhase::Unresolved
                 } else {
                     RyeOsSourcePhase::Loading
                 },
                 truncated: false,
                 error: input.error.map(str::to_string),
                 evidence: Vec::new(),
-                evidence_omitted: 0,
             }),
         }
     }
@@ -1454,7 +1380,6 @@ pub(crate) fn field_projection_fingerprint(
                 "parse_error": parse_error,
                 "uncached_digest": uncached_digest,
                 "fetch_error": input.error,
-                "unresolved": input.unresolved,
                 "refreshing": input.refreshing,
             })
         })
@@ -1788,7 +1713,7 @@ fn project_entity(
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> RyeOsFieldEntityVm {
@@ -1862,7 +1787,6 @@ fn project_entity(
         tone,
         traits,
         badges: project_badges(set.get("badges"), &raw_value, warnings),
-        artifact_ref: project_artifact_ref(entity.raw.artifact_ref.as_ref(), warnings),
         preview_ids: Vec::new(),
         compare_available: false,
         selected,
@@ -1879,39 +1803,13 @@ fn project_entity(
     }
 }
 
-fn project_artifact_ref(
-    value: Option<&Value>,
-    warnings: &mut Vec<String>,
-) -> Option<RyeOsFieldArtifactRefVm> {
-    let value = value?;
-    let parsed = serde_json::from_value::<RyeOsFieldArtifactRefVm>(value.clone());
-    match parsed {
-        Ok(reference)
-            if validate_id(&reference.thread_id).is_ok()
-                && reference.artifact_id > 0
-                && reference.content_hash.as_ref().is_none_or(|digest| {
-                    digest.len() == 64
-                        && digest
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                }) =>
-        {
-            Some(reference)
-        }
-        _ => {
-            warnings.push("field entity contains an invalid retained artifact reference".into());
-            None
-        }
-    }
-}
-
 fn project_relation(
     relation: &MergedRelation,
     entities: &BTreeMap<String, MergedEntity>,
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> RyeOsFieldRelationVm {
@@ -1973,7 +1871,7 @@ fn project_derived_relations(
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> Vec<RyeOsFieldRelationVm> {
@@ -2085,7 +1983,7 @@ fn relation_activate_intent(
     entities: &BTreeMap<String, MergedEntity>,
     selected: Option<&str>,
     binding: &ViewBinding,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     view_ref: &str,
 ) -> Option<RyeOsUiIntent> {
     if let Some(affordance_id) = resolved_string(set.get("activate"), relation_raw) {
@@ -2112,12 +2010,11 @@ fn relation_activate_intent(
 
 fn validated_affordance_intent(
     binding: &ViewBinding,
-    instance_key: Option<&crate::ids::RyeOsViewInstanceKey>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     view_ref: &str,
     affordance_id: &str,
     record: &Value,
 ) -> Option<RyeOsUiIntent> {
-    let instance_key = instance_key?;
     let affordance = binding
         .affordances
         .iter()
@@ -2883,36 +2780,6 @@ mod tests {
     }
 
     #[test]
-    fn source_evidence_list_discloses_refs_omitted_by_display_bound() {
-        let mut source = document("project", "step:one");
-        source["entities"][0]["provenance"]["evidence"] = json!(
-            (0..35)
-                .map(|index| format!("evidence:{index}"))
-                .collect::<Vec<_>>()
-        );
-        let field = project_field(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding(),
-            &[FieldSourceInput {
-                channel: "project",
-                source_ref: "service:project",
-                subject_fingerprint: None,
-                response: Some(&source),
-                parsed: None,
-                error: None,
-                unresolved: false,
-                refreshing: false,
-            }],
-            None,
-        );
-        assert_eq!(field.sources[0].evidence.len(), 32);
-        assert_eq!(field.sources[0].evidence_omitted, 3);
-        assert!(!field.sources[0].truncated);
-    }
-
-    #[test]
     fn source_arrival_permutations_produce_identical_field_vm() {
         let project = document("project", "step:a");
         let execution = document("execution", "step:b");
@@ -2930,7 +2797,6 @@ mod tests {
                     response: Some(&project),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
                 FieldSourceInput {
@@ -2940,7 +2806,6 @@ mod tests {
                     response: Some(&execution),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
             ],
@@ -2959,7 +2824,6 @@ mod tests {
                     response: Some(&execution),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
                 FieldSourceInput {
@@ -2969,7 +2833,6 @@ mod tests {
                     response: Some(&project),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
             ],
@@ -2978,189 +2841,6 @@ mod tests {
         assert_eq!(left, right);
         assert_eq!(left.entities.len(), 2);
         assert_eq!(left.entities[0].traits.shape, FieldShape::Capsule);
-    }
-
-    #[test]
-    fn source_with_unresolved_required_params_is_unresolved_not_loading() {
-        let binding = binding();
-        let unresolved = project_field(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding,
-            &[FieldSourceInput {
-                channel: "project",
-                source_ref: "service:project",
-                subject_fingerprint: None,
-                response: None,
-                parsed: None,
-                error: None,
-                unresolved: true,
-                refreshing: false,
-            }],
-            None,
-        );
-        assert_eq!(unresolved.sources[0].phase, RyeOsSourcePhase::Unresolved);
-
-        let requested = project_field(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding,
-            &[FieldSourceInput {
-                channel: "project",
-                source_ref: "service:project",
-                subject_fingerprint: Some("subject:project"),
-                response: None,
-                parsed: None,
-                error: None,
-                unresolved: false,
-                refreshing: false,
-            }],
-            None,
-        );
-        assert_eq!(requested.sources[0].phase, RyeOsSourcePhase::Loading);
-    }
-
-    #[test]
-    fn retained_artifact_coordinate_survives_as_bounded_typed_evidence() {
-        let instance = crate::ids::RyeOsViewInstanceKey::surface_tile(
-            &crate::ids::PresentationId::try_new("field-fixture").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("field-surface").unwrap(),
-            crate::ids::TileId::new(1),
-        );
-        let mut source = document("project", "artifact:one");
-        source["entities"][0]["artifact_ref"] = json!({
-            "thread_id": "thread:one",
-            "artifact_id": 1,
-            "content_hash": "ab".repeat(32),
-        });
-        let binding = binding();
-        let field = project_field_for_instance(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding,
-            &[FieldSourceInput {
-                channel: "project",
-                source_ref: "service:project",
-                subject_fingerprint: Some("subject:project"),
-                response: Some(&source),
-                parsed: None,
-                error: None,
-                unresolved: false,
-                refreshing: false,
-            }],
-            None,
-            &instance,
-        );
-        assert_eq!(
-            field.entities[0].artifact_ref,
-            Some(RyeOsFieldArtifactRefVm {
-                thread_id: "thread:one".into(),
-                artifact_id: 1,
-                content_hash: Some("ab".repeat(32)),
-            })
-        );
-        assert!(
-            field.entities[0].activate_intent.is_none(),
-            "a retained artifact coordinate is evidence, not an opening affordance"
-        );
-
-        source["entities"][0]["artifact_ref"] = json!({
-            "thread_id": "thread:one",
-            "artifact_id": 2,
-        });
-        let without_hash = project_field_for_instance(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding,
-            &[FieldSourceInput {
-                channel: "project",
-                source_ref: "service:project",
-                subject_fingerprint: Some("subject:project"),
-                response: Some(&source),
-                parsed: None,
-                error: None,
-                unresolved: false,
-                refreshing: false,
-            }],
-            None,
-            &instance,
-        );
-        assert_eq!(
-            without_hash.entities[0]
-                .artifact_ref
-                .as_ref()
-                .unwrap()
-                .artifact_id,
-            2
-        );
-        assert_eq!(
-            without_hash.entities[0]
-                .artifact_ref
-                .as_ref()
-                .unwrap()
-                .content_hash,
-            None
-        );
-        assert!(without_hash.entities[0].activate_intent.is_none());
-    }
-
-    #[test]
-    fn artifact_coordinate_does_not_change_mounted_activation_authority() {
-        let instance = crate::ids::RyeOsViewInstanceKey::surface_tile(
-            &crate::ids::PresentationId::try_new("field-fixture").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("field-surface").unwrap(),
-            crate::ids::TileId::new(1),
-        );
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "field",
-            "sources": {"project": {"ref": "service:project"}},
-            "selection": {"activate": "inspect"},
-            "affordances": [{
-                "id": "inspect",
-                "invoke": {"plane": "ui", "facet": "selection.entity", "value": "{record.id}"}
-            }],
-            "projections": {"schema_version": FIELD_PROJECTION_SCHEMA}
-        }))
-        .unwrap();
-        let mut source = document("project", "artifact:one");
-        let project = |source: &Value| {
-            project_field_for_instance(
-                "field:test",
-                "Test",
-                "view:test",
-                &binding,
-                &[FieldSourceInput {
-                    channel: "project",
-                    source_ref: "service:project",
-                    subject_fingerprint: Some("subject:project"),
-                    response: Some(source),
-                    parsed: None,
-                    error: None,
-                    unresolved: false,
-                    refreshing: false,
-                }],
-                None,
-                &instance,
-            )
-        };
-        let ordinary = project(&source);
-        source["entities"][0]["artifact_ref"] = json!({
-            "thread_id": "thread:one",
-            "artifact_id": 1,
-            "content_hash": "ab".repeat(32),
-        });
-        let with_artifact = project(&source);
-        for field in [ordinary, with_artifact] {
-            assert!(matches!(
-                field.entities[0].activate_intent.as_ref(),
-                Some(RyeOsUiIntent::InvokeAffordance { affordance_id, .. })
-                    if affordance_id == "inspect"
-            ));
-        }
     }
 
     #[test]
@@ -3211,11 +2891,6 @@ mod tests {
 
     #[test]
     fn projected_relations_carry_the_shared_activation_intent() {
-        let instance = crate::ids::RyeOsViewInstanceKey::surface_tile(
-            &crate::ids::PresentationId::try_new("field-fixture").unwrap(),
-            &crate::ids::SurfaceInstanceId::try_new("field-surface").unwrap(),
-            crate::ids::TileId::new(1),
-        );
         let mut value = document("execution", "step:a");
         let mut second = value["entities"][0].clone();
         second["id"] = json!("step:b");
@@ -3247,7 +2922,7 @@ mod tests {
             "projections": {"schema_version": FIELD_PROJECTION_SCHEMA}
         }))
         .unwrap();
-        let vm = project_field_for_instance(
+        let vm = project_field(
             "field:test",
             "Test",
             "view:test",
@@ -3259,11 +2934,9 @@ mod tests {
                 response: Some(&value),
                 parsed: Some(&parsed_result),
                 error: None,
-                unresolved: false,
                 refreshing: false,
             }],
             None,
-            &instance,
         );
         let intent = vm.relations[0]
             .activate_intent
@@ -3295,7 +2968,6 @@ mod tests {
                     response: Some(&project),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
                 FieldSourceInput {
@@ -3305,7 +2977,6 @@ mod tests {
                     response: Some(&execution),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
             ],
@@ -3349,7 +3020,6 @@ mod tests {
                     response: Some(&project),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
                 FieldSourceInput {
@@ -3359,7 +3029,6 @@ mod tests {
                     response: Some(&execution),
                     parsed: None,
                     error: None,
-                    unresolved: false,
                     refreshing: false,
                 },
             ],
@@ -3435,7 +3104,6 @@ mod tests {
                 response: Some(&source),
                 parsed: None,
                 error: None,
-                unresolved: false,
                 refreshing: false,
             }],
             Some(&local),
@@ -3471,7 +3139,6 @@ mod tests {
                 response: None,
                 parsed: None,
                 error: Some("execution chain no longer exists"),
-                unresolved: false,
                 refreshing: false,
             }],
             None,
@@ -3482,42 +3149,6 @@ mod tests {
         assert_eq!(
             field.sources[0].error.as_deref(),
             Some("execution chain no longer exists")
-        );
-    }
-
-    #[test]
-    fn failed_refresh_keeps_last_good_document_but_not_ready_status() {
-        let cached = document("execution", "step:retained");
-        let field = project_field(
-            "field:test",
-            "Test",
-            "view:test",
-            &binding(),
-            &[FieldSourceInput {
-                channel: "execution",
-                source_ref: "service:execution",
-                subject_fingerprint: Some("thread:retained"),
-                response: Some(&cached),
-                parsed: None,
-                error: Some("latest refresh failed"),
-                unresolved: false,
-                refreshing: true,
-            }],
-            None,
-        );
-        assert_eq!(field.sources[0].phase, RyeOsSourcePhase::Error);
-        assert_eq!(
-            field.sources[0].error.as_deref(),
-            Some("latest refresh failed")
-        );
-        assert_eq!(
-            field.sources[0].revision.as_deref(),
-            Some("revision:execution")
-        );
-        assert_eq!(
-            field.entities.len(),
-            1,
-            "last good evidence remains visible"
         );
     }
 
@@ -3591,7 +3222,6 @@ mod tests {
                 response: Some(&source),
                 parsed: None,
                 error: None,
-                unresolved: false,
                 refreshing: false,
             }],
             None,

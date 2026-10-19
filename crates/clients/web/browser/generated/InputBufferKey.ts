@@ -10,7 +10,6 @@ import type { RyeOsViewInstanceKey } from "./RyeOsViewInstanceKey";
  */
 export interface InputBufferKey {
   view_instance_key: RyeOsViewInstanceKey;
-  binding_scope: string;
   view_ref: string;
   input_id: string;
   /**

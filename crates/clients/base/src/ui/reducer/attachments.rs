@@ -4,17 +4,40 @@ use crate::ids::{RyeOsViewInstanceKey, ViewSetId};
 
 impl RyeOsCore {
     fn active_attachment_view(&self, instance: &RyeOsViewInstanceKey) -> Option<String> {
-        let mount = self.presentation.as_ref()?.mount(instance)?;
-        mount.visible().then(|| mount.view_ref().to_string())
+        (self.view_set_index_for_instance(instance) == Some(self.active_view_set))
+            .then(|| self.mounted_view_ref(instance).map(str::to_string))
+            .flatten()
+    }
+
+    fn refresh_attachment_subject(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        view_ref: &str,
+    ) -> Vec<RyeOsEffect> {
+        let channels = self
+            .binding_for_instance(instance, view_ref)
+            .map(|binding| binding.sources.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.invalidate_view_sources(instance);
+        self.reset_field_replay_for_subject(instance);
+        let effects = channels
+            .into_iter()
+            .flat_map(|channel| {
+                self.clear_field_expansions_for_channel(instance, &channel);
+                self.refresh_source_channel(instance.clone(), view_ref, &channel)
+            })
+            .collect();
+        self.bump_generation();
+        effects
     }
 
     pub(crate) fn pin_view_selection(
         &mut self,
         instance: RyeOsViewInstanceKey,
     ) -> Vec<RyeOsEffect> {
-        if self.active_attachment_view(&instance).is_none() {
+        let Some(view_ref) = self.active_attachment_view(&instance) else {
             return Vec::new();
-        }
+        };
         if self.instance_has_unresolved_required_subject(&instance) {
             self.notice(
                 "Cannot pin selection until the required subject is supplied.",
@@ -35,30 +58,20 @@ impl RyeOsCore {
         if self.selection_attachments.get(&instance) == Some(&pinned) {
             return Vec::new();
         }
-        self.prepare_subject_operation(instance, pinned)
+        self.selection_attachments.insert(instance.clone(), pinned);
+        self.refresh_attachment_subject(&instance, &view_ref)
     }
 
     pub(crate) fn open_pinned_view_alongside(
         &mut self,
         instance: RyeOsViewInstanceKey,
     ) -> Vec<RyeOsEffect> {
-        // Alongside is a Surface-local placement operation. A shared mount
-        // must not acquire the active Surface merely because one is visible.
-        if self.view_set_for_instance(&instance).is_none() {
-            return Vec::new();
-        }
         let Some(view_ref) = self.active_attachment_view(&instance) else {
             return Vec::new();
         };
-        let Some(binding) = self
+        let Some(binding_id) = self
             .binding_attachment_for_instance(&instance)
-            .map(
-                |attachment| crate::ui::binding::UiBindingAttachmentCoordinate {
-                    binding_attachment_id: attachment.binding_attachment_id.clone(),
-                    binding_generation: attachment.binding_generation,
-                    binding_digest: attachment.binding_digest.clone(),
-                },
-            )
+            .map(|attachment| attachment.binding_attachment_id.clone())
         else {
             return Vec::new();
         };
@@ -72,43 +85,31 @@ impl RyeOsCore {
                 return Vec::new();
             }
         };
-        let Some(set) = self.view_set_for_instance(&instance) else {
+        let Some(tile_id) = self.add_tile_motions_under_binding(
+            crate::view_set::ViewSpec::bound(&view_ref),
+            &binding_id,
+        ) else {
+            self.notice(
+                "The layout cannot open another view alongside this one.",
+                super::view_model::RyeOsTone::Warn,
+            );
             return Vec::new();
         };
-        if self
-            .active_view_set()
-            .is_none_or(|active| active.id != set.id)
-        {
-            return Vec::new();
-        }
-        let Some(target) = set
+        let Some(new_instance) = self.view_sets[self.active_view_set]
             .tiles
-            .iter()
-            .find_map(|(id, tile)| (tile.instance_key == instance).then_some(*id))
+            .get(&tile_id)
+            .map(|tile| tile.instance_key.clone())
         else {
             return Vec::new();
         };
-        self.prepare_composition_mutation(
-            crate::ui::composition_operation::CompositionMutation::InsertPinnedView {
-                tab_id: set.id,
-                placement: crate::ui::composition_operation::CompositionPlacement::Split {
-                    target,
-                    axis: match set.tiling.stack.arrange {
-                        crate::surface::ArrangeSpec::Horizontal => {
-                            crate::layout::SplitAxis::Horizontal
-                        }
-                        crate::surface::ArrangeSpec::Vertical => crate::layout::SplitAxis::Vertical,
-                    },
-                    before: false,
-                    ratio: 0.5,
-                },
-                view_ref,
-                binding,
-                attachment: pinned,
-                route_assignment:
-                    crate::ui::composition_operation::UiCompositionRouteAssignment::Authored,
-            },
-        )
+        self.stamp_instance_binding(new_instance.clone(), &binding_id);
+        self.selection_attachments
+            .insert(new_instance.clone(), pinned);
+        self.normalize_field_local_states();
+        let effects = self.emit_fetch_source_for_instance(new_instance, &view_ref);
+        self.floor_source_fetches(&effects, true);
+        self.bump_generation();
+        effects
     }
 
     pub(crate) fn follow_view_set_selection(
@@ -119,7 +120,11 @@ impl RyeOsCore {
         let Some(view_ref) = self.active_attachment_view(&instance) else {
             return Vec::new();
         };
-        if !self.same_surface(&instance, view_set_id) {
+        if !self
+            .view_sets
+            .iter()
+            .any(|view_set| view_set.id == view_set_id)
+        {
             return Vec::new();
         }
         if let Some((input, facets)) = self.unresolved_required_subject(&instance) {
@@ -146,13 +151,12 @@ impl RyeOsCore {
         let next = super::super::attachment::SelectionAttachment::FollowViewSet { view_set_id };
         if self.selection_attachments.get(&instance) == Some(&next)
             || (!self.selection_attachments.contains_key(&instance)
-                && self
-                    .view_set_for_instance(&instance)
-                    .is_some_and(|set| set.id == view_set_id))
+                && self.view_sets[self.active_view_set].id == view_set_id)
         {
             return Vec::new();
         }
-        self.prepare_subject_operation(instance, next)
+        self.selection_attachments.insert(instance.clone(), next);
+        self.refresh_attachment_subject(&instance, &view_ref)
     }
 
     pub(crate) fn supply_required_subject(
@@ -203,7 +207,17 @@ impl RyeOsCore {
         if self.unresolved_required_subject(&instance) != Some((input.clone(), facets)) {
             return Vec::new();
         }
-        self.prepare_subject_operation(instance, pinned)
+        self.selection_attachments.insert(instance.clone(), pinned);
+        self.invalidate_view_sources(&instance);
+        self.reset_field_replay_for_subject(&instance);
+        let effects = self.emit_fetch_source_for_instance(instance, &view_ref);
+        self.floor_source_fetches(&effects, true);
+        self.notice(
+            format!("Subject supplied from the current selection for {input}."),
+            super::view_model::RyeOsTone::Good,
+        );
+        self.bump_generation();
+        effects
     }
 }
 
@@ -213,15 +227,15 @@ mod tests {
     use crate::ui::binding::UiBindingPayload;
     use crate::ui::effect::RyeOsEffectKind;
     use crate::ui::event::{RyeOsEvent, RyeOsUiEvent, RyeOsUiIntent};
-    use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
 
     fn core_with_selection_view() -> (RyeOsCore, RyeOsViewInstanceKey) {
-        let mut core = test_support_core(session_with_surface(serde_json::json!({
-            "name":"selection-fixture", "tiles":["view:test/selection"],
-            "views":{"view:test/selection":{
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/selection",
+            serde_json::json!({
                 "widget": "rows",
-                "input":{"id":"query","feeds":{"param":"query"}},
                 "sources": {
                     "initial": {
                         "ref": "service:test/initial",
@@ -233,24 +247,14 @@ mod tests {
                         "params": {"thread": "@facet:selection.work.thread"}
                     }
                 }
-            }}
-        })));
-        let producer = claim_fixture_producer(&mut core);
-        settle_pending_prefix(&mut core, &producer);
-        let tile = core.active_view_set().unwrap().focused_tile;
-        let instance = core.active_view_set().unwrap().tiles[&tile]
+            }),
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/selection"));
+        let tile = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile]
             .instance_key
             .clone();
         (core, instance)
-    }
-
-    fn settle_subject(core: &mut RyeOsCore) -> Vec<RyeOsEffect> {
-        let producer = core
-            .presentation_operations
-            .producer
-            .clone()
-            .expect("fixture producer claimed");
-        settle_pending_prefix(core, &producer)
     }
 
     fn set_selection(core: &mut RyeOsCore, view_set_id: ViewSetId, thread: &str) {
@@ -262,7 +266,7 @@ mod tests {
     #[test]
     fn unresolved_subject_is_a_source_and_attachment_action_fence() {
         let (mut core, instance) = core_with_selection_view();
-        let owner = core.active_view_set().unwrap().id;
+        let owner = core.view_sets[core.active_view_set].id;
         core.selection_attachments.insert(
             instance.clone(),
             crate::ui::attachment::SelectionAttachment::RequiredSubject {
@@ -301,9 +305,11 @@ mod tests {
 
     #[test]
     fn unresolved_subject_suppresses_every_alternate_source_path() {
-        let mut core = test_support_core(session_with_surface(serde_json::json!({
-            "name":"source-fence", "tiles":["view:test/source-fence"],
-            "views":{"view:test/source-fence":{
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/source-fence",
+            serde_json::json!({
                 "widget": "rows",
                 "sources": {
                     "independent": {"ref": "service:test/independent", "params": {}},
@@ -325,12 +331,11 @@ mod tests {
                         "label": "label"
                     }
                 }
-            }}
-        })));
-        let producer = claim_fixture_producer(&mut core);
-        settle_pending_prefix(&mut core, &producer);
-        let tile = core.active_view_set().unwrap().focused_tile;
-        let instance = core.active_view_set().unwrap().tiles[&tile]
+            }),
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/source-fence"));
+        let tile = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile]
             .instance_key
             .clone();
         core.selection_attachments.insert(
@@ -380,35 +385,18 @@ mod tests {
     #[test]
     fn supply_required_subject_reads_the_named_set_and_pins_exact_facets() {
         let (mut core, instance) = core_with_selection_view();
-        let source = core.active_view_set().unwrap().id;
+        let source = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, source, "T-current");
-        settle_subject(&mut core);
-        core.prepare_subject_operation(
+        core.selection_attachments.insert(
             instance.clone(),
             crate::ui::attachment::SelectionAttachment::RequiredSubject {
                 input: "subject_tile_0".into(),
                 facets: vec!["selection.work.thread".into()],
             },
         );
-        settle_subject(&mut core);
 
-        assert!(
-            core.supply_required_subject(instance.clone(), source)
-                .is_empty()
-        );
-        assert!(
-            matches!(
-                core.selection_attachments.get(&instance),
-                Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. })
-            ),
-            "subject remains unresolved before ACK"
-        );
-        let effects = settle_subject(&mut core);
-        assert_eq!(
-            effects.len(),
-            2,
-            "settled subject replacement refreshes every declared channel"
-        );
+        let effects = core.supply_required_subject(instance.clone(), source);
+        assert_eq!(effects.len(), 1, "only the initial source is activated");
         let Some(crate::ui::attachment::SelectionAttachment::Pinned { values, .. }) =
             core.selection_attachments.get(&instance)
         else {
@@ -427,7 +415,7 @@ mod tests {
     #[test]
     fn incomplete_source_set_leaves_required_subject_unresolved() {
         let (mut core, instance) = core_with_selection_view();
-        let source = core.active_view_set().unwrap().id;
+        let source = core.view_sets[core.active_view_set].id;
         core.selection_attachments.insert(
             instance.clone(),
             crate::ui::attachment::SelectionAttachment::RequiredSubject {
@@ -449,7 +437,7 @@ mod tests {
     #[test]
     fn stale_source_or_changed_binding_cannot_complete_required_subject() {
         let (mut core, instance) = core_with_selection_view();
-        let source = core.active_view_set().unwrap().id;
+        let source = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, source, "T-current");
         let unresolved = crate::ui::attachment::SelectionAttachment::RequiredSubject {
             input: "subject_tile_0".into(),
@@ -481,15 +469,15 @@ mod tests {
         );
         assert_eq!(core.selection_attachments.get(&instance), Some(&unresolved));
 
-        let tile_id = instance.surface_tile_id().unwrap();
-        core.active_view_set_mut().unwrap().tiles.remove(&tile_id);
+        let tile_id = instance.view_set_tile_id().unwrap();
+        core.view_sets[core.active_view_set].tiles.remove(&tile_id);
         assert!(core.supply_required_subject(instance, source).is_empty());
     }
 
     #[test]
     fn supply_required_subject_enforces_the_exact_target_byte_bound() {
         let (mut core, instance) = core_with_selection_view();
-        let source = core.active_view_set().unwrap().id;
+        let source = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, source, "T-bounded");
         let facets = vec!["selection.work.thread".to_string()];
         let values = core.subject_values_from_view_set(source, &facets).unwrap();
@@ -500,11 +488,6 @@ mod tests {
         };
         core.selection_attachments
             .insert(instance.clone(), unresolved.clone());
-
-        let full_envelope_bound = core.binding_attachments["fixture-attachment"]
-            .descriptor
-            .binding_request_bounds
-            .max_request_bytes;
 
         core.binding_attachments
             .get_mut("fixture-attachment")
@@ -524,73 +507,13 @@ mod tests {
             .descriptor
             .binding_request_bounds
             .max_request_bytes = u64::try_from(encoded_len).unwrap();
-        assert_eq!(
-            core.subject_values_from_view_set(source, &["selection.work.thread".into()])
-                .unwrap(),
-            values,
-            "portable subject values fit their exact encoded bound"
-        );
-        let journal = core.seat.events().to_vec();
-        // Subject values use the exact target descriptor; the retained
-        // composition envelope is independently bounded by the shared owner.
-        let shared_id = core
-            .data
-            .session
-            .as_ref()
-            .unwrap()
-            .root_attachment_id
-            .clone();
-        let shared_bound = core.binding_attachments[&shared_id]
-            .descriptor
-            .binding_request_bounds
-            .max_request_bytes;
-        core.binding_attachments
-            .get_mut(&shared_id)
-            .unwrap()
-            .descriptor
-            .binding_request_bounds
-            .max_request_bytes = encoded_len as u64;
-        assert!(
-            core.supply_required_subject(instance.clone(), source)
-                .is_empty()
-        );
-        assert_eq!(
-            core.seat.events(),
-            journal.as_slice(),
-            "subject-only capacity cannot admit the larger prepared envelope"
-        );
-        assert_eq!(core.selection_attachments.get(&instance), Some(&unresolved));
-        core.binding_attachments
-            .get_mut(&shared_id)
-            .unwrap()
-            .descriptor
-            .binding_request_bounds
-            .max_request_bytes = shared_bound;
-        core.binding_attachments
-            .get_mut("fixture-attachment")
-            .unwrap()
-            .descriptor
-            .binding_request_bounds
-            .max_request_bytes = full_envelope_bound;
-        assert!(
-            core.supply_required_subject(instance.clone(), source)
-                .is_empty()
-        );
-        assert!(
-            !pending_prefix(&core).is_empty(),
-            "full signed envelope bound admits preparation"
-        );
-        settle_subject(&mut core);
-        assert!(matches!(
-            core.selection_attachments.get(&instance),
-            Some(crate::ui::attachment::SelectionAttachment::Pinned { .. })
-        ));
+        assert!(!core.supply_required_subject(instance, source).is_empty());
     }
 
     #[test]
     fn compatible_follow_replaces_required_subject_without_pinning_values() {
         let (mut core, instance) = core_with_selection_view();
-        let source = core.active_view_set().unwrap().id;
+        let source = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, source, "T-current");
         core.selection_attachments.insert(
             instance.clone(),
@@ -600,11 +523,7 @@ mod tests {
             },
         );
 
-        assert!(
-            core.follow_view_set_selection(instance.clone(), source)
-                .is_empty()
-        );
-        let effects = settle_subject(&mut core);
+        let effects = core.follow_view_set_selection(instance.clone(), source);
         assert!(!effects.is_empty());
         assert_eq!(
             core.selection_attachments.get(&instance),
@@ -614,37 +533,30 @@ mod tests {
         );
         set_selection(&mut core, source, "T-later");
         assert_eq!(
-            core.facet_value_for_instance(&instance, "selection.work"),
-            Some(serde_json::json!({"thread":"T-later"}))
+            core.facet_value_for_instance(&instance, "selection.work.thread"),
+            Some(serde_json::json!("T-later"))
         );
     }
 
     #[test]
     fn pin_keeps_exact_value_and_has_no_write_owner() {
         let (mut core, instance) = core_with_selection_view();
-        let owner = core.active_view_set().unwrap().id;
+        let owner = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, owner, "T-one");
-        settle_subject(&mut core);
 
-        let prepared_effects = core.dispatch(RyeOsEvent::Ui {
+        let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::PinViewSelection {
                     instance_key: instance.clone(),
                 },
             },
         });
-        assert!(prepared_effects.is_empty());
-        assert!(
-            core.followed_selection_view_set(&instance).is_some(),
-            "pin does not publish before ACK"
-        );
-        let effects = settle_subject(&mut core);
         assert_eq!(effects.len(), 2, "initial and on-demand channels refresh");
         set_selection(&mut core, owner, "T-two");
 
         assert_eq!(
-            core.facet_value_for_instance(&instance, "selection.work.thread"),
-            Some(serde_json::json!("T-one"))
+            core.facet_value_for_instance(&instance, "selection.work"),
+            Some(serde_json::json!({"thread": "T-one"}))
         );
         assert!(
             core.followed_selection_view_set(&instance).is_none(),
@@ -655,20 +567,13 @@ mod tests {
     #[test]
     fn follow_rebind_fences_old_sources_and_refreshes_every_channel() {
         let (mut core, instance) = core_with_selection_view();
-        let source_id = core.active_view_set().unwrap().id;
-        let source = core
-            .active_surface_view_sets()
-            .unwrap()
-            .iter()
-            .position(|set| set.id == source_id)
-            .unwrap();
+        let source = core.active_view_set;
+        let source_id = core.view_sets[source].id;
         set_selection(&mut core, source_id, "T-source");
         core.new_view_set();
-        settle_subject(&mut core);
-        let target_id = core.active_view_set().unwrap().id;
+        let target_id = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, target_id, "T-target");
         core.switch_view_set_tab(source);
-        settle_subject(&mut core);
 
         let old_key =
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance.clone(), "initial")
@@ -677,7 +582,7 @@ mod tests {
             .sources
             .insert(old_key.clone(), serde_json::json!({"old": true}));
 
-        let prepared_effects = core.dispatch(RyeOsEvent::Ui {
+        let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::FollowViewSetSelection {
                     instance_key: instance.clone(),
@@ -686,8 +591,6 @@ mod tests {
             },
         });
 
-        assert!(prepared_effects.is_empty());
-        let effects = settle_subject(&mut core);
         assert_eq!(effects.len(), 2, "on-demand channels are refreshed too");
         assert!(!core.data.sources.contains_key(&old_key));
         assert!(core.data.source_floor.contains_key(&old_key));
@@ -705,92 +608,28 @@ mod tests {
     #[test]
     fn open_alongside_mounts_a_new_instance_pinned_before_its_initial_fetch() {
         let (mut core, original) = core_with_selection_view();
-        let owner = core.active_view_set().unwrap().id;
+        let owner = core.view_sets[core.active_view_set].id;
         set_selection(&mut core, owner, "T-one");
-        settle_subject(&mut core);
-        let draft_key = crate::ui::model::InputBufferKey::new(
-            original.clone(),
-            "view:test/selection",
-            "query",
-            core.binding_attachment_for_instance(&original).unwrap(),
-        )
-        .storage_key();
-        core.input_buffers.insert(
-            draft_key.clone(),
-            crate::ui::model::RyeOsInputState {
-                text: "original draft".into(),
-                ..Default::default()
-            },
-        );
-        let frontier = core
-            .acknowledged_composition_replay()
-            .unwrap()
-            .next_mount_id;
 
-        let preparation = core.dispatch(RyeOsEvent::Ui {
+        let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::OpenPinnedViewAlongside {
                     instance_key: original.clone(),
                 },
             },
         });
-        assert!(preparation.is_empty());
-        assert_eq!(core.active_view_set().unwrap().tiles.len(), 1);
-        assert_eq!(
-            core.acknowledged_composition_replay()
-                .unwrap()
-                .next_mount_id,
-            frontier
-        );
-        let producer = core.presentation_operations.producer.clone().unwrap();
-        let prepared = pending_prefix(&core);
-        assert_eq!(prepared.iter().filter(|event| matches!(&event.kind, crate::ui::seat::SeatEventKind::PresentationOperationPrepared(operation) if operation.composition().is_some_and(|request| matches!(request.mutation, crate::ui::composition_operation::CompositionMutation::InsertPinnedView { .. })))).count(), 1);
-        assert!(core.acknowledge_seat_prefix(&producer, prepared).is_empty());
-        assert_eq!(
-            core.active_view_set().unwrap().tiles.len(),
-            1,
-            "prepared ACK cannot publish a provisional pin or tile"
-        );
-        assert_eq!(
-            core.acknowledged_composition_replay()
-                .unwrap()
-                .next_mount_id,
-            frontier
-        );
-        let effects = settle_subject(&mut core);
 
-        assert_eq!(core.active_view_set().unwrap().tiles.len(), 2);
+        assert_eq!(core.view_sets[core.active_view_set].tiles.len(), 2);
         let new_instance = core.focused_view_instance_key().unwrap();
         assert_ne!(new_instance, original);
-        assert_eq!(core.input_buffers[&draft_key].text, "original draft");
-        assert!(core.input_buffers.keys().all(|key| {
-            !crate::ui::model::InputBufferKey::storage_key_belongs_to(key, &new_instance)
-        }));
         assert!(matches!(
             core.selection_attachments.get(&new_instance),
             Some(crate::ui::attachment::SelectionAttachment::Pinned { .. })
         ));
-        assert_eq!(
-            effects.len(),
-            2,
-            "both visible mounts refresh their initial channel"
-        );
-        let new_effects = effects
-            .iter()
-            .filter(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { tile_id, .. }
-                if crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)
-                    .is_some_and(|key| key.belongs_to(&new_instance)))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            new_effects.len(),
-            1,
-            "the new pinned mount opens only its initial channel"
-        );
+        assert_eq!(effects.len(), 1, "only the initial channel opens eagerly");
         let RyeOsEffectKind::FetchSource {
             tile_id, request, ..
-        } = &new_effects[0].kind
+        } = &effects[0].kind
         else {
             panic!("pinned open must fetch its initial source");
         };
@@ -798,25 +637,7 @@ mod tests {
             panic!("source fetch must carry resolved parameters");
         };
         assert_eq!(params["thread"], "T-one");
-        // A newly allocated source key has no prior subject to fence. Its
-        // initial request is tracked by the epoch; floors fence replacements.
-        assert_eq!(core.data.source_floor.get(tile_id), None);
-        assert_eq!(
-            core.data.source_epoch.get(tile_id),
-            Some(&new_effects[0].id)
-        );
-        assert_eq!(
-            core.data.source_subject_fingerprint.get(tile_id),
-            Some(&crate::ui::field::source_subject_fingerprint(
-                "service:test/initial",
-                params
-            ))
-        );
-        assert!(matches!(
-            core.pending_effects.get(&new_effects[0].id),
-            Some(RyeOsEffectKind::FetchSource { tile_id: pending_key, request: pending_request, .. })
-                if pending_key == tile_id && pending_request == request
-        ));
+        assert_eq!(core.data.source_floor.get(tile_id), Some(&effects[0].id));
 
         set_selection(&mut core, owner, "T-two");
         assert_eq!(
@@ -824,24 +645,24 @@ mod tests {
             Some(serde_json::json!({"thread": "T-two"}))
         );
         assert_eq!(
-            core.facet_value_for_instance(&new_instance, "selection.work.thread"),
-            Some(serde_json::json!("T-one"))
+            core.facet_value_for_instance(&new_instance, "selection.work"),
+            Some(serde_json::json!({"thread": "T-one"}))
         );
     }
 
     #[test]
     fn readable_selection_view_exposes_open_pinned_alongside() {
         let (mut core, instance) = core_with_selection_view();
-        let actions = super::super::view_model::available_command_items(&core);
+        let actions = super::super::view_model::command_overlay_items_for(&core);
         assert!(actions.iter().any(|action| matches!(
             &action.intent,
             RyeOsUiIntent::OpenPinnedViewAlongside { instance_key }
                 if instance_key == &instance
         )));
 
-        core.active_view_set_mut().unwrap().tiling.mode =
+        core.view_sets[core.active_view_set].tiling.mode =
             crate::surface::TilingModeSpec::SingleLens;
-        let actions = super::super::view_model::available_command_items(&core);
+        let actions = super::super::view_model::command_overlay_items_for(&core);
         assert!(!actions.iter().any(|action| matches!(
             &action.intent,
             RyeOsUiIntent::OpenPinnedViewAlongside { .. }
@@ -852,8 +673,7 @@ mod tests {
     fn attachment_intents_reject_inactive_or_missing_coordinates() {
         let (mut core, instance) = core_with_selection_view();
         core.new_view_set();
-        settle_subject(&mut core);
-        let active_id = core.active_view_set().unwrap().id;
+        let active_id = core.view_sets[core.active_view_set].id;
 
         assert!(
             core.pin_view_selection(instance.clone()).is_empty(),
@@ -867,6 +687,6 @@ mod tests {
             core.follow_view_set_selection(instance, ViewSetId::new(u64::MAX))
                 .is_empty()
         );
-        assert_eq!(core.active_view_set().unwrap().id, active_id);
+        assert_eq!(core.view_sets[core.active_view_set].id, active_id);
     }
 }

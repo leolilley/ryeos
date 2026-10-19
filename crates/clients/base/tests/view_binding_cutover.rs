@@ -33,6 +33,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "b709361e129453a8adc88ff56fb7ffb818fc14e540407fcd238764fd36920adc",
     ),
     (
+        "view:ryeos/bundles/list",
+        "111c10ba3eef0dfec5807f82a465f7c8bfc5fbd42389627e5d6cdf7a4480b4aa",
+    ),
+    (
         "view:ryeos/chain/timeline",
         "b2e0ce2c296c3e28dad6778b9344a8e6ce02f596555777c94b824926184e6ef1",
     ),
@@ -59,6 +63,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/files/list",
         "348daf047a0f4a012c2c52103a5dd942d821d15d61abc7916e67f9bdd7fc2b7c",
+    ),
+    (
+        "view:ryeos/gc/status",
+        "e4e08a44a10ee967578bbe1132795d27df35a6b88914d2857d630e3d09da601f",
     ),
     (
         "view:ryeos/graph/topology",
@@ -131,6 +139,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/projects/list",
         "8a93c6c973658c729f2b0900d503c82c7b690210146b76edd6111a2c95821d0e",
+    ),
+    (
+        "view:ryeos/remotes/list",
+        "2dbf6ecda45621aa9fefdf98934d99b72fe773ef7b3defa32648240c1dffb723",
     ),
     (
         "view:ryeos/review/history",
@@ -215,116 +227,6 @@ fn snapshot_digest(value: &Value) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-// Exercises the client-side retained initialization contract. The authored
-// View is resolved through signed assets below; these deterministic admission
-// descriptors are a fixture, not proof of daemon signature/admission checks.
-fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
-    use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId};
-    use ryeos_client_base::ui::binding::{
-        UiBindingAttachmentCoordinate, UiPresentationMembership, UiSurfaceMembership,
-    };
-    use ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest;
-    use ryeos_client_base::ui::presentation_initialization::{
-        UiPresentationInitialSelection, UiPresentationInitialization,
-        UiPresentationInitializationRecord,
-    };
-    use ryeos_client_base::ui::seat::{SeatEvent, SeatEventKind};
-
-    const PRESENTATION: &str = "11111111-1111-4111-8111-111111111111";
-    const SURFACE: &str = "22222222-2222-4222-8222-222222222222";
-    const PREPARE: &str = "33333333-3333-4333-8333-333333333333";
-    let root: UiBindingAttachment = serde_json::from_value(json!({
-        "binding_attachment_id":"cutover-shared-root", "binding_generation":1,
-        "binding_digest":"shared-fixture-binding", "root_ref":"config:fixture/cutover",
-        "root_generation":"shared-fixture-generation", "project_path":null,
-        "subject":{"kind":"projectless"}, "posture":"observation_only",
-        "binding_request_bounds":attachment.binding_request_bounds,
-        "presentation":{"definition":{"kind":"shared_presentation","config":{
-            "category":"ui", "shared_presentation":{"schema":1,"title":"Cutover",
-                "launcher":"launch", "dialogs":[{"id":"launch","title":"Launch",
-                    "view":"view:fixture/launcher"}],
-                "capabilities":{"sources":[],"affordances":[]}}}},
-            "views":{"view:fixture/launcher":{"widget":"rows"}}}
-    }))
-    .unwrap();
-    let coordinate = |descriptor: &UiBindingAttachment| UiBindingAttachmentCoordinate {
-        binding_attachment_id: descriptor.binding_attachment_id.clone(),
-        binding_generation: descriptor.binding_generation,
-        binding_digest: descriptor.binding_digest.clone(),
-    };
-    let seeds = attachment
-        .presentation
-        .definition
-        .surface()
-        .unwrap()
-        .to_mount_seeds()
-        .unwrap();
-    let active = seeds.first().map(|seed| seed.id.clone());
-    let binding = coordinate(&attachment);
-    let manifest = UiSurfaceMountManifest::allocate(
-        PresentationId::try_new(PRESENTATION).unwrap(),
-        SurfaceInstanceId::try_new(SURFACE).unwrap(),
-        1,
-        seeds
-            .into_iter()
-            .map(|seed| (seed, binding.clone()))
-            .collect(),
-        active.as_deref(),
-    )
-    .unwrap();
-    let mut initial = UiPresentationInitialization {
-        schema: 2,
-        selection: UiPresentationInitialSelection::ConfiguredDefaults,
-        presentation_id: PRESENTATION.into(),
-        creation_request_id: PREPARE.into(),
-        root_binding: coordinate(&root),
-        next_mount_id: manifest.next_mount_id,
-        surfaces: vec![UiSurfaceMembership {
-            surface_instance_id: SURFACE.into(),
-            ordinal: 1,
-            title: "Cutover".into(),
-            binding,
-            mount_manifest: manifest,
-            saved_surface: None,
-        }],
-        binding_attachments: vec![root, attachment],
-    };
-    initial
-        .binding_attachments
-        .sort_by(|a, b| a.binding_attachment_id.cmp(&b.binding_attachment_id));
-    initial.validate().expect("exact cutover initialization");
-    let session = BrowserSession {
-        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
-        session_id: "cutover-session".into(),
-        root_attachment_id: initial.root_binding.binding_attachment_id.clone(),
-        binding_attachments: initial.binding_attachments.clone(),
-        presentations: vec![UiPresentationMembership {
-            presentation_id: PRESENTATION.into(),
-            root_binding: initial.root_binding.clone(),
-            thread_id: Some("T-cutover".into()),
-            chain_root_id: Some("T-cutover".into()),
-            next_mount_id: initial.next_mount_id,
-            initialization_digest: initial.digest().unwrap(),
-            surfaces: initial.surfaces.clone(),
-        }],
-        ..Default::default()
-    };
-    let mut core = RyeOsCore::new(session, PRESENTATION, BrowserViewport::default(), 0);
-    let event = SeatEvent {
-        producer_engine_seq: None,
-        seq: 1,
-        kind: SeatEventKind::PresentationInitialized(UiPresentationInitializationRecord {
-            operation_id: PREPARE.into(),
-            initialization: initial,
-        }),
-    };
-    core.validate_replayed_initialization(std::slice::from_ref(&event))
-        .unwrap();
-    core.replay_seat_events([event]);
-    core.require_replayed_initialization().unwrap();
-    core
-}
-
 fn yaml_files_below(root: &Path) -> Vec<PathBuf> {
     fn visit(path: &Path, files: &mut Vec<PathBuf>) {
         let mut entries: Vec<_> = fs::read_dir(path)
@@ -347,71 +249,6 @@ fn yaml_files_below(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn node_inventory_views_have_one_origin_and_remotes_do_not_retarget_input() {
-    let repository = ryeos_engine::test_support::workspace_root();
-    let views = repository.join("bundles/ryeos-ui/.ai/views/ryeos");
-    for removed in ["bundles/list", "remotes/list", "gc/status"] {
-        assert!(
-            !views.join(format!("{removed}.yaml")).exists(),
-            "removed View origin must not be restored as an alias: {removed}"
-        );
-    }
-    for (origin, source) in [
-        ("node/bundles", "service:bundle/list"),
-        ("node/remotes", "service:ui/ryeos-ui/remotes/list"),
-        ("node/gc", "service:ui/ryeos-ui/gc/status"),
-    ] {
-        let text = fs::read_to_string(views.join(format!("{origin}.yaml"))).unwrap();
-        let definition: Value = serde_yaml::from_str(&text).unwrap();
-        assert_eq!(definition["sources"]["default"]["ref"], source);
-        assert!(definition.get("extends").is_none());
-        if origin == "node/remotes" {
-            assert!(definition.get("selection").is_none());
-            assert!(definition.get("affordances").is_none());
-        }
-    }
-}
-
-#[test]
-fn activity_sections_expose_their_source_coverage_without_executable_activation() {
-    let views =
-        ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
-    for (origin, source_channel, coverage) in [
-        ("node/events", "pulse", "pulse_coverage"),
-        ("node/events", "pulse", "usage_coverage"),
-        ("node/events", "recent", "events_coverage"),
-        ("home/overview", "movement", "events_coverage"),
-    ] {
-        let raw: Value = serde_yaml::from_str(
-            &fs::read_to_string(views.join(format!("{origin}.yaml"))).unwrap(),
-        )
-        .unwrap();
-        let section = raw["sections"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|section| {
-                section["source_channel"] == source_channel && section["collection"] == coverage
-            })
-            .expect("activity coverage remains visible beside observed rows");
-        assert_eq!(section["projection"]["primary"], "state");
-        assert_eq!(section["projection"]["meta"], "reason");
-        assert!(section.get("activate").is_none());
-        let binding: ryeos_client_base::ui::content::SectionBinding =
-            serde_json::from_value(section.clone()).unwrap();
-        let response =
-            serde_json::json!({coverage: {"state":"failed", "reason":"signed_event_read_failed"}});
-        let rows = ryeos_client_base::ui::content::project_section(&binding, &response);
-        assert_eq!(
-            rows.len(),
-            1,
-            "coverage object projects as an ordinary section record"
-        );
-        assert_eq!(rows[0].primary, "failed");
-    }
-}
-
-#[test]
 fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let repository = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .expect("canonical repository root");
@@ -419,8 +256,8 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        52,
-        "authored inventory includes the Surfaces catalogue and session-details View"
+        51,
+        "the complete signed view inventory changed"
     );
 
     let mut raw_by_ref = BTreeMap::new();
@@ -559,35 +396,25 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
             "tiles": [view_ref],
             "views": views,
         });
-        let attachment = UiBindingAttachment {
-            binding_attachment_id: "cutover-golden-attachment".into(),
-            binding_generation: 1,
-            binding_digest: "cutover-golden-binding".into(),
-            root_ref: "surface:fixture/cutover-golden".into(),
-            root_generation: "cutover-golden-surface".into(),
-            presentation:
-                ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
-                    effective_surface,
-                )
-                .unwrap(),
-            project_path: Some("/fixture/project".into()),
-            subject: ryeos_client_base::ui::UiBindingSubject::UnregisteredProject,
-            posture: Default::default(),
-            binding_request_bounds: UiBindingRequestBounds {
-                max_request_bytes: 64 * 1024,
-                max_input_bytes: 16 * 1024,
-                max_seat_append_bytes: 64 * 1024,
-            },
+        let session = BrowserSession {
+            surface_attachment_id: "cutover-golden-attachment".into(),
+            binding_attachments: vec![UiBindingAttachment {
+                binding_attachment_id: "cutover-golden-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "cutover-golden-binding".into(),
+                surface_ref: "surface:fixture/cutover-golden".into(),
+                surface_generation: "cutover-golden-surface".into(),
+                effective_surface,
+                project_path: Some("/fixture/project".into()),
+                posture: Default::default(),
+                binding_request_bounds: UiBindingRequestBounds {
+                    max_request_bytes: 64 * 1024,
+                    max_input_bytes: 16 * 1024,
+                },
+            }],
+            ..Default::default()
         };
-        let mut core = initialized_view_core(attachment);
-        let mounted = core
-            .active_view_set()
-            .expect("initialized Surface has its tab");
-        assert_eq!(mounted.tiles.len(), 1, "one tested View is really mounted");
-        assert_eq!(
-            mounted.tiles.values().next().unwrap().view.view_ref,
-            view_ref
-        );
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let effects = core.initial_effects();
         let snapshot = json!({
             "view_model": build_view_model(&core),

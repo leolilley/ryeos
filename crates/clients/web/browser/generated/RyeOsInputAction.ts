@@ -4,10 +4,4 @@ export type RyeOsInputAction =
   | { type: "focus" }
   | { type: "set_text"; text: string; cursor: bigint }
   | { type: "complete" }
-  | { type: "submit"; interrupt: boolean }
-  /**
-   * List navigation belongs to this exact live-filter mount, never to
-   * whichever tile happened to gain focus after the renderer frame.
-   */
-  | { type: "navigate_selection"; delta: number }
-  | { type: "activate_selection" };
+  | { type: "submit"; interrupt: boolean };

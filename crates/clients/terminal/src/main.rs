@@ -1,14 +1,13 @@
-//! Native terminal renderer for an admitted RyeOS shared presentation.
-//! The authored Config selects shared mounts and initial Surface compositions;
-//! this entry point does not manufacture a Surface or infer project authority.
+//! ryeos-tui — Native terminal TUI for Rye OS.
+//!
+//! A tiled view set for AI agent operations: thread management,
+//! execution, state inspection, remotes, and trust.
 
 mod app;
 mod render;
 mod render_text;
 mod terminal;
 mod transport;
-
-use std::io::{self, IsTerminal, Write};
 
 /// Pre-launch messages go to stderr before the alternate screen opens, in the
 /// same plain line form as the CLI's non-terminal diagnostics.
@@ -20,290 +19,365 @@ fn exit_with_error(message: impl Into<String>, hint: Option<&str>) -> ! {
     std::process::exit(1);
 }
 
-#[derive(Debug, PartialEq)]
-enum LaunchOptions {
-    Fresh {
-        presentation: String,
-        project: Option<String>,
-    },
-    Resume {
-        presentation_id: String,
-    },
+fn emit_info(message: impl Into<String>) {
+    eprintln!("ryeos: info: {}", message.into());
 }
 
-fn parse_options(args: &[String]) -> Result<LaunchOptions, String> {
-    let mut presentation = None;
-    let mut project = None;
-    let mut resume_presentation = None;
-    let mut i = 0;
-    while i < args.len() {
-        let destination = match args[i].as_str() {
-            "--presentation" => &mut presentation,
-            "--project" => &mut project,
-            "--resume-presentation" => &mut resume_presentation,
-            flag => return Err(format!("unknown option: {flag}")),
-        };
-        if destination.is_some() {
-            return Err(format!("duplicate option: {}", args[i]));
-        }
-        i += 1;
-        let value = args
-            .get(i)
-            .filter(|value| !value.is_empty() && !value.starts_with('-'))
-            .ok_or_else(|| format!("{} requires an argument", args[i - 1]))?;
-        *destination = Some(value.clone());
-        i += 1;
-    }
-    if let Some(presentation_id) = resume_presentation {
-        if presentation.is_some() || project.is_some() {
-            return Err(
-                "--resume-presentation cannot be combined with --presentation or --project".into(),
-            );
-        }
-        if presentation_id.len() > 128
-            || !presentation_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err("--resume-presentation requires a bounded exact presentation ID".into());
-        }
-        return Ok(LaunchOptions::Resume { presentation_id });
-    }
-    let presentation =
-        presentation.ok_or("--presentation requires an authored shared Config ref")?;
-    if !presentation.starts_with("config:") {
-        return Err(
-            "--presentation must select a Config; initial Surfaces belong to that Config".into(),
-        );
-    }
-    Ok(LaunchOptions::Fresh {
-        presentation,
-        project,
-    })
-}
-
-struct PromptRawMode;
-
-fn valid_session_credential(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-impl Drop for PromptRawMode {
-    fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
-}
-
-fn prompt_session_id() -> io::Result<String> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-
-    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return Err(io::Error::other("Resume requires an interactive terminal"));
-    }
-    eprint!("Still-live UI session credential: ");
-    io::stderr().flush()?;
-    crossterm::terminal::enable_raw_mode()?;
-    let guard = PromptRawMode;
-    let mut credential = String::new();
-    let result = loop {
-        match event::read()? {
-            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                match key.code {
-                    KeyCode::Enter if valid_session_credential(&credential) => {
-                        break Ok(credential);
-                    }
-                    KeyCode::Enter => {
-                        break Err(io::Error::other("session credential is required"));
-                    }
-                    KeyCode::Esc => {
-                        break Err(io::Error::other("session credential entry cancelled"));
-                    }
-                    KeyCode::Backspace => {
-                        credential.pop();
-                    }
-                    KeyCode::Char(ch) if ch.is_ascii_alphanumeric() || ch == '-' => {
-                        if credential.len() == 64 {
-                            break Err(io::Error::other(
-                                "session credential exceeds the 64-byte limit",
-                            ));
-                        }
-                        credential.push(ch);
-                    }
-                    KeyCode::Char(_) => {
-                        break Err(io::Error::other(
-                            "session credential contains an invalid character",
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    };
-    drop(guard);
-    eprintln!();
-    result
+fn emit_warning(message: impl Into<String>) {
+    eprintln!("ryeos: warning: {}", message.into());
 }
 
 fn print_help() {
     println!(
-        "RYEOS TERMINAL
+        "ryeos-tui
+
+USAGE
+ryeos-tui: [OPTIONS] [PROJECT_PATH]
 
 OPTIONS
---presentation <CONFIG>: Signed shared presentation Config (required)
---project <PATH>: Explicit project context; absent means node-level
---resume-presentation <ID>: Resume one exact retained presentation; prompts privately for a live UI session credential
+--surface <REF>: Open a surface by canonical ref
+--surface-file <PATH>: Load a surface spec from a local file (untrusted preview)
+--views-root <DIR>: Resolve view refs from local YAML under DIR first (with --surface-file)
+--project <PATH>: Project root for daemon-backed resolution
 --help: Show this help"
     );
 }
 
-fn main() {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
-        print_help();
-        return;
-    }
-    let options = parse_options(&args).unwrap_or_else(|error| {
-        exit_with_error(error,
-            Some("use ryeos tui to select the authored terminal presentation"),
-        )
-    });
-    let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
-        exit_with_error(format!("failed to create terminal runtime: {error}"),
-            None,
-        )
-    });
-    runtime.block_on(async {
-        let client = transport::daemon::DaemonClient::try_connect()
-            .await
-            .unwrap_or_else(|error| {
-                exit_with_error(format!("daemon connection failed: {error}"),
-                    Some("check ryeos node status"),
-                )
-            });
-        let resume_id = match options {
-            LaunchOptions::Fresh { presentation, project } => {
-                let admitted = client.mint_ui_session(&presentation, project.as_deref()).await;
-                if let Err(error) = admitted {
-                    exit_with_error(format!("failed to initialize UI session: {error}"), None);
-                }
-                None
-            }
-            LaunchOptions::Resume { presentation_id } => {
-                let credential = prompt_session_id().unwrap_or_else(|error| {
-                    exit_with_error(format!("cannot read private UI session credential: {error}"), None)
-                });
-                client.adopt_ui_session(&credential).unwrap_or_else(|error| {
-                    exit_with_error(format!("invalid UI session credential: {error}"), None)
-                });
-                let session = client.current_ui_session().await.unwrap_or_else(|error| {
-                    exit_with_error(format!("UI session authentication failed: {error}"), None)
-                });
-                if session.session_id != credential {
-                    exit_with_error("authenticated UI session did not match the supplied credential", None);
-                }
-                if session.presentations.iter().filter(|membership| membership.presentation_id == presentation_id).count() != 1 {
-                    exit_with_error("authenticated UI session has no unique membership for that presentation ID", None);
-                }
-                Some(presentation_id)
-            }
-        };
-        if let Err(error) = app::run(Vec::new(), client, resume_id).await {
-            exit_with_error(format!("terminal presentation failed: {error}"),
-                None,
-            );
-        }
-    });
+/// Collect every `view:`-prefixed ref anywhere in a surface value so each
+/// can be embedded. Skips the `views` map itself (it holds already-resolved
+/// bindings keyed by ref, not refs to resolve).
+///
+/// Only the `--surface-file` local-preview path uses this: that spec exists
+/// solely client-side, so its views must still be fetched here. A
+/// daemon-resolved surface arrives with views already embedded.
+fn collect_view_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    collect_view_refs_at(value, out, true);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_owned()).collect()
-    }
-
-    #[test]
-    fn node_launch_does_not_infer_a_project_or_surface() {
-        assert_eq!(
-            parse_options(&args(&["--presentation", "config:test/terminal"])).unwrap(),
-            LaunchOptions::Fresh {
-                presentation: "config:test/terminal".into(),
-                project: None
+fn collect_view_refs_at(value: &serde_json::Value, out: &mut Vec<String>, at_root: bool) {
+    match value {
+        serde_json::Value::String(s) if s.starts_with("view:") => out.push(s.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_view_refs_at(item, out, false);
             }
-        );
-        assert!(parse_options(&[]).is_err());
-        assert!(parse_options(&args(&["--presentation", "surface:test/lens"])).is_err());
-    }
-
-    #[test]
-    fn explicit_project_is_preserved_without_default_owner() {
-        assert_eq!(
-            parse_options(&args(&[
-                "--presentation",
-                "config:test/terminal",
-                "--project",
-                "/project"
-            ]))
-            .unwrap(),
-            LaunchOptions::Fresh {
-                presentation: "config:test/terminal".into(),
-                project: Some("/project".into())
+        }
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                // Only the root map is already-resolved definitions. Nested
+                // group `views` are ordinary refs, including inactive tabs.
+                if at_root && key == "views" {
+                    continue;
+                }
+                collect_view_refs_at(v, out, false);
             }
-        );
+        }
+        _ => {}
     }
+}
 
-    #[test]
-    fn resume_requires_exact_id_and_excludes_fresh_options() {
-        assert_eq!(
-            parse_options(&args(&["--resume-presentation", "p-123"])).unwrap(),
-            LaunchOptions::Resume {
-                presentation_id: "p-123".into()
-            }
-        );
-        for flags in [
-            vec![
-                "--resume-presentation",
-                "p-123",
-                "--presentation",
-                "config:test/terminal",
-            ],
-            vec!["--resume-presentation", "p-123", "--project", "/project"],
-            vec!["--resume-presentation", "invalid/id"],
-        ] {
-            assert!(parse_options(&args(&flags)).is_err());
+fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnostic) -> &str {
+    match diag {
+        ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message }
+        | ryeos_client_base::surface::SurfaceDiagnostic::Info { message }
+        | ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField { message, .. } => {
+            message
         }
     }
+}
 
-    #[test]
-    fn private_prompt_accepts_only_bounded_transport_tokens() {
-        assert!(valid_session_credential("live-123"));
-        assert!(!valid_session_credential(""));
-        assert!(!valid_session_credential("bad/token"));
-        assert!(!valid_session_credential(&"a".repeat(65)));
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut project_path = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".into());
+    let mut surface_file: Option<String> = None;
+    let mut surface_name: Option<String> = None;
+    let mut views_root: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" => {
+                i += 1;
+                if i < args.len() {
+                    project_path = args[i].clone();
+                } else {
+                    exit_with_error("--project requires a path argument", None);
+                }
+            }
+            "--surface-file" => {
+                i += 1;
+                if i < args.len() {
+                    surface_file = Some(args[i].clone());
+                } else {
+                    exit_with_error("--surface-file requires a path argument", None);
+                }
+            }
+            "--surface" => {
+                i += 1;
+                if i < args.len() {
+                    surface_name = Some(args[i].clone());
+                } else {
+                    exit_with_error("--surface requires a name argument", None);
+                }
+            }
+            "--views-root" => {
+                i += 1;
+                if i < args.len() {
+                    views_root = Some(args[i].clone());
+                } else {
+                    exit_with_error("--views-root requires a directory argument", None);
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            p if !p.starts_with('-') => {
+                project_path = p.to_string();
+            }
+            _ => {
+                exit_with_error(format!("unknown option: {}", args[i]), None);
+            }
+        }
+        i += 1;
     }
 
-    #[test]
-    fn predecessor_live_preview_flags_are_not_production_aliases() {
-        for flag in ["--surface", "--surface-file", "--views-root", "--mock"] {
-            assert!(parse_options(&args(&[flag, "ignored"])).is_err());
-        }
-        assert!(parse_options(&args(&["--presentation"])).is_err());
-        assert!(
-            parse_options(&args(&[
-                "--presentation",
-                "config:test/terminal",
-                "--presentation",
-                "config:test/other"
-            ]))
-            .is_err()
+    // No hardcoded default surface. The surface is supplied by the caller
+    // (`--surface` / `--surface-file`) or by the launching client's config.
+    // With neither, show an empty surface — never fabricate one or crash.
+    if surface_name.is_none() && surface_file.is_none() {
+        emit_info(
+            "no surface specified (--surface / --surface-file, or client config); showing an empty surface",
         );
     }
+
+    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+        exit_with_error(format!("failed to create terminal runtime: {error}"), None)
+    });
+
+    rt.block_on(async {
+        // Load surface
+        let surface_opts = ryeos_client_base::surface::SurfaceLoadOptions {
+            explicit_file: surface_file.map(std::path::PathBuf::from),
+            surface_name: None,
+        };
+
+        // Non-fatal resolution diagnostics (a view that failed to resolve, an
+        // unsupported field) are collected here and handed to the TUI, which
+        // shows them as notices — stderr scrolls off above the alternate screen.
+        let mut diagnostics: Vec<String> = Vec::new();
+
+        // The connection that resolves the surface is handed on to the app —
+        // discovery and audience settle once, and every later call reuses the
+        // same kept-alive client.
+        let mut daemon_client: Option<transport::daemon::DaemonClient> = None;
+
+        // If --surface was given, resolve through daemon.
+        // --surface always means daemon resolution, not local preview.
+        let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
+            match transport::daemon::DaemonClient::try_connect().await {
+                Ok(client) => {
+                    let ref_str = surface_name.as_deref().unwrap();
+                    if let Err(e) = client.mint_ui_session(ref_str, Some(&project_path)).await {
+                        exit_with_error(format!("failed to initialize UI session: {e}"),
+                            None,
+                        );
+                    }
+                    let resolved = client.current_ui_session().await.and_then(|session| {
+                        let mut matches = session.binding_attachments.into_iter().filter(|attachment| {
+                            attachment.binding_attachment_id == session.surface_attachment_id
+                        });
+                        let attachment = matches.next().ok_or_else(|| {
+                            transport::daemon::ClientError::UiBindingRequest(
+                                "UI session omitted its authored surface attachment".into(),
+                            )
+                        })?;
+                        if matches.next().is_some() {
+                            return Err(transport::daemon::ClientError::UiBindingRequest(
+                                "UI session duplicated its authored surface attachment".into(),
+                            ));
+                        }
+                        Ok(attachment.effective_surface)
+                    });
+                    daemon_client = Some(client);
+                    match resolved {
+                        Ok(value) => {
+                            // Views arrive embedded by the daemon
+                            // (`composed_value.views`, keyed by ref) — no
+                            // per-view round-trips here. A view that failed
+                            // to resolve server-side arrives as a degraded
+                            // entry the pane renders as a placeholder
+                            // carrying the reason; the daemon also reports
+                            // each failure as a warn diagnostic, which
+                            // `from_daemon` folds into the surface
+                            // diagnostics surfaced as notices below.
+                            match ryeos_client_base::surface::LoadedSurface::from_daemon(
+                                ref_str, value,
+                            ) {
+                                Ok(surface) => surface,
+                                Err(diag) => {
+                                    exit_with_error(format!(
+                                            "invalid effective surface '{}': {}",
+                                            ref_str,
+                                            surface_diagnostic_message(&diag)
+                                        ),
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Explicit surface request that fails — fail closed.
+                            exit_with_error(format!("failed to resolve surface '{}': {}", ref_str, e),
+                                Some("use --surface-file <path> for local preview"),
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    let ref_str = surface_name.as_deref().unwrap();
+                    exit_with_error(format!(
+                            "failed to resolve surface '{}': daemon not available",
+                            ref_str
+                        ),
+                        Some("start ryeosd, or use --surface-file <path> for local preview"),
+                    );
+                }
+            }
+        } else {
+            // `--surface-file`: the SURFACE is an untrusted local file. Its
+            // views come from `--views-root` first (read straight off disk —
+            // the content-iteration path: edit a view in the repo, relaunch,
+            // see it, no republish), then from the trusted daemon for
+            // whatever the root doesn't carry. Without a daemon, the layout
+            // still renders; unresolved panes show the missing-binding
+            // placeholder.
+            let mut loaded = ryeos_client_base::surface::load_surface(&surface_opts);
+            let spec_value = serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
+            let mut view_refs: Vec<String> = Vec::new();
+            collect_view_refs(&spec_value, &mut view_refs);
+            view_refs.sort();
+            view_refs.dedup();
+            let mut views = serde_json::Map::new();
+            if let Some(root) = &views_root {
+                // `view:<path>` → `<root>/<path>.yaml`. The signed header
+                // line is a YAML comment, so files parse as-is. Misses fall
+                // through to daemon resolution below.
+                view_refs.retain(|view_ref| {
+                    let rel = view_ref.strip_prefix("view:").unwrap_or(view_ref);
+                    let path = std::path::Path::new(root).join(format!("{rel}.yaml"));
+                    match std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|text| serde_yaml::from_str::<serde_json::Value>(&text).ok())
+                    {
+                        Some(value) => {
+                            views.insert(view_ref.clone(), value);
+                            false
+                        }
+                        None => true,
+                    }
+                });
+            }
+            match transport::daemon::DaemonClient::try_connect().await {
+                Ok(client) => {
+                    let session_surface_ref = loaded
+                        .requested_ref()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| loaded.spec().name.clone());
+                    match client
+                        .mint_ui_session(&session_surface_ref, Some(&project_path))
+                        .await
+                    {
+                        Ok(()) => {
+                            let admitted_views = client.current_ui_session().await.and_then(|session| {
+                                let mut matches = session
+                                    .binding_attachments
+                                    .into_iter()
+                                    .filter(|attachment| {
+                                        attachment.binding_attachment_id
+                                            == session.surface_attachment_id
+                                    });
+                                let attachment = matches.next().ok_or_else(|| {
+                                    transport::daemon::ClientError::UiBindingRequest(
+                                        "preview session omitted its authored surface attachment"
+                                            .into(),
+                                    )
+                                })?;
+                                if matches.next().is_some() {
+                                    return Err(
+                                        transport::daemon::ClientError::UiBindingRequest(
+                                            "preview session duplicated its authored surface attachment"
+                                                .into(),
+                                        ),
+                                    );
+                                }
+                                Ok(attachment
+                                    .effective_surface
+                                    .get("views")
+                                    .and_then(serde_json::Value::as_object)
+                                    .cloned()
+                                    .unwrap_or_default())
+                            });
+                            let admitted_views = match admitted_views {
+                                Ok(views) => views,
+                                Err(e) => {
+                                    diagnostics.push(format!(
+                                        "preview binding unavailable: {e}"
+                                    ));
+                                    serde_json::Map::new()
+                                }
+                            };
+                            for view_ref in view_refs {
+                                match admitted_views.get(&view_ref).cloned() {
+                                    Some(binding) => {
+                                        views.insert(view_ref, binding);
+                                    }
+                                    None => diagnostics.push(format!(
+                                        "view {view_ref} unavailable in admitted preview binding"
+                                    )),
+                                }
+                            }
+                            daemon_client = Some(client);
+                        }
+                        Err(e) => diagnostics.push(format!("UI session unavailable: {e}")),
+                    }
+                }
+                Err(_) => {
+                    emit_warning("no daemon — local preview renders only views the views-root carries",
+                    );
+                }
+            }
+            loaded.set_views(serde_json::Value::Object(views));
+            loaded
+        };
+
+        // Surface diagnostics → the same in-TUI notice channel (errors/warnings
+        // that don't abort the load; pure info stays on stderr as it's benign).
+        for diag in loaded.all_diagnostics() {
+            match diag {
+                ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message } => {
+                    diagnostics.push(format!("surface: {message}"));
+                }
+                ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField {
+                    field,
+                    message,
+                } => {
+                    diagnostics.push(format!("unsupported field '{field}': {message}"));
+                }
+                ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
+                    emit_info(message);
+                }
+            }
+        }
+
+        let result = app::run(&project_path, loaded, diagnostics, daemon_client).await;
+
+        if let Err(e) = result {
+            exit_with_error(format!("terminal view set failed: {e}"), None);
+        }
+    });
 }
 
 #[cfg(test)]

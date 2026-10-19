@@ -44,9 +44,7 @@
 </script>
 
 {#if model.type === "tile"}
-  {#key model.instance_key}
-    <TileFrame model={model} />
-  {/key}
+  <TileFrame model={model} />
 {:else}
   <div bind:this={region} class="split" data-axis={model.axis} style={`--split:${model.ratio}fr;--split-rest:${1 - model.ratio}fr`}>
     <LayoutNode model={model.first} {guard} {minRatio} {maxRatio} path={[...path, "first"]} />

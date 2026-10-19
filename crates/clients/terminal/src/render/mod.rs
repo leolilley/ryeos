@@ -10,12 +10,12 @@
 //! colors); `text` is width-aware string shaping; `primitives` are raw
 //! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
 //! per widget primitive (incl. the generic `scene` renderer);
-//! `dialog`/`input` are compositions. This file orchestrates: layout
+//! `overlay`/`input` are compositions. This file orchestrates: layout
 //! traversal, the empty-center backdrop, view dispatch.
 
 mod chrome;
-mod dialog;
 mod input;
+mod overlay;
 mod primitives;
 mod text;
 mod theme;
@@ -62,7 +62,7 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    // There is no "home" mode. Bars, ordinary docks and dialogs render in
+    // There is no "home" mode. Bars, ordinary docks and overlays render in
     // every state. A maximized tile is the one deliberate exception: the
     // shared presentation layout projects it as the sole root and all clients
     // give it the complete body rather than retaining supporting docks.
@@ -81,7 +81,7 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
     let maximized = matches!(
-        vm.view_set.as_ref().and_then(|set| set.root.as_ref()),
+        vm.view_set.root.as_ref(),
         Some(RyeOsLayoutNodeVm::Tile {
             maximized: true,
             ..
@@ -92,15 +92,15 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     } else {
         chrome::draw_docks(&mut surface, body, vm)
     };
-    let draw_backdrop_underlay = vm.view_set.as_ref().is_some_and(|set| set.root.is_some())
+    let draw_backdrop_underlay = vm.view_set.root.is_some()
         && vm.session.ambient.show_background
         && vm
             .session
             .ambient
             .opacity
             .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
-    if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
-        if draw_backdrop_underlay && let Some(backdrop) = &vm.backdrop {
+    if let Some(root) = &vm.view_set.root {
+        if draw_backdrop_underlay && let Some(backdrop) = &vm.view_set.backdrop {
             widgets::scene::draw_scene(&mut surface, center, backdrop);
         }
         let border = theme::border_for(&vm.presentation.chrome.border);
@@ -112,16 +112,16 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
             vm.now_ms,
             draw_backdrop_underlay,
         );
-    } else if let Some(backdrop) = &vm.backdrop {
+    } else if let Some(backdrop) = &vm.view_set.backdrop {
         // Empty center: the backdrop is content — the ONE generic scene
         // renderer draws it (particles twinkle by generation). No
         // per-art code, no background enum.
         widgets::scene::draw_scene(&mut surface, center, backdrop);
     }
 
-    if let Some(active_dialog) = vm.dialogs.first() {
+    if let Some(active_overlay) = vm.overlays.first() {
         primitives::dim_surface(&mut surface);
-        dialog::draw_dialog(&mut surface, active_dialog, vm.now_ms);
+        overlay::draw_overlay(&mut surface, active_overlay);
     }
 
     surface
@@ -266,28 +266,7 @@ fn split_rect(rect: Rect, axis: RyeOsSplitAxisVm, ratio: f32) -> (Rect, Option<R
     }
 }
 
-fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
-    let status = match view {
-        RyeOsViewVm::Rows { source_status, .. }
-        | RyeOsViewVm::Timeline { source_status, .. }
-        | RyeOsViewVm::Table { source_status, .. }
-        | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
-        _ => None,
-    };
-    if let Some(status) = status {
-        if rect.h == 0 {
-            return;
-        }
-        let prefix = if status.stale {
-            "Last observation (stale) · "
-        } else {
-            ""
-        };
-        let message = format!("{prefix}{}: {}", status.state, status.message);
-        draw_lines(surface, Rect { h: 1, ..rect }, &[message]);
-        rect.y += 1;
-        rect.h -= 1;
-    }
+fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
     if let RyeOsViewVm::Field { field } = view {
         widgets::field::draw_field(surface, rect, field);
         return;
@@ -333,21 +312,8 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         widgets::sections::draw_sections(surface, rect, sections, now_ms);
         return;
     }
-    if let RyeOsViewVm::Table {
-        columns,
-        rows,
-        coverage,
-        ..
-    } = view
-    {
-        widgets::table::draw_table_with_coverage(
-            surface,
-            rect,
-            columns,
-            rows,
-            coverage.as_ref(),
-            now_ms,
-        );
+    if let RyeOsViewVm::Table { columns, rows, .. } = view {
+        widgets::table::draw_table(surface, rect, columns, rows, now_ms);
         return;
     }
     if let RyeOsViewVm::Text {
@@ -396,14 +362,7 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         } => {
             lines.push(title.clone());
             lines.push(format!("{input}: {}", facets.join(", ")));
-            if !actions.is_empty() {
-                lines.push("Ctrl+K: choose a source for this subject".into());
-                lines.extend(
-                    actions
-                        .iter()
-                        .map(|action| format!("  in launcher · {}", action.label)),
-                );
-            }
+            lines.extend(actions.iter().map(|action| format!("• {}", action.label)));
         }
     }
     draw_lines(surface, rect, &lines);
@@ -504,120 +463,37 @@ mod tests {
         out
     }
 
-    #[test]
-    fn unresolved_subject_labels_actions_as_launcher_only() {
-        let mut surface = TextSurface::new(80, 8);
-        let view = RyeOsViewVm::RequiredSubject {
-            title: "Subject required".into(),
-            input: "thread".into(),
-            facets: vec!["thread_id".into()],
-            actions: vec![ryeos_client_base::ui::view_model::RyeOsTileIntentVm {
-                label: "Use selection in Development".into(),
-                title: "Exact selected subject".into(),
-                intent: ryeos_client_base::ui::RyeOsUiIntent::OpenLauncher,
-            }],
-        };
-        draw_view(&mut surface, Rect::new(0, 0, 80, 8), &view, 0);
-        let text = surface_text(&surface);
-        assert!(text.contains("Ctrl+K: choose a source for this subject"));
-        assert!(text.contains("in launcher · Use selection in Development"));
-    }
-
-    #[test]
-    fn native_top_bar_shows_projected_view_sets_and_keeps_active_set_on_narrow_widths() {
-        let mut vm = build_view_model(&empty_center_core());
-        let mut development = vm.presentation.chrome.top_bar.tabs[0].clone();
-        development.number = 1;
-        development.title = "Development".into();
-        development.active = false;
-        let mut review = development.clone();
-        review.view_set_id = ryeos_client_base::ids::ViewSetId::new(999);
-        review.number = 2;
-        review.title = "Review".into();
-        review.active = true;
-        vm.presentation.chrome.top_bar.tabs = vec![development, review];
-
-        let mut wide = TextSurface::new(90, 1);
-        chrome::draw_top_bar(&mut wide, &vm);
-        let text = surface_text(&wide);
-        assert!(text.contains("02 Review"));
-        assert!(text.contains("01 Development"));
-        assert!(text.find("01 Development") < text.find("02 Review"));
-        assert!(
-            wide.cells
-                .iter()
-                .any(|cell| cell.rune == 'R' && cell.bg == theme::ACCENT)
-        );
-
-        for width in [1, 4, 9, 20] {
-            let mut narrow = TextSurface::new(width, 1);
-            chrome::draw_top_bar(&mut narrow, &vm);
-            assert_eq!(narrow.cells.len(), width);
-            if width == 20 {
-                assert!(
-                    surface_text(&narrow).contains("02"),
-                    "active tab remains visible"
-                );
-            }
-        }
-        vm.chrome.health_label = "H".repeat(200);
-        let mut long_health = TextSurface::new(40, 1);
-        chrome::draw_top_bar(&mut long_health, &vm);
-        assert!(surface_text(&long_health).contains("02 Review"));
-        assert!(surface_text(&long_health).contains('…'));
-    }
-
-    #[test]
-    fn status_bar_reserves_badge_and_complete_key_hint() {
-        let mut vm = build_view_model(&empty_center_core());
-        vm.presentation.chrome.status_bar.key_hint.clear();
-        vm.presentation.chrome.status_bar.segments =
-            vec![ryeos_client_base::ui::view_model::RyeOsStatusSegmentVm {
-                id: "long".into(),
-                label: None,
-                value: "X".repeat(100),
-                tone: ryeos_client_base::ui::view_model::RyeOsTone::Neutral,
-                grow: false,
-            }];
-        let mut long = TextSurface::new(40, 1);
-        chrome::draw_status_bar(&mut long, &vm);
-        assert_eq!(long.get(32, 0).rune, '…');
-        assert!(surface_text(&long).contains(" RyeOS "));
-
-        vm.presentation.chrome.status_bar.segments.clear();
-        vm.presentation.chrome.status_bar.key_hint = "KEY".into();
-        let mut hint = TextSurface::new(20, 1);
-        chrome::draw_status_bar(&mut hint, &vm);
-        assert!(surface_text(&hint).contains("KEY"));
-        assert!(surface_text(&hint).contains(" RyeOS "));
-    }
-
-    /// An admitted Surface declares the backdrop; a separate Shared Config
-    /// owns the bottom input. Neither tab geometry nor focus grants a binding.
+    /// A surface whose empty center declares a backdrop scene and a
+    /// bottom input slot — the post-cut shape (no home mode).
     fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
             session_id: "S-backdrop".to_string(),
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
-            root_attachment_id: "shared-attachment".into(),
+            surface_attachment_id: "backdrop-attachment".into(),
             binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
                 binding_attachment_id: "backdrop-attachment".into(),
                 binding_generation: 1,
                 binding_digest: "backdrop-binding".into(),
-                root_ref: "surface:ryeos/ryeos/base".to_string(),
-                root_generation: "backdrop-generation".into(),
+                surface_ref: "surface:ryeos/ryeos/base".to_string(),
+                surface_generation: "backdrop-generation".into(),
                 project_path: None,
-                subject: ryeos_client_base::ui::UiBindingSubject::Projectless,
                 posture: Default::default(),
                 binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
                     max_request_bytes: 4096,
                     max_input_bytes: 1024,
-max_seat_append_bytes:64*1024,
-},
-                presentation: ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(json!({
+                },
+                effective_surface: json!({
                 "name": "ryeos-base",
                 "version": "1.0.0",
                 "backdrop": "view:test/backdrop",
+                "slots": {
+                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 }
+                },
                 "views": {
+                    "view:ryeos/input": {
+                        "widget": "text",
+                        "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+                    },
                     "view:test/backdrop": {
                         "widget": "scene",
                         "body": { "objects": [
@@ -628,117 +504,19 @@ max_seat_append_bytes:64*1024,
                         ] }
                     }
                 }
-                })).unwrap(),
+                }),
             }],
             ..Default::default()
         };
-        let mut session = session;
-        let surface_binding = ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
-            binding_attachment_id: "backdrop-attachment".into(),
-            binding_generation: 1,
-            binding_digest: "backdrop-binding".into(),
-        };
-        let shared = serde_json::from_value(json!({
-            "binding_attachment_id":"shared-attachment", "binding_generation":2,
-            "binding_digest":"shared-binding", "root_ref":"config:test/presentation",
-            "root_generation":"shared-generation", "project_path":null, "subject":{"kind":"projectless"},
-            "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
-            "presentation":{"definition":{"kind":"shared_presentation","config":{
-                "category":"ui","shared_presentation":{"schema":1,"title":"Fixture","launcher":"launch",
-                    "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launch"}],
-                    "docks":{"bottom":{"content":"view:ryeos/input","open":true,"size":7}},
-                    "capabilities":{"sources":[],"affordances":[]}}
-            }}, "views":{
-                "view:test/launch":{"widget":"text","body":"Fixture only"},
-                "view:ryeos/input":{"widget":"text","input":{"id":"line","placeholder":"Ask or run a command","submit":"route"}}
-            }}
-        })).expect("actual Config descriptor fixture");
-        session.binding_attachments.push(shared);
-        let presentation_id = "11111111-1111-4111-8111-111111111111";
-        let surface_instance_id = "22222222-2222-4222-8222-222222222222";
-        let surface = session.binding_attachments[0]
-            .presentation
-            .definition
-            .surface()
-            .unwrap();
-        let mount_manifest =
-            ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
-                ryeos_client_base::ids::PresentationId::try_new(presentation_id).unwrap(),
-                ryeos_client_base::ids::SurfaceInstanceId::try_new(surface_instance_id).unwrap(),
-                1,
-                surface
-                    .to_mount_seeds()
-                    .unwrap()
-                    .into_iter()
-                    .map(|seed| (seed, surface_binding.clone()))
-                    .collect(),
-                surface
-                    .to_mount_seeds()
-                    .unwrap()
-                    .first()
-                    .map(|seed| seed.id.as_str()),
-            )
-            .unwrap();
-        session.presentations = vec![ryeos_client_base::ui::binding::UiPresentationMembership {
-            presentation_id: presentation_id.into(),
-            next_mount_id: mount_manifest.next_mount_id,
-            initialization_digest: "a".repeat(64),
-            root_binding: ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
-                binding_attachment_id: "shared-attachment".into(),
-                binding_generation: 2,
-                binding_digest: "shared-binding".into(),
-            },
-            thread_id: Some("fixture-seat".into()),
-            chain_root_id: Some("fixture-chain".into()),
-            surfaces: vec![ryeos_client_base::ui::binding::UiSurfaceMembership {
-                saved_surface: None,
-                surface_instance_id: surface_instance_id.into(),
-                ordinal: 1,
-                title: "ryeos-base".into(),
-                binding: surface_binding,
-                mount_manifest,
-            }],
-        }];
-        let membership = &mut session.presentations[0];
-        let initialization = ryeos_client_base::ui::presentation_initialization::UiPresentationInitialization {
-            schema: 2,
-            selection: ryeos_client_base::ui::presentation_initialization::UiPresentationInitialSelection::ConfiguredDefaults,
-            presentation_id: presentation_id.into(),
-            creation_request_id: "33333333-3333-4333-8333-333333333333".into(),
-            root_binding: membership.root_binding.clone(),
-            next_mount_id: membership.next_mount_id,
-            surfaces: membership.surfaces.clone(),
-            binding_attachments: session.binding_attachments.clone(),
-        };
-        initialization
-            .validate()
-            .expect("exact authored fixture initialization");
-        membership.initialization_digest = initialization.digest().unwrap();
-        let mut core = RyeOsCore::new(session, presentation_id, BrowserViewport::default(), 0);
-        core.replay_seat_events([ryeos_client_base::ui::seat::SeatEvent {
-            producer_engine_seq: None,
-            seq: 0,
-            kind: ryeos_client_base::ui::seat::SeatEventKind::PresentationInitialized(
-                ryeos_client_base::ui::presentation_initialization::UiPresentationInitializationRecord {
-                    operation_id: initialization.creation_request_id.clone(),
-                    initialization,
-                },
-            ),
-        }]);
-        core.require_replayed_initialization()
-            .expect("fixture initialization replay");
-        core.dispatch(ryeos_client_base::ui::RyeOsEvent::Ui {
-            event: ryeos_client_base::ui::RyeOsUiEvent::FocusInput,
-        });
-        core
+        RyeOsCore::new(session, BrowserViewport::default(), 0)
     }
 
     #[test]
     fn empty_center_draws_backdrop_scene_and_bottom_input() {
         let vm = build_view_model(&empty_center_core());
         // The backdrop scene resolved on an empty center.
-        assert!(vm.view_set.as_ref().unwrap().center_is_empty);
-        assert!(vm.backdrop.is_some());
+        assert!(vm.view_set.center_is_empty);
+        assert!(vm.view_set.backdrop.is_some());
 
         let rendered = surface_text(&build_surface(&vm, 96, 28));
         // The backdrop scene draws its text objects + particles.
@@ -768,7 +546,7 @@ max_seat_append_bytes:64*1024,
         // The bug's regression: on an empty center, the bottom slot is the
         // focused/active input instance carrying the prompt VM.
         let vm = build_view_model(&empty_center_core());
-        let bottom = vm.docks.bottom.expect("shared bottom input present");
+        let bottom = vm.view_set.docks.bottom.expect("bottom input slot present");
         let input = bottom.input.expect("bottom slot declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
     }
