@@ -14,7 +14,7 @@
   },
   "facade": {
     "path": "facade/ryeos_lease_facade.py",
-    "sha256": "2197e7cbcfcd5e33ea2b56e8a4fd061cb4c912f333fab97c20ec511e4b015ef6",
+    "sha256": "2a15ddfced73703774fa4f09eb95be545688caeabb13ec231b08b5d65a69e103",
     "app": "ryeos-lease-facade",
     "lease_app": "ryeos-lease-sandboxes",
     "endpoint_label": "ryeos-lease",

@@ -60,7 +60,7 @@ class FakeStdin:
 
 
 class FakeWriteProcess(FakeProcess):
-    """An exec running a fixed `base64 -d >[>] "$1"` script fed over stdin."""
+    """An exec running a fixed `cat >[>] "$1"` script fed over stdin."""
 
     def __init__(self, sandbox, argv):
         super().__init__(0)
@@ -68,14 +68,13 @@ class FakeWriteProcess(FakeProcess):
         self.stdin = FakeStdin(self)
 
     def finish(self):
-        text = ''.join(self.chunks)
-        self.sandbox.stdins.append((self.argv, text))
+        data = b''.join(self.chunks)
+        self.sandbox.stdins.append((self.argv, data))
         if 'sh' in self.sandbox.fail_exec:
             self.code = 1
             return
-        data = base64.b64decode(text, validate=True)
         path = self.argv[4]
-        old = self.sandbox.files.get(path, b'') if self.argv[2].startswith('base64 -d >>') else b''
+        old = self.sandbox.files.get(path, b'') if self.argv[2].startswith('cat >>') else b''
         self.sandbox.files[path] = old + data
 
 
@@ -117,7 +116,7 @@ class FakeSandbox:
         code = 0
         out = ''
         if argv[:2] == ('sh', '-c'):
-            assert argv[2] in ('base64 -d > "$1"', 'base64 -d >> "$1"') and argv[3] == 'sh' and len(argv) == 5
+            assert argv[2] in ('cat > "$1"', 'cat >> "$1"') and argv[3] == 'sh' and len(argv) == 5
             return FakeWriteProcess(self, argv)
         if argv[0] in self.fail_exec:
             code = 1
@@ -733,7 +732,7 @@ class FacadeTest(unittest.TestCase):
         self.assertEqual(sandbox.files, {'/ryeos/guest/entrypoint': data})
         self.assertEqual(sandbox.execs, [
             ('mkdir', '/ryeos/upload.claimed'),
-            ('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/guest/entrypoint'), ('chmod', '0755', '/ryeos/guest/entrypoint'),
+            ('sh', '-c', 'cat > "$1"', 'sh', '/ryeos/guest/entrypoint'), ('chmod', '0755', '/ryeos/guest/entrypoint'),
             ('mkdir', '/ryeos/upload.done')])
         self.assertEqual([t.get('ryeos_upload') for t in sandbox.tag_history[1:]], ['claimed', body['sha256']])
         self.refused(self.facade.handle_upload, body, 'upload_already_claimed')
@@ -788,10 +787,10 @@ class FacadeTest(unittest.TestCase):
         self.assertEqual(self.facade.handle_run_once({'sandbox_id': sid, 'stdin_b64': b64(b'in')})[0], 200)
         writes = [(argv, text) for argv, text in sandbox.stdins]
         self.assertEqual(writes, [
-            (('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/guest/entrypoint'), b64(b'guest')),
-            (('sh', '-c', 'base64 -d >> "$1"', 'sh', '/ryeos/stage/a'), b64(b'abc')),
-            (('sh', '-c', 'base64 -d >> "$1"', 'sh', '/ryeos/stage/a'), b64(b'\x00\xffd')),
-            (('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/run.stdin'), b64(b'in')),
+            (('sh', '-c', 'cat > "$1"', 'sh', '/ryeos/guest/entrypoint'), b'guest'),
+            (('sh', '-c', 'cat >> "$1"', 'sh', '/ryeos/stage/a'), b'abc'),
+            (('sh', '-c', 'cat >> "$1"', 'sh', '/ryeos/stage/a'), b'\x00\xffd'),
+            (('sh', '-c', 'cat > "$1"', 'sh', '/ryeos/run.stdin'), b'in'),
         ])
         self.assertEqual(sandbox.files['/ryeos/stage/a'], b'abc\x00\xffd')
 
@@ -817,7 +816,7 @@ class FacadeTest(unittest.TestCase):
         self.assertEqual(sandbox.files['/ryeos/run.stdin'], stdin)
         self.assertEqual(sandbox.execs[-5:], [
             ('test', '-d', '/ryeos/upload.done'), ('test', '-d', '/ryeos/stage-claim'), ('mkdir', '/ryeos/run.claimed'),
-            ('sh', '-c', 'base64 -d > "$1"', 'sh', '/ryeos/run.stdin'), ('mkdir', '/ryeos/run.go')])
+            ('sh', '-c', 'cat > "$1"', 'sh', '/ryeos/run.stdin'), ('mkdir', '/ryeos/run.go')])
         self.assertEqual(sandbox.tags['ryeos_run'], run['stdin_sha256'])
         self.refused(self.facade.handle_run_once, {'sandbox_id': out['sandbox_id'], 'stdin_b64': ''}, 'run_once_already_claimed')
         sandbox.dirs.discard('/ryeos/run.claimed')

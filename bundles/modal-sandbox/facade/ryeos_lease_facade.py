@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T04:12:31Z:ec8a1f73377cf3f5ff07d5b4940f53ace6a2501848d7c21119cc1a9d0e13bafa:1SmyGRewU089WQyOseEXgIp+aWM7YQrqEOlXedOOxssdpMCaFASUic+usXyCyWlL1H/Sh1178GT6NkLt/LKDDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T04:40:31Z:3a248e271fa5e619c82595a360b0adcc8e2c6bf0c3d12cbc343a4538a02b808d:m+QwCsEB+uGFeV5N+W63uoemNyz8izdjoosWHGmH5Dh1kgDimimlokgymcYn+XyL2YIX5tXUrbkQ9zhpNTSjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """RyeOS Modal lease facade: fixed HTTP routes over Modal sandboxes.
 
 One ``asgi_app`` behind Modal proxy auth serves eight fixed POST paths. The only
@@ -372,20 +372,19 @@ def _read(sandbox, *argv: str) -> tuple[int, str]:
 
 
 # Fixed guest scripts: the target path is only ever a positional argument, and
-# the bytes arrive base64 encoded over stdin because the sandbox file API is
-# refused by Modal.
-_WRITE_SCRIPT = 'base64 -d > "$1"'
-_APPEND_SCRIPT = 'base64 -d >> "$1"'
-_STDIN_PIECE_CHARS = 4 * 1024 * 1024
+# the bytes travel raw over exec stdin because Modal refuses the sandbox file
+# API.
+_WRITE_SCRIPT = 'cat > "$1"'
+_APPEND_SCRIPT = 'cat >> "$1"'
+_STDIN_PIECE_BYTES = 4 * 1024 * 1024
 
 
 def _write(sandbox, path: str, data: bytes, append: bool = False) -> None:
     """Write (or append) bytes to a fixed guest path over exec stdin."""
     script = _APPEND_SCRIPT if append else _WRITE_SCRIPT
     process = sandbox.exec('sh', '-c', script, 'sh', path)
-    text = base64.b64encode(data).decode('ascii')
-    for start in range(0, len(text), _STDIN_PIECE_CHARS):
-        process.stdin.write(text[start:start + _STDIN_PIECE_CHARS])
+    for start in range(0, len(data), _STDIN_PIECE_BYTES):
+        process.stdin.write(data[start:start + _STDIN_PIECE_BYTES])
         process.stdin.drain()
     process.stdin.write_eof()
     process.stdin.drain()
