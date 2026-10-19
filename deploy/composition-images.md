@@ -38,6 +38,16 @@ shipped profiles and judges them against synthetic host evidence; it is the
 authority for host-class expectations, and this document deliberately repeats
 none of them.
 
+## Root drop on a hosted container
+
+The entrypoint hands `/data` to the node account and re-executes itself as
+that account with cleared groups, cleared inheritable capabilities and
+no_new_privs. It also clears the capability bounding set when the host
+allows it. Some hosted sandboxes refuse bounding-set changes; there the
+entrypoint logs `host refuses capability bounding-set changes` and continues
+with the other guarantees, which already leave the daemon with no
+capabilities and no way to regain them.
+
 ## Operator window on a hosted container
 
 Verbs such as `ryeos node external-execution compose` need the node stopped,
