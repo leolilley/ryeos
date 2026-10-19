@@ -21,3 +21,6 @@ base64 = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
+
+[lints]
+workspace = true

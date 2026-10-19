@@ -30,3 +30,6 @@ tokio = { workspace = true }
 rmp-serde = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

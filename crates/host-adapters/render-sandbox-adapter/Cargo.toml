@@ -29,3 +29,6 @@ ryeos-external-execution = { path = "../../engine/ryeos-external-execution" }
 [[bin]]
 name = "ryeos-render-sandbox-lifecycle-adapter"
 path = "src/main.rs"
+
+[lints]
+workspace = true

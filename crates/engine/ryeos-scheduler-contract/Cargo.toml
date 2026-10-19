@@ -14,3 +14,6 @@ ryeos-engine = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

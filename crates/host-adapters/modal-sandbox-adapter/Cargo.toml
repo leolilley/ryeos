@@ -23,3 +23,6 @@ zeroize = "1"
 [[bin]]
 name = "ryeos-modal-sandbox-lifecycle-adapter"
 path = "src/main.rs"
+
+[lints]
+workspace = true

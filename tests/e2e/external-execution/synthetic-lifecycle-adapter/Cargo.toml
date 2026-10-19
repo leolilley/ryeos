@@ -82,3 +82,6 @@ path = "../../../../crates/tools/external-candidate-connector/src/main.rs"
 [[bin]]
 name = "ryeos-synthetic-codex-external-configuration"
 path = "../../../../crates/tools/codex-external-configuration/src/main.rs"
+
+[lints]
+workspace = true

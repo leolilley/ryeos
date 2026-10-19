@@ -47,3 +47,6 @@ ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-provider-contract = { workspace = true }
 ryeos-scheduler = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -32,3 +32,6 @@ tempfile = { workspace = true, optional = true }
 tempfile = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true
