@@ -678,8 +678,10 @@ mod tests {
         assert!(retry.reused_existing);
         assert_eq!(retry.attestation_hash, first.attestation_hash);
 
-        let mut narrowed = ObjectClosureLimits::default();
-        narrowed.max_object_bytes = 1;
+        let narrowed = ObjectClosureLimits {
+            max_object_bytes: 1,
+            ..ObjectClosureLimits::default()
+        };
         let limit_error = publish_admission_attestation(
             &db,
             &build("2026-08-27T00:00:01Z", json!({"operation_id":"op"})),

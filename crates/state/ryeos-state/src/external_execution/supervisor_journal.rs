@@ -1592,7 +1592,7 @@ mod tests {
             )
             .unwrap(),
             bootstrap_capability: STANDARD.encode([12_u8; 32]),
-            attachment_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap()
+            attachment_deadline_ms: lillux::time::timestamp_millis()
                 + 60_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
@@ -1614,7 +1614,7 @@ mod tests {
         bootstrap: &ExternalSupervisorBootstrap,
         supervisor: &lillux::crypto::SigningKey,
     ) -> ExecutionChannelBinding {
-        let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let issued_at_ms = lillux::time::timestamp_millis();
         ExecutionChannelBinding {
             schema: crate::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:

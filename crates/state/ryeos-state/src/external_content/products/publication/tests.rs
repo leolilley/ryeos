@@ -514,8 +514,10 @@ fn identical_bytes_keep_distinct_execution_witnesses_and_integrity_is_not_missin
         .unwrap(),
         ProductWitnessLookup::Missing
     );
-    let mut too_small = ObjectClosureLimits::default();
-    too_small.max_blob_bytes = 1;
+    let too_small = ObjectClosureLimits {
+        max_blob_bytes: 1,
+        ..ObjectClosureLimits::default()
+    };
     assert!(
         lookup_product_witness_guarded(
             &authority,
@@ -791,8 +793,10 @@ fn witness_body_is_bounded_by_product_and_current_node_limits_before_decode() {
         .sign_attestation(&signer, "2026-09-07T00:00:00Z".into())
         .unwrap();
 
-    let mut node_limited = ObjectClosureLimits::default();
-    node_limited.max_object_bytes = 1;
+    let node_limited = ObjectClosureLimits {
+        max_object_bytes: 1,
+        ..ObjectClosureLimits::default()
+    };
     let error = publish_product_witness(
         &authority,
         &coordinate,

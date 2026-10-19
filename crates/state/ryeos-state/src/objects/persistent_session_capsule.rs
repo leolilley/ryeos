@@ -1532,7 +1532,7 @@ mod tests {
             source: "policy/requirements.toml".into(),
             destination: "/etc/qualification/requirements.toml".into(),
         };
-        validate_session_runtime_configs(&[file.clone()]).unwrap();
+        validate_session_runtime_configs(std::slice::from_ref(&file)).unwrap();
         for destination in [
             "",
             "/",
@@ -1594,7 +1594,7 @@ mod tests {
             source: "admitted.conf".into(),
             destination: "runtime.conf".into(),
         };
-        validate_session_auxiliary_configs("baseline.conf", &[file.clone()]).unwrap();
+        validate_session_auxiliary_configs("baseline.conf", std::slice::from_ref(&file)).unwrap();
         for invalid in [
             "",
             ".",
@@ -1609,7 +1609,10 @@ mod tests {
             bad.destination = invalid.into();
             assert!(validate_session_auxiliary_configs("baseline.conf", &[bad]).is_err());
         }
-        assert!(validate_session_auxiliary_configs("runtime.conf", &[file.clone()]).is_err());
+        assert!(
+            validate_session_auxiliary_configs("runtime.conf", std::slice::from_ref(&file))
+                .is_err()
+        );
         assert!(
             validate_session_auxiliary_configs("baseline.conf", &[file.clone(), file.clone()])
                 .is_err()

@@ -1589,7 +1589,6 @@ impl SchedulerDb {
         match held.take_whole() {
             Ok(parts) => {
                 drop(parts);
-                drop(outbox_drain);
                 Ok(())
             }
             Err(held) => Err((
@@ -1651,7 +1650,6 @@ impl SchedulerDb {
                 ));
             }
         };
-        drop(outbox_drain);
         let SchedulerDbParts { inner, original } = parts;
         let owner = inner
             .into_inner()
@@ -2780,7 +2778,7 @@ impl SchedulerDb {
     /// this marker is set. A missing, duplicate, or non-boolean marker fails
     /// closed and routes startup through the explicit full replay path.
     pub fn fire_projection_is_current(&self) -> Result<bool> {
-        self.with_sql(|conn| fire_projection_is_current_conn(conn))
+        self.with_sql(fire_projection_is_current_conn)
     }
 
     /// Invalidate the fire projection before a destructive full replay.

@@ -106,7 +106,7 @@ impl Signer for TestSigner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Default for TestSigner {
     fn default() -> Self {
         Self::new()

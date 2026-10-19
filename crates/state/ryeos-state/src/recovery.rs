@@ -4942,7 +4942,7 @@ mod tests {
         // The temporary-name scratch bounds the longest name a State writer
         // can generate: maximal pid and sequence digits.
         let longest = format!(".secure.tmp.{}.{}.{}", "x".repeat(16), u32::MAX, u64::MAX);
-        assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
+        assert!((longest.len() as u64) < ACK_TEMP_NAME_SCRATCH_BYTES);
         // The joined-path term is the directory's own path plus the name.
         let joined = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
         assert!(

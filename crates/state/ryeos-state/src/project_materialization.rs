@@ -510,7 +510,7 @@ fn observe_materialized_tree(
             crate::project_sync::MAX_PROJECT_TREE_DEPTH,
         ),
         |_relative, _directory| Ok(false),
-        |relative, mut file| {
+        |relative, file| {
             if observed.len() % 256 == 0 {
                 tracing::debug!(
                     observed_files = observed.len(),

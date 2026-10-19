@@ -79,584 +79,6 @@ struct PartialMember {
     bytes: Vec<u8>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    fn authenticated(
-        binding: &ExecutionChannelBinding,
-        key: &SigningKey,
-        direction: ChannelDirection,
-        payload: ExecutionChannelPayload,
-    ) -> AuthenticatedExecutionFrame {
-        let frame = ExecutionFrame {
-            schema: 1,
-            binding_digest: binding.digest().unwrap(),
-            direction,
-            sequence: 1,
-            previous_frame_digest: None,
-            acknowledged_peer_sequence: 0,
-            payload,
-        };
-        let signed = SignedExecutionFrame::sign(frame, binding, key).unwrap();
-        let wire = lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap();
-        SignedExecutionFrame::decode_and_verify(wire.as_bytes(), binding, 50).unwrap()
-    }
-
-    fn base(cas: &lillux::CasStore) -> (String, ProjectSnapshot) {
-        let policy = ProjectSnapshotPolicy::new(
-            crate::project_sync::ProjectSyncScope::FullProject,
-            vec![],
-            vec![],
-            Default::default(),
-        )
-        .unwrap();
-        let file = ProjectFile {
-            blob_hash: cas.store_blob(b"reused-base-content").unwrap(),
-            size: b"reused-base-content".len() as u64,
-            normalized_mode: ProjectFile::REGULAR_MODE,
-        };
-        let tree = ProjectTree {
-            files: [(
-                "input.txt".to_owned(),
-                cas.store_object(&file.to_value()).unwrap(),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let snapshot = ProjectSnapshot {
-            project_tree_hash: cas.store_object(&tree.to_value()).unwrap(),
-            effective_policy_hash: cas.store_object(&policy.to_value()).unwrap(),
-            parent_hashes: vec![],
-            created_at: "2026-09-19T00:00:00Z".into(),
-            message: None,
-            source: "external-export-test".into(),
-        };
-        (cas.store_object(&snapshot.to_value()).unwrap(), snapshot)
-    }
-
-    #[test]
-    fn external_export_imports_existing_project_contract_without_publication() {
-        let root = tempfile::tempdir().unwrap();
-        // Store initialization acquires a CAS mutation guard internally.
-        // Prepare the independent store before holding the importing guard;
-        // never relax the non-reentrant production ownership rule for a test.
-        // A node holds one State at a time: the foreign store is established,
-        // its pinned authority (roots only, no SQL) kept, and it closes before
-        // the importing State opens.
-        let foreign_root = tempfile::tempdir().unwrap();
-        let foreign_authority = {
-            let foreign_db = crate::test_support::TestState::open(
-                foreign_root.path(),
-                Arc::new(crate::TrustStore::new()),
-            )
-            .unwrap();
-            let authority = foreign_db.pinned_authority().unwrap();
-            foreign_db.close().unwrap();
-            authority
-        };
-        let db =
-            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
-                .unwrap();
-        let authority = db.pinned_authority().unwrap();
-        let guard = authority.acquire_shared_guard().unwrap();
-        let cas = authority.cas_store().unwrap();
-        let (base_hash, mut candidate) = base(&cas);
-        let (mut binding, owner, supervisor) = super::super::tests::binding();
-        binding.base_snapshot_hash = base_hash.clone();
-        candidate.parent_hashes = vec![base_hash.clone()];
-        let large_blob = vec![0x5a; MAX_CHUNK_BYTES + 17];
-        let large_blob_hash = cas.store_blob(&large_blob).unwrap();
-        let empty_blob_hash = cas.store_blob(&[]).unwrap();
-        let large_file = ProjectFile {
-            blob_hash: large_blob_hash.clone(),
-            size: large_blob.len() as u64,
-            normalized_mode: ProjectFile::REGULAR_MODE,
-        };
-        let empty_file = ProjectFile {
-            blob_hash: empty_blob_hash.clone(),
-            size: 0,
-            normalized_mode: ProjectFile::REGULAR_MODE,
-        };
-        let candidate_tree = ProjectTree {
-            files: [
-                (
-                    "large.bin".to_owned(),
-                    cas.store_object(&large_file.to_value()).unwrap(),
-                ),
-                (
-                    "empty.bin".to_owned(),
-                    cas.store_object(&empty_file.to_value()).unwrap(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        candidate.project_tree_hash = cas.store_object(&candidate_tree.to_value()).unwrap();
-        let candidate_bytes = lillux::canonical_json(&candidate.to_value()).unwrap();
-        let candidate_hash = lillux::sha256_hex(candidate_bytes.as_bytes());
-        let output_blob = b"remote-only-output";
-        let output_blob_hash = cas.store_blob(output_blob).unwrap();
-        let output_manifest = crate::objects::ExternalContentManifestObject {
-            schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.into(),
-            kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
-            entries: vec![crate::objects::ExternalContentManifestEntry {
-                path: "artifact.txt".into(),
-                kind: crate::objects::ExternalContentManifestEntryKind::File,
-                mode: Some(ProjectFile::REGULAR_MODE),
-                blob_hash: Some(output_blob_hash.clone()),
-                size: Some(output_blob.len() as u64),
-                target: None,
-            }],
-            entry_count: 1,
-            total_bytes: output_blob.len() as u64,
-        };
-        output_manifest.validate().unwrap();
-        let output_manifest_hash = cas
-            .store_object(&serde_json::to_value(&output_manifest).unwrap())
-            .unwrap();
-        let policy = ProjectSnapshotPolicy::from_value(
-            &cas.get_object(&candidate.effective_policy_hash)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        let bounds = crate::external_content::products::ProductBounds {
-            maximum_entries: 8,
-            maximum_depth: 4,
-            maximum_file_bytes: 1024,
-            maximum_total_bytes: 4096,
-        };
-        let mut output_partition = crate::objects::WorkspaceOutputPartition {
-            schema: crate::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA.into(),
-            recipe_binding: "remote_products".into(),
-            recipe_ref: "config:fixtures/remote-products".into(),
-            recipe_raw_content_digest: "d".repeat(64),
-            declarations_hash: "e".repeat(64),
-            project_snapshot_policy_hash: candidate.effective_policy_hash.clone(),
-            roots: vec![crate::objects::WorkspaceOutputRoot {
-                name: "artifact".into(),
-                path: "products/artifact".into(),
-                storage: crate::external_content::products::ProductStorage::Content,
-                declared_bounds: bounds.clone(),
-                effective_bounds: bounds,
-            }],
-            products: Vec::new(),
-            partition_identity: String::new(),
-            capture_policy_digest: String::new(),
-        };
-        output_partition.capture_policy_digest = output_partition
-            .derived_capture_policy_digest(&policy)
-            .unwrap();
-        output_partition.partition_identity =
-            output_partition.derived_partition_identity().unwrap();
-        output_partition.validate().unwrap();
-        let output_capture = crate::objects::WorkspaceOutputCapture {
-            schema: crate::objects::WORKSPACE_OUTPUT_CAPTURE_SCHEMA.into(),
-            kind: crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND.into(),
-            producer_chain_root_id: "T-root".into(),
-            producer_thread_id: "T-remote".into(),
-            admitted_launch_capsule_hash: "f".repeat(64),
-            base_project_snapshot_hash: base_hash.clone(),
-            result_project_snapshot_hash: candidate_hash.clone(),
-            partition: output_partition,
-            outputs: std::collections::BTreeMap::from([(
-                "artifact".into(),
-                crate::objects::WorkspaceOutputCaptureState::Captured {
-                    manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
-                    manifest_hash: output_manifest_hash.clone(),
-                },
-            )]),
-        };
-        output_capture.validate().unwrap();
-        let output_capture_hash = cas
-            .store_object(&output_capture.to_value().unwrap())
-            .unwrap();
-        let completion = "9".repeat(64);
-        let quiesce = authenticated(
-            &binding,
-            &owner,
-            ChannelDirection::OwnerToSupervisor,
-            ExecutionChannelPayload::Quiesce {
-                completion_request_digest: completion.clone(),
-            },
-        );
-        let mut assembler =
-            CandidateExportAssembler::new(&authority, &guard, binding.clone(), &quiesce).unwrap();
-        let data = authenticated(
-            &binding,
-            &supervisor,
-            ChannelDirection::SupervisorToOwner,
-            ExecutionChannelPayload::ExportObjectChunk {
-                content_kind: ExportContentKind::Object,
-                object_hash: candidate_hash.clone(),
-                offset: 0,
-                bytes_base64: STANDARD.encode(candidate_bytes),
-                final_chunk: true,
-            },
-        );
-        assert!(assembler.accept(&data).unwrap().is_none());
-        let evidence = NativeWriterExclusionObservation {
-            schema: 1,
-            binding_digest: binding.digest().unwrap(),
-            base_snapshot_hash: binding.base_snapshot_hash.clone(),
-            completion_request_digest: completion.clone(),
-            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
-            exit: NativeNamespaceExit::Signal(9),
-        };
-        let evidence_bytes =
-            lillux::canonical_json(&serde_json::to_value(evidence).unwrap()).unwrap();
-        let evidence_hash = lillux::sha256_hex(evidence_bytes.as_bytes());
-        let data = authenticated(
-            &binding,
-            &supervisor,
-            ChannelDirection::SupervisorToOwner,
-            ExecutionChannelPayload::ExportObjectChunk {
-                content_kind: ExportContentKind::Blob,
-                object_hash: evidence_hash.clone(),
-                offset: 0,
-                bytes_base64: STANDARD.encode(evidence_bytes),
-                final_chunk: true,
-            },
-        );
-        assert!(assembler.accept(&data).unwrap().is_none());
-        let sealed = authenticated(
-            &binding,
-            &supervisor,
-            ChannelDirection::SupervisorToOwner,
-            ExecutionChannelPayload::ExportSealed {
-                candidate_snapshot_hash: candidate_hash.clone(),
-                candidate_output_capture_hash: Some(output_capture_hash.clone()),
-                completion_request_digest: completion.clone(),
-                writer_exclusion_evidence_hash: evidence_hash,
-            },
-        );
-        let imported = assembler.accept(&sealed).unwrap().unwrap();
-        assert_eq!(imported.snapshot_hash(), candidate_hash);
-        assert_eq!(
-            imported.output_capture_hash(),
-            Some(output_capture_hash.as_str())
-        );
-        assert!(assembler.accept(&sealed).is_err());
-
-        // A real external supervisor and controller do not share a CAS. Seed
-        // only the independently admitted base B in a second store, emit the
-        // candidate closure from the guest source, and prove that the receiver
-        // reconstructs C without consulting the guest namespace.
-        let source = CandidateExportSource::new(
-            &authority,
-            &guard,
-            binding.clone(),
-            imported.snapshot_hash(),
-            imported.output_capture_hash(),
-            imported.completion_request_digest(),
-            imported.claimed_writer_exclusion_evidence_hash(),
-        )
-        .unwrap();
-        let mut transferred = Vec::new();
-        source
-            .emit_chunks(|payload| {
-                transferred.push(payload);
-                Ok(())
-            })
-            .unwrap();
-        let large_chunks = transferred
-            .iter()
-            .filter_map(|payload| match payload {
-                ExecutionChannelPayload::ExportObjectChunk {
-                    content_kind: ExportContentKind::Blob,
-                    object_hash,
-                    offset,
-                    bytes_base64,
-                    final_chunk,
-                } if object_hash == &large_blob_hash => Some((
-                    *offset,
-                    STANDARD.decode(bytes_base64).unwrap(),
-                    *final_chunk,
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(large_chunks.len(), 2);
-        assert_eq!(large_chunks[0].0, 0);
-        assert_eq!(large_chunks[0].1.len(), MAX_CHUNK_BYTES);
-        assert!(!large_chunks[0].2);
-        assert_eq!(large_chunks[1].0, MAX_CHUNK_BYTES as u64);
-        assert_eq!(large_chunks[1].1.len(), 17);
-        assert!(large_chunks[1].2);
-        assert_eq!(
-            large_chunks
-                .iter()
-                .flat_map(|(_, bytes, _)| bytes.iter().copied())
-                .collect::<Vec<_>>(),
-            large_blob
-        );
-        assert!(transferred.iter().any(|payload| matches!(
-            payload,
-            ExecutionChannelPayload::ExportObjectChunk {
-                content_kind: ExportContentKind::Blob,
-                object_hash,
-                offset: 0,
-                bytes_base64,
-                final_chunk: true,
-            } if object_hash == &empty_blob_hash && bytes_base64.is_empty()
-        )));
-
-        let mut limited_binding = binding.clone();
-        limited_binding.candidate_export_max_bytes = 1;
-        let limited_evidence = NativeWriterExclusionObservation {
-            schema: 1,
-            binding_digest: limited_binding.digest().unwrap(),
-            base_snapshot_hash: limited_binding.base_snapshot_hash.clone(),
-            completion_request_digest: completion.clone(),
-            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
-            exit: NativeNamespaceExit::Signal(9),
-        };
-        let limited_evidence_bytes =
-            lillux::canonical_json(&serde_json::to_value(limited_evidence).unwrap()).unwrap();
-        let limited_evidence_hash = cas.store_blob(limited_evidence_bytes.as_bytes()).unwrap();
-        let limited_source = CandidateExportSource::new(
-            &authority,
-            &guard,
-            limited_binding,
-            imported.snapshot_hash(),
-            imported.output_capture_hash(),
-            &completion,
-            &limited_evidence_hash,
-        )
-        .unwrap();
-        let mut emitted = 0_u64;
-        assert!(
-            limited_source
-                .emit_chunks(|_| {
-                    emitted += 1;
-                    Ok(())
-                })
-                .is_err()
-        );
-        assert_eq!(emitted, 0, "raw export budget must fail before first frame");
-        drop(limited_source);
-        drop(source);
-        drop(assembler);
-        drop(guard);
-
-        let foreign_guard = foreign_authority.acquire_shared_guard().unwrap();
-        let foreign_cas = foreign_authority.cas_store().unwrap();
-        let (foreign_base_hash, _) = base(&foreign_cas);
-        assert_eq!(foreign_base_hash, binding.base_snapshot_hash);
-        let mut remote = CandidateExportAssembler::new(
-            &foreign_authority,
-            &foreign_guard,
-            binding.clone(),
-            &quiesce,
-        )
-        .unwrap();
-        for payload in transferred {
-            let frame = authenticated(
-                &binding,
-                &supervisor,
-                ChannelDirection::SupervisorToOwner,
-                payload,
-            );
-            assert!(remote.accept(&frame).unwrap().is_none());
-        }
-        let remote_imported = remote.accept(&sealed).unwrap().unwrap();
-        assert_eq!(remote_imported.snapshot_hash(), imported.snapshot_hash());
-        assert_eq!(
-            remote_imported.output_capture_hash(),
-            imported.output_capture_hash()
-        );
-        assert_eq!(
-            foreign_cas.get_blob(&output_blob_hash).unwrap().unwrap(),
-            output_blob
-        );
-        remote_imported
-            .validate_retention(&foreign_authority, &foreign_guard, &binding)
-            .unwrap();
-        drop(foreign_guard);
-
-        let guard = authority.acquire_shared_guard().unwrap();
-        let retained = imported
-            .validate_retention(&authority, &guard, &binding)
-            .unwrap();
-        assert_eq!(
-            retained
-                .content_for_store(&authority)
-                .unwrap()
-                .snapshot_hash(),
-            candidate_hash
-        );
-        assert!(retained.content_for_store(&foreign_authority).is_err());
-        let mut other_binding = binding.clone();
-        other_binding.channel_nonce = "8".repeat(64);
-        assert!(
-            imported
-                .validate_retention(&authority, &guard, &other_binding)
-                .is_err()
-        );
-        let retention_owner = "7".repeat(64);
-        let occurrence_digest = "8".repeat(64);
-        let publication_key = crate::DurableCasPublicationKey::external_candidate_occurrence(
-            &binding.digest().unwrap(),
-            &occurrence_digest,
-        )
-        .unwrap();
-        let mut stage = authority
-            .require_recovery()
-            .unwrap()
-            .begin_durable_cas_upload_admitted(
-                &guard,
-                &retention_owner,
-                "external-candidate-capture",
-                &publication_key,
-                None,
-            )
-            .unwrap();
-        let receipt = retained
-            .retain_external_candidate_occurrence(&authority, &mut stage)
-            .unwrap();
-        let staging_id = receipt.staging_id().to_owned();
-        let unused = cas.store_blob(b"unretained-transfer-fragment").unwrap();
-        drop(guard);
-        // Exercise the production GC root traversal, not a test-only supplied
-        // AdditionalCasRoots list. The retained receipt survives while an
-        // unrelated blob is collected.
-        let exclusive = authority.acquire_exclusive_guard(false).unwrap();
-        crate::gc::run_gc_with_pinned_authority(
-            &authority,
-            &exclusive,
-            None,
-            &crate::gc::GcParams::default(),
-            &crate::gc::AdditionalCasRoots::default(),
-        )
-        .unwrap();
-        drop(exclusive);
-        assert!(cas.open_blob(&unused).unwrap().is_none());
-        drop(db);
-        let reopened =
-            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
-                .unwrap();
-        let reopened_authority = reopened.pinned_authority().unwrap();
-        let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
-        imported
-            .validate_retention(&reopened_authority, &reopened_guard, &binding)
-            .unwrap();
-
-        // A new import can reuse existing CAS members without retransmitting
-        // them. Same-size cache corruption must not turn a descriptor-only
-        // closure into authoritative imported content at any entry boundary.
-        let mut reused = CandidateExportAssembler::new(
-            &reopened_authority,
-            &reopened_guard,
-            binding.clone(),
-            &quiesce,
-        )
-        .unwrap();
-        let reused_hash = lillux::sha256_hex(b"reused-base-content");
-        let blob_path = cas
-            .root()
-            .join("blobs")
-            .join(&reused_hash[..2])
-            .join(&reused_hash[2..4])
-            .join(&reused_hash);
-        std::fs::write(blob_path, b"corrupt-base-bytes!").unwrap();
-        // Deliberately the same size: descriptor validation still succeeds.
-        assert_eq!(b"corrupt-base-bytes!".len(), b"reused-base-content".len());
-        VerifiedProjectSnapshotClosure::load(&cas, imported.snapshot_hash()).unwrap();
-        assert!(
-            reused
-                .accept(&sealed)
-                .err()
-                .expect("corrupt reused candidate must be refused")
-                .to_string()
-                .contains("blob content")
-        );
-        assert!(
-            imported
-                .validate_retention(&reopened_authority, &reopened_guard, &binding)
-                .err()
-                .expect("corrupt reused content must not gain retention authority")
-                .to_string()
-                .contains("blob content")
-        );
-        assert!(
-            CandidateExportAssembler::new(
-                &reopened_authority,
-                &reopened_guard,
-                binding.clone(),
-                &quiesce,
-            )
-            .is_err()
-        );
-        drop(reopened_guard);
-        let exclusive = reopened_authority.acquire_exclusive_guard(false).unwrap();
-        let stage = reopened_authority
-            .require_recovery()
-            .unwrap()
-            .open_durable_cas_upload_admitted(&exclusive, &staging_id, &retention_owner)
-            .unwrap();
-        stage
-            .dispose_external_candidate_occurrence(&exclusive, &receipt)
-            .unwrap();
-        crate::gc::run_gc_with_pinned_authority(
-            &reopened_authority,
-            &exclusive,
-            None,
-            &crate::gc::GcParams::default(),
-            &crate::gc::AdditionalCasRoots::default(),
-        )
-        .unwrap();
-        assert!(
-            reopened_authority
-                .cas_store()
-                .unwrap()
-                .get_object(imported.snapshot_hash())
-                .unwrap()
-                .is_none(),
-            "explicit disposition must permit later candidate collection"
-        );
-    }
-
-    #[test]
-    fn external_export_rejects_authority_objects_and_stays_failed() {
-        let root = tempfile::tempdir().unwrap();
-        let db =
-            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
-                .unwrap();
-        let authority = db.pinned_authority().unwrap();
-        let guard = authority.acquire_shared_guard().unwrap();
-        let (base_hash, _) = base(&authority.cas_store().unwrap());
-        let (mut binding, owner, supervisor) = super::super::tests::binding();
-        binding.base_snapshot_hash = base_hash;
-        let quiesce = authenticated(
-            &binding,
-            &owner,
-            ChannelDirection::OwnerToSupervisor,
-            ExecutionChannelPayload::Quiesce {
-                completion_request_digest: "9".repeat(64),
-            },
-        );
-        let mut assembler =
-            CandidateExportAssembler::new(&authority, &guard, binding.clone(), &quiesce).unwrap();
-        let bytes = br#"{"kind":"thread_snapshot"}"#;
-        let data = authenticated(
-            &binding,
-            &supervisor,
-            ChannelDirection::SupervisorToOwner,
-            ExecutionChannelPayload::ExportObjectChunk {
-                content_kind: ExportContentKind::Object,
-                object_hash: lillux::sha256_hex(bytes),
-                offset: 0,
-                bytes_base64: STANDARD.encode(bytes),
-                final_chunk: true,
-            },
-        );
-        assert!(assembler.accept(&data).is_err());
-        assert!(assembler.accept(&data).is_err());
-    }
-}
-
 /// Finite assembler underneath the durable frame-application owner. Only
 /// newly claimed frames may be passed here. If its owning process dies during
 /// an application, recovery must reconcile/quarantine the exact obligation;
@@ -1300,5 +722,583 @@ impl<'a> CandidateExportAssembler<'a> {
             }
             _ => bail!("candidate content assembler received a non-export frame"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn authenticated(
+        binding: &ExecutionChannelBinding,
+        key: &SigningKey,
+        direction: ChannelDirection,
+        payload: ExecutionChannelPayload,
+    ) -> AuthenticatedExecutionFrame {
+        let frame = ExecutionFrame {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            direction,
+            sequence: 1,
+            previous_frame_digest: None,
+            acknowledged_peer_sequence: 0,
+            payload,
+        };
+        let signed = SignedExecutionFrame::sign(frame, binding, key).unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap();
+        SignedExecutionFrame::decode_and_verify(wire.as_bytes(), binding, 50).unwrap()
+    }
+
+    fn base(cas: &lillux::CasStore) -> (String, ProjectSnapshot) {
+        let policy = ProjectSnapshotPolicy::new(
+            crate::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let file = ProjectFile {
+            blob_hash: cas.store_blob(b"reused-base-content").unwrap(),
+            size: b"reused-base-content".len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let tree = ProjectTree {
+            files: [(
+                "input.txt".to_owned(),
+                cas.store_object(&file.to_value()).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: cas.store_object(&tree.to_value()).unwrap(),
+            effective_policy_hash: cas.store_object(&policy.to_value()).unwrap(),
+            parent_hashes: vec![],
+            created_at: "2026-09-19T00:00:00Z".into(),
+            message: None,
+            source: "external-export-test".into(),
+        };
+        (cas.store_object(&snapshot.to_value()).unwrap(), snapshot)
+    }
+
+    #[test]
+    fn external_export_imports_existing_project_contract_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        // Store initialization acquires a CAS mutation guard internally.
+        // Prepare the independent store before holding the importing guard;
+        // never relax the non-reentrant production ownership rule for a test.
+        // A node holds one State at a time: the foreign store is established,
+        // its pinned authority (roots only, no SQL) kept, and it closes before
+        // the importing State opens.
+        let foreign_root = tempfile::tempdir().unwrap();
+        let foreign_authority = {
+            let foreign_db = crate::test_support::TestState::open(
+                foreign_root.path(),
+                Arc::new(crate::TrustStore::new()),
+            )
+            .unwrap();
+            let authority = foreign_db.pinned_authority().unwrap();
+            foreign_db.close().unwrap();
+            authority
+        };
+        let db =
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let (base_hash, mut candidate) = base(&cas);
+        let (mut binding, owner, supervisor) = super::super::tests::binding();
+        binding.base_snapshot_hash = base_hash.clone();
+        candidate.parent_hashes = vec![base_hash.clone()];
+        let large_blob = vec![0x5a; MAX_CHUNK_BYTES + 17];
+        let large_blob_hash = cas.store_blob(&large_blob).unwrap();
+        let empty_blob_hash = cas.store_blob(&[]).unwrap();
+        let large_file = ProjectFile {
+            blob_hash: large_blob_hash.clone(),
+            size: large_blob.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let empty_file = ProjectFile {
+            blob_hash: empty_blob_hash.clone(),
+            size: 0,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let candidate_tree = ProjectTree {
+            files: [
+                (
+                    "large.bin".to_owned(),
+                    cas.store_object(&large_file.to_value()).unwrap(),
+                ),
+                (
+                    "empty.bin".to_owned(),
+                    cas.store_object(&empty_file.to_value()).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        candidate.project_tree_hash = cas.store_object(&candidate_tree.to_value()).unwrap();
+        let candidate_bytes = lillux::canonical_json(&candidate.to_value()).unwrap();
+        let candidate_hash = lillux::sha256_hex(candidate_bytes.as_bytes());
+        let output_blob = b"remote-only-output";
+        let output_blob_hash = cas.store_blob(output_blob).unwrap();
+        let output_manifest = crate::objects::ExternalContentManifestObject {
+            schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.into(),
+            kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            entries: vec![crate::objects::ExternalContentManifestEntry {
+                path: "artifact.txt".into(),
+                kind: crate::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(ProjectFile::REGULAR_MODE),
+                blob_hash: Some(output_blob_hash.clone()),
+                size: Some(output_blob.len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: output_blob.len() as u64,
+        };
+        output_manifest.validate().unwrap();
+        let output_manifest_hash = cas
+            .store_object(&serde_json::to_value(&output_manifest).unwrap())
+            .unwrap();
+        let policy = ProjectSnapshotPolicy::from_value(
+            &cas.get_object(&candidate.effective_policy_hash)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let bounds = crate::external_content::products::ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1024,
+            maximum_total_bytes: 4096,
+        };
+        let mut output_partition = crate::objects::WorkspaceOutputPartition {
+            schema: crate::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA.into(),
+            recipe_binding: "remote_products".into(),
+            recipe_ref: "config:fixtures/remote-products".into(),
+            recipe_raw_content_digest: "d".repeat(64),
+            declarations_hash: "e".repeat(64),
+            project_snapshot_policy_hash: candidate.effective_policy_hash.clone(),
+            roots: vec![crate::objects::WorkspaceOutputRoot {
+                name: "artifact".into(),
+                path: "products/artifact".into(),
+                storage: crate::external_content::products::ProductStorage::Content,
+                declared_bounds: bounds.clone(),
+                effective_bounds: bounds,
+            }],
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: String::new(),
+        };
+        output_partition.capture_policy_digest = output_partition
+            .derived_capture_policy_digest(&policy)
+            .unwrap();
+        output_partition.partition_identity =
+            output_partition.derived_partition_identity().unwrap();
+        output_partition.validate().unwrap();
+        let output_capture = crate::objects::WorkspaceOutputCapture {
+            schema: crate::objects::WORKSPACE_OUTPUT_CAPTURE_SCHEMA.into(),
+            kind: crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND.into(),
+            producer_chain_root_id: "T-root".into(),
+            producer_thread_id: "T-remote".into(),
+            admitted_launch_capsule_hash: "f".repeat(64),
+            base_project_snapshot_hash: base_hash.clone(),
+            result_project_snapshot_hash: candidate_hash.clone(),
+            partition: output_partition,
+            outputs: std::collections::BTreeMap::from([(
+                "artifact".into(),
+                crate::objects::WorkspaceOutputCaptureState::Captured {
+                    manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+                    manifest_hash: output_manifest_hash.clone(),
+                },
+            )]),
+        };
+        output_capture.validate().unwrap();
+        let output_capture_hash = cas
+            .store_object(&output_capture.to_value().unwrap())
+            .unwrap();
+        let completion = "9".repeat(64);
+        let quiesce = authenticated(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            ExecutionChannelPayload::Quiesce {
+                completion_request_digest: completion.clone(),
+            },
+        );
+        let mut assembler =
+            CandidateExportAssembler::new(&authority, &guard, binding.clone(), &quiesce).unwrap();
+        let data = authenticated(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ExportContentKind::Object,
+                object_hash: candidate_hash.clone(),
+                offset: 0,
+                bytes_base64: STANDARD.encode(candidate_bytes),
+                final_chunk: true,
+            },
+        );
+        assert!(assembler.accept(&data).unwrap().is_none());
+        let evidence = NativeWriterExclusionObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            completion_request_digest: completion.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let evidence_bytes =
+            lillux::canonical_json(&serde_json::to_value(evidence).unwrap()).unwrap();
+        let evidence_hash = lillux::sha256_hex(evidence_bytes.as_bytes());
+        let data = authenticated(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ExportContentKind::Blob,
+                object_hash: evidence_hash.clone(),
+                offset: 0,
+                bytes_base64: STANDARD.encode(evidence_bytes),
+                final_chunk: true,
+            },
+        );
+        assert!(assembler.accept(&data).unwrap().is_none());
+        let sealed = authenticated(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: candidate_hash.clone(),
+                candidate_output_capture_hash: Some(output_capture_hash.clone()),
+                completion_request_digest: completion.clone(),
+                writer_exclusion_evidence_hash: evidence_hash,
+            },
+        );
+        let imported = assembler.accept(&sealed).unwrap().unwrap();
+        assert_eq!(imported.snapshot_hash(), candidate_hash);
+        assert_eq!(
+            imported.output_capture_hash(),
+            Some(output_capture_hash.as_str())
+        );
+        assert!(assembler.accept(&sealed).is_err());
+
+        // A real external supervisor and controller do not share a CAS. Seed
+        // only the independently admitted base B in a second store, emit the
+        // candidate closure from the guest source, and prove that the receiver
+        // reconstructs C without consulting the guest namespace.
+        let source = CandidateExportSource::new(
+            &authority,
+            &guard,
+            binding.clone(),
+            imported.snapshot_hash(),
+            imported.output_capture_hash(),
+            imported.completion_request_digest(),
+            imported.claimed_writer_exclusion_evidence_hash(),
+        )
+        .unwrap();
+        let mut transferred = Vec::new();
+        source
+            .emit_chunks(|payload| {
+                transferred.push(payload);
+                Ok(())
+            })
+            .unwrap();
+        let large_chunks = transferred
+            .iter()
+            .filter_map(|payload| match payload {
+                ExecutionChannelPayload::ExportObjectChunk {
+                    content_kind: ExportContentKind::Blob,
+                    object_hash,
+                    offset,
+                    bytes_base64,
+                    final_chunk,
+                } if object_hash == &large_blob_hash => Some((
+                    *offset,
+                    STANDARD.decode(bytes_base64).unwrap(),
+                    *final_chunk,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(large_chunks.len(), 2);
+        assert_eq!(large_chunks[0].0, 0);
+        assert_eq!(large_chunks[0].1.len(), MAX_CHUNK_BYTES);
+        assert!(!large_chunks[0].2);
+        assert_eq!(large_chunks[1].0, MAX_CHUNK_BYTES as u64);
+        assert_eq!(large_chunks[1].1.len(), 17);
+        assert!(large_chunks[1].2);
+        assert_eq!(
+            large_chunks
+                .iter()
+                .flat_map(|(_, bytes, _)| bytes.iter().copied())
+                .collect::<Vec<_>>(),
+            large_blob
+        );
+        assert!(transferred.iter().any(|payload| matches!(
+            payload,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ExportContentKind::Blob,
+                object_hash,
+                offset: 0,
+                bytes_base64,
+                final_chunk: true,
+            } if object_hash == &empty_blob_hash && bytes_base64.is_empty()
+        )));
+
+        let mut limited_binding = binding.clone();
+        limited_binding.candidate_export_max_bytes = 1;
+        let limited_evidence = NativeWriterExclusionObservation {
+            schema: 1,
+            binding_digest: limited_binding.digest().unwrap(),
+            base_snapshot_hash: limited_binding.base_snapshot_hash.clone(),
+            completion_request_digest: completion.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let limited_evidence_bytes =
+            lillux::canonical_json(&serde_json::to_value(limited_evidence).unwrap()).unwrap();
+        let limited_evidence_hash = cas.store_blob(limited_evidence_bytes.as_bytes()).unwrap();
+        let limited_source = CandidateExportSource::new(
+            &authority,
+            &guard,
+            limited_binding,
+            imported.snapshot_hash(),
+            imported.output_capture_hash(),
+            &completion,
+            &limited_evidence_hash,
+        )
+        .unwrap();
+        let mut emitted = 0_u64;
+        assert!(
+            limited_source
+                .emit_chunks(|_| {
+                    emitted += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(emitted, 0, "raw export budget must fail before first frame");
+        drop(limited_source);
+        drop(source);
+        drop(assembler);
+        drop(guard);
+
+        let foreign_guard = foreign_authority.acquire_shared_guard().unwrap();
+        let foreign_cas = foreign_authority.cas_store().unwrap();
+        let (foreign_base_hash, _) = base(&foreign_cas);
+        assert_eq!(foreign_base_hash, binding.base_snapshot_hash);
+        let mut remote = CandidateExportAssembler::new(
+            &foreign_authority,
+            &foreign_guard,
+            binding.clone(),
+            &quiesce,
+        )
+        .unwrap();
+        for payload in transferred {
+            let frame = authenticated(
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                payload,
+            );
+            assert!(remote.accept(&frame).unwrap().is_none());
+        }
+        let remote_imported = remote.accept(&sealed).unwrap().unwrap();
+        assert_eq!(remote_imported.snapshot_hash(), imported.snapshot_hash());
+        assert_eq!(
+            remote_imported.output_capture_hash(),
+            imported.output_capture_hash()
+        );
+        assert_eq!(
+            foreign_cas.get_blob(&output_blob_hash).unwrap().unwrap(),
+            output_blob
+        );
+        remote_imported
+            .validate_retention(&foreign_authority, &foreign_guard, &binding)
+            .unwrap();
+        drop(foreign_guard);
+
+        let guard = authority.acquire_shared_guard().unwrap();
+        let retained = imported
+            .validate_retention(&authority, &guard, &binding)
+            .unwrap();
+        assert_eq!(
+            retained
+                .content_for_store(&authority)
+                .unwrap()
+                .snapshot_hash(),
+            candidate_hash
+        );
+        assert!(retained.content_for_store(&foreign_authority).is_err());
+        let mut other_binding = binding.clone();
+        other_binding.channel_nonce = "8".repeat(64);
+        assert!(
+            imported
+                .validate_retention(&authority, &guard, &other_binding)
+                .is_err()
+        );
+        let retention_owner = "7".repeat(64);
+        let occurrence_digest = "8".repeat(64);
+        let publication_key = crate::DurableCasPublicationKey::external_candidate_occurrence(
+            &binding.digest().unwrap(),
+            &occurrence_digest,
+        )
+        .unwrap();
+        let mut stage = authority
+            .require_recovery()
+            .unwrap()
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &retention_owner,
+                "external-candidate-capture",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let receipt = retained
+            .retain_external_candidate_occurrence(&authority, &mut stage)
+            .unwrap();
+        let staging_id = receipt.staging_id().to_owned();
+        let unused = cas.store_blob(b"unretained-transfer-fragment").unwrap();
+        drop(guard);
+        // Exercise the production GC root traversal, not a test-only supplied
+        // AdditionalCasRoots list. The retained receipt survives while an
+        // unrelated blob is collected.
+        let exclusive = authority.acquire_exclusive_guard(false).unwrap();
+        crate::gc::run_gc_with_pinned_authority(
+            &authority,
+            &exclusive,
+            None,
+            &crate::gc::GcParams::default(),
+            &crate::gc::AdditionalCasRoots::default(),
+        )
+        .unwrap();
+        drop(exclusive);
+        assert!(cas.open_blob(&unused).unwrap().is_none());
+        drop(db);
+        let reopened =
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
+        let reopened_authority = reopened.pinned_authority().unwrap();
+        let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
+        imported
+            .validate_retention(&reopened_authority, &reopened_guard, &binding)
+            .unwrap();
+
+        // A new import can reuse existing CAS members without retransmitting
+        // them. Same-size cache corruption must not turn a descriptor-only
+        // closure into authoritative imported content at any entry boundary.
+        let mut reused = CandidateExportAssembler::new(
+            &reopened_authority,
+            &reopened_guard,
+            binding.clone(),
+            &quiesce,
+        )
+        .unwrap();
+        let reused_hash = lillux::sha256_hex(b"reused-base-content");
+        let blob_path = cas
+            .root()
+            .join("blobs")
+            .join(&reused_hash[..2])
+            .join(&reused_hash[2..4])
+            .join(&reused_hash);
+        std::fs::write(blob_path, b"corrupt-base-bytes!").unwrap();
+        // Deliberately the same size: descriptor validation still succeeds.
+        assert_eq!(b"corrupt-base-bytes!".len(), b"reused-base-content".len());
+        VerifiedProjectSnapshotClosure::load(&cas, imported.snapshot_hash()).unwrap();
+        assert!(
+            reused
+                .accept(&sealed)
+                .err()
+                .expect("corrupt reused candidate must be refused")
+                .to_string()
+                .contains("blob content")
+        );
+        assert!(
+            imported
+                .validate_retention(&reopened_authority, &reopened_guard, &binding)
+                .err()
+                .expect("corrupt reused content must not gain retention authority")
+                .to_string()
+                .contains("blob content")
+        );
+        assert!(
+            CandidateExportAssembler::new(
+                &reopened_authority,
+                &reopened_guard,
+                binding.clone(),
+                &quiesce,
+            )
+            .is_err()
+        );
+        drop(reopened_guard);
+        let exclusive = reopened_authority.acquire_exclusive_guard(false).unwrap();
+        let stage = reopened_authority
+            .require_recovery()
+            .unwrap()
+            .open_durable_cas_upload_admitted(&exclusive, &staging_id, &retention_owner)
+            .unwrap();
+        stage
+            .dispose_external_candidate_occurrence(&exclusive, &receipt)
+            .unwrap();
+        crate::gc::run_gc_with_pinned_authority(
+            &reopened_authority,
+            &exclusive,
+            None,
+            &crate::gc::GcParams::default(),
+            &crate::gc::AdditionalCasRoots::default(),
+        )
+        .unwrap();
+        assert!(
+            reopened_authority
+                .cas_store()
+                .unwrap()
+                .get_object(imported.snapshot_hash())
+                .unwrap()
+                .is_none(),
+            "explicit disposition must permit later candidate collection"
+        );
+    }
+
+    #[test]
+    fn external_export_rejects_authority_objects_and_stays_failed() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::test_support::TestState::open(root.path(), Arc::new(crate::TrustStore::new()))
+                .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let (base_hash, _) = base(&authority.cas_store().unwrap());
+        let (mut binding, owner, supervisor) = super::super::tests::binding();
+        binding.base_snapshot_hash = base_hash;
+        let quiesce = authenticated(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            ExecutionChannelPayload::Quiesce {
+                completion_request_digest: "9".repeat(64),
+            },
+        );
+        let mut assembler =
+            CandidateExportAssembler::new(&authority, &guard, binding.clone(), &quiesce).unwrap();
+        let bytes = br#"{"kind":"thread_snapshot"}"#;
+        let data = authenticated(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ExportContentKind::Object,
+                object_hash: lillux::sha256_hex(bytes),
+                offset: 0,
+                bytes_base64: STANDARD.encode(bytes),
+                final_chunk: true,
+            },
+        );
+        assert!(assembler.accept(&data).is_err());
+        assert!(assembler.accept(&data).is_err());
     }
 }

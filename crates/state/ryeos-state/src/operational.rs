@@ -3110,7 +3110,7 @@ impl OperationalDb {
                          ORDER BY created_at DESC, job_id DESC LIMIT ?4",
                         )
                         .context("failed to prepare paged sync operation history query")?;
-                    let mut rows = stmt.query_map(
+                    let rows = stmt.query_map(
                         rusqlite::params![operation_type, created_at, job_id, limit],
                         sync_job_from_row,
                     )?;
@@ -3131,7 +3131,7 @@ impl OperationalDb {
                          ORDER BY created_at DESC, job_id DESC LIMIT ?2",
                         )
                         .context("failed to prepare sync operation history query")?;
-                    let mut rows =
+                    let rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
                     for row in rows {
@@ -3181,7 +3181,7 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?4",
                         )
                         .context("failed to prepare paged active sync recovery query")?;
-                    let mut rows = stmt.query_map(
+                    let rows = stmt.query_map(
                         rusqlite::params![operation_type, created_at, job_id, limit],
                         sync_job_from_row,
                     )?;
@@ -3202,7 +3202,7 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?2",
                         )
                         .context("failed to prepare active sync operation recovery query")?;
-                    let mut rows =
+                    let rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
                     for row in rows {
@@ -3253,7 +3253,7 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?5",
                         )
                         .context("failed to prepare paged exact sync operation state query")?;
-                    let mut rows = stmt.query_map(
+                    let rows = stmt.query_map(
                         rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
                         sync_job_from_row,
                     )?;
@@ -3274,7 +3274,7 @@ impl OperationalDb {
                          ORDER BY created_at ASC, job_id ASC LIMIT ?3",
                         )
                         .context("failed to prepare exact sync operation state query")?;
-                    let mut rows = stmt.query_map(
+                    let rows = stmt.query_map(
                         rusqlite::params![operation_type, state.as_str(), limit],
                         sync_job_from_row,
                     )?;
@@ -3562,11 +3562,7 @@ mod tests {
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
         assert_eq!(tables, 7);
         assert_eq!(indexes, 17);
-        assert_eq!(
-            db.with_sql(|connection| replay_index_epoch(connection))
-                .unwrap(),
-            REPLAY_INDEX_EPOCH
-        );
+        assert_eq!(db.with_sql(replay_index_epoch).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecord {
@@ -3819,7 +3815,7 @@ mod tests {
         );
         assert_eq!(db.list_replay_record_hashes().unwrap(), vec![hash.clone()]);
         assert_eq!(
-            db.delete_replay_records(&namespace("provider.call"), &[key.clone()])
+            db.delete_replay_records(&namespace("provider.call"), std::slice::from_ref(&key))
                 .unwrap(),
             1
         );
