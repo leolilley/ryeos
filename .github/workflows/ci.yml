@@ -254,6 +254,14 @@ jobs:
           cargo --version
           cargo nextest --version
 
+      - name: Place scratch on the attached volume
+        # The durable-root probe refuses an app root on a virtual machine's
+        # root disk. Hosted runners mount a separate disk at /mnt.
+        run: |
+          sudo mkdir -p /mnt/ryeos-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
+
       - name: Run workspace gate
         # --refresh-bundles populates + dev-key-signs the bundle bin trees the
         # live-registry tests load from, then runs the suite (with per-test
@@ -360,6 +368,14 @@ jobs:
           rustc --version
           cargo --version
           cargo nextest --version
+
+      - name: Place scratch on the attached volume
+        # The durable-root probe refuses an app root on a virtual machine's
+        # root disk. Hosted runners mount a separate disk at /mnt.
+        run: |
+          sudo mkdir -p /mnt/ryeos-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
       - name: Run crash recovery qualification
         env:
