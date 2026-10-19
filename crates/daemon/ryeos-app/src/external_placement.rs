@@ -8629,6 +8629,11 @@ pub mod test_support {
     };
     use crate::vault::SealedEnvelopeVault;
 
+    pub use crate::node_config::sections::external_execution::{
+        ContentRuntimeQualificationSelection, GuestRuntimeQualificationSelection,
+        PlacementQualificationSelection,
+    };
+
     #[allow(clippy::type_complexity)]
     fn installed_artifact_coordinates(
         state: &AppState,
@@ -8695,6 +8700,7 @@ pub mod test_support {
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
         tls_root_certificates_der_base64: Vec<String>,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<()> {
         install_precontact_binding_with_settings(
             state,
@@ -8703,6 +8709,7 @@ pub mod test_support {
             tls_root_certificates_der_base64,
             serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
             b"fixture-secret",
+            qualification,
         )
     }
 
@@ -8716,6 +8723,7 @@ pub mod test_support {
         tls_root_certificates_der_base64: Vec<String>,
         settings: serde_json::Value,
         credential: &[u8],
+        qualification: &PlacementQualificationSelection,
     ) -> Result<()> {
         let (
             backend,
@@ -8748,6 +8756,7 @@ pub mod test_support {
             connector_hash,
             connector_bytes,
             settings,
+            qualification,
         )?;
         let credential_access = binding.credential_access()?;
         state.vault.provision_placement_credential(
@@ -8998,6 +9007,7 @@ pub mod test_support {
         tls_root_certificates_der_base64: Vec<String>,
         supervisor_artifact_hash: String,
         launcher_artifact_hash: String,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<ryeos_state::external_execution::transport::ExternalSupervisorBootstrap> {
         prepare_bound_external_supervisor_inner(
             state,
@@ -9009,6 +9019,7 @@ pub mod test_support {
             supervisor_artifact_hash,
             launcher_artifact_hash,
             None,
+            qualification,
         )
     }
 
@@ -9023,6 +9034,7 @@ pub mod test_support {
         launcher_artifact_hash: String,
         project_root: &std::path::Path,
         workspace_lifeline: &Arc<crate::temp_dir_guard::TempDirGuard>,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<ryeos_state::external_execution::transport::ExternalSupervisorBootstrap> {
         prepare_bound_external_supervisor_inner(
             state,
@@ -9034,6 +9046,7 @@ pub mod test_support {
             supervisor_artifact_hash,
             launcher_artifact_hash,
             Some((project_root, workspace_lifeline)),
+            qualification,
         )
     }
 
@@ -9119,7 +9132,7 @@ pub mod test_support {
     #[allow(clippy::too_many_arguments)]
     fn prepare_bound_external_supervisor_inner(
         state: &mut AppState,
-        capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,
+        mut capsule: ryeos_state::objects::AdmittedPersistentSessionCapsule,
         base_snapshot_hash: String,
         guest_inputs: ryeos_external_execution_contract::ExternalGuestInputProjection,
         controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
@@ -9127,6 +9140,7 @@ pub mod test_support {
         supervisor_artifact_hash: String,
         launcher_artifact_hash: String,
         workspace: Option<(&std::path::Path, &Arc<crate::temp_dir_guard::TempDirGuard>)>,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<ryeos_state::external_execution::transport::ExternalSupervisorBootstrap> {
         capsule.validate()?;
         let program = capsule
@@ -9153,17 +9167,6 @@ pub mod test_support {
             lillux::vault::VaultSecretKey::generate(),
         ));
         state.vault = vault.clone();
-
-        let state_authority = state.state_store.pinned_state_authority()?;
-        let guard = state_authority.acquire_shared_guard()?;
-        let capsule_value = capsule.to_value()?;
-        let stored_capsule_hash = state_authority.cas_store()?.store_object(&capsule_value)?;
-        ensure!(
-            stored_capsule_hash == capsule.content_hash()?,
-            "composed external fixture changed its admitted capsule hash"
-        );
-        drop(guard);
-        drop(state_authority);
 
         let (
             backend,
@@ -9200,6 +9203,7 @@ pub mod test_support {
             configuration_bytes,
             connector_hash,
             connector_bytes,
+            qualification,
         )?;
         let credential_access = retained.credential_access()?;
         vault.provision_placement_credential(
@@ -9207,6 +9211,38 @@ pub mod test_support {
             &credential_access.test_value("fixture-secret"),
         )?;
         let contract = retained.backend_contract();
+        // A binding that selects runtime proofs yields the same retained
+        // testimony the ordinary session admission seals into its capsule.
+        if let Some(selected) = contract.runtime_content_qualification.as_ref() {
+            let published = require_current_runtime_content_qualification(state, &contract)?
+                .context("composed fixture content selection has no authenticated content")?;
+            program.require_content_qualification(&published.evidence)?;
+            capsule.retained_external_runtime_content_qualification = Some(
+                ryeos_state::objects::RetainedExternalRuntimeContentQualification {
+                    binding_hash: retained.digest().to_owned(),
+                    runtime_manifest_hash: program.runtime_manifest_hash.clone(),
+                    activation_ref: selected.activation_ref.clone(),
+                    coordinate_id: published.coordinate_id,
+                    attestation_hash: published.attestation_hash,
+                    evidence: published.evidence,
+                },
+            );
+        }
+        if contract.runtime_qualification.is_some() {
+            capsule.retained_external_runtime_qualification =
+                admit_current_runtime_qualification(state, &contract, retained.digest())?;
+        }
+        capsule.validate()?;
+        let state_authority = state.state_store.pinned_state_authority()?;
+        let guard = state_authority.acquire_shared_guard()?;
+        let capsule_value = capsule.to_value()?;
+        let stored_capsule_hash = state_authority.cas_store()?.store_object(&capsule_value)?;
+        ensure!(
+            stored_capsule_hash == capsule.content_hash()?,
+            "composed external fixture changed its admitted capsule hash"
+        );
+        drop(guard);
+        drop(state_authority);
         let placement_thread_id = "T-00000000-0000-0000-0000-000000000004".to_owned();
         let workspace_id = "W-external-composed-controller".to_owned();
         let worker_instance_id = "worker-external-composed-controller".to_owned();

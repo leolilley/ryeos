@@ -21,25 +21,32 @@ fn run() -> anyhow::Result<()> {
     let arguments = std::env::args().collect::<Vec<_>>();
     if arguments.get(1).map(String::as_str) == Some("--qualification-probe") {
         anyhow::ensure!(
-            arguments.len() == 3
+            arguments.len() >= 4
                 && arguments[2].len() == 64
                 && arguments[2]
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "qualification probe requires one canonical subject manifest digest"
+            "qualification probe requires one canonical subject manifest digest and its claims"
+        );
+        // The claim list is the signed policy's own, rendered into the
+        // verifier's argv; the probe adds and removes nothing.
+        let claims = &arguments[3..];
+        anyhow::ensure!(
+            claims.windows(2).all(|pair| pair[0] < pair[1])
+                && claims.iter().all(|claim| {
+                    !claim.is_empty()
+                        && claim
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                }),
+            "qualification probe claims must be sorted unique canonical names"
         );
         serde_json::to_writer(
             std::io::stdout().lock(),
             &serde_json::json!({
                 "schema":"ryeos.product_qualification_result.v1",
                 "subject_manifest_hash":arguments[2],
-                "claims":[
-                    "bounded_candidate_capture",
-                    "candidate_only_execution",
-                    "controller_credential_exclusion",
-                    "native_writer_exclusion",
-                    "no_local_execution_fallback"
-                ],
+                "claims":claims,
                 "probe_evidence":{
                     "fixture":"synthetic_external_candidate_runtime_v1"
                 }

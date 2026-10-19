@@ -35,27 +35,93 @@ pub fn sign_candidate_qualification_inputs(
     parameters: &serde_json::Value,
     final_policy: bool,
 ) {
-    let parameters = lillux::canonical_json(parameters).unwrap();
-    let claims = if final_policy {
-        "    - bounded_candidate_capture\n    - candidate_only_execution\n    - controller_credential_exclusion\n    - native_writer_exclusion\n    - no_local_execution_fallback\n"
+    let claim_names: &[&str] = if final_policy {
+        &[
+            "bounded_candidate_capture",
+            "candidate_only_execution",
+            "controller_credential_exclusion",
+            "native_writer_exclusion",
+            "no_local_execution_fallback",
+        ]
     } else {
-        "    - fixture_draft_never_admit\n"
+        &["fixture_draft_never_admit"]
     };
     let ai = bundle_root.join(".ai");
-    let policy = format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: Exact synthetic external candidate runtime qualification\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: tool:fixtures/verify-external-runtime\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
-    );
     let path = ai.join("config/fixtures/qualification.yaml");
     std::fs::write(
         path,
-        lillux::signature::sign_content(&policy, identity.signing_key(), "#", None),
+        lillux::signature::sign_content(
+            &qualification_policy_source(
+                "Exact synthetic external candidate runtime qualification",
+                "tool:fixtures/verify-external-runtime",
+                claim_names,
+                parameters,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
     )
     .unwrap();
-    let tool = format!(
+    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
+    std::fs::write(
+        path,
+        lillux::signature::sign_content(
+            &qualification_verifier_tool_source(
+                "verify-external-runtime",
+                "Execute the exact synthetic runtime's independent qualification probe",
+                external_runtime_manifest_hash,
+                qualification_runtime_manifest_hash,
+                claim_names,
+                parameters,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
+    )
+    .unwrap();
+}
+
+/// Signed policy source whose allowed claims and verifier parameters are the
+/// exact values the paired verifier tool is rendered from.
+pub fn qualification_policy_source(
+    description: &str,
+    verifier_ref: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    let claims = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    format!(
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
+    )
+}
+
+/// Signed verifier tool source. The probe receives the policy's claim list as
+/// argv, and `config_schema` pins the one parameter object the matching policy
+/// carries, so a verifier cannot be reused under another policy.
+pub fn qualification_verifier_tool_source(
+    name: &str,
+    description: &str,
+    external_runtime_manifest_hash: &str,
+    qualification_runtime_manifest_hash: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    let claim_args = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    format!(
         r#"category: fixtures
-name: verify-external-runtime
+name: {name}
 version: "1.0.0"
-description: Execute the exact synthetic runtime's independent qualification probe
+description: {description}
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -89,19 +155,13 @@ config:
     - /ryeos/realizations/qualification/verifier/bin/candidate
     - --qualification-probe
     - {external_runtime_manifest_hash}
-  env: {{}}
+{claim_args}  env: {{}}
   timeout_secs: 30
 config_schema:
   type: object
   const: {parameters}
-"#,
-    );
-    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
-    std::fs::write(
-        path,
-        lillux::signature::sign_content(&tool, identity.signing_key(), "#", None),
+"#
     )
-    .unwrap();
 }
 
 /// One exact recipe source for both the installed consumer and its real

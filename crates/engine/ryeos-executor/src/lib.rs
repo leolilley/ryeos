@@ -133,6 +133,7 @@ pub mod test_support {
         selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
         external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
         qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<String> {
         let tls_roots = vec!["Zml4dHVyZSBjb250cm9sbGVyIFRMUyByb290".to_owned()];
         let controller =
@@ -174,6 +175,7 @@ pub mod test_support {
             tls_roots,
             serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
             "fixture-secret",
+            qualification,
         )
         .map(|fixture| fixture.capsule_hash)
     }
@@ -193,6 +195,7 @@ pub mod test_support {
         tls_roots: Vec<String>,
         placement_settings: serde_json::Value,
         placement_credential: &str,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<AdmittedWorkerSessionFixture> {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
@@ -411,6 +414,7 @@ pub mod test_support {
             tls_roots,
             placement_settings,
             placement_credential.as_bytes(),
+            qualification,
         )?;
         dependency.resolution.composed.derived.insert(
             EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),

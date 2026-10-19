@@ -881,6 +881,7 @@ impl RetainedExternalExecutionBinding {
         configuration_adapter_artifact_bytes: u64,
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
         Self::composed_test_fixture_with_settings(
             program,
@@ -899,6 +900,7 @@ impl RetainedExternalExecutionBinding {
             connector_artifact_hash,
             connector_artifact_bytes,
             serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
+            qualification,
         )
     }
 
@@ -921,9 +923,10 @@ impl RetainedExternalExecutionBinding {
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
         settings: Value,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
         let provider_network_inputs = controller_transport.network_inputs.clone();
-        let document = compose::compose_binding_document(compose::ComposeInputs {
+        let mut document = compose::compose_binding_document(compose::ComposeInputs {
             program,
             controller_transport: controller_transport.into(),
             provider_network_inputs,
@@ -933,8 +936,18 @@ impl RetainedExternalExecutionBinding {
             capacity_group: compose::DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
             settings,
-            guest_runtime_manifest_hash: "4".repeat(64),
-            runtime_qualification: None,
+            guest_runtime_manifest_hash: qualification.guest_runtime_manifest_hash.clone(),
+            runtime_qualification: qualification.guest.as_ref().map(|guest| {
+                ExternalRuntimeQualificationBinding {
+                    attestation_hash: guest.attestation_hash.clone(),
+                    owner_principal: guest.owner_principal.clone(),
+                    qualification:
+                        ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                            policy_ref: Some(guest.policy_ref.clone()),
+                            required_claims: guest.required_claims.clone(),
+                        },
+                }
+            }),
             artifacts: compose::BundleArtifactFacts {
                 backend_artifact_hash,
                 backend_artifact_bytes,
@@ -970,6 +983,17 @@ impl RetainedExternalExecutionBinding {
                 max_guest_package_framed_bytes: 1024 * 1024 * 1024,
             },
         })?;
+        document.runtime_content_qualification =
+            qualification.content.as_ref().map(|content| {
+                ExternalRuntimeContentQualificationBinding {
+                    activation_ref: content.activation_ref.clone(),
+                    coordinate_id: content.coordinate_id.clone(),
+                    attestation_hash: content.attestation_hash.clone(),
+                    owner_principal: content.owner_principal.clone(),
+                    required_claims: content.required_claims.clone(),
+                }
+            });
+        document.validate()?;
         let id = "composed-test".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
         let signer_verifying_key = key.verifying_key().to_bytes();
@@ -1011,6 +1035,50 @@ impl std::fmt::Debug for InstalledExternalExecutionBinding {
             .field("id", &self.id)
             .field("digest", &self.digest)
             .finish_non_exhaustive()
+    }
+}
+
+/// Plain-data selection of the runtime proofs a composed test binding carries.
+/// The binding types themselves stay crate-private; a downstream fixture
+/// names the published attestations it qualified and nothing else.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct PlacementQualificationSelection {
+    /// Expected independently qualified guest-owner runtime.
+    pub guest_runtime_manifest_hash: String,
+    pub guest: Option<GuestRuntimeQualificationSelection>,
+    pub content: Option<ContentRuntimeQualificationSelection>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct GuestRuntimeQualificationSelection {
+    pub attestation_hash: String,
+    pub owner_principal: String,
+    pub policy_ref: String,
+    pub required_claims: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ContentRuntimeQualificationSelection {
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub attestation_hash: String,
+    pub owner_principal: String,
+    pub required_claims: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PlacementQualificationSelection {
+    /// A binding that selects no runtime proof, for an adapter that does not
+    /// declare independent guest-runtime admission.
+    pub fn unselected() -> Self {
+        Self {
+            guest_runtime_manifest_hash: "4".repeat(64),
+            guest: None,
+            content: None,
+        }
     }
 }
 
@@ -1064,6 +1132,7 @@ impl InstalledExternalExecutionBinding {
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
         settings: Value,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
         let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings(
             program,
@@ -1082,6 +1151,7 @@ impl InstalledExternalExecutionBinding {
             connector_artifact_hash,
             connector_artifact_bytes,
             settings,
+            qualification,
         )?;
         Ok(Self {
             id: retained.id,
