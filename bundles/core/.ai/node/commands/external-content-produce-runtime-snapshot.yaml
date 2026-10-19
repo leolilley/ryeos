@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-29T09:15:35Z:329504d8bd442174f427d84ccfaa22857eb76a4602425345a8e2aebbc9e28c0a:HWkQbv74Rf0xfX3WslTdE9Du+StiB9BKT/4Y3/YUwGO5B7DQSQFdZ65gEAm95+LhXdYnXdHGiLj4o6OvkURaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T00:21:54Z:553a0f50e4247419a62eb87dd34691cacf4c02874c4a2ecfab05761d302b85b1:LEvVSaSvUhCFlq4izHTaOMBHai5mynunZPbDvhtWpf4nOJdZO4OkuvUSlKY1z3hOGjOR4Ll4jw5DR/XfxbTxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, produce-runtime-snapshot]
 description: Produce one unqualified runtime snapshot locator from an exact retained product
 parameter_binding:
@@ -7,7 +7,7 @@ parameter_binding:
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
 help:
-  usage: "ryeos external-content produce-runtime-snapshot '{\"binding_id\":\"<signed-binding>\",\"source\":{\"kind\":\"captured_product\",\"witness_hash\":\"<exact-witness>\",\"witness_source\":{\"kind\":\"local_capture\"}},\"source_occurrence_id\":\"<exact-provider-sandbox>\"}'"
+  usage: "ryeos external-content produce-runtime-snapshot '{\"binding_id\":\"<signed-binding>\",\"source\":{\"kind\":\"captured_product\",\"witness_hash\":\"<exact-witness>\",\"witness_source\":{\"kind\":\"local_capture\"},\"source_occurrence_id\":\"<exact-provider-sandbox>\"}}'"
 dispatch:
   kind: execute_ref
   execute: service:external-content/produce-runtime-snapshot

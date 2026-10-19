@@ -5,11 +5,11 @@
 # generation. Node binaries additionally select the native scheduler composition
 # appropriate to the final stage's declared bundle set.
 
-# Only contained qualification targets may select the development publication.
-# Official images and archives always depend on the checked published stage.
+# Only qualification builds may select the development publication.
+# Official archives always depend on the checked published stage, and an
+# official image build leaves PUBLICATION_STAGE at its published default.
 ARG CONTAINED_PUBLICATION_STAGE=published
-# The composition images (core, core-scheduling, standard, f5r-controller)
-# select their publication the same way: `published` for official images,
+# The composition images select their publication the same way: `published` for official images,
 # `development-publication` for candidate builds signed with a development key.
 ARG PUBLICATION_STAGE=published
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
@@ -105,10 +105,18 @@ FROM compiled-publication AS development-publication
 # Local qualification must not masquerade as official publication.
 RUN python3 -c 'import tomllib; from pathlib import Path; actual=tomllib.loads(Path("bundles/.ai/PUBLISHER_TRUST.toml").read_text()); expected=tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text()); assert actual["fingerprint"] == expected["fingerprint"]; assert actual["owner"] != "ryeos-official"'
 
+# Every runtime image takes its binaries and bundles from the selected
+# publication. Only the distributable archives below name `published`, the one
+# stage that runs the official-only packaging gate.
+# Composition images compile their node pair from the selected publication
+# with exactly the native features their bundle set selects, so an image never
+# carries a scheduler or provider-setup implementation its bundles omit.
+FROM ${PUBLICATION_STAGE} AS composition-publication
+
 # The bundle-source substrate omits the workflow bundles. Compile its node pair explicitly
 # from the same source and lockfile; copying the full publication's node pair
 # would retain the scheduler implementation despite omitting its bundle.
-FROM published AS scheduler-free-publication
+FROM composition-publication AS scheduler-free-publication
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
 RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
@@ -125,11 +133,6 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     mkdir -p /build/target/scheduler-free && \
     cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
-
-# Composition images compile their node pair from the selected publication
-# with exactly the native features their bundle set selects, so an image never
-# carries a scheduler or provider-setup implementation its bundles omit.
-FROM ${PUBLICATION_STAGE} AS composition-publication
 
 # Core: no optional native features.
 FROM composition-publication AS core-pair
@@ -384,17 +387,17 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-local-inference
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai             /opt/ryeos/.ai
-COPY --from=published /build/bundles/core            /opt/ryeos/core
-COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
-COPY --from=published /build/bundles/directive /opt/ryeos/directive
-COPY --from=published /build/bundles/graph /opt/ryeos/graph
-COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
-COPY --from=published /build/bundles/local-inference /opt/ryeos/local-inference
+COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai             /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core            /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/local-inference /opt/ryeos/local-inference
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -419,18 +422,18 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-central-host
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai                   /opt/ryeos/.ai
-COPY --from=published /build/bundles/core                  /opt/ryeos/core
-COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/central-auth          /opt/ryeos/central-auth
-COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
-COPY --from=published /build/bundles/directive /opt/ryeos/directive
-COPY --from=published /build/bundles/graph /opt/ryeos/graph
-COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
-COPY --from=published /build/bundles/web                   /opt/ryeos/web
+COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai                   /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core                  /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/central-auth          /opt/ryeos/central-auth
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/web                   /opt/ryeos/web
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -536,10 +539,10 @@ RUN groupadd --gid 10000 ryeos && \
 FROM hosted-runtime AS ryeos-substrate
 COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeosd /usr/local/bin/ryeosd
 COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeos  /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai           /opt/ryeos/.ai
-COPY --from=published /build/bundles/core          /opt/ryeos/core
-COPY --from=published /build/bundles/bundle-source /opt/ryeos/bundle-source
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai           /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core          /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/bundle-source /opt/ryeos/bundle-source
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
@@ -565,18 +568,18 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
-COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=published /build/bundles/knowledge /opt/ryeos/knowledge
-COPY --from=published /build/bundles/directive /opt/ryeos/directive
-COPY --from=published /build/bundles/graph /opt/ryeos/graph
-COPY --from=published /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
-COPY --from=published /build/bundles/codex        /opt/ryeos/codex
-COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
+COPY --from=composition-publication /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=composition-publication /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/codex        /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV HOME=/data/app
