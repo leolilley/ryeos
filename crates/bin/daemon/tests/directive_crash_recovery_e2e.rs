@@ -452,15 +452,21 @@ async fn await_root_thread(
     harness: &mut DaemonHarness,
     request: &mut tokio::task::JoinHandle<Result<(u16, String), String>>,
 ) -> String {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The first execute on a cold node builds the request engine, verifies
+    // the bundle set and runs the directive's augmentation subprocess, which
+    // a slow debug host can stretch well past half a minute.
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         if let Some(thread_id) = root_thread_id(&harness.state_path) {
             return thread_id;
         }
-        assert!(
-            Instant::now() < deadline,
-            "directive root thread did not appear"
-        );
+        if Instant::now() >= deadline {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            let pending = !request.is_finished();
+            panic!(
+                "directive root thread did not appear within 120 s (execute request still pending: {pending})\n--- daemon stderr ---\n{stderr}"
+            );
+        }
         tokio::select! {
             result = &mut *request => {
                 let stderr = harness.drain_stderr_nonblocking().await;
