@@ -38,7 +38,7 @@ it does not discover or load NVML. The NVML source was joined at integration
 checkpoint `073cd6332894cc5988d4643f9ea255507ae24d64`. The existing source-manifest
 helper in `bundles/local-inference/test_contract.py` computes the complete worker
 closure after the version-neutral policy wording correction as
-`fa780c36fc49e442fea873c11f5eefa9be559366460b81e73269a939f3b894ee`; this value
+`cf082a0b47f3417c481c57d4480bbae103fdeb366a3c1baafc57c7bbea8418ab`; this value
 was recorded in the unsigned worker draft at that checkpoint. Later preflight
 source changes invalidate that value as a claim about the current enlarged tree.
 The preceding NVML-helper closure
