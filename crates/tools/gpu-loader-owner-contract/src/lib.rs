@@ -146,7 +146,7 @@ impl<'a> BorrowedGpuLoaderRealizationRoots<'a> {
         let positions = external_role_positions(&ids)?;
         let mut roots = Vec::with_capacity(EXTERNAL_REALIZATION_ROLES.len());
         let mut descriptor_identities = Vec::with_capacity(sources.len());
-        for (role_index, role) in EXTERNAL_REALIZATION_ROLES.into_iter().enumerate() {
+        for role_index in 0..EXTERNAL_REALIZATION_ROLES.len() {
             let index = positions[role_index];
             let realization = entries[index];
             let source = &sources[index];
