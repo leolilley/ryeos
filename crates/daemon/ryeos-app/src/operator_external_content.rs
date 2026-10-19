@@ -17,6 +17,7 @@ use crate::handler_context::HandlerContext;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
+pub mod consumer_qualification_context;
 pub mod content_qualification;
 pub mod product_build;
 pub mod product_composition;

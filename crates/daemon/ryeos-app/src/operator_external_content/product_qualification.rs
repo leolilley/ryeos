@@ -1482,7 +1482,111 @@ pub(super) struct PreparedBundleConsumerContentInputs {
     publication: Option<ryeos_state::PendingCasPublication>,
 }
 
+/// The admitted halves of one consumer use: the Worker source and literals,
+/// the runtime product, and the environment content with its process settings.
+pub(super) struct AdmittedUseInputs<'a> {
+    pub requirement: &'a ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+    pub profile: &'a ryeos_state::objects::AdmittedStructuredSessionProfile,
+    pub source: &'a ryeos_state::objects::EffectiveSourceClosureProjection,
+    pub worker_literals: &'a ExternalContentRealizationSet,
+    pub runtime: ryeos_state::objects::ExternalContentRealization,
+    pub environment: &'a ExternalContentRealizationSet,
+    pub executable_search: &'a [ExecutableSearchPathEntry],
+    pub process_environment: &'a BTreeMap<String, SessionProcessEnvironmentValue>,
+}
+
+impl AdmittedUseInputs<'_> {
+    /// Join the Worker's own literals, the runtime product and the environment
+    /// realizations into the one set the admitted use digests, refusing an
+    /// environment identity that contradicts a literal. Applied parity against
+    /// signed verifier parameters remains the caller's separate check.
+    pub(super) fn derive(
+        self,
+    ) -> anyhow::Result<ryeos_state::external_execution::admission::ExternalCandidateQualificationUse>
+    {
+        let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
+        entries.push(self.runtime);
+        for inherited in self.environment.iter() {
+            match entries.iter().find(|entry| entry.id == inherited.id) {
+                Some(entry) if entry == inherited => {}
+                Some(_) => bail!("consumer literal conflicts with inherited environment identity"),
+                None => entries.push(inherited.clone()),
+            }
+        }
+        let realizations = ExternalContentRealizationSet::new(entries)?;
+        ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
+            self.requirement,
+            self.profile,
+            self.source,
+            &realizations,
+            self.executable_search,
+            self.process_environment,
+        )
+    }
+}
+
+/// Load the runtime product's exact manifest and return its executable-member
+/// digest, entry count and byte total. The member must be the recipe's file.
+pub(super) fn load_runtime_manifest_identity(
+    authority: &ryeos_state::PinnedStateAuthority,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    subject_manifest_hash: &str,
+    executable_relative_path: &str,
+) -> anyhow::Result<(String, usize, u64)> {
+    let manifest = with_state_guard(authority, |_guard| {
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &authority.cas_store()?,
+            subject_manifest_hash,
+            limits
+                .max_object_bytes
+                .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+        )
+    })?;
+    let executable_hash = exact_runtime_member_hash(&manifest, executable_relative_path)?;
+    let (entry_count, total_bytes) = match manifest.get("kind").and_then(serde_json::Value::as_str)
+    {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            let manifest = ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?;
+            (manifest.entry_count, manifest.total_bytes)
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            let manifest =
+                ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest)?;
+            (manifest.entry_count, manifest.total_bytes)
+        }
+        _ => bail!("consumer runtime has no supported exact manifest"),
+    };
+    Ok((executable_hash, entry_count, total_bytes))
+}
+
+/// Realize the signed runtime product slot against its exact manifest.
+pub(super) fn realize_runtime_slot(
+    slot: &ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration,
+    subject_manifest_hash: &str,
+    entry_count: usize,
+    total_bytes: u64,
+) -> ryeos_state::objects::ExternalContentRealization {
+    ryeos_state::objects::ExternalContentRealization {
+        id: slot.id.clone(),
+        kind: slot.kind,
+        mode: ExternalContentMode::Pinned,
+        manifest_hash: subject_manifest_hash.to_owned(),
+        entry_count,
+        total_bytes,
+        mount_root: slot.mount_root,
+        mount: slot.mount.clone(),
+    }
+}
+
 impl PreparedBundleConsumerContentInputs {
+    /// The signed runtime product slot a captured-product consumer selected.
+    pub(super) fn runtime_slot(
+        &self,
+    ) -> Option<&ryeos_state::external_content::products::composition::ExternalProductSlotDeclaration>
+    {
+        self.runtime_slot.as_ref()
+    }
+
     pub(in crate::operator_external_content) fn publication_mut(
         &mut self,
     ) -> anyhow::Result<&mut ryeos_state::PendingCasPublication> {
@@ -1520,28 +1624,20 @@ impl PreparedBundleConsumerContentInputs {
         else {
             return Ok(None);
         };
-        let mut entries: Vec<_> = self.worker_literals.iter().cloned().collect();
-        entries.push(
-            self.runtime_realization
+        let context = AdmittedUseInputs {
+            requirement: &requirement,
+            profile: &self.worker_source.profile,
+            source: &self.worker_source.source,
+            worker_literals: &self.worker_literals,
+            runtime: self
+                .runtime_realization
                 .clone()
                 .context("consumer use has no authenticated runtime realization")?,
-        );
-        for inherited in self.environment.realizations.iter() {
-            match entries.iter().find(|entry| entry.id == inherited.id) {
-                Some(entry) if entry == inherited => {}
-                Some(_) => bail!("consumer literal conflicts with inherited environment identity"),
-                None => entries.push(inherited.clone()),
-            }
+            environment: &self.environment.realizations,
+            executable_search: &self.environment.definition.executable_search,
+            process_environment: &self.environment.definition.process_environment,
         }
-        let realizations = ExternalContentRealizationSet::new(entries)?;
-        let context = ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
-            &requirement,
-            &self.worker_source.profile,
-            &self.worker_source.source,
-            &realizations,
-            &self.environment.definition.executable_search,
-            &self.environment.definition.process_environment,
-        )?;
+        .derive()?;
         context.require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
         Ok(Some(context))
     }
@@ -1626,49 +1722,18 @@ impl PreparedBundleConsumerContentInputs {
         if self.policy_source.policy.producer_scenarios.is_empty() {
             bail!("external runtime qualification has no signed direct probe");
         }
-        let manifest = with_state_guard(authority, |_guard| {
-            ryeos_state::object_closure::load_exact_cas_object_with_cas(
-                &authority.cas_store()?,
-                subject_manifest_hash,
-                limits
-                    .max_object_bytes
-                    .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
-            )
-        })?;
-        let executable_hash = exact_runtime_member_hash(
-            &manifest,
+        let (executable_hash, entry_count, total_bytes) = load_runtime_manifest_identity(
+            authority,
+            limits,
+            subject_manifest_hash,
             &requirement.runtime_recipe.executable_relative_path,
         )?;
-        let (entry_count, total_bytes) =
-            match manifest.get("kind").and_then(serde_json::Value::as_str) {
-                Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
-                    let manifest =
-                        ryeos_state::objects::ExternalContentManifestObject::from_value(&manifest)?;
-                    (manifest.entry_count, manifest.total_bytes)
-                }
-                Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
-                    let manifest =
-                        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(
-                            &manifest,
-                        )?;
-                    (manifest.entry_count, manifest.total_bytes)
-                }
-                _ => bail!("consumer runtime has no supported exact manifest"),
-            };
         if let Some(slot) = &self.runtime_slot {
             if slot.id != context.product_declaration_id {
                 bail!("consumer runtime has conflicting product and literal authority");
             }
-            let realized = ryeos_state::objects::ExternalContentRealization {
-                id: slot.id.clone(),
-                kind: slot.kind,
-                mode: ExternalContentMode::Pinned,
-                manifest_hash: subject_manifest_hash.to_owned(),
-                entry_count,
-                total_bytes,
-                mount_root: slot.mount_root,
-                mount: slot.mount.clone(),
-            };
+            let realized =
+                realize_runtime_slot(slot, subject_manifest_hash, entry_count, total_bytes);
             if self
                 .runtime_realization
                 .as_ref()
@@ -2419,7 +2484,7 @@ pub(super) fn resolve_signed_bundle_consumer_environment_definition(
     })
 }
 
-fn resolve_consumer_definition_in_generation(
+pub(super) fn resolve_consumer_definition_in_generation(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     item_ref: &str,
     kind: &str,

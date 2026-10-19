@@ -206,6 +206,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_products::COMPOSE_DESCRIPTOR,
     external_content_products::QUALIFY_DESCRIPTOR,
     external_content_products::QUALIFY_CONTENT_DESCRIPTOR,
+    external_content_products::DERIVE_CONSUMER_QUALIFICATION_CONTEXT_DESCRIPTOR,
     product_qualification_launch::DESCRIPTOR,
     product_qualification_launch::CONTENT_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,

@@ -410,6 +410,19 @@ pub async fn qualify(
     )?)
 }
 
+pub async fn derive_consumer_qualification_context(
+    req: ryeos_app::operator_external_content::consumer_qualification_context::ConsumerQualificationContextRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        ryeos_app::operator_external_content::consumer_qualification_context::derive(
+            state, ctx, req,
+        )
+        .await?,
+    )?)
+}
+
 pub async fn qualify_content(
     req: ryeos_app::operator_external_content::content_qualification::ContentQualificationProofRequest,
     ctx: HandlerContext,
@@ -952,6 +965,23 @@ pub const QUALIFY_CONTENT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| {
         Box::pin(async move {
             qualify_content(crate::handler_error::parse_request(params)?, ctx, state).await
+        })
+    },
+};
+
+pub const DERIVE_CONSUMER_QUALIFICATION_CONTEXT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-content/derive-consumer-qualification-context",
+    endpoint: "external-content.derive-consumer-qualification-context",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.external-content/derive-consumer-qualification-context"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            derive_consumer_qualification_context(
+                crate::handler_error::parse_request(params)?,
+                ctx,
+                state,
+            )
+            .await
         })
     },
 };
