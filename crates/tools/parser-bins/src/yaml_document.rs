@@ -531,14 +531,21 @@ mod tests {
             expected: Some(Value::String("old".into())),
             value: Value::String("current".into()),
         };
-        assert!(edit_source(&json!({ "require_mapping": true }), flow, &[edit.clone()]).is_err());
+        assert!(
+            edit_source(
+                &json!({ "require_mapping": true }),
+                flow,
+                std::slice::from_ref(&edit)
+            )
+            .is_err()
+        );
 
         let duplicate = "routes:\n  - name: primary\n    state: old\n    state: older\n";
         assert!(
             edit_source(
                 &json!({ "require_mapping": true }),
                 duplicate,
-                &[edit.clone()]
+                std::slice::from_ref(&edit)
             )
             .is_err()
         );

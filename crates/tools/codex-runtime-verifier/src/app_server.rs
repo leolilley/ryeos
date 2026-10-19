@@ -490,7 +490,7 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
         Ok(())
     }
 
-    pub fn next(&mut self) -> Result<Value> {
+    pub fn next_message(&mut self) -> Result<Value> {
         ensure!(
             !self.deadline.has_elapsed(),
             "app-server read deadline expired"
@@ -541,7 +541,7 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
     pub fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
         self.send(json!({"id":id,"method":method,"params":params}))?;
         loop {
-            let message = self.next()?;
+            let message = self.next_message()?;
             if message.get("id").is_some() {
                 ensure!(
                     message["id"] == id && message.get("error").is_none(),
@@ -681,7 +681,7 @@ impl<T: AppServerTransport> AppServerProtocol<T> {
                 }
             }
             ensure!(
-                self.next()?.get("id").is_none(),
+                self.next_message()?.get("id").is_none(),
                 "unexpected app-server response while awaiting turn completion"
             );
         }
@@ -949,7 +949,7 @@ mod tests {
         let mut oversized = memory_protocol("thread-one");
         oversized.transport.frames =
             std::collections::VecDeque::from([vec![b' '; MAX_EVENT_BYTES + 1]]);
-        assert!(oversized.next().is_err());
+        assert!(oversized.next_message().is_err());
         assert!(oversized.notifications().is_empty());
 
         let mut truncated = memory_protocol("thread-one");

@@ -1096,7 +1096,7 @@ mod tests {
             );
         }
         assert!(RouteName::Stage.request_body_limit() <= TRANSPORT_IN_MEMORY_BODY_BYTES);
-        assert!(LAUNCHER_UPLOAD_BYTES <= UPLOAD_BYTES);
+        const _: () = assert!(LAUNCHER_UPLOAD_BYTES <= UPLOAD_BYTES);
         assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES) <= TRANSPORT_IN_MEMORY_BODY_BYTES);
         assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES + 1) > TRANSPORT_IN_MEMORY_BODY_BYTES);
     }

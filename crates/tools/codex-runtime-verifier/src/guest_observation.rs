@@ -480,7 +480,6 @@ mod tests {
         changed = observation.clone();
         changed["forwarded_output_bytes"] = json!(before_ack);
         assert!(check_guest_observation(&changed, &scenario).is_err());
-        let mut changed = changed;
         changed["forwarded_output_bytes"] = json!(output.len());
         let unexpected = format!(
             "{}{}\n",

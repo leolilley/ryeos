@@ -185,11 +185,11 @@ struct PlanSource {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 enum LifetimeFieldSource {
     #[serde(rename = "reservation.maximum_lifetime_seconds")]
-    ReservationMaximumLifetimeSeconds,
+    Reservation,
     #[serde(rename = "qualification.maximum_lifetime_seconds")]
-    QualificationMaximumLifetimeSeconds,
+    Qualification,
     #[serde(rename = "bootstrap.maximum_lifetime_seconds")]
-    BootstrapMaximumLifetimeSeconds,
+    Bootstrap,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -712,8 +712,7 @@ impl ProviderSpec {
             guarantees.insert(LEASE_CREATE_BOUND);
         }
         if let Some(body) = &allocate.body {
-            if body.timeout_seconds.source == LifetimeFieldSource::ReservationMaximumLifetimeSeconds
-            {
+            if body.timeout_seconds.source == LifetimeFieldSource::Reservation {
                 guarantees.insert(LEASE_LIFETIME_BOUND);
             }
             if body.network_policy.source == Some(EgressFieldSource::LeaseGuestNetworkAllow) {
@@ -960,11 +959,11 @@ impl ProviderSpec {
             PlanFieldSource::SettingsPlan => settings_plan,
         };
         let timeout_seconds = match mapping.timeout_seconds.source {
-            LifetimeFieldSource::ReservationMaximumLifetimeSeconds => reservation_lifetime_seconds,
-            LifetimeFieldSource::QualificationMaximumLifetimeSeconds => {
+            LifetimeFieldSource::Reservation => reservation_lifetime_seconds,
+            LifetimeFieldSource::Qualification => {
                 anyhow::bail!("worker allocation cannot select qualification lifetime")
             }
-            LifetimeFieldSource::BootstrapMaximumLifetimeSeconds => {
+            LifetimeFieldSource::Bootstrap => {
                 anyhow::bail!("worker allocation cannot select bootstrap lifetime")
             }
         };
@@ -1007,8 +1006,7 @@ impl ProviderSpec {
                 && mapping.plan.source == PlanFieldSource::SettingsPlan
                 && mapping.snapshot_id.as_ref().map(|source| source.source)
                     == Some(StringFieldSource::QualificationLocatorSnapshotId)
-                && mapping.timeout_seconds.source
-                    == LifetimeFieldSource::QualificationMaximumLifetimeSeconds
+                && mapping.timeout_seconds.source == LifetimeFieldSource::Qualification
                 && mapping.network_policy
                     == NetworkPolicyMapping {
                         literal: Some(NetworkPolicyTypeLiteral {
@@ -1172,7 +1170,7 @@ fn expected_create_body_mapping() -> CreateBodyMapping {
             source: StringFieldSource::SettingsRegion,
         },
         timeout_seconds: LifetimeSource {
-            source: LifetimeFieldSource::ReservationMaximumLifetimeSeconds,
+            source: LifetimeFieldSource::Reservation,
         },
         network_policy: NetworkPolicyMapping {
             literal: None,
@@ -1196,7 +1194,7 @@ fn expected_qualification_create_body_mapping() -> CreateBodyMapping {
             source: StringFieldSource::SettingsRegion,
         },
         timeout_seconds: LifetimeSource {
-            source: LifetimeFieldSource::QualificationMaximumLifetimeSeconds,
+            source: LifetimeFieldSource::Qualification,
         },
         network_policy: NetworkPolicyMapping {
             literal: Some(NetworkPolicyTypeLiteral {
@@ -1222,7 +1220,7 @@ fn expected_bootstrap_create_body_mapping() -> CreateBodyMapping {
             source: StringFieldSource::SettingsRegion,
         },
         timeout_seconds: LifetimeSource {
-            source: LifetimeFieldSource::BootstrapMaximumLifetimeSeconds,
+            source: LifetimeFieldSource::Bootstrap,
         },
         network_policy: NetworkPolicyMapping {
             literal: Some(NetworkPolicyTypeLiteral {
