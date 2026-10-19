@@ -1911,6 +1911,19 @@ fn post_execution_foldback(
         .context("fence authoritative fold-back to current launch owner")?;
     super::assert_workspace_capture_processes_settled(state, &workspace_record)?;
 
+    // The freeze adapter starts a process, so it runs before this thread
+    // takes the CAS mutation guard. The guard below covers every staged CAS
+    // write from the first fold-back object through the signed publication;
+    // the adapter's output is workspace evidence, not staged CAS state.
+    let lifecycle = crate::execution::freeze_workspace_for_foldback(
+        &state.isolation,
+        workspace_id,
+        launch_owner,
+        base_snapshot_hash,
+        working_dir,
+        &workspace_record,
+    )?;
+
     // The shared CAS guard is the outer mutation lock. Keep it live from the
     // first fold-back object write through the signed HEAD publication so GC
     // cannot sweep an unpublished intermediate closure.
@@ -1935,12 +1948,10 @@ fn post_execution_foldback(
         authority: &authority,
         cas_mutation_guard: &cas_mutation_guard,
         isolation: &state.isolation,
-        workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir,
         pre_tree_hash,
         policy_hash: pre_policy_hash,
-        base_snapshot_hash,
         workspace_record: &workspace_record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -7501,7 +7512,7 @@ async fn dispatch_detached_bg_task(
                             tracing::error!(
                                 phase = log_phase,
                                 thread_id = %bg_thread_id,
-                                error = %error,
+                                error = format!("{error:#}"),
                                 "authoritative fold-back failed; refusing successful settlement"
                             );
                             if let Err(cleanup_error) = fail_thread_static_owned(

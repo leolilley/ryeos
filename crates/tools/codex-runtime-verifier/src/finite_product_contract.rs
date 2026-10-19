@@ -74,33 +74,68 @@ pub(crate) struct CheckerMemberSelection {
 
 impl CheckerProgramSelector {
     pub(crate) fn validate(&self) -> Result<()> {
-        use ryeos_state::objects::{MAX_EXTERNAL_CONTENT_FILE_BYTES, validate_canonical_project_relative_path};
-        ensure!(self.schema == "ryeos.codex.semantic_checker_program.v1"
-            && self.wire_schema == "ryeos.codex.semantic_input.v2", "unsupported checker program/wire");
-        ensure!(self.max_header_bytes == 2 * 1024 * 1024 && self.max_response_bytes == 64 * 1024
-            && self.required_root_settlement == "scope_empty", "checker safety bounds or required scope changed");
+        use ryeos_state::objects::{
+            MAX_EXTERNAL_CONTENT_FILE_BYTES, validate_canonical_project_relative_path,
+        };
+        ensure!(
+            self.schema == "ryeos.codex.semantic_checker_program.v1"
+                && self.wire_schema == "ryeos.codex.semantic_input.v2",
+            "unsupported checker program/wire"
+        );
+        ensure!(
+            self.max_header_bytes == 2 * 1024 * 1024
+                && self.max_response_bytes == 64 * 1024
+                && self.required_root_settlement == "scope_empty",
+            "checker safety bounds or required scope changed"
+        );
         for id in [&self.runtime.id, &self.code.id] {
-            ensure!(!id.is_empty() && id.len() <= 64
-                && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)),
-                "invalid checker realization ID");
+            ensure!(
+                !id.is_empty()
+                    && id.len() <= 64
+                    && id.bytes().all(|b| b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || b"_-".contains(&b)),
+                "invalid checker realization ID"
+            );
         }
-        ensure!(self.runtime.id != self.code.id, "checker runtime/code IDs alias");
+        ensure!(
+            self.runtime.id != self.code.id,
+            "checker runtime/code IDs alias"
+        );
         for hash in [&self.runtime.manifest_hash, &self.code.manifest_hash] {
             validate_canonical_hash("checker realization manifest", hash)?;
         }
         let mut total = 0u64;
-        for member in [&self.runtime.loader, &self.runtime.interpreter, &self.code.script] {
+        for member in [
+            &self.runtime.loader,
+            &self.runtime.interpreter,
+            &self.code.script,
+        ] {
             validate_canonical_project_relative_path(&member.path)?;
-            ensure!(member.path.len() <= 1024 && (1..=MAX_EXTERNAL_CONTENT_FILE_BYTES).contains(&member.bytes),
-                "checker member exceeds fixed native file bound");
+            ensure!(
+                member.path.len() <= 1024
+                    && (1..=MAX_EXTERNAL_CONTENT_FILE_BYTES).contains(&member.bytes),
+                "checker member exceeds fixed native file bound"
+            );
             validate_canonical_hash("checker member digest", &member.sha256)?;
-            total = total.checked_add(member.bytes).ok_or_else(|| anyhow::anyhow!("checker selected bytes overflow"))?;
+            total = total
+                .checked_add(member.bytes)
+                .ok_or_else(|| anyhow::anyhow!("checker selected bytes overflow"))?;
         }
-        ensure!(total <= 3 * MAX_EXTERNAL_CONTENT_FILE_BYTES, "checker selected file aggregate exceeds bound");
-        ensure!(self.runtime.loader.path != self.runtime.interpreter.path, "checker executable roles alias");
+        ensure!(
+            total <= 3 * MAX_EXTERNAL_CONTENT_FILE_BYTES,
+            "checker selected file aggregate exceeds bound"
+        );
+        ensure!(
+            self.runtime.loader.path != self.runtime.interpreter.path,
+            "checker executable roles alias"
+        );
         for path in [&self.runtime.library_path, &self.runtime.prefix_path] {
             validate_canonical_project_relative_path(path)?;
-            ensure!(path.len() <= 1024, "checker runtime directory path exceeds bound");
+            ensure!(
+                path.len() <= 1024,
+                "checker runtime directory path exceeds bound"
+            );
         }
         Ok(())
     }
@@ -511,19 +546,48 @@ mod tests {
     fn required_checker_selection_refuses_old_missing_or_unsafe_values() {
         let original = value();
         assert!(FiniteProductContract::parse(&bytes(&original)).is_ok());
-        for mutation in ["old", "missing", "alias", "oversize", "escape", "weaken", "unknown", "bool_size"] {
+        for mutation in [
+            "old",
+            "missing",
+            "alias",
+            "oversize",
+            "escape",
+            "weaken",
+            "unknown",
+            "bool_size",
+        ] {
             let mut changed = original.clone();
             match mutation {
-                "old" => { changed["schema"] = json!("ryeos.codex.finite_product_contract.v1"); },
-                "missing" => { changed.as_object_mut().unwrap().remove("semantic_checker"); },
-                "alias" => { changed["semantic_checker"]["code"]["id"] = json!("checker-python"); },
-                "oversize" => { changed["semantic_checker"]["code"]["script"]["bytes"] = json!(ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES + 1); },
-                "escape" => { changed["semantic_checker"]["runtime"]["loader"]["path"] = json!("../loader"); },
-                "weaken" => { changed["semantic_checker"]["required_root_settlement"] = json!("group_absent"); },
-                "unknown" => { changed["semantic_checker"]["trusted"] = json!(true); },
-                _ => { changed["semantic_checker"]["code"]["script"]["bytes"] = json!(true); },
+                "old" => {
+                    changed["schema"] = json!("ryeos.codex.finite_product_contract.v1");
+                }
+                "missing" => {
+                    changed.as_object_mut().unwrap().remove("semantic_checker");
+                }
+                "alias" => {
+                    changed["semantic_checker"]["code"]["id"] = json!("checker-python");
+                }
+                "oversize" => {
+                    changed["semantic_checker"]["code"]["script"]["bytes"] =
+                        json!(ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES + 1);
+                }
+                "escape" => {
+                    changed["semantic_checker"]["runtime"]["loader"]["path"] = json!("../loader");
+                }
+                "weaken" => {
+                    changed["semantic_checker"]["required_root_settlement"] = json!("group_absent");
+                }
+                "unknown" => {
+                    changed["semantic_checker"]["trusted"] = json!(true);
+                }
+                _ => {
+                    changed["semantic_checker"]["code"]["script"]["bytes"] = json!(true);
+                }
             }
-            assert!(FiniteProductContract::parse(&bytes(&changed)).is_err(), "{mutation}");
+            assert!(
+                FiniteProductContract::parse(&bytes(&changed)).is_err(),
+                "{mutation}"
+            );
         }
     }
 

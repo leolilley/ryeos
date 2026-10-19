@@ -1860,7 +1860,8 @@ mod tests {
     /// Canonical bytes of one first Ready request, as the controller must
     /// compose them: fields in declared order, the admitted request embedded
     /// whole, an undeclared Ready clock skew omitted and `resume` null.
-    const LEASE_READY_REQUEST_FIXTURE: &[u8] = include_bytes!("../fixtures/lease-ready-request.json");
+    const LEASE_READY_REQUEST_FIXTURE: &[u8] =
+        include_bytes!("../fixtures/lease-ready-request.json");
 
     fn fixture_ready_request() -> LeaseReadyRequest {
         let lease = lease();
@@ -1908,7 +1909,10 @@ mod tests {
             crate::operation::MAX_LEASE_READY_REQUEST_BYTES,
         )
         .unwrap();
-        assert_eq!(canonical_json(&parsed).unwrap(), LEASE_READY_REQUEST_FIXTURE);
+        assert_eq!(
+            canonical_json(&parsed).unwrap(),
+            LEASE_READY_REQUEST_FIXTURE
+        );
         parsed.validate(&relayed_facts()).unwrap();
         assert!(parsed.resume.is_none());
         assert_eq!(

@@ -45,7 +45,12 @@ impl<'frame> OriginalOperationalMutationAuthority<'frame> {
         // Actual intent/funding/State/CAS checks precede any admitted SQL or
         // mutable Operational action. They are repeated on every retry.
         (self.verify)()?;
-        let OperationalConnection::Original { owner, factory, reference: _ } = &db.conn else {
+        let OperationalConnection::Original {
+            owner,
+            factory,
+            reference: _,
+        } = &db.conn
+        else {
             anyhow::bail!(
                 "original mutation authority cannot authorize an ordinary Operational owner"
             )

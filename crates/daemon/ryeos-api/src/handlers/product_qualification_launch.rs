@@ -199,7 +199,7 @@ async fn handle_source(
         })?;
 
     let mut reservation =
-        AcceptedLaunchAdmissionGuard::reserve(&state, &req.launch_id(), &ctx.fingerprint)
+        AcceptedLaunchAdmissionGuard::reserve(&state, req.launch_id(), &ctx.fingerprint)
             .map_err(map_reservation_error)?;
 
     let mut prepared = {
@@ -463,7 +463,7 @@ async fn handle_source(
             &project.request_engine,
             &root_admission,
             &prepared.policy_source().policy.subject_declaration_id,
-            &prepared.subject_manifest_hash(),
+            prepared.subject_manifest_hash(),
         )?;
         admitted
     };
@@ -471,8 +471,8 @@ async fn handle_source(
         ryeos_app::operator_external_content::product_qualification::
             resolve_current_bundle_producer_recipes_for_policy(
                 &state,
-                &prepared.policy_source(),
-                &prepared.subject_manifest_hash(),
+                prepared.policy_source(),
+                prepared.subject_manifest_hash(),
             )
             .map_err(|error| HandlerError::BadRequest(format!(
                 "qualification producer recipe admission refused: {error:#}"

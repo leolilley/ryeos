@@ -1066,8 +1066,8 @@ pub fn decode_external_channel_stream_response(
         !message.is_empty() && message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES,
         "external channel stream message is empty or exceeds its bound"
     );
-    let response: ExternalChannelExchangeResponse = serde_json::from_slice(message)
-        .context("decode external channel stream response")?;
+    let response: ExternalChannelExchangeResponse =
+        serde_json::from_slice(message).context("decode external channel stream response")?;
     response.validate_shape()?;
     ensure!(
         lillux::canonical_json(&serde_json::to_value(&response)?)?.as_bytes() == message,
@@ -1695,11 +1695,15 @@ mod tests {
         reporting.report_capabilities = true;
         reporting.validate().unwrap();
         assert_ne!(silent.digest().unwrap(), reporting.digest().unwrap());
-        let canonical: Value = serde_json::from_slice(&reporting.canonical_bytes().unwrap()).unwrap();
+        let canonical: Value =
+            serde_json::from_slice(&reporting.canonical_bytes().unwrap()).unwrap();
         assert_eq!(canonical["report_capabilities"], Value::Bool(true));
 
         let mut missing = serde_json::to_value(&silent).unwrap();
-        missing.as_object_mut().unwrap().remove("report_capabilities");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("report_capabilities");
         let refusal = serde_json::from_value::<ExternalSupervisorBootstrap>(missing)
             .err()
             .unwrap()
@@ -1716,7 +1720,10 @@ mod tests {
         relay.validate().unwrap();
         relay.report_capabilities = true;
         let refusal = relay.validate().unwrap_err().to_string();
-        assert!(refusal.contains("never over a controller file relay"), "{refusal}");
+        assert!(
+            refusal.contains("never over a controller file relay"),
+            "{refusal}"
+        );
         let mut ordinary = ordinary_relay_bootstrap();
         ordinary.report_capabilities = true;
         assert!(ordinary.validate().is_err());
@@ -1724,16 +1731,17 @@ mod tests {
 
     #[test]
     fn retired_bootstrap_schemas_are_refused_by_name() {
-        for (retired, current) in RETIRED_EXTERNAL_SUPERVISOR_BOOTSTRAP_SCHEMAS.into_iter().zip([
-            bootstrap(),
-            relay_bootstrap(),
-            ordinary_relay_bootstrap(),
-        ]) {
+        for (retired, current) in RETIRED_EXTERNAL_SUPERVISOR_BOOTSTRAP_SCHEMAS
+            .into_iter()
+            .zip([bootstrap(), relay_bootstrap(), ordinary_relay_bootstrap()])
+        {
             let mut value = current;
             value.schema = retired;
             let refusal = value.validate().err().unwrap().to_string();
             assert!(
-                refusal.contains(&format!("retired external supervisor bootstrap schema {retired}")),
+                refusal.contains(&format!(
+                    "retired external supervisor bootstrap schema {retired}"
+                )),
                 "{refusal}"
             );
         }
@@ -2135,7 +2143,10 @@ mod tests {
             external_channel_stream_inbound_frame(&full).unwrap().len(),
             MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES
         );
-        assert_eq!(MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES, super::super::MAX_FRAME_BYTES);
+        assert_eq!(
+            MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES,
+            super::super::MAX_FRAME_BYTES
+        );
         assert!(external_channel_stream_inbound_frame(&[]).is_err());
         let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_INBOUND_BYTES + 1];
         assert!(external_channel_stream_inbound_frame(&over).is_err());
@@ -2150,7 +2161,10 @@ mod tests {
             encode_external_channel_stream_response(&decoded).unwrap(),
             message
         );
-        assert_eq!(decoded.outbound_frames[0].decode_frame().unwrap().len(), 1024);
+        assert_eq!(
+            decoded.outbound_frames[0].decode_frame().unwrap().len(),
+            1024
+        );
 
         let pretty = serde_json::to_vec_pretty(&response).unwrap();
         assert!(decode_external_channel_stream_response(&pretty).is_err());
@@ -2170,7 +2184,10 @@ mod tests {
         let message = encode_external_channel_stream_response(&response).unwrap();
         assert!(message.len() <= MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES);
         let decoded = decode_external_channel_stream_response(&message).unwrap();
-        assert_eq!(encode_external_channel_stream_response(&decoded).unwrap(), message);
+        assert_eq!(
+            encode_external_channel_stream_response(&decoded).unwrap(),
+            message
+        );
         let over = vec![b'{'; MAX_EXTERNAL_CHANNEL_STREAM_OUTBOUND_BYTES + 1];
         assert!(decode_external_channel_stream_response(&over).is_err());
     }

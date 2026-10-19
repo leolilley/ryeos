@@ -29,22 +29,25 @@ mod oci_lifecycle;
 #[cfg(all(test, target_os = "linux"))]
 mod pid_namespace;
 mod scope;
-#[cfg(target_os = "linux")]
-pub(crate) use scope::SelectedScopePreparation;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
-    CgroupLimit, DirectoryStepFacts, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities, HostFacts,
-    HostLifetimeBound, ISOLATION_NAMESPACES, MAX_CAPABILITY_ENTRIES, MAX_CAPABILITY_NAME_BYTES,
-    MAX_CAPABILITY_TEXT_BYTES, MemlockFacts, PERSISTENCE_DURABLE_STATE, PrivateDirectoryFacts,
-    ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
+    CgroupLimit, DirectoryStepFacts, HOST_FACTS_VERSION, HOST_PROVIDER, HostCapabilities,
+    HostFacts, HostLifetimeBound, ISOLATION_NAMESPACES, MAX_CAPABILITY_ENTRIES,
+    MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_TEXT_BYTES, MemlockFacts, PERSISTENCE_DURABLE_STATE,
+    PrivateDirectoryFacts, ProbeOutcome, ProofSource, RECOVERY_ENCLOSURE,
     RECOVERY_ENCLOSURE_TRUSTED_INIT, RESIDENCY_CAPABILITIES, RESIDENCY_LOCKED,
-    RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts,
-    STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT, SCOPE_LIMITS,
+    RESIDENCY_SWAP_ABSENT, RESIDENCY_SWAP_LIMIT, ResidencyProof, RootStorageFacts, SCOPE_LIMITS,
+    STORAGE_DURABLE_ROOT, TERMINATION_ENCLOSURE, TERMINATION_ENCLOSURE_TRUSTED_INIT,
     admit_enclosure_inits, current_host_generation, decide_durable_root, decide_durable_state,
-    decide_private_directory, floor_entry_refusal,
-    is_scope_capability, is_weaker_grade, met_by_strongest, satisfies,
+    decide_private_directory, floor_entry_refusal, is_scope_capability, is_weaker_grade,
+    met_by_strongest, satisfies,
 };
-pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress};
+pub use oci_lifecycle::{
+    OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase,
+    OciPreparationProgress,
+};
+#[cfg(target_os = "linux")]
+pub(crate) use scope::SelectedScopePreparation;
 pub use scope::{
     ControllerAccount, ProbeBarrier, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
@@ -416,27 +419,52 @@ pub fn capture_current_process_identity() -> Result<ExactProcessIdentity, String
 /// Check an already captured original current incarnation without constructing
 /// another owned identity. Proc reads and refusals are fixed-size; both pidfds
 /// fence the numeric observations exactly as in the owned capture path.
-pub fn require_current_process_identity_fixed(expected: &ExactProcessIdentity) -> Result<(), &'static str> {
+pub fn require_current_process_identity_fixed(
+    expected: &ExactProcessIdentity,
+) -> Result<(), &'static str> {
     #[cfg(not(target_os = "linux"))]
-    { let _ = expected; Err("current process identity check requires Linux") }
+    {
+        let _ = expected;
+        Err("current process identity check requires Linux")
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         fn read_fixed(path: &[u8], bytes: &mut [u8]) -> Result<usize, &'static str> {
-            let raw = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
-            if raw < 0 { return Err("original process input open refused"); }
+            let raw = unsafe {
+                libc::open(
+                    path.as_ptr().cast(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if raw < 0 {
+                return Err("original process input open refused");
+            }
             let fd = unsafe { OwnedFd::from_raw_fd(raw) };
             let mut used = 0;
             loop {
                 if used == bytes.len() {
                     let mut extra = 0u8;
-                    let result = unsafe { libc::read(fd.as_raw_fd(), (&mut extra as *mut u8).cast(), 1) };
-                    if result == 0 { return Ok(used); }
+                    let result =
+                        unsafe { libc::read(fd.as_raw_fd(), (&mut extra as *mut u8).cast(), 1) };
+                    if result == 0 {
+                        return Ok(used);
+                    }
                     return Err("original process input exceeds fixed bound");
                 }
-                let result = unsafe { libc::read(fd.as_raw_fd(), bytes[used..].as_mut_ptr().cast(), bytes.len() - used) };
-                if result < 0 { return Err("original process input read refused"); }
-                if result == 0 { return Ok(used); }
+                let result = unsafe {
+                    libc::read(
+                        fd.as_raw_fd(),
+                        bytes[used..].as_mut_ptr().cast(),
+                        bytes.len() - used,
+                    )
+                };
+                if result < 0 {
+                    return Err("original process input read refused");
+                }
+                if result == 0 {
+                    return Ok(used);
+                }
                 used += result as usize;
                 // Positive reads consume at least one byte; at most len+1
                 // calls, with no EINTR retry or renewed admission interval.
@@ -448,53 +476,105 @@ pub fn require_current_process_identity_fixed(expected: &ExactProcessIdentity) -
             let mut digits = [0u8; 10];
             let mut count = 0;
             let mut value = pid;
-            loop { digits[count] = b'0' + (value % 10) as u8; count += 1; value /= 10; if value == 0 { break; } }
-            for i in 0..count { path[6+i] = digits[count-1-i]; }
-            path[6+count..11+count].copy_from_slice(b"/stat");
+            loop {
+                digits[count] = b'0' + (value % 10) as u8;
+                count += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            for i in 0..count {
+                path[6 + i] = digits[count - 1 - i];
+            }
+            path[6 + count..11 + count].copy_from_slice(b"/stat");
             let mut bytes = [0u8; 4096];
             let size = read_fixed(&path, &mut bytes)?;
-            let text = std::str::from_utf8(&bytes[..size]).map_err(|_| "original process stat is not UTF-8")?;
-            let end = text.rfind(')').ok_or("original process stat has no comm boundary")?;
-            let mut fields = text[end+1..].split_ascii_whitespace();
-            let state = fields.next().and_then(|v| if v.len() == 1 { Some(v.as_bytes()[0]) } else { None })
+            let text = std::str::from_utf8(&bytes[..size])
+                .map_err(|_| "original process stat is not UTF-8")?;
+            let end = text
+                .rfind(')')
+                .ok_or("original process stat has no comm boundary")?;
+            let mut fields = text[end + 1..].split_ascii_whitespace();
+            let state = fields
+                .next()
+                .and_then(|v| {
+                    if v.len() == 1 {
+                        Some(v.as_bytes()[0])
+                    } else {
+                        None
+                    }
+                })
                 .ok_or("original process stat has no state")?;
             fields.next().ok_or("original process stat has no parent")?;
-            let group = fields.next().ok_or("original process stat has no group")?
-                .parse::<i64>().map_err(|_| "original process stat has invalid group")?;
-            let birth = fields.nth(16).ok_or("original process stat has no birth")?
-                .parse::<u64>().map_err(|_| "original process stat has invalid birth")?;
-            if birth == 0 { return Err("original process stat has zero birth"); }
+            let group = fields
+                .next()
+                .ok_or("original process stat has no group")?
+                .parse::<i64>()
+                .map_err(|_| "original process stat has invalid group")?;
+            let birth = fields
+                .nth(16)
+                .ok_or("original process stat has no birth")?
+                .parse::<u64>()
+                .map_err(|_| "original process stat has invalid birth")?;
+            if birth == 0 {
+                return Err("original process stat has zero birth");
+            }
             Ok((state, group, birth))
         }
         fn pin(pid: u32) -> Result<OwnedFd, &'static str> {
             let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
-            if raw < 0 { return Err("original process pidfd refused"); }
+            if raw < 0 {
+                return Err("original process pidfd refused");
+            }
             Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
         }
         fn probe(fd: &OwnedFd) -> Result<(), &'static str> {
-            let result = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), 0i32,
-                std::ptr::null::<libc::siginfo_t>(), 0u32) };
-            if result != 0 { return Err("original process pidfd probe refused"); }
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    0i32,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                )
+            };
+            if result != 0 {
+                return Err("original process pidfd probe refused");
+            }
             Ok(())
         }
         let pid = unsafe { libc::getpid() };
         let group = unsafe { libc::getpgrp() };
-        if pid <= 1 || group <= 1 || pid as u32 != expected.target_pid || group as u32 != expected.group_leader_pid {
+        if pid <= 1
+            || group <= 1
+            || pid as u32 != expected.target_pid
+            || group as u32 != expected.group_leader_pid
+        {
             return Err("native admission cannot cross a process incarnation");
         }
         let target_fd = pin(expected.target_pid)?;
         let group_fd = pin(expected.group_leader_pid)?;
-        probe(&target_fd)?; probe(&group_fd)?;
+        probe(&target_fd)?;
+        probe(&group_fd)?;
         let target = stat(expected.target_pid)?;
         let leader = stat(expected.group_leader_pid)?;
         let mut boot = [0u8; 128];
         let size = read_fixed(b"/proc/sys/kernel/random/boot_id\0", &mut boot)?;
-        let boot = std::str::from_utf8(&boot[..size]).map_err(|_| "original boot identity is not UTF-8")?.trim();
-        probe(&target_fd)?; probe(&group_fd)?;
-        if matches!(target.0, b'Z' | b'X') || matches!(leader.0, b'Z' | b'X')
-            || target.1 != i64::from(expected.group_leader_pid) || leader.1 != i64::from(expected.group_leader_pid)
-            || target.2 != expected.target_start_time_ticks || leader.2 != expected.group_leader_start_time_ticks
-            || boot.is_empty() || boot != expected.boot_id {
+        let boot = std::str::from_utf8(&boot[..size])
+            .map_err(|_| "original boot identity is not UTF-8")?
+            .trim();
+        probe(&target_fd)?;
+        probe(&group_fd)?;
+        if matches!(target.0, b'Z' | b'X')
+            || matches!(leader.0, b'Z' | b'X')
+            || target.1 != i64::from(expected.group_leader_pid)
+            || leader.1 != i64::from(expected.group_leader_pid)
+            || target.2 != expected.target_start_time_ticks
+            || leader.2 != expected.group_leader_start_time_ticks
+            || boot.is_empty()
+            || boot != expected.boot_id
+        {
             return Err("native admission cannot cross a process incarnation");
         }
         Ok(())
@@ -616,9 +696,12 @@ impl ExactProcessIdentity {
     /// This is identity data, not liveness, resource or execution authority.
     pub fn incarnation_digest_bytes(&self) -> Result<[u8; 32], &'static str> {
         use sha2::Digest;
-        if self.boot_id.trim().is_empty() || self.target_pid <= 1
-            || self.group_leader_pid <= 1 || self.target_start_time_ticks == 0
-            || self.group_leader_start_time_ticks == 0 {
+        if self.boot_id.trim().is_empty()
+            || self.target_pid <= 1
+            || self.group_leader_pid <= 1
+            || self.target_start_time_ticks == 0
+            || self.group_leader_start_time_ticks == 0
+        {
             return Err("exact process identity is incomplete");
         }
         // Declaration order is the canonical decoded-key order. Borrow every
@@ -635,28 +718,37 @@ impl ExactProcessIdentity {
         struct HashWriter(sha2::Sha256);
         impl std::io::Write for HashWriter {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.update(bytes); Ok(bytes.len())
+                self.0.update(bytes);
+                Ok(bytes.len())
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
         // RyeOS canonical strings escape non-ASCII as lowercase UTF-16
         // units. Compact serde already handles ASCII control/quote escapes.
         struct CanonicalStrings;
         impl serde_json::ser::Formatter for CanonicalStrings {
             fn write_string_fragment<W: ?Sized + std::io::Write>(
-                &mut self, writer: &mut W, fragment: &str,
+                &mut self,
+                writer: &mut W,
+                fragment: &str,
             ) -> std::io::Result<()> {
                 const HEX: &[u8; 16] = b"0123456789abcdef";
                 for ch in fragment.chars() {
-                    if ch.is_ascii() { writer.write_all(&[ch as u8])?; }
-                    else {
+                    if ch.is_ascii() {
+                        writer.write_all(&[ch as u8])?;
+                    } else {
                         let mut units = [0u16; 2];
                         for unit in ch.encode_utf16(&mut units).iter().copied() {
-                            writer.write_all(&[b'\\', b'u',
+                            writer.write_all(&[
+                                b'\\',
+                                b'u',
                                 HEX[((unit >> 12) & 15) as usize],
                                 HEX[((unit >> 8) & 15) as usize],
                                 HEX[((unit >> 4) & 15) as usize],
-                                HEX[(unit & 15) as usize]])?;
+                                HEX[(unit & 15) as usize],
+                            ])?;
                         }
                     }
                 }
@@ -665,14 +757,20 @@ impl ExactProcessIdentity {
         }
         // Exhaustive destructure makes new identity fields require review of
         // this persisted digest instead of silently omitting them.
-        let Self { boot_id, target_pid, target_start_time_ticks,
-            group_leader_pid, group_leader_start_time_ticks } = self;
+        let Self {
+            boot_id,
+            target_pid,
+            target_start_time_ticks,
+            group_leader_pid,
+            group_leader_start_time_ticks,
+        } = self;
         let wire = Wire {
             boot_identity: boot_id,
             group_leader_birth: *group_leader_start_time_ticks,
             group_leader_pid: *group_leader_pid,
             target_birth: *target_start_time_ticks,
-            target_pid: *target_pid, version: 1,
+            target_pid: *target_pid,
+            version: 1,
         };
         let mut writer = HashWriter(sha2::Sha256::new());
         let mut serializer = serde_json::Serializer::with_formatter(&mut writer, CanonicalStrings);
@@ -1325,23 +1423,32 @@ mod tests {
         for boot in ["01234567-89ab-cdef-0123-456789abcdef", "é🚀\n\t\\\"\u{1b}"] {
             for (pid, ticks) in [(2, 1), (u32::MAX, u64::MAX)] {
                 let identity = super::ExactProcessIdentity {
-                    boot_id: boot.to_owned(), target_pid: pid,
-                    target_start_time_ticks: ticks, group_leader_pid: pid,
+                    boot_id: boot.to_owned(),
+                    target_pid: pid,
+                    target_start_time_ticks: ticks,
+                    group_leader_pid: pid,
                     group_leader_start_time_ticks: ticks,
                 };
                 let canonical = crate::canonical_json(&serde_json::json!({
                     "version": 1, "boot_identity": boot,
                     "target_pid": pid, "target_birth": ticks,
                     "group_leader_pid": pid, "group_leader_birth": ticks,
-                })).unwrap();
+                }))
+                .unwrap();
                 let expected: [u8; 32] = sha2::Sha256::digest(canonical.as_bytes()).into();
                 assert_eq!(identity.incarnation_digest_bytes().unwrap(), expected);
-                assert_eq!(identity.incarnation_digest().unwrap(), crate::sha256_hex(canonical.as_bytes()));
+                assert_eq!(
+                    identity.incarnation_digest().unwrap(),
+                    crate::sha256_hex(canonical.as_bytes())
+                );
             }
         }
         let invalid = super::ExactProcessIdentity {
-            boot_id: " ".into(), target_pid: 2, target_start_time_ticks: 1,
-            group_leader_pid: 2, group_leader_start_time_ticks: 1,
+            boot_id: " ".into(),
+            target_pid: 2,
+            target_start_time_ticks: 1,
+            group_leader_pid: 2,
+            group_leader_start_time_ticks: 1,
         };
         assert!(invalid.incarnation_digest_bytes().is_err());
     }
@@ -1537,7 +1644,8 @@ mod tests {
 mod fixed_current_identity_controls {
     #[test]
     fn retained_current_identity_matches_and_rejects_foreign_coordinates() {
-        let original = super::capture_current_process_identity().expect("capture actual current identity");
+        let original =
+            super::capture_current_process_identity().expect("capture actual current identity");
         super::require_current_process_identity_fixed(&original).expect("same actual identity");
         let mut foreign = original.clone();
         foreign.target_pid = if original.target_pid == 2 { 3 } else { 2 };
@@ -1546,7 +1654,8 @@ mod fixed_current_identity_controls {
         foreign.target_start_time_ticks = original.target_start_time_ticks.wrapping_add(1);
         assert!(super::require_current_process_identity_fixed(&foreign).is_err());
         let mut foreign = original.clone();
-        foreign.group_leader_start_time_ticks = original.group_leader_start_time_ticks.wrapping_add(1);
+        foreign.group_leader_start_time_ticks =
+            original.group_leader_start_time_ticks.wrapping_add(1);
         assert!(super::require_current_process_identity_fixed(&foreign).is_err());
         let mut foreign = original;
         foreign.boot_id = "foreign-boot".into();

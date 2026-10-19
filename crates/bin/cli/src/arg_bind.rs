@@ -89,10 +89,10 @@ pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchErro
         } else {
             arg.strip_prefix("--input=")
         };
-        if let Some(candidate) = candidate {
-            if source.replace(candidate).is_some() {
-                return Err(invalid("duplicate --input sources are not allowed"));
-            }
+        if let Some(candidate) = candidate
+            && source.replace(candidate).is_some()
+        {
+            return Err(invalid("duplicate --input sources are not allowed"));
         }
     }
     source

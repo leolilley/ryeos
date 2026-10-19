@@ -352,7 +352,6 @@ mod tests {
 
     struct CandidateFixture {
         root: std::path::PathBuf,
-        store: Arc<StateStore>,
         pool: Arc<ExternalCandidateImportPool>,
         binding: ExecutionChannelBinding,
         owner: lillux::crypto::SigningKey,
@@ -606,7 +605,6 @@ mod tests {
                 .unwrap();
             Self {
                 root,
-                store,
                 pool,
                 binding,
                 owner,
@@ -632,7 +630,7 @@ mod tests {
                 payload,
             );
             crate::external_placement::exchange_external_supervisor_frame_and_wake_imports(
-                &self.store,
+                self.store_owner.store(),
                 &self.pool,
                 &self.binding.placement_thread_id,
                 &wire,
@@ -655,7 +653,8 @@ mod tests {
                 self.quiesce_sequence,
                 payload,
             );
-            self.store
+            self.store_owner
+                .store()
                 .exchange_external_supervisor_frame(
                     &self.binding.placement_thread_id,
                     &wire,
@@ -730,7 +729,10 @@ mod tests {
     }
 
     fn candidate_content(fixture: &CandidateFixture) -> CandidateContent {
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         let base: ProjectSnapshot = ProjectSnapshot::from_value(
             &cas.get_object(&fixture.binding.base_snapshot_hash)
@@ -848,7 +850,8 @@ mod tests {
         let (seal_sequence, seal_digest) = send_candidate(&mut fixture, &content, true);
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&fixture.binding.placement_thread_id))
                 .unwrap()
                 .is_empty()
@@ -857,20 +860,23 @@ mod tests {
         fixture.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&content.snapshot_hash)
         );
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .external_execution_blob_roots()
                 .unwrap()
                 .contains(&content.evidence_hash)
         );
         fixture
-            .store
+            .store_owner
+            .store()
             .reconcile_external_candidate_import(
                 &fixture.binding.placement_thread_id,
                 seal_sequence,
@@ -878,7 +884,10 @@ mod tests {
             )
             .unwrap();
 
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         std::fs::remove_file(lillux::shard_path(
             cas.root(),
@@ -889,7 +898,8 @@ mod tests {
         .unwrap();
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .reconcile_external_candidate_import(
                     &fixture.binding.placement_thread_id,
                     seal_sequence,
@@ -908,14 +918,18 @@ mod tests {
         let (seal_sequence, seal_digest) = send_candidate(&mut fixture, &content, false);
         fixture.acknowledge_quiesce(false);
         fixture
-            .store
+            .store_owner
+            .store()
             .claim_external_candidate_import_test_fixture(
                 &fixture.binding.placement_thread_id,
                 seal_sequence,
                 &seal_digest,
             )
             .unwrap();
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         let ExecutionChannelPayload::ExportObjectChunk {
             object_hash,
@@ -965,14 +979,16 @@ mod tests {
         fixture.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             !fixture
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&content.snapshot_hash)
         );
         assert_eq!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&fixture.binding.placement_thread_id))
                 .unwrap(),
             [
@@ -992,12 +1008,14 @@ mod tests {
         send_candidate(&mut pending, &pending_content, false);
         pending.acknowledge_quiesce(false);
         pending
-            .store
+            .store_owner
+            .store()
             .author_external_owner_revocation(&pending.binding.placement_thread_id, &pending.owner)
             .unwrap();
         assert!(
             pending
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&pending.binding.placement_thread_id,))
                 .unwrap()
                 .is_empty()
@@ -1012,7 +1030,8 @@ mod tests {
         let (seal_sequence, seal_digest) = send_candidate(&mut claimed, &claimed_content, false);
         claimed.acknowledge_quiesce(false);
         claimed
-            .store
+            .store_owner
+            .store()
             .claim_external_candidate_import_test_fixture(
                 &claimed.binding.placement_thread_id,
                 seal_sequence,
@@ -1020,14 +1039,15 @@ mod tests {
             )
             .unwrap();
         claimed
-            .store
+            .store_owner
+            .store()
             .author_external_owner_revocation(&claimed.binding.placement_thread_id, &claimed.owner)
             .unwrap();
         assert_eq!(
             claimed
                 .pool
                 .wake_recoverable(
-                    Arc::clone(&claimed.store),
+                    Arc::clone(claimed.store_owner.store()),
                     Some(&claimed.binding.placement_thread_id),
                 )
                 .unwrap(),
@@ -1036,7 +1056,8 @@ mod tests {
         claimed.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             claimed
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&claimed_content.snapshot_hash)

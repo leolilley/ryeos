@@ -3,7 +3,10 @@
 //! These operations deliberately produce immutable coordinates and plans. They
 //! neither write the installed bundle registry nor authorize activation.
 
-use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM};
+use ryeos_bundle_publication_contract::{
+    BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY,
+    BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, bail};
@@ -17,8 +20,7 @@ use std::sync::Arc;
 
 use super::{
     BundleReleaseEvidenceProof, PublicationObjectReader, PublisherMaterializationProof,
-    ReleasePolicyBinding, VerifiedBundleGeneration,
-    verify_bundle_generation,
+    ReleasePolicyBinding, VerifiedBundleGeneration, verify_bundle_generation,
 };
 
 pub const DEPLOYMENT_SELECTION_CLAIM: &str = "ryeos.node-bundle-selection.deploy.v1";
@@ -48,7 +50,9 @@ impl FetchedCasReleaseProof {
             bail!("fetched-CAS verifier policy differs from current consumer binding");
         }
         Ok(Self {
-            inner: super::standalone_publisher::StandalonePublisherProof::new_resolving(cas, policy)?,
+            inner: super::standalone_publisher::StandalonePublisherProof::new_resolving(
+                cas, policy,
+            )?,
         })
     }
 }
@@ -210,13 +214,13 @@ impl CurrentConsumerPublicationPolicy {
         Ok(Self {
             namespace: namespace.to_owned(),
             publisher_fingerprint: catalog.publisher_fingerprint.clone(),
-            publisher_key: publisher.verifying_key.clone(),
+            publisher_key: publisher.verifying_key,
             generation_claim: catalog.generation_claim.clone(),
             set_claim: catalog.set_claim.clone(),
             catalog_claim: catalog.catalog_publication_claim.clone(),
             publication_policy: catalog.policy.clone(),
             operator_fingerprint: operator_fingerprint.to_owned(),
-            operator_key: operator.verifying_key.clone(),
+            operator_key: operator.verifying_key,
             release_proof_policy,
         })
     }

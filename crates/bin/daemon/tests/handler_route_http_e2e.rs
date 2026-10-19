@@ -249,11 +249,19 @@ fn plant_handler_bundle(
 ) -> anyhow::Result<()> {
     let bundle_root = state.join(".ai/bundles").join(bundle_name);
     let routes_dir = bundle_root.join(".ai/node/routes");
-    write_signed(&routes_dir.join("oauth-callback.yaml"), CALLBACK_ROUTE, fixture)?;
+    write_signed(
+        &routes_dir.join("oauth-callback.yaml"),
+        CALLBACK_ROUTE,
+        fixture,
+    )?;
 
     if with_tools {
         write_signed(&routes_dir.join("probe.yaml"), PROBE_ROUTE, fixture)?;
-        write_signed(&routes_dir.join("probe-signed.yaml"), SIGNED_PROBE_ROUTE, fixture)?;
+        write_signed(
+            &routes_dir.join("probe-signed.yaml"),
+            SIGNED_PROBE_ROUTE,
+            fixture,
+        )?;
         // Project-owned executable source must carry a verified signer; the
         // fixture publisher is pinned in the node trust store.
         let tools = bundle_root.join(".ai/tools").join(BUNDLE);
@@ -273,16 +281,14 @@ fn plant_handler_bundle(
 fn plant_shadow_bundle(state: &Path, fixture: &FastFixture) -> anyhow::Result<()> {
     let bundle_root = state.join(".ai/bundles/a-shadow-fixture");
     write_signed(
-        &bundle_root.join(".ai/tools").join(BUNDLE).join("oauth/callback.py"),
+        &bundle_root
+            .join(".ai/tools")
+            .join(BUNDLE)
+            .join("oauth/callback.py"),
         SHADOW_CALLBACK_TOOL,
         fixture,
     )?;
-    common::fast_fixture::register_fixture_bundle(
-        state,
-        "a-shadow-fixture",
-        &bundle_root,
-        fixture,
-    )
+    common::fast_fixture::register_fixture_bundle(state, "a-shadow-fixture", &bundle_root, fixture)
 }
 
 /// Plant a registered bundle that sorts ahead of the handler bundle and ships
@@ -290,7 +296,10 @@ fn plant_shadow_bundle(state: &Path, fixture: &FastFixture) -> anyhow::Result<()
 /// an item it cannot verify.
 fn plant_unverifiable_shadow_bundle(state: &Path, fixture: &FastFixture) -> anyhow::Result<()> {
     let bundle_root = state.join(".ai/bundles/a-unverifiable-fixture");
-    let tool = bundle_root.join(".ai/tools").join(BUNDLE).join("oauth/callback.py");
+    let tool = bundle_root
+        .join(".ai/tools")
+        .join(BUNDLE)
+        .join("oauth/callback.py");
     std::fs::create_dir_all(tool.parent().expect("fixture file has a parent"))?;
     std::fs::write(&tool, SHADOW_CALLBACK_TOOL)?;
     common::fast_fixture::register_fixture_bundle(
@@ -481,7 +490,9 @@ fn assert_probe_write_reach(
                  so its installed bundle is writable; body: {body}"
             );
             assert_eq!(
-                report.get("wrote_workspaces").and_then(serde_json::Value::as_array),
+                report
+                    .get("wrote_workspaces")
+                    .and_then(serde_json::Value::as_array),
                 Some(seen),
                 "under direct-host isolation every request workspace the tool sees is \
                  writable; body: {body}"
@@ -501,7 +512,9 @@ fn assert_outside_write(
     outside_dir: &Path,
 ) {
     assert_eq!(
-        report.get("outside_received").and_then(serde_json::Value::as_str),
+        report
+            .get("outside_received")
+            .and_then(serde_json::Value::as_str),
         Some(outside_dir.to_str().expect("UTF-8 outside dir")),
         "the probe must receive the outside target it is asked to write; body: {body}"
     );
@@ -590,7 +603,10 @@ async fn handler_writes_stay_in_a_scratch_removed_after_the_request() {
 
     let mode = tool_confinement(&h.state_path);
     let outside = tempfile::tempdir().expect("outside directory");
-    let outside_dir = outside.path().canonicalize().expect("canonical outside dir");
+    let outside_dir = outside
+        .path()
+        .canonicalize()
+        .expect("canonical outside dir");
     let (status, report, body) = get_json(non_following_client().get(format!(
         "http://{}/probe?outside={}&{}",
         h.bind,
@@ -662,7 +678,10 @@ async fn authenticated_caller_authority_is_not_the_handler_authority() {
     // sorted order: `outside` sorts first, and `workspaces_query` already
     // lists its own parameters sorted.
     let outside = tempfile::tempdir().expect("outside directory");
-    let outside_dir = outside.path().canonicalize().expect("canonical outside dir");
+    let outside_dir = outside
+        .path()
+        .canonicalize()
+        .expect("canonical outside dir");
     let target = format!(
         "/probe/signed?outside={}&{}",
         outside_dir.display(),
@@ -675,7 +694,11 @@ async fn authenticated_caller_authority_is_not_the_handler_authority() {
         request = request.header(name, value);
     }
     let (status, report, body) = get_json(request).await;
-    assert_eq!(status, reqwest::StatusCode::OK, "signed probe failed: {body}");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "signed probe failed: {body}"
+    );
 
     let principal_id = report
         .get("principal_id")
@@ -796,9 +819,22 @@ async fn shadowing_tool_from_another_bundle_is_refused() {
         position("a-shadow-fixture") < position(BUNDLE),
         "the shadow bundle must be registered ahead of the handler bundle; found {registered:?}"
     );
-    let tool = Path::new(".ai/tools").join(BUNDLE).join("oauth/callback.py");
-    assert!(h.state_path.join(".ai/bundles/a-shadow-fixture").join(&tool).is_file());
-    assert!(h.state_path.join(".ai/bundles").join(BUNDLE).join(&tool).is_file());
+    let tool = Path::new(".ai/tools")
+        .join(BUNDLE)
+        .join("oauth/callback.py");
+    assert!(
+        h.state_path
+            .join(".ai/bundles/a-shadow-fixture")
+            .join(&tool)
+            .is_file()
+    );
+    assert!(
+        h.state_path
+            .join(".ai/bundles")
+            .join(BUNDLE)
+            .join(&tool)
+            .is_file()
+    );
 
     let resp = non_following_client()
         .get(format!("http://{}/oauth/callback?code=x", h.bind))

@@ -26,3 +26,6 @@ tempfile = { workspace = true }
 name = "guest_occurrence_owner_native"
 path = "tests/guest_occurrence_owner_native.rs"
 harness = false
+
+[lints]
+workspace = true

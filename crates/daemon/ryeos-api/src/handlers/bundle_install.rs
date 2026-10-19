@@ -78,7 +78,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // per-name transaction lock.
     let registry_lock =
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
-    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, &req.name)?;
+    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+        &registry_lock,
+        &req.name,
+    )?;
     let recovered = match transaction.reconcile(state.identity.signing_key()) {
         Ok(recovered) => recovered,
         Err(error) => {
@@ -388,12 +391,12 @@ pub(crate) fn admit_completed_staging(
         trust_store: node_trust_store,
     }
     .load_full(
-            &config_table,
-            &prospective_records,
-            command_registration,
-            &policy_table,
-        )
-        .context("prospective bundle set would fail full node-config boot")?;
+        &config_table,
+        &prospective_records,
+        command_registration,
+        &policy_table,
+    )
+    .context("prospective bundle set would fail full node-config boot")?;
     prospective_validator
         .validate(&snapshot)
         .context("prospective bundle set would fail composed node-config admission")?;
@@ -723,8 +726,11 @@ mod tests {
         let app_root = target.ancestors().nth(3).unwrap();
         let registry_lock =
             ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(app_root).unwrap();
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, target.file_name().unwrap().to_str().unwrap())
-            .unwrap();
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &registry_lock,
+            target.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
         replace_dir_atomic(
             src,
             target,
@@ -851,7 +857,11 @@ mod tests {
         fs::write(target.join("old.txt"), b"old").unwrap();
         let registry_lock =
             ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, "demo").unwrap();
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &registry_lock,
+            "demo",
+        )
+        .unwrap();
         let validation_called = std::cell::Cell::new(false);
 
         let error = replace_dir_atomic(

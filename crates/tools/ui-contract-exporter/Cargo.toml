@@ -9,3 +9,6 @@ description = "Build-time exporter for the Rust-owned RyeOS browser contract"
 prettyplease = "=0.3.0"
 syn = { version = "=3.0.3", features = ["full", "parsing", "visit"] }
 ts-typegen-build = "=1.2.0"
+
+[lints]
+workspace = true

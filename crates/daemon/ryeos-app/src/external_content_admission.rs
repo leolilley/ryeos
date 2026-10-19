@@ -20,8 +20,8 @@ use ryeos_state::{
 use serde::Serialize;
 use serde_json::Value;
 
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 /// Exact, non-secret reason a retained content realization cannot be admitted.
 ///

@@ -48,8 +48,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     };
     let service_path = ".ai/services/threads/list.yaml";
     let service_bytes =
-        std::fs::read(ryeos_engine::test_support::core_bundle_root().join(service_path))
-            .unwrap();
+        std::fs::read(ryeos_engine::test_support::core_bundle_root().join(service_path)).unwrap();
     let service_file = ProjectFile {
         blob_hash: cas.store_blob(&service_bytes).unwrap(),
         size: service_bytes.len() as u64,

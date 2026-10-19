@@ -1,14 +1,17 @@
 //! Standalone constrained bundle-publisher process.
 use anyhow::Context as _;
 use clap::Parser;
-use ryeos_app::{bundle_publication::{
+use ryeos_app::{
+    bundle_publication::{
         producer::LocalConstrainedPublisherAuthority,
         standalone_publisher::{
             ManifestOnlyTreePublisher, StandalonePublisherPolicy, StandalonePublisherProof,
             observe_current_publisher_tool, observe_publisher_tool,
         },
-    }, state_store::NodeIdentitySigner};
-use ryeos_node_runtime::{identity::NodeIdentity};
+    },
+    state_store::NodeIdentitySigner,
+};
+use ryeos_node_runtime::identity::NodeIdentity;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Parser)]
@@ -96,10 +99,11 @@ async fn main() -> anyhow::Result<()> {
             verifying_key: identity.signing_key().verifying_key(),
             label: None,
         }]);
-    let ownership = ryeos_app::bundle_publication::admitted_build::load_installed_payload_ownership(
-        &bundle_release_root,
-        &ownership_trust,
-    )?;
+    let ownership =
+        ryeos_app::bundle_publication::admitted_build::load_installed_payload_ownership(
+            &bundle_release_root,
+            &ownership_trust,
+        )?;
     let observed_tool = observe_current_publisher_tool()?;
     policy.require_observed_tool(&observed_tool)?;
     let cas_root = lillux::PinnedDirectory::open(&cas_root)?.context("pin publication CAS root")?;

@@ -13,7 +13,10 @@ use crate::atomic_fs::atomic_write_with_mode;
 pub const CAS_TEMP_PURPOSE: crate::TempPurpose = crate::TempPurpose::new("cas");
 
 mod record_canonical;
-pub use record_canonical::{CanonicalRecordStorageQuote, canonical_record_storage_quote, canonical_record_quote_work_bound, canonical_record_bytes};
+pub use record_canonical::{
+    CanonicalRecordStorageQuote, canonical_record_bytes, canonical_record_quote_work_bound,
+    canonical_record_storage_quote,
+};
 
 struct FixedJsonString {
     bytes: [u8; 64],
@@ -2026,7 +2029,8 @@ mod bounded_cas_tests {
                 .is_err()
         );
 
-        let object = serde_json::json!({"kind":"admitted_launch_capsule", "payload":"x".repeat(91)});
+        let object =
+            serde_json::json!({"kind":"admitted_launch_capsule", "payload":"x".repeat(91)});
         let canonical = canonical_json(&object).unwrap();
         let object_hash = cas.store_object(&object).unwrap();
         let exact_limit = u64::try_from(canonical.len()).unwrap();

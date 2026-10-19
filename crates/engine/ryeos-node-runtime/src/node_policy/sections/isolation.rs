@@ -42,7 +42,9 @@ impl IsolationPolicyEnvelope {
 
 /// Host classes an isolation section body declares, after validating it.
 pub fn declared_host_classes(body: &Value) -> anyhow::Result<Vec<String>> {
-    Ok(IsolationPolicyEnvelope::parse(body)?.policy.host_class_names())
+    Ok(IsolationPolicyEnvelope::parse(body)?
+        .policy
+        .host_class_names())
 }
 
 /// The isolation section body narrowed to the one named host class. A
@@ -93,6 +95,7 @@ impl NodePolicySection for IsolationPolicySection {
         Ok(Arc::new(policy))
     }
 }
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
@@ -112,8 +115,7 @@ mod tests {
 
     /// The single class of a section body built by `disabled_policy_value`.
     fn class(body: &mut Value) -> &mut Value {
-        &mut body["policy"]["host_classes"]
-            [ryeos_engine::isolation::AUTHORING_HOST_CLASS]
+        &mut body["policy"]["host_classes"][ryeos_engine::isolation::AUTHORING_HOST_CLASS]
     }
 
     #[test]
@@ -222,7 +224,10 @@ mod tests {
             .downcast_ref::<ryeos_engine::isolation::IsolationPolicy>()
             .unwrap();
         assert_eq!(policy.requires_capabilities.len(), 4);
-        assert_eq!(policy.requires_capabilities[2].accepted_grades(), ["trusted"]);
+        assert_eq!(
+            policy.requires_capabilities[2].accepted_grades(),
+            ["trusted"]
+        );
         assert_eq!(policy.requires_capabilities[3].providers(), ["host"]);
         assert!(policy.requires_capabilities[1].accepted_grades().is_empty());
 
@@ -272,7 +277,10 @@ mod tests {
             "hosted": hosted,
             "local": local,
         });
-        assert_eq!(declared_host_classes(&profile).unwrap(), ["hosted", "local"]);
+        assert_eq!(
+            declared_host_classes(&profile).unwrap(),
+            ["hosted", "local"]
+        );
 
         // A node runs under one class: the unselected body does not compile.
         let error = format!("{:#}", section.parse(&context(), &profile).err().unwrap());
@@ -293,4 +301,3 @@ mod tests {
         assert!(refused.contains("`edge` is not declared"), "{refused}");
     }
 }
-use std::sync::Arc;

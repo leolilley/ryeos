@@ -593,14 +593,17 @@ impl ExternalContentManifestObject {
                 }
             }
         }
-        validate_internal_symlink_graph(self.entries.iter().filter_map(|entry| {
-            (entry.kind == ExternalContentManifestEntryKind::Symlink).then(|| {
-                (
-                    entry.path.as_str(),
-                    entry.target.as_deref().expect("validated target"),
-                )
-            })
-        }))?;
+        validate_internal_symlink_graph(
+            self.entries
+                .iter()
+                .filter(|&entry| (entry.kind == ExternalContentManifestEntryKind::Symlink))
+                .map(|entry| {
+                    (
+                        entry.path.as_str(),
+                        entry.target.as_deref().expect("validated target"),
+                    )
+                }),
+        )?;
         validate_manifest_tree_namespace(
             self.entries
                 .iter()

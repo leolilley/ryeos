@@ -2671,8 +2671,9 @@ async fn send_prepared_streaming_inner(
             requested_output_tokens,
         )?;
         #[cfg(feature = "latency-profiling")]
-        if !provider_stream_started_published && !final_events.is_empty() {
-            if let Err(error) = callback
+        if !provider_stream_started_published
+            && !final_events.is_empty()
+            && let Err(error) = callback
                 .append_runtime_event(
                     RuntimeEventType::Observation,
                     json!({
@@ -2684,9 +2685,8 @@ async fn send_prepared_streaming_inner(
                     }),
                 )
                 .await
-            {
-                tracing::warn!(%error, "provider stream-start milestone publication failed");
-            }
+        {
+            tracing::warn!(%error, "provider stream-start milestone publication failed");
         }
         for ev in final_events {
             if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {

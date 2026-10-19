@@ -687,7 +687,7 @@ fn completed_activation_receipt_is_reusable(
             &cas,
             &component.expected_manifest_hash,
             &consumer,
-            &authority.node_fingerprint,
+            authority.node_fingerprint,
         )?
         else {
             return Ok(false);
@@ -2307,7 +2307,7 @@ fn managed_policy(
     state: &AppState,
 ) -> Result<
     &ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentActivationPolicy,
-> {
+>{
     state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
@@ -2317,8 +2317,9 @@ fn managed_policy(
 
 fn external_content_policy(
     state: &AppState,
-) -> Result<&ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>
-{
+) -> Result<
+    &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+> {
     state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
@@ -2784,7 +2785,8 @@ mod tests {
     /// The owner dereferences to the Store and closes it when dropped.
     fn test_state_store(root: &std::path::Path) -> ryeos_app::test_support::TestStateStore {
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("identity/node-key.pem"))
+                .unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
@@ -2942,16 +2944,23 @@ mod tests {
     #[test]
     fn exhausted_interrupted_job_folds_authoritative_receipt_without_acquisition() {
         let root = tempfile::tempdir().unwrap();
-        let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("identity/node-key.pem"))
-                .unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &root.path().join("identity/node-key.pem"),
+        )
+        .unwrap();
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(root.path(), signer, write_barrier.clone(), std::sync::Arc::new(trust)).unwrap();
+        let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            root.path(),
+            signer,
+            write_barrier.clone(),
+            std::sync::Arc::new(trust),
+        )
+        .unwrap();
 
         let state_authority = state_store.pinned_state_authority().unwrap();
         let guard = state_authority.acquire_shared_guard().unwrap();

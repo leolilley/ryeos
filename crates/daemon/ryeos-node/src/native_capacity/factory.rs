@@ -9,9 +9,9 @@ use lillux::PinnedDirectory;
 use lillux_sqlite::{
     OriginalNativeAdmissionAuthority, OriginalNativeBudgetOwner, OriginalNativeConnectionAdmission,
     OriginalNativeFactory, OriginalNativeProjectionLeaseAdmission,
-    OriginalNativeProjectionLeaseAuthority,
-    SqliteInspectionProductionControl, SqliteInspectionProductionKind,
-    SqliteInspectionProductionPermit, SqliteInspectionProductionPublicationFailure,
+    OriginalNativeProjectionLeaseAuthority, SqliteInspectionProductionControl,
+    SqliteInspectionProductionKind, SqliteInspectionProductionPermit,
+    SqliteInspectionProductionPublicationFailure,
 };
 
 use super::LiveNativeCapacityReservation;
@@ -80,7 +80,7 @@ impl ServiceRefusalLatch {
                 && !self.fact_woken.swap(true, Ordering::SeqCst);
             if first || first_fact {
                 // A panicking wake is contained; the latch stays set.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake()));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wake));
             }
         }
     }
@@ -109,8 +109,10 @@ thread_local! {
 struct DurableCheckGuard;
 impl DurableCheckGuard {
     fn enter() -> Result<Self> {
-        ensure!(!IN_DURABLE_CHECK.with(|flag| flag.replace(true)),
-            "live native durable check re-entered");
+        ensure!(
+            !IN_DURABLE_CHECK.with(|flag| flag.replace(true)),
+            "live native durable check re-entered"
+        );
         Ok(Self)
     }
 }
@@ -144,12 +146,23 @@ pub struct LiveProducerControlCensus {
 // Ordinary callback wrapper under the enclosing node cap. The permit itself
 // holds the actual counted resident producer cell; no registry/backedge owns
 // this wrapper inside the mapped region.
-struct LiveProductionControl { authority: Arc<LiveNativeAuthority> }
+struct LiveProductionControl {
+    authority: Arc<LiveNativeAuthority>,
+}
 impl SqliteInspectionProductionControl for LiveProductionControl {
-    fn checkpoint(&self) -> Result<()> { self.authority.require_original(false) }
-    fn complete(&self) -> Result<()> { self.authority.require_original(true) }
+    fn checkpoint(&self) -> Result<()> {
+        self.authority.require_original(false)
+    }
+    fn complete(&self) -> Result<()> {
+        self.authority.require_original(true)
+    }
     fn abandoned(&self) {
-        if self.authority.reservation.require_original_process().is_ok() {
+        if self
+            .authority
+            .reservation
+            .require_original_process()
+            .is_ok()
+        {
             self.authority.latch(service_refusal::PRODUCER_ABANDONED);
         }
     }
@@ -174,7 +187,10 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
     fn require_runtime_binding(&self, runtime: &PinnedDirectory) -> Result<()> {
         self.require_original(false)?;
         ensure!(
-            self.reservation.inputs()?.runtime.is_same_directory(runtime)?,
+            self.reservation
+                .inputs()?
+                .runtime
+                .is_same_directory(runtime)?,
             "live native factory selects foreign runtime"
         );
         runtime.ensure_path_binding()
@@ -209,7 +225,8 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
     }
 
     fn begin_projection_lease(&self) -> Result<OriginalNativeProjectionLeaseAdmission> {
-        let (ticket, permit) = self.begin_ticket(SqliteInspectionProductionKind::ProjectionLease)?;
+        let (ticket, permit) =
+            self.begin_ticket(SqliteInspectionProductionKind::ProjectionLease)?;
         // SAFETY: a distinct lease interval, issued from the SAME nonrecycled
         // ticket counter; no SQL producer can acknowledge this lease permit.
         unsafe {
@@ -217,7 +234,6 @@ impl OriginalNativeAdmissionAuthority for LiveNativeAuthority {
                 .map_err(anyhow::Error::new)
         }
     }
-
 }
 
 impl LiveNativeAuthority {
@@ -273,9 +289,14 @@ impl LiveNativeAuthority {
         self.require_original(false)?;
         // A new ticket is new native work against the resident region.
         self.reservation.confirm_residency()?;
-        let _gate = self.admission_gate.try_lock()
+        let _gate = self
+            .admission_gate
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original live producer admission busy"))?;
-        ensure!(!self.admission_closed.load(Ordering::Acquire), "live native admission closed");
+        ensure!(
+            !self.admission_closed.load(Ordering::Acquire),
+            "live native admission closed"
+        );
         let original = self
             .original
             .upgrade()
@@ -285,23 +306,36 @@ impl LiveNativeAuthority {
         let core = self.region.claim_producer_control(kind)?;
         let ticket = match self.budget.debit_connection_ticket() {
             Ok(ticket) => ticket,
-            Err(error) => return Err(anyhow::Error::new(LiveNativeProducerPreparationFailure {
-                original: Arc::clone(&self.reservation), core, ticket: None, error,
-            })),
+            Err(error) => {
+                return Err(anyhow::Error::new(LiveNativeProducerPreparationFailure {
+                    original: Arc::clone(&self.reservation),
+                    core,
+                    ticket: None,
+                    error,
+                }));
+            }
         };
         if let Err(error) = core.bind_ticket(ticket) {
             return Err(anyhow::Error::new(LiveNativeProducerPreparationFailure {
-                original: Arc::clone(&self.reservation), core, ticket: Some(ticket), error: error.into(),
+                original: Arc::clone(&self.reservation),
+                core,
+                ticket: Some(ticket),
+                error: error.into(),
             }));
         }
-        let control: Arc<dyn SqliteInspectionProductionControl> =
-            Arc::new(LiveProductionControl { authority: original });
+        let control: Arc<dyn SqliteInspectionProductionControl> = Arc::new(LiveProductionControl {
+            authority: original,
+        });
         // SAFETY: the real original reservation and resident producer cell
         // share this sole counter; no copied index or ordinary Arc grants it.
-        let permit = unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, control, core) }
-            .map_err(|retained| anyhow::Error::new(LiveNativeProducerPublicationFailure {
-                original: Arc::clone(&self.reservation), retained,
-            }))?;
+        let permit =
+            unsafe { SqliteInspectionProductionPermit::issued_from_region(kind, control, core) }
+                .map_err(|retained| {
+                    anyhow::Error::new(LiveNativeProducerPublicationFailure {
+                        original: Arc::clone(&self.reservation),
+                        retained,
+                    })
+                })?;
         Ok((ticket, permit))
     }
 }
@@ -321,34 +355,69 @@ impl LiveNativeProducerPreparationFailure {
         if self.original.require_original_process().is_err() || self.ticket.is_some() {
             return Err(self);
         }
-        if self.core.retire_unbound_preparation().is_err() { return Err(self); }
+        if self.core.retire_unbound_preparation().is_err() {
+            return Err(self);
+        }
         Ok(self.error)
     }
     /// Recover an issued but never-published ticket through the SAME actual
     /// factory and its C no-acquisition transition. The returned Released
     /// receipt joins the ordinary exhaustive native terminal census.
-    pub fn retire_bound(self, factory: &Arc<LiveNativeFactory>)
-        -> std::result::Result<(anyhow::Error, lillux_sqlite::OriginalNativeConnectionTerminal), Self> {
-        if self.ticket.is_none() || !Arc::ptr_eq(&self.original, &factory.authority.reservation)
-            || !self.core.observation().is_ok_and(|observation| Some(observation.ticket) == self.ticket) {
+    pub fn retire_bound(
+        self,
+        factory: &Arc<LiveNativeFactory>,
+    ) -> std::result::Result<
+        (
+            anyhow::Error,
+            lillux_sqlite::OriginalNativeConnectionTerminal,
+        ),
+        Self,
+    > {
+        if self.ticket.is_none()
+            || !Arc::ptr_eq(&self.original, &factory.authority.reservation)
+            || !self
+                .core
+                .observation()
+                .is_ok_and(|observation| Some(observation.ticket) == self.ticket)
+        {
             return Err(self);
         }
-        let Some(native) = factory.factory.get() else { return Err(self); };
+        let Some(native) = factory.factory.get() else {
+            return Err(self);
+        };
         let released = match native.retire_unpublished_ticket(&self.core) {
             Ok(released) => released,
             Err(_) => return Err(self),
         };
-        Ok((self.error, lillux_sqlite::OriginalNativeConnectionTerminal::Released(released)))
+        Ok((
+            self.error,
+            lillux_sqlite::OriginalNativeConnectionTerminal::Released(released),
+        ))
     }
 
-    pub fn into_parts(self) -> std::result::Result<(Arc<LiveNativeCapacityReservation>, lillux_sqlite::OriginalNativeProducerControl, Option<u32>, anyhow::Error), Self> {
-        if self.original.require_original_process().is_err() { return Err(self); }
+    pub fn into_parts(
+        self,
+    ) -> std::result::Result<
+        (
+            Arc<LiveNativeCapacityReservation>,
+            lillux_sqlite::OriginalNativeProducerControl,
+            Option<u32>,
+            anyhow::Error,
+        ),
+        Self,
+    > {
+        if self.original.require_original_process().is_err() {
+            return Err(self);
+        }
         Ok((self.original, self.core, self.ticket, self.error))
     }
 }
 impl std::fmt::Debug for LiveNativeProducerPreparationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LiveNativeProducerPreparationFailure").field("ticket", &self.ticket).field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("LiveNativeProducerPreparationFailure")
+            .field("ticket", &self.ticket)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for LiveNativeProducerPreparationFailure {
@@ -370,7 +439,8 @@ impl LiveNativeProducerPublicationFailure {
     /// borrow its original custody before the final consuming transfer.
     fn retire_uninstalled(self) -> std::result::Result<(), Self> {
         if self.original.close_uninstalled_construction().is_err()
-            || self.retained.retire_uninstalled_factory_issuer().is_err() {
+            || self.retained.retire_uninstalled_factory_issuer().is_err()
+        {
             return Err(self);
         }
         let Self { original, retained } = self;
@@ -384,19 +454,35 @@ impl LiveNativeProducerPublicationFailure {
             Err(retained) => Err(Self { original, retained }),
         }
     }
-    pub fn into_parts(self) -> std::result::Result<(Arc<LiveNativeCapacityReservation>, SqliteInspectionProductionPublicationFailure), Self> {
-        if self.original.require_original_process().is_err() { return Err(self); }
+    pub fn into_parts(
+        self,
+    ) -> std::result::Result<
+        (
+            Arc<LiveNativeCapacityReservation>,
+            SqliteInspectionProductionPublicationFailure,
+        ),
+        Self,
+    > {
+        if self.original.require_original_process().is_err() {
+            return Err(self);
+        }
         Ok((self.original, self.retained))
     }
 }
 impl std::fmt::Debug for LiveNativeProducerPublicationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LiveNativeProducerPublicationFailure").field("refusal", &self.retained.refusal).finish_non_exhaustive()
+        f.debug_struct("LiveNativeProducerPublicationFailure")
+            .field("refusal", &self.retained.refusal)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for LiveNativeProducerPublicationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "original producer publication retained: {}", self.retained.refusal)
+        write!(
+            f,
+            "original producer publication retained: {}",
+            self.retained.refusal
+        )
     }
 }
 impl std::error::Error for LiveNativeProducerPublicationFailure {}
@@ -404,18 +490,37 @@ impl std::error::Error for LiveNativeProducerPublicationFailure {}
 // Issued only by the actual retained live factory after its irreversible
 // producer gate closes. The lower backend separately requires every genuine
 // connection/lease terminal; this is not a caller-provided drain flag.
-struct LiveCleanupAuthority { original: Arc<LiveNativeFactory> }
+struct LiveCleanupAuthority {
+    original: Arc<LiveNativeFactory>,
+}
 impl lillux_sqlite::OriginalNativeCleanupAuthority for LiveCleanupAuthority {
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         let authority = &self.original.authority;
         authority.require_original(true)?;
-        ensure!(authority.admission_closed.load(Ordering::Acquire), "live producer gate is not sealed");
-        let _gate = authority.admission_gate.try_lock()
+        ensure!(
+            authority.admission_closed.load(Ordering::Acquire),
+            "live producer gate is not sealed"
+        );
+        let _gate = authority
+            .admission_gate
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("live producer start has not quiesced"))?;
-        let original = self.original.factory.get().context("original live factory absent")?;
-        ensure!(Arc::ptr_eq(original, factory), "live cleanup selects foreign native factory");
-        let issuer = authority.issuer.get().context("actual live issuer cell absent")?;
-        authority.region.require_quiescent_nonissuer_producers(*issuer)?;
+        let original = self
+            .original
+            .factory
+            .get()
+            .context("original live factory absent")?;
+        ensure!(
+            Arc::ptr_eq(original, factory),
+            "live cleanup selects foreign native factory"
+        );
+        let issuer = authority
+            .issuer
+            .get()
+            .context("actual live issuer cell absent")?;
+        authority
+            .region
+            .require_quiescent_nonissuer_producers(*issuer)?;
         Ok(())
     }
 }
@@ -433,14 +538,28 @@ impl LiveNativeFactoryFailure {
     /// Recover an actual publication refusal before a lower factory exists.
     /// No replacement factory, budget or backend terminal is issued.
     pub fn retire_uninstalled(self) -> std::result::Result<(), Self> {
-        if self._original.authority.reservation.require_original_process().is_err()
+        if self
+            ._original
+            .authority
+            .reservation
+            .require_original_process()
+            .is_err()
             || self._original.factory.get().is_some()
-            || self._original.close_admission().is_err() { return Err(self); }
+            || self._original.close_admission().is_err()
+        {
+            return Err(self);
+        }
         let Self { _original, error } = self;
         match error.downcast::<LiveNativeProducerPublicationFailure>() {
             Ok(failure) => match failure.retire_uninstalled() {
-                Ok(()) => { drop(_original); Ok(()) }
-                Err(failure) => Err(Self { _original, error: anyhow::Error::new(failure) }),
+                Ok(()) => {
+                    drop(_original);
+                    Ok(())
+                }
+                Err(failure) => Err(Self {
+                    _original,
+                    error: anyhow::Error::new(failure),
+                }),
             },
             Err(error) => {
                 // Earlier input/claim refusal can precede issuer creation; a
@@ -449,16 +568,31 @@ impl LiveNativeFactoryFailure {
                 // real admission/region first, never guess a native terminal.
                 let retired = (|| -> Result<()> {
                     _original.close_admission()?;
-                    _original.authority.reservation.close_uninstalled_construction()?;
+                    _original
+                        .authority
+                        .reservation
+                        .close_uninstalled_construction()?;
                     if let Some(index) = _original.authority.issuer.get() {
-                        _original.authority.region.retire_uninstalled_factory_issuer(*index)?;
+                        _original
+                            .authority
+                            .region
+                            .retire_uninstalled_factory_issuer(*index)?;
                     } else {
-                        ensure!(_original.authority.region.producer_control_census()?.allocated == 0,
-                            "uninstalled construction has an unowned producer cell");
+                        ensure!(
+                            _original
+                                .authority
+                                .region
+                                .producer_control_census()?
+                                .allocated
+                                == 0,
+                            "uninstalled construction has an unowned producer cell"
+                        );
                     }
                     Ok(())
                 })();
-                if retired.is_err() { return Err(Self { _original, error }); }
+                if retired.is_err() {
+                    return Err(Self { _original, error });
+                }
                 drop(error);
                 drop(_original);
                 Ok(())
@@ -468,7 +602,13 @@ impl LiveNativeFactoryFailure {
     /// Return actual custody to the outside supervisor, preserving the same
     /// failed factory, reservation and resident graph. No retry grant is issued.
     pub fn into_original(self) -> std::result::Result<Arc<LiveNativeFactory>, Self> {
-        if self._original.authority.reservation.require_original_process().is_err() {
+        if self
+            ._original
+            .authority
+            .reservation
+            .require_original_process()
+            .is_err()
+        {
             return Err(self);
         }
         Ok(self._original)
@@ -501,14 +641,18 @@ impl LiveNativeFactory {
     /// nonrecycled producer cells and ticket receipts. Ordinary wrappers live
     /// under the separately enforced node process envelope.
     pub(super) fn minimum_host_payload_bytes(tickets: u32) -> Result<u64> {
-        ensure!(tickets > 0 && tickets as usize <= MAX_TICKETS,
-            "host payload quote has unsupported ticket count");
+        ensure!(
+            tickets > 0 && tickets as usize <= MAX_TICKETS,
+            "host payload quote has unsupported ticket count"
+        );
         let layout = lillux_sqlite::original_host_owner::original_native_region_layout()?;
         Ok(u64::try_from(layout.layout.size())?)
     }
     /// The single concrete resident graph initialization. Mapping/page work
     /// is quoted separately by the actual host owner.
-    pub(super) fn minimum_host_placement_steps() -> u64 { 1 }
+    pub(super) fn minimum_host_placement_steps() -> u64 {
+        1
+    }
     /// Retain the host before any factory/bootstrap effect. Installation uses
     /// one original issuer interval and never exposes a replacement factory.
     pub fn install(reservation: Arc<LiveNativeCapacityReservation>) -> Result<Arc<Self>> {
@@ -520,7 +664,11 @@ impl LiveNativeFactory {
         let region = reservation.region_handle()?;
         let service_edge = reservation.inputs()?.service_edge;
         let authority = Arc::new_cyclic(|original| LiveNativeAuthority {
-            original: original.clone(), reservation, budget, region, issuer: OnceLock::new(),
+            original: original.clone(),
+            reservation,
+            budget,
+            region,
+            issuer: OnceLock::new(),
             latch: Arc::new(ServiceRefusalLatch::new(service_edge)),
             admission_closed: AtomicBool::new(false),
             admission_gate: Mutex::new(()),
@@ -531,25 +679,43 @@ impl LiveNativeFactory {
         });
         let result = (|| -> Result<()> {
             original.authority.require_original(false)?;
-            let core = original.authority.region.claim_producer_control(
-                SqliteInspectionProductionKind::FactoryIssuer)?;
-            original.authority.issuer.set(core.index())
+            let core = original
+                .authority
+                .region
+                .claim_producer_control(SqliteInspectionProductionKind::FactoryIssuer)?;
+            original
+                .authority
+                .issuer
+                .set(core.index())
                 .map_err(|_| anyhow::anyhow!("actual live issuer index already retained"))?;
-            let control: Arc<dyn SqliteInspectionProductionControl> = Arc::new(LiveProductionControl {
-                authority: Arc::clone(&original.authority),
-            });
+            let control: Arc<dyn SqliteInspectionProductionControl> =
+                Arc::new(LiveProductionControl {
+                    authority: Arc::clone(&original.authority),
+                });
             // SAFETY: this one-use issuer owns a counted cell in the actual
             // original resident graph, authenticated by the retained account.
-            let permit = unsafe { SqliteInspectionProductionPermit::issued_from_region(
-                SqliteInspectionProductionKind::FactoryIssuer, control, core,
-            ) }.map_err(|retained| anyhow::Error::new(LiveNativeProducerPublicationFailure {
-                original: Arc::clone(&original.authority.reservation), retained,
-            }))?;
+            let permit = unsafe {
+                SqliteInspectionProductionPermit::issued_from_region(
+                    SqliteInspectionProductionKind::FactoryIssuer,
+                    control,
+                    core,
+                )
+            }
+            .map_err(|retained| {
+                anyhow::Error::new(LiveNativeProducerPublicationFailure {
+                    original: Arc::clone(&original.authority.reservation),
+                    retained,
+                })
+            })?;
             let host: Arc<dyn OriginalNativeAdmissionAuthority> = original.authority.clone();
             // SAFETY: authentic retained original reservation, same prepaid
             // counter and one active issuer interval above, before any effect.
             let factory = match unsafe {
-                OriginalNativeFactory::install_from_original_issuer(original.authority.region.try_clone()?, host, permit)
+                OriginalNativeFactory::install_from_original_issuer(
+                    original.authority.region.try_clone()?,
+                    host,
+                    permit,
+                )
             } {
                 Ok(factory) => factory,
                 Err(error) => {
@@ -581,15 +747,22 @@ impl LiveNativeFactory {
     /// expires; the actual original process remains required.
     pub fn close_admission(&self) -> Result<()> {
         self.authority.reservation.require_original_process()?;
-        self.authority.admission_closed.store(true, Ordering::Release);
-        let _gate = self.authority.admission_gate.try_lock()
+        self.authority
+            .admission_closed
+            .store(true, Ordering::Release);
+        let _gate = self
+            .authority
+            .admission_gate
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("native admission close busy; gate remains closed"))?;
         Ok(())
     }
 
     pub fn producer_control_census(&self) -> Result<LiveProducerControlCensus> {
         self.authority.require_original(true)?;
-        self.authority.budget.debit_steps((MAX_PREPARED_CONTROLS + 1) as u64, true)?;
+        self.authority
+            .budget
+            .debit_steps((MAX_PREPARED_CONTROLS + 1) as u64, true)?;
         let resident = self.authority.region.producer_control_census()?;
         let census = LiveProducerControlCensus {
             prepared_attempts: resident.allocated,
@@ -614,18 +787,25 @@ impl LiveNativeFactory {
             self.close_admission()?;
             let factory = self.factory.get().context("original live factory absent")?;
             let authority: Arc<dyn lillux_sqlite::OriginalNativeCleanupAuthority> =
-                Arc::new(LiveCleanupAuthority { original: Arc::clone(self) });
+                Arc::new(LiveCleanupAuthority {
+                    original: Arc::clone(self),
+                });
             // SAFETY: the actual producer gate is irreversibly closed and
             // start has quiesced; resident producer state and every native
             // terminal are rechecked by these original owners at each effect.
-            let inputs = unsafe { lillux_sqlite::OriginalLiveNativeDrainInputs::issued(
-                Arc::clone(factory), authority,
-            ) }?;
-            factory.finish_live_backend(terminals, leases, &inputs).map_err(anyhow::Error::new)
+            let inputs = unsafe {
+                lillux_sqlite::OriginalLiveNativeDrainInputs::issued(Arc::clone(factory), authority)
+            }?;
+            factory
+                .finish_live_backend(terminals, leases, &inputs)
+                .map_err(anyhow::Error::new)
         })();
-        result.map_err(|error| anyhow::Error::new(LiveNativeFactoryFailure {
-            _original: Arc::clone(self), error,
-        }))
+        result.map_err(|error| {
+            anyhow::Error::new(LiveNativeFactoryFailure {
+                _original: Arc::clone(self),
+                error,
+            })
+        })
     }
 
     /// Retire the retained budget facade's counted resident handle only after
@@ -647,18 +827,30 @@ impl LiveNativeFactory {
     /// Close a genuine failed initialization before any Ready handoff or
     /// resource ticket. The lower owner checks those facts; this never grants
     /// Ready admission or constructs replacement native state.
-    pub fn finish_initialization_refusal(self: &Arc<Self>) -> Result<Arc<lillux_sqlite::OriginalNativeTerminal>> {
+    pub fn finish_initialization_refusal(
+        self: &Arc<Self>,
+    ) -> Result<Arc<lillux_sqlite::OriginalNativeTerminal>> {
         let result = (|| -> Result<_> {
             self.close_admission()?;
             self.authority.require_original(true)?;
-            let factory = self.factory.get().context("original failed native factory absent")?;
-            let authority = LiveCleanupAuthority { original: Arc::clone(self) };
+            let factory = self
+                .factory
+                .get()
+                .context("original failed native factory absent")?;
+            let authority = LiveCleanupAuthority {
+                original: Arc::clone(self),
+            };
             lillux_sqlite::OriginalNativeCleanupAuthority::require_original(&authority, factory)?;
-            factory.finish_original_initialization_refusal().map_err(anyhow::Error::new)
+            factory
+                .finish_original_initialization_refusal()
+                .map_err(anyhow::Error::new)
         })();
-        result.map_err(|error| anyhow::Error::new(LiveNativeFactoryFailure {
-            _original: Arc::clone(self), error,
-        }))
+        result.map_err(|error| {
+            anyhow::Error::new(LiveNativeFactoryFailure {
+                _original: Arc::clone(self),
+                error,
+            })
+        })
     }
 
     pub fn initialize(self: &Arc<Self>) -> Result<()> {
@@ -679,12 +871,18 @@ impl LiveNativeFactory {
     /// Prepay concrete outside receiver storage from the original reservation
     /// only after genuine same-factory aggregate acknowledgement. No Ready or
     /// service opening is re-entered and no replacement allowance is issued.
-    pub fn prepay_outside_control(&self, terminal: &lillux_sqlite::OriginalNativeTerminal,
-        memory_bytes: u64, steps: u64) -> Result<()> {
+    pub fn prepay_outside_control(
+        &self,
+        terminal: &lillux_sqlite::OriginalNativeTerminal,
+        memory_bytes: u64,
+        steps: u64,
+    ) -> Result<()> {
         self.authority.require_original(true)?;
         let factory = self.factory.get().context("original live factory absent")?;
         terminal.require_original(factory)?;
-        self.authority.reservation.prepay_outside_control(memory_bytes, steps)
+        self.authority
+            .reservation
+            .prepay_outside_control(memory_bytes, steps)
     }
 
     /// Issue metadata-pin retirement inputs for the exact pins still held by
@@ -700,16 +898,23 @@ impl LiveNativeFactory {
         let factory = self.factory.get().context("original live factory absent")?;
         terminal.require_original(factory)?;
         leaf.require_original(factory, terminal)?;
-        self.authority.reservation.packet_metadata_pin_retirement_inputs(
-            Arc::clone(factory), Arc::clone(terminal), leaf, pins,
-        )
+        self.authority
+            .reservation
+            .packet_metadata_pin_retirement_inputs(
+                Arc::clone(factory),
+                Arc::clone(terminal),
+                leaf,
+                pins,
+            )
     }
 
     /// Transfer the same registry allocated by this genuine reservation before
     /// mapping. The consuming supervisor must cache it before any further
     /// fallible step; a second registry is never allocated for shutdown.
-    pub fn take_prepared_physical_registry(&self, terminal: &lillux_sqlite::OriginalNativeTerminal)
-        -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
+    pub fn take_prepared_physical_registry(
+        &self,
+        terminal: &lillux_sqlite::OriginalNativeTerminal,
+    ) -> Result<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry> {
         self.authority.require_original(true)?;
         terminal.require_original(self.factory.get().context("original live factory absent")?)?;
         self.authority.reservation.take_prepared_physical_registry()
@@ -719,7 +924,10 @@ impl LiveNativeFactory {
     /// permits no new destination or ticket authority.
     pub fn retained_factory_for_cleanup(&self) -> Result<Arc<OriginalNativeFactory>> {
         self.authority.require_original(true)?;
-        self.factory.get().cloned().context("original live factory absent")
+        self.factory
+            .get()
+            .cloned()
+            .context("original live factory absent")
     }
 
     /// Checked handoff of the SAME paid factory. Destination admission remains
@@ -740,10 +948,20 @@ impl LiveNativeFactory {
     ) -> Result<lillux::time::MonotonicDeadline> {
         self.authority.require_original(cleanup)?;
         let original = self.factory.get().context("original live factory absent")?;
-        ensure!(Arc::ptr_eq(original, factory), "foreign live projection lease factory");
+        ensure!(
+            Arc::ptr_eq(original, factory),
+            "foreign live projection lease factory"
+        );
         let inputs = self.authority.reservation.inputs()?;
-        let deadline = if cleanup { inputs.cleanup_deadline } else { inputs.sql_deadline };
-        ensure!(!deadline.has_elapsed(), "original live projection lease deadline elapsed");
+        let deadline = if cleanup {
+            inputs.cleanup_deadline
+        } else {
+            inputs.sql_deadline
+        };
+        ensure!(
+            !deadline.has_elapsed(),
+            "original live projection lease deadline elapsed"
+        );
         Ok(deadline)
     }
 
@@ -762,7 +980,10 @@ impl LiveNativeFactory {
     /// Register the daemon's wake for the first latch. If a latch already
     /// happened, the wake runs now. Registers at most once.
     pub fn register_service_refusal_wake(&self, wake: ServiceRefusalWake) -> Result<()> {
-        self.authority.latch.wake.set(wake)
+        self.authority
+            .latch
+            .wake
+            .set(wake)
             .map_err(|_| anyhow::anyhow!("service refusal wake already registered"))?;
         std::sync::atomic::fence(Ordering::SeqCst);
         if self.authority.latch.bits() != 0 {
@@ -782,16 +1003,23 @@ impl LiveNativeFactory {
     pub fn arm_service_window_timers(&self, on_margin: ServiceRefusalWake) -> Result<()> {
         let latch = Arc::clone(&self.authority.latch);
         let margin = std::time::Duration::from_millis(
-            self.authority.reservation.inputs()?.policy.incarnation.rollover_drain_margin_ms,
+            self.authority
+                .reservation
+                .inputs()?
+                .policy
+                .incarnation
+                .rollover_drain_margin_ms,
         );
         std::thread::Builder::new()
             .name("ryeosd-service-window".to_owned())
             .spawn(move || {
                 // A refused clock wait fails closed: the edge latches at once.
                 if latch.edge.sleep_until_before_edge(margin).is_ok() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_margin()));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_margin));
                 }
-                let _ = latch.edge.sleep_until_before_edge(std::time::Duration::ZERO);
+                let _ = latch
+                    .edge
+                    .sleep_until_before_edge(std::time::Duration::ZERO);
                 latch.latch(service_refusal::WINDOW_EDGE);
             })
             .context("start service window timer")?;
@@ -817,16 +1045,15 @@ impl LiveNativeFactory {
 }
 
 impl OriginalNativeProjectionLeaseAuthority for LiveNativeFactory {
-    fn require_original(
-        &self,
-        factory: &Arc<OriginalNativeFactory>,
-        cleanup: bool,
-    ) -> Result<()> {
+    fn require_original(&self, factory: &Arc<OriginalNativeFactory>, cleanup: bool) -> Result<()> {
         // Revalidate the retained actual BOOTTIME observer for every lower
         // acquisition/cleanup check, including after fork waits and effects.
         self.authority.require_original(cleanup)?;
         let original = self.factory.get().context("original live factory absent")?;
-        ensure!(Arc::ptr_eq(original, factory), "foreign live projection lease factory");
+        ensure!(
+            Arc::ptr_eq(original, factory),
+            "foreign live projection lease factory"
+        );
         Ok(())
     }
 
@@ -848,8 +1075,11 @@ mod service_refusal_latch_tests {
     #[test]
     fn a_fact_after_the_planned_edge_wakes_the_daemon_again() {
         let clock = lillux::time::RetainedOccupancyClock::capture().unwrap();
-        let limit = lillux::time::OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
-        let edge = clock.service_edge(&limit, lillux::time::Duration::from_secs(60)).unwrap();
+        let limit =
+            lillux::time::OccupancyLimit::new(clock.start().clone(), 3_600_000_000_000).unwrap();
+        let edge = clock
+            .service_edge(&limit, lillux::time::Duration::from_secs(60))
+            .unwrap();
         let latch = ServiceRefusalLatch::new(edge);
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = Arc::clone(&wakes);

@@ -2,8 +2,10 @@
 //! No image digest or substrate receipt is an input: those are measured only
 //! after this exact signed/qualified Core generation is packaged.
 
-use ryeos_bundle_publication_contract::{CORE_SEED_QUALIFIER, CORE_SEED_QUALIFICATION_POLICY, CORE_SEED_QUALIFICATION_CLAIM};
 use anyhow::Context as _;
+use ryeos_bundle_publication_contract::{
+    CORE_SEED_QUALIFICATION_CLAIM, CORE_SEED_QUALIFICATION_POLICY, CORE_SEED_QUALIFIER,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

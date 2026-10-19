@@ -282,20 +282,21 @@ pub fn capture_signed_bundle_source_manifest(
         after_shebang: false,
     };
     let signature =
-        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
+        crate::item_resolution::parse_signature_header(raw, &envelope).ok_or_else(|| {
             EngineError::Internal(format!(
                 "runtime source-bundle manifest is unsigned: {}",
                 manifest_path.display()
             ))
         })?;
     let (trust_class, _) =
-        crate::trust::verify_item_signature(&raw, &signature, &envelope, node_trust_store)
-            .map_err(|error| {
+        crate::trust::verify_item_signature(raw, &signature, &envelope, node_trust_store).map_err(
+            |error| {
                 EngineError::Internal(format!(
                     "verify runtime source-bundle manifest {}: {error}",
                     manifest_path.display()
                 ))
-            })?;
+            },
+        )?;
     if trust_class != ContractTrustClass::Trusted {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest signer {} is not node-trusted",
@@ -385,7 +386,7 @@ fn validate_runtime_source_bundle_manifest_body(
     signer_fingerprint: &str,
     source_description: &str,
 ) -> Result<SignedBundleManifestIdentity, EngineError> {
-    let manifest_value: serde_yaml::Value = serde_yaml::from_str(&body).map_err(|error| {
+    let manifest_value: serde_yaml::Value = serde_yaml::from_str(body).map_err(|error| {
         EngineError::Internal(format!(
             "parse runtime source-bundle manifest {}: {error}",
             source_description
@@ -1300,15 +1301,14 @@ fn build_plan_with_execution_root(
     );
     plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
     plan_env.insert("RYEOS_ITEM_REF".to_owned(), canonical_ref.clone());
-    let execution_project_root =
-        logical_project_root.unwrap_or_else(|| match &ctx.project_context {
-            crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
-            crate::contracts::ProjectContext::None
-            | crate::contracts::ProjectContext::SnapshotHash { .. }
-            | crate::contracts::ProjectContext::ProjectRef { .. } => {
-                resolved.materialized_project_root.as_deref()
-            }
-        });
+    let execution_project_root = logical_project_root.unwrap_or(match &ctx.project_context {
+        crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+        crate::contracts::ProjectContext::None
+        | crate::contracts::ProjectContext::SnapshotHash { .. }
+        | crate::contracts::ProjectContext::ProjectRef { .. } => {
+            resolved.materialized_project_root.as_deref()
+        }
+    });
     if let Some(root) = execution_project_root {
         plan_env.insert(
             "RYEOS_PROJECT_ROOT".to_owned(),
@@ -1388,14 +1388,13 @@ fn build_plan_with_execution_root(
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
-    let mut authenticated_chain_authorities =
-        vec![root_plan_trust_authority(item, &canonical_ref)];
+    let mut authenticated_chain_authorities = vec![root_plan_trust_authority(item, &canonical_ref)];
     authenticated_chain_authorities.extend(terminal.verified_chain.iter().cloned());
     // A pinned snapshot has a materialized execution root even though source
     // lookup remains under its separate admitted project authority. Give the
     // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
     // cwd and typed project-path inputs can be relocated with the direct plan.
-    let runtime_execution_root = logical_project_root.unwrap_or_else(|| {
+    let runtime_execution_root = logical_project_root.unwrap_or({
         if matches!(
             &ctx.project_context,
             crate::contracts::ProjectContext::SnapshotHash { .. }
@@ -1553,9 +1552,15 @@ fn root_plan_trust_authority(
 ) -> crate::contracts::PlanTrustAuthority {
     let resolved = &item.resolved;
     let trust_class = match (item.trust_class, resolved.source_space) {
-        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => crate::resolution::TrustClass::TrustedBundle,
-        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => crate::resolution::TrustClass::TrustedProject,
-        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => crate::resolution::TrustClass::TrustedNode,
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => {
+            crate::resolution::TrustClass::TrustedBundle
+        }
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => {
+            crate::resolution::TrustClass::TrustedProject
+        }
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => {
+            crate::resolution::TrustClass::TrustedNode
+        }
         (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
     };
@@ -1564,7 +1569,10 @@ fn root_plan_trust_authority(
         canonical_ref: canonical_ref.to_owned(),
         source_space: resolved.source_space,
         trust_class,
-        signer_fingerprint: resolved.signature_header.as_ref().map(|header| header.signer_fingerprint.clone()),
+        signer_fingerprint: resolved
+            .signature_header
+            .as_ref()
+            .map(|header| header.signer_fingerprint.clone()),
         content_hash: resolved.content_hash.clone(),
         raw_content_digest: resolved.raw_content_digest.clone(),
     }

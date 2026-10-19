@@ -1025,7 +1025,10 @@ mod tests {
             "credential:private_home"
         );
         for (value, refusal) in [
-            (json!({ "node": ["time", "persistence:durable_state"] }), "sorted and unique"),
+            (
+                json!({ "node": ["time", "persistence:durable_state"] }),
+                "sorted and unique",
+            ),
             (json!({ "node": ["time", "time"] }), "sorted and unique"),
             (
                 json!({ "credential_kinds": { "credential_profile": [{ "any_of": [] }] } }),
@@ -1035,8 +1038,14 @@ mod tests {
                 json!({ "credential_kinds": { "credential_profile": [{ "name": "x", "accept": ["peer_attested"] }] } }),
                 "peer_attested",
             ),
-            (json!({ "credential_kinds": { "credential_profile": [] } }), "must name what"),
-            (json!({ "credential_kinds": { "credential profile": ["x"] } }), "portable identifier"),
+            (
+                json!({ "credential_kinds": { "credential_profile": [] } }),
+                "must name what",
+            ),
+            (
+                json!({ "credential_kinds": { "credential profile": ["x"] } }),
+                "portable identifier",
+            ),
             (
                 json!({ "credential_kinds": { "credential_profile": ["x"], "provider_env": ["y"] } }),
                 "at most 1",
@@ -1049,11 +1058,16 @@ mod tests {
         // rather than read as an unnamed kind.
         assert!(parse_runtime_requires(&json!({ "credential": ["x"] })).is_err());
         assert!(parse_runtime_requires(&json!({ "node": [1] })).is_err());
-        let bounded: Vec<String> = (0..MAX_REQUIREMENT_ENTRIES).map(|index| format!("n{index:03}")).collect();
+        let bounded: Vec<String> = (0..MAX_REQUIREMENT_ENTRIES)
+            .map(|index| format!("n{index:03}"))
+            .collect();
         assert!(parse_runtime_requires(&json!({ "node": bounded })).is_ok());
-        let over: Vec<String> = (0..=MAX_REQUIREMENT_ENTRIES).map(|index| format!("n{index:03}")).collect();
-        let error = parse_runtime_requires(&json!({ "credential_kinds": { "credential_profile": over } }))
-            .unwrap_err();
+        let over: Vec<String> = (0..=MAX_REQUIREMENT_ENTRIES)
+            .map(|index| format!("n{index:03}"))
+            .collect();
+        let error =
+            parse_runtime_requires(&json!({ "credential_kinds": { "credential_profile": over } }))
+                .unwrap_err();
         assert!(error.contains("more than 64"), "{error}");
     }
 

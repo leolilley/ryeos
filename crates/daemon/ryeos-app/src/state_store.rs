@@ -111,25 +111,28 @@ impl StateStore {
     }
 }
 
-mod projection_access;
 mod live_destination_join;
-pub use live_destination_join::{quote_store_leaf_transfers, quote_store_parent_transfer,
-    quote_store_receiver};
+mod projection_access;
+pub use live_destination_join::{
+    quote_store_leaf_transfers, quote_store_parent_transfer, quote_store_receiver,
+};
 mod live_outside;
-pub use live_outside::{LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource, StoreExhausted,
+pub use live_outside::{
+    LiveStateStoreOutsideCustody, LiveStateStoreOutsideSource,
     MAX_LIVE_ACCOUNTING_NATIVE_PACKET_SOURCES, MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES,
     MAX_LIVE_SCHEDULER_NATIVE_PACKET_SOURCES, MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
-    quote_destination_retries, quote_packet_parts, quote_packet_metadata_pin_retirements,
-    quote_retired_packet_metadata_pin_receipts, quote_retired_packet_source_parts};
+    StoreExhausted, quote_destination_retries, quote_packet_metadata_pin_retirements,
+    quote_packet_parts, quote_retired_packet_metadata_pin_receipts,
+    quote_retired_packet_source_parts,
+};
 mod live_close;
 pub use live_close::{ClosedLiveStateStore, LiveStateStoreCloseFailure, StateStoreCensus};
 mod live_native;
 pub use live_native::{
-    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure, abandoned_state_store_openings,
-    LiveAccountingNativeAdmission,
-    LiveSchedulerNativeAdmission, LiveSchedulerNativeAdmissionFailure,
-    LiveSchedulerNativeAdmissionOutsideSources,
-    ReleasedLiveStateStoreStartup, quote_store_child_parent_alias_retirement,
+    LiveAccountingNativeAdmission, LiveSchedulerNativeAdmission,
+    LiveSchedulerNativeAdmissionFailure, LiveSchedulerNativeAdmissionOutsideSources,
+    LiveStateStoreOpenFailure, LiveStateStoreStartupRecoveryFailure, ReleasedLiveStateStoreStartup,
+    abandoned_state_store_openings, quote_store_child_parent_alias_retirement,
     quote_store_completed_parent_root_membership, quote_store_destination_join_preparation,
     quote_store_direct_operational_handoff, quote_store_operator_lock_membership,
     quote_store_operator_lock_registration, quote_store_packet_vector_handoff,
@@ -163,7 +166,11 @@ fn retain_all_terminals(
             reasons.push(format!("{reason:#}"));
         }
     }
-    if refused.is_empty() { Ok(()) } else { Err((refused, reasons.join("; "))) }
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err((refused, reasons.join("; ")))
+    }
 }
 
 /// Close an in-process Runtime store into its host's census. A refusal
@@ -184,7 +191,10 @@ fn close_runtime_into(
     let terminals = match closed.native_terminals() {
         Ok(terminals) => terminals,
         Err(refusal) => {
-            return Err(CarriedOwners::carry(refusal.context("closed Runtime census refused"), closed));
+            return Err(CarriedOwners::carry(
+                refusal.context("closed Runtime census refused"),
+                closed,
+            ));
         }
     };
     if let Err((refused, reasons)) = retain_all_terminals(terminals, retain) {
@@ -200,12 +210,20 @@ fn close_runtime_into(
 
 /// Records one closed projection generation lease in an in-process host's
 /// census; a refusal hands it back with the reason.
-pub type RetainLease<'a> = &'a dyn Fn(Arc<lillux_sqlite::ClosedOriginalProjectionLease>)
-    -> std::result::Result<(), (Arc<lillux_sqlite::ClosedOriginalProjectionLease>, anyhow::Error)>;
+pub type RetainLease<'a> = &'a dyn Fn(
+    Arc<lillux_sqlite::ClosedOriginalProjectionLease>,
+) -> std::result::Result<
+    (),
+    (
+        Arc<lillux_sqlite::ClosedOriginalProjectionLease>,
+        anyhow::Error,
+    ),
+>;
 
 /// Hands a closed State's generation lease owners to an in-process host,
 /// which retires them against its finished native backend before release.
-pub type RetireLeasesAfterBackend<'a> = &'a dyn Fn(ryeos_state::state_db::GenerationLeaseRetirement);
+pub type RetireLeasesAfterBackend<'a> =
+    &'a dyn Fn(ryeos_state::state_db::GenerationLeaseRetirement);
 
 /// Settle a closed in-process State's census: every terminal reaches
 /// `retain`, every lease `retain_lease` and the lease owners
@@ -213,7 +231,10 @@ pub type RetireLeasesAfterBackend<'a> = &'a dyn Fn(ryeos_state::state_db::Genera
 /// before close is carried whole; a refusal that already carries its owners
 /// passes through.
 fn retain_state_census(
-    closed: std::result::Result<ryeos_state::state_db::LiveStateCensus, (Option<StateDb>, anyhow::Error)>,
+    closed: std::result::Result<
+        ryeos_state::state_db::LiveStateCensus,
+        (Option<StateDb>, anyhow::Error),
+    >,
     retain: ryeos_state::operational::RetainTerminal<'_>,
     retain_lease: RetainLease<'_>,
     retire_after: RetireLeasesAfterBackend<'_>,
@@ -223,11 +244,19 @@ fn retain_state_census(
     let census = match closed {
         Ok(census) => census,
         Err((Some(state), refusal)) => {
-            return Err(CarriedOwners::carry(refusal.context(format!("close {what}")), state));
+            return Err(CarriedOwners::carry(
+                refusal.context(format!("close {what}")),
+                state,
+            ));
         }
         Err((None, refusal)) => return Err(refusal.context(format!("close {what}"))),
     };
-    let ryeos_state::state_db::LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+    let ryeos_state::state_db::LiveStateCensus {
+        terminals,
+        leases,
+        lease_retirement,
+        prior_refusal,
+    } = census;
     retire_after(lease_retirement);
     let mut refused_leases = Vec::new();
     let mut reasons = Vec::new();
@@ -277,13 +306,19 @@ fn attached_processes_from_runtime(
         let (process_identity, cancellation_mode) = match runtime_db.get_runtime_info(&thread_id)? {
             Some(runtime) => (
                 runtime.process_identity,
-                runtime.launch_metadata.and_then(|metadata| metadata.cancellation_mode),
+                runtime
+                    .launch_metadata
+                    .and_then(|metadata| metadata.cancellation_mode),
             ),
             None => (None, None),
         };
         attached.insert(
             thread_id.clone(),
-            AttachedProcess { thread_id, process_identity, cancellation_mode },
+            AttachedProcess {
+                thread_id,
+                process_identity,
+                cancellation_mode,
+            },
         );
     }
     Ok(attached)
@@ -2670,7 +2705,7 @@ fn verify_rooted_bundle_member_source_proof(
     ) || owner
         .signer_fingerprint
         .as_ref()
-        .map_or(true, |fingerprint| !trust_store.is_trusted(fingerprint))
+        .is_none_or(|fingerprint| !trust_store.is_trusted(fingerprint))
     {
         bail!("retained Bundle runtime owner is no longer trusted");
     }
@@ -2851,7 +2886,8 @@ fn verify_admitted_launch_capsule(
         ),
         (Some(rooted_hash), Some(expected)) => {
             let expected_hash = expected.content_hash()?;
-            let rooted = load_admitted_launch_capsule(state_authority, bundle_admission_trust, rooted_hash)?;
+            let rooted =
+                load_admitted_launch_capsule(state_authority, bundle_admission_trust, rooted_hash)?;
             if rooted.schema == expected.schema && rooted_hash != expected_hash {
                 bail!(
                     "thread {} admitted capsule drift: authoritative {}, attempted {}",
@@ -3007,8 +3043,7 @@ fn replay_in_process_chain_member_link_locked(
         );
     }
     link_in_process_chain_member_locked(g, chain_root_id, &member, inherit_parent_stop)?;
-    Ok(g
-        .runtime_db
+    Ok(g.runtime_db
         .get_runtime_info(child_thread_id)?
         .ok_or_else(|| anyhow!("in-process chain member {child_thread_id} lost its runtime row"))?
         .stop_intent)
@@ -3747,10 +3782,11 @@ fn persisted_event_from_projection_row(
     // The projection stores the State durability vocabulary ("durable"),
     // not the App event API's storage class ("indexed"). Decode it strictly;
     // accepting API names here would hide a corrupt projection.
-    let durability = ryeos_state::objects::EventDurability::deserialize(
-        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&row.durability),
-    )
-    .context("invalid projected event durability")?;
+    let durability =
+        ryeos_state::objects::EventDurability::deserialize(serde::de::value::StrDeserializer::<
+            serde::de::value::Error,
+        >::new(&row.durability))
+        .context("invalid projected event durability")?;
     let storage_class = persisted_event_storage_class(durability)?;
     let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
         format!(
@@ -5232,11 +5268,27 @@ impl StateStore {
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
         let original = live_native::LiveStateOpen::capture(
-            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
-            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+            &app_root,
+            &runtime_state_dir,
+            &runtime_db_path,
+            exclusion,
+            factory,
+            lease_authority,
+            Arc::clone(&signer),
+            Arc::clone(&head_trust),
+            deadline,
         )?;
-        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
-            write_barrier, head_trust, bundle_admission_trust, Some(recovery_observer), original)
+        Self::open(
+            app_root,
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            head_trust,
+            bundle_admission_trust,
+            Some(recovery_observer),
+            original,
+        )
     }
 
     /// Offline projection-rebuild control store on an in-process native host,
@@ -5273,17 +5325,30 @@ impl StateStore {
         // SAFETY: forwarded from this function's own contract.
         unsafe {
             Self::open_offline_native_store(
-                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
-                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, true,
+                app_root,
+                runtime_state_directory,
+                namespace,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                factory,
+                destination,
+                deadline,
+                retain,
+                retain_lease,
+                retire_after,
+                true,
                 move |directory, namespace| {
-                    // SAFETY: the caller holds the StateLock and `namespace`,
+                    // Covered by the unsafe block above: the caller holds the StateLock and `namespace`,
                     // the host was funded under that exclusion, and the lease
                     // authority admits only this host's factory.
-                    unsafe {
-                        StateDb::open_offline_native_for_rebuild(
-                            directory, namespace, head_trust, &state_factory, lease_authority,
-                        )
-                    }
+                    StateDb::open_offline_native_for_rebuild(
+                        directory,
+                        namespace,
+                        head_trust,
+                        &state_factory,
+                        lease_authority,
+                    )
                 },
             )
         }
@@ -5319,16 +5384,29 @@ impl StateStore {
         // SAFETY: forwarded from this function's own contract.
         unsafe {
             Self::open_offline_native_store(
-                app_root, runtime_state_directory, namespace, runtime_db_path, signer,
-                write_barrier, factory, destination, deadline, retain, retain_lease, retire_after, false,
+                app_root,
+                runtime_state_directory,
+                namespace,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                factory,
+                destination,
+                deadline,
+                retain,
+                retain_lease,
+                retire_after,
+                false,
                 move |directory, namespace| {
-                    // SAFETY: the caller holds the StateLock and `namespace`;
+                    // Covered by the unsafe block above: the caller holds the StateLock and `namespace`;
                     // the lease authority admits only this host's factory.
-                    unsafe {
-                        StateDb::open_offline_native_verification(
-                            directory, namespace, head_trust, &state_factory, lease_authority,
-                        )
-                    }
+                    StateDb::open_offline_native_verification(
+                        directory,
+                        namespace,
+                        head_trust,
+                        &state_factory,
+                        lease_authority,
+                    )
                 },
             )
         }
@@ -5353,7 +5431,10 @@ impl StateStore {
         retain_lease: RetainLease<'_>,
         retire_after: RetireLeasesAfterBackend<'_>,
         allow_projection_rebuild: bool,
-        open_state: impl FnOnce(lillux::PinnedDirectory, &lillux::PinnedDirectoryLock) -> Result<StateDb>,
+        open_state: impl FnOnce(
+            lillux::PinnedDirectory,
+            &lillux::PinnedDirectoryLock,
+        ) -> Result<StateDb>,
     ) -> Result<Self> {
         use ryeos_state::operational::CarriedOwners;
         namespace.ensure_protects(&runtime_state_directory)?;
@@ -5364,7 +5445,9 @@ impl StateStore {
             runtime_db_path.parent() == Some(root.path()),
             "native rebuild Runtime database must belong to the locked State namespace"
         );
-        let name = runtime_db_path.file_name().context("Runtime database path has no basename")?;
+        let name = runtime_db_path
+            .file_name()
+            .context("Runtime database path has no basename")?;
         // SAFETY: the caller's funded host issues these tickets under the
         // exclusion this function's contract requires; the fixed Runtime role
         // and the existing-only mode are chosen here.
@@ -5407,7 +5490,9 @@ impl StateStore {
                 return Err(match retain(terminal) {
                     Ok(()) => error,
                     Err((terminal, reason)) => CarriedOwners::carry(
-                        error.context(format!("Runtime schema reference terminal not retained: {reason:#}")),
+                        error.context(format!(
+                            "Runtime schema reference terminal not retained: {reason:#}"
+                        )),
                         terminal,
                     ),
                 });
@@ -5433,12 +5518,14 @@ impl StateStore {
                                 original
                             }
                             Err((refused, reasons)) => CarriedOwners::carry(
-                                original.context(format!("Runtime terminal not retained: {reasons}")),
+                                original
+                                    .context(format!("Runtime terminal not retained: {reasons}")),
                                 (released, refused),
                             ),
                         },
                         Err(refusal) => CarriedOwners::carry(
-                            original.context(format!("released Runtime census refused: {refusal:#}")),
+                            original
+                                .context(format!("released Runtime census refused: {refusal:#}")),
                             released,
                         ),
                     },
@@ -5461,7 +5548,9 @@ impl StateStore {
             Err(error) => {
                 return Err(match close_runtime_into(runtime_db, factory, retain) {
                     Ok(()) => error,
-                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                    Err(close) => {
+                        close.context(format!("projection rebuild open refused: {error:#}"))
+                    }
                 });
             }
         };
@@ -5474,11 +5563,19 @@ impl StateStore {
                 } else {
                     state_db.close_verification_native(factory)
                 };
-                let state = retain_state_census(closed, retain, retain_lease, retire_after, "refused control-store State");
+                let state = retain_state_census(
+                    closed,
+                    retain,
+                    retain_lease,
+                    retire_after,
+                    "refused control-store State",
+                );
                 let runtime = close_runtime_into(runtime_db, factory, retain);
                 return Err(match state.and(runtime) {
                     Ok(()) => error,
-                    Err(close) => close.context(format!("projection rebuild open refused: {error:#}")),
+                    Err(close) => {
+                        close.context(format!("projection rebuild open refused: {error:#}"))
+                    }
                 });
             }
         };
@@ -5537,24 +5634,59 @@ impl StateStore {
                 store,
             ));
         }
-        let StateStore { live_native_open, state_authority, bundle_admission_trust,
-            thread_runtime_authority, inner, projection_health, read_only: _,
-            allow_projection_rebuild, write_barrier, process_attachment_admission_open: _,
-            process_attachment_admission_closed, attached_processes, live_workers,
-            selected_invocations, launch_task_abort_handles, active_in_process_handlers } = store;
-        let Inner { state_db, runtime_db, signer, active_launch_owners } =
-            inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let StateStore {
+            live_native_open,
+            state_authority,
+            bundle_admission_trust,
+            thread_runtime_authority,
+            inner,
+            projection_health,
+            read_only: _,
+            allow_projection_rebuild,
+            write_barrier,
+            process_attachment_admission_open: _,
+            process_attachment_admission_closed,
+            attached_processes,
+            live_workers,
+            selected_invocations,
+            launch_task_abort_handles,
+            active_in_process_handlers,
+        } = store;
+        let Inner {
+            state_db,
+            runtime_db,
+            signer,
+            active_launch_owners,
+        } = inner
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // In-memory registries, admission and bookkeeping own no descriptor.
-        drop((live_native_open, bundle_admission_trust, projection_health, write_barrier,
-            process_attachment_admission_closed, attached_processes, live_workers,
-            selected_invocations, launch_task_abort_handles, active_in_process_handlers,
-            signer, active_launch_owners));
+        drop((
+            live_native_open,
+            bundle_admission_trust,
+            projection_health,
+            write_barrier,
+            process_attachment_admission_closed,
+            attached_processes,
+            live_workers,
+            selected_invocations,
+            launch_task_abort_handles,
+            active_in_process_handlers,
+            signer,
+            active_launch_owners,
+        ));
         let closed = if allow_projection_rebuild {
             state_db.close_offline_native(factory)
         } else {
             state_db.close_verification_native(factory)
         };
-        let state = retain_state_census(closed, retain, retain_lease, retire_after, "control-store State");
+        let state = retain_state_census(
+            closed,
+            retain,
+            retain_lease,
+            retire_after,
+            "control-store State",
+        );
         let runtime = close_runtime_into(runtime_db, factory, retain);
         // The pinned authority roots and the thread-runtime authority end
         // after both databases closed.
@@ -5583,12 +5715,60 @@ impl StateStore {
         lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
+        Self::new_in_process_native_with_bundle_admission_trust(
+            app_root,
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            head_trust,
+            BundleAdmissionTrust::unbound(),
+            exclusion,
+            factory,
+            lease_authority,
+            deadline,
+        )
+    }
+
+    /// [`Self::new_in_process_native`] bound to the Bundle admission trust a
+    /// node would bind, so retained Bundle executors revalidate against it.
+    /// # Safety
+    /// The same as [`Self::new_in_process_native`].
+    pub unsafe fn new_in_process_native_with_bundle_admission_trust(
+        app_root: PathBuf,
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
+        exclusion: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+        factory: Arc<lillux_sqlite::OriginalNativeFactory>,
+        lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<Self> {
         let original = live_native::LiveStateOpen::capture(
-            &app_root, &runtime_state_dir, &runtime_db_path, exclusion, factory, lease_authority,
-            Arc::clone(&signer), Arc::clone(&head_trust), deadline,
+            &app_root,
+            &runtime_state_dir,
+            &runtime_db_path,
+            exclusion,
+            factory,
+            lease_authority,
+            Arc::clone(&signer),
+            Arc::clone(&head_trust),
+            deadline,
         )?;
-        Self::open(app_root, runtime_state_dir, runtime_db_path, signer,
-            write_barrier, head_trust, BundleAdmissionTrust::unbound(), None, original)
+        Self::open(
+            app_root,
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            head_trust,
+            bundle_admission_trust,
+            None,
+            original,
+        )
     }
 
     /// Close a Store opened by [`StateStore::new_in_process_native`] into its
@@ -5633,7 +5813,10 @@ impl StateStore {
         // Establish the real outside checkout before schema/native Runtime
         // acquisition, so early failures reach the same startup recovery owner.
         let mut custody = live_native::StateOpenCustody::new(live);
-        let opened_runtime = custody.original().expect("actual Store opening owner").open_runtime();
+        let opened_runtime = custody
+            .original()
+            .expect("actual Store opening owner")
+            .open_runtime();
         let runtime_db = match opened_runtime {
             Ok(runtime) => runtime,
             Err(error) => return Err(custody.fail(error)),
@@ -5643,9 +5826,17 @@ impl StateStore {
         // restart so reconciliation can revoke the exact abandoned claim after
         // proving its attached process identity dead (or classify a genuinely
         // pre-attach window). Never erase ownership history wholesale here.
-        let state_db = custody.original().expect("actual Store opening owner")
-            .open_state(runtime_state_directory, runtime_state_lock, projection_health.clone(),
-                head_trust, recovery_observer, custody.runtime().expect("acquired Runtime owner"))
+        let state_db = custody
+            .original()
+            .expect("actual Store opening owner")
+            .open_state(
+                runtime_state_directory,
+                runtime_state_lock,
+                projection_health.clone(),
+                head_trust,
+                recovery_observer,
+                custody.runtime().expect("acquired Runtime owner"),
+            )
             .map_err(with_execution_schema_cutover_hint);
         let state_db = match state_db {
             Ok(state_db) => state_db,
@@ -5658,7 +5849,8 @@ impl StateStore {
             reconcile_credential_profile_authority(state_db, runtime_db)
                 .context("reconcile stable credential-profile authority")?;
             ensure_current_external_content_bindings(state_db)?;
-            projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
+            projection_health
+                .observe_pending_transitions(state_db.pending_chain_transitions()?.len());
             let state_authority = state_db.pinned_authority()?;
             let attached_processes = attached_processes_from_runtime(runtime_db)?;
             let live_workers = live_workers_from_runtime(runtime_db)?;
@@ -5703,18 +5895,26 @@ impl StateStore {
     /// Issue the fixed scheduler role once from the same live namespace and
     /// factory used for State/Runtime. Offline stores cannot issue admission.
     pub fn live_scheduler_native_admission(&self) -> Result<LiveSchedulerNativeAdmission> {
-        anyhow::ensure!(self.process_attachment_admission_is_open(),
-            "StateStore startup/service admission is closed");
-        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+        anyhow::ensure!(
+            self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed"
+        );
+        self.live_native_open
+            .as_ref()
+            .context("live StateStore admission owner absent")?
             .scheduler_admission()
     }
 
     /// Issue the fixed accounting ledger role once from the same live
     /// namespace and factory used for State/Runtime.
     pub fn live_accounting_native_admission(&self) -> Result<LiveAccountingNativeAdmission> {
-        anyhow::ensure!(self.process_attachment_admission_is_open(),
-            "StateStore startup/service admission is closed");
-        self.live_native_open.as_ref().context("live StateStore admission owner absent")?
+        anyhow::ensure!(
+            self.process_attachment_admission_is_open(),
+            "StateStore startup/service admission is closed"
+        );
+        self.live_native_open
+            .as_ref()
+            .context("live StateStore admission owner absent")?
             .accounting_admission()
     }
 
@@ -5959,8 +6159,7 @@ impl StateStore {
             return Ok(other());
         }
         let linked = g.runtime_db.child_link_relation(thread_id)?.as_deref() == Some("dispatch")
-            && g
-                .runtime_db
+            && g.runtime_db
                 .chain_child_links(&[thread_id.to_owned()])?
                 .iter()
                 .any(|(parent, child)| child == thread_id && *parent == upstream_thread_id);
@@ -8401,7 +8600,7 @@ impl StateStore {
             .runtime_db
             .get_launch_claim(thread_id)?
             .ok_or_else(|| anyhow!("dedicated workspace contact has no launch owner"))?;
-        if !Self::is_launch_owner_active_locked(&g, &claim.claimed_by) {
+        if !Self::is_launch_owner_active_locked(g, &claim.claimed_by) {
             bail!("dedicated workspace contact requires its active launch owner");
         }
         Self::authorize_thread_workspace_contact_locked(g, thread_id)
@@ -10015,7 +10214,9 @@ impl StateStore {
         )
     }
 
-    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, AttachedProcess>> {
+    fn attached_process_registry(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<String, AttachedProcess>> {
         self.attached_processes.lock().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "attached process registry mutex was poisoned; retaining its derived state"
@@ -10303,10 +10504,12 @@ impl StateStore {
         status: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        let updated = g.state_db.projection().with_sql(|connection| Ok(connection.execute(
-            "UPDATE threads SET status = ?2 WHERE thread_id = ?1",
-            rusqlite::params![thread_id, status],
-        )?))?;
+        let updated = g.state_db.projection().with_sql(|connection| {
+            Ok(connection.execute(
+                "UPDATE threads SET status = ?2 WHERE thread_id = ?1",
+                rusqlite::params![thread_id, status],
+            )?)
+        })?;
         if updated != 1 {
             bail!("test projection mutation found no exact thread {thread_id}");
         }
@@ -10330,10 +10533,12 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_events_for_test(&self, thread_id: &str) -> Result<usize> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
-            "DELETE FROM events WHERE thread_id = ?1",
-            rusqlite::params![thread_id],
-        )?))?)
+        g.state_db.projection().with_sql(|connection| {
+            Ok(connection.execute(
+                "DELETE FROM events WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+            )?)
+        })
     }
 
     /// Remove the replaceable thread row after its projected events have been
@@ -10342,10 +10547,12 @@ impl StateStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn delete_thread_projection_row_for_test(&self, thread_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        Ok(g.state_db.projection().with_sql(|connection| Ok(connection.execute(
-            "DELETE FROM threads WHERE thread_id = ?1",
-            rusqlite::params![thread_id],
-        )?))? == 1)
+        Ok(g.state_db.projection().with_sql(|connection| {
+            Ok(connection.execute(
+                "DELETE FROM threads WHERE thread_id = ?1",
+                rusqlite::params![thread_id],
+            )?)
+        })? == 1)
     }
 
     fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
@@ -10481,14 +10688,25 @@ impl StateStore {
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         owner: &InProcessHandlerControl,
     ) -> Result<(Vec<PersistedEventRecord>, UnspawnedInProcessChild)> {
-        let persisted =
-            self.create_in_process_child_birth(thread, initial_events, launch_metadata, owner, true)?;
+        let persisted = self.create_in_process_child_birth(
+            thread,
+            initial_events,
+            launch_metadata,
+            owner,
+            true,
+        )?;
         let parent_thread_id = thread.upstream_thread_id.clone().ok_or_else(|| {
-            anyhow!("in-process child {} names no upstream parent", thread.thread_id)
+            anyhow!(
+                "in-process child {} names no upstream parent",
+                thread.thread_id
+            )
         })?;
         Ok((
             persisted,
-            UnspawnedInProcessChild { parent_thread_id, thread_id: thread.thread_id.clone() },
+            UnspawnedInProcessChild {
+                parent_thread_id,
+                thread_id: thread.thread_id.clone(),
+            },
         ))
     }
 
@@ -11690,7 +11908,13 @@ impl StateStore {
         let capsule = snapshot
             .admitted_launch_capsule_hash
             .as_deref()
-            .map(|hash| load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, hash))
+            .map(|hash| {
+                load_admitted_launch_capsule(
+                    &self.state_authority,
+                    &self.bundle_admission_trust,
+                    hash,
+                )
+            })
             .transpose()?;
         let is_external = capsule
             .as_ref()
@@ -12719,8 +12943,11 @@ impl StateStore {
                 .admitted_launch_capsule_hash
                 .as_deref()
                 .ok_or_else(|| anyhow!("remote adoption source has no admitted launch capsule"))?;
-            let source_capsule =
-                load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
+            let source_capsule = load_admitted_launch_capsule(
+                &self.state_authority,
+                &self.bundle_admission_trust,
+                source_capsule_hash,
+            )?;
             source_capsule.validate_durable_handoff_eligibility()?;
             let source_sealed =
                 crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -13028,8 +13255,11 @@ impl StateStore {
                     .ok_or_else(|| {
                         anyhow!("remote adoption source has no admitted launch capsule")
                     })?;
-                let source_capsule =
-                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, source_capsule_hash)?;
+                let source_capsule = load_admitted_launch_capsule(
+                    &self.state_authority,
+                    &self.bundle_admission_trust,
+                    source_capsule_hash,
+                )?;
                 let target_sealed =
                     crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
                         &target_capsule,
@@ -13477,16 +13707,15 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                if local_runtime_seeded {
-                    if let Err(cleanup_error) =
+                if local_runtime_seeded
+                    && let Err(cleanup_error) =
                         self.delete_thread_runtime_locked(&g, &successor.thread_id)
-                    {
-                        tracing::error!(
-                            thread_id = %successor.thread_id,
-                            error = %cleanup_error,
-                            "failed to remove runtime row after atomic running-continuation birth failed"
-                        );
-                    }
+                {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove runtime row after atomic running-continuation birth failed"
+                    );
                 }
                 return Err(error);
             }
@@ -15065,8 +15294,11 @@ impl StateStore {
                 {
                     bail!("state-anchor execution subject contradicts its authoritative thread");
                 }
-                let capsule =
-                    load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, launch_capsule_hash)?;
+                let capsule = load_admitted_launch_capsule(
+                    &self.state_authority,
+                    &self.bundle_admission_trust,
+                    launch_capsule_hash,
+                )?;
                 if &capsule.exact_program_hash != exact_program_hash {
                     bail!("state-anchor execution subject contradicts its admitted program");
                 }
@@ -15723,7 +15955,8 @@ impl StateStore {
     pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, follow_waiters, terminal_error_previews) = {
             let g = self.lock()?;
-            let result = (
+
+            (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
                     g.state_db.projection(),
@@ -15742,8 +15975,7 @@ impl StateStore {
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
-            );
-            result
+            )
         };
         Self::assemble_thread_list_enrichment(
             facet_rows,
@@ -15823,7 +16055,8 @@ impl StateStore {
     ) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, terminal_error_previews) = {
             let g = self.lock()?;
-            let result = (
+
+            (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
                     g.state_db.projection(),
@@ -15838,8 +16071,7 @@ impl StateStore {
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
-            );
-            result
+            )
         };
         Self::assemble_thread_list_enrichment(
             facet_rows,
@@ -16257,7 +16489,11 @@ impl StateStore {
         else {
             return Ok(None);
         };
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(
+            &self.state_authority,
+            &self.bundle_admission_trust,
+            &capsule_hash,
+        )?;
         Ok(Some((chain_root_id, capsule_hash, capsule)))
     }
 
@@ -16299,8 +16535,11 @@ impl StateStore {
         let Some((_, capsule_hash)) = self.admitted_launch_capsule_coordinate(thread_id)? else {
             return Ok(None);
         };
-        let (capsule, execution_realization) =
-            load_admitted_launch_capsule_with_realization(&self.state_authority, &self.bundle_admission_trust, &capsule_hash)?;
+        let (capsule, execution_realization) = load_admitted_launch_capsule_with_realization(
+            &self.state_authority,
+            &self.bundle_admission_trust,
+            &capsule_hash,
+        )?;
         capsule.validate()?;
         let request: crate::thread_lifecycle::SealedRootExecutionRequest =
             serde_json::from_value(capsule.sealed_invocation.clone())
@@ -16348,7 +16587,11 @@ impl StateStore {
             .ok_or_else(|| {
                 anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
             })?;
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(
+            &self.state_authority,
+            &self.bundle_admission_trust,
+            capsule_hash,
+        )?;
         if &capsule.artifact_identity != attempted {
             bail!(
                 "thread {thread_id} recovery artifact identity differs from its authoritative \
@@ -16535,7 +16778,9 @@ impl StateStore {
         &self,
         now_ms: i64,
     ) -> Result<Vec<runtime_db::external_execution::ExternalLeaseRecord>> {
-        self.lock()?.runtime_db.overdue_external_lease_records(now_ms)
+        self.lock()?
+            .runtime_db
+            .overdue_external_lease_records(now_ms)
     }
 
     /// Unrefused lease records of leases held for a worker of another daemon
@@ -16723,7 +16968,11 @@ impl StateStore {
             capsule_hash == reservation.admitted_capsule_hash,
             "external direct allocation changed its born capsule"
         );
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &self.bundle_admission_trust, capsule_hash)?;
+        let capsule = load_admitted_launch_capsule(
+            &self.state_authority,
+            &self.bundle_admission_trust,
+            capsule_hash,
+        )?;
         anyhow::ensure!(
             capsule.project_authority == snapshot.project_authority
                 && capsule.executor_ref == snapshot.executor_ref
@@ -17731,23 +17980,6 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .external_direct_normal_settlement_output(placement)
-    }
-
-    /// Read exact retained direct owner/program and authenticated raw terminal
-    /// output only after normal occurrence settlement, under one DB transaction.
-    /// Historical data only; no native limit/view or evaluator authority issued.
-    pub(crate) fn external_direct_settled_owner_output(
-        &self,
-        placement: &str,
-    ) -> Result<
-        Option<(
-            runtime_db::external_execution::ExternalAllocationRecord,
-            runtime_db::external_execution::ExternalDirectOutput,
-        )>,
-    > {
-        self.lock()?
-            .runtime_db
-            .external_direct_settled_owner_output(placement)
     }
 
     pub(crate) fn external_connector_capability_generation(
@@ -18935,18 +19167,6 @@ impl StateStore {
             )
     }
 
-    /// Full local batches for a later semantic verifier; this grants no
-    /// transport or qualification permit.
-    pub(crate) fn qualification_worker_observation_batches(
-        &self,
-        placement: &str,
-    ) -> Result<Vec<runtime_db::external_execution::QualificationWorkerObservationBatchRecord>>
-    {
-        self.lock()?
-            .runtime_db
-            .qualification_worker_observation_batches(placement)
-    }
-
     /// Freeze the exact death-settled Q Worker command and pushed batches as
     /// CAS objects, then bind the manifest as an immutable operator root.
     /// The returned row is structural evidence, never a qualification permit.
@@ -19424,16 +19644,6 @@ impl StateStore {
             .accept_external_relay_readback(intent, bytes)
     }
 
-    pub(crate) fn quarantine_external_relay_transfer(
-        &self,
-        intent: &runtime_db::external_execution::RelayTransferIntent,
-    ) -> Result<runtime_db::external_execution::RelayTransferRecord> {
-        let _permit = self.acquire_write_permit()?;
-        self.lock()?
-            .runtime_db
-            .quarantine_external_relay_transfer(intent)
-    }
-
     /// Author only the original bound occurrence's guest assignment with the
     /// node identity. The qualified guest must already pin this public root;
     /// signing here does not make a provider snapshot qualified or start it.
@@ -19580,20 +19790,6 @@ impl StateStore {
             .has_external_qualification_normal_termination_intent(placement)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn install_external_placement_test_fixture(
-        &self,
-        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
-        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
-    ) -> Result<()> {
-        self.install_external_placement_test_fixture_with_workspace(
-            reservation,
-            binding,
-            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
-            |_| external_placement_test_workspace_binding(reservation),
-        )
-    }
-
     /// Install the composed placement as a chain root admitted through the
     /// exact root launch metadata, so the production placement owner finds
     /// the same admitted launch capsule an ordinary launch would record.
@@ -19616,7 +19812,21 @@ impl StateStore {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
+    pub(crate) fn install_external_placement_test_fixture(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace(
+            reservation,
+            binding,
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            |_| external_placement_test_workspace_binding(reservation),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn install_external_placement_test_fixture_with_workspace(
         &self,
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
@@ -23609,7 +23819,7 @@ impl StateStore {
         }
         if let Some(expected) = launch_owner {
             let claim = g.runtime_db.get_launch_claim(thread_id)?;
-            if !claim.is_some_and(|claim| claim.claimed_by == expected) {
+            if claim.is_none_or(|claim| claim.claimed_by != expected) {
                 return Ok(None);
             }
         }
@@ -24366,7 +24576,10 @@ impl StateStore {
         &self,
         child: UnspawnedInProcessChild,
     ) -> Result<Option<StopIntent>> {
-        let UnspawnedInProcessChild { parent_thread_id, thread_id } = child;
+        let UnspawnedInProcessChild {
+            parent_thread_id,
+            thread_id,
+        } = child;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         if !self
@@ -24377,8 +24590,10 @@ impl StateStore {
                 "in-process chain member {thread_id} cannot be linked to start its handler: thread admission is closed for daemon shutdown"
             );
         }
-        let chain_root_id = in_process_chain_member_root_locked(&g, &thread_id)?
-            .ok_or_else(|| anyhow!("unspawned in-process child {thread_id} is not an in-process chain member"))?;
+        let chain_root_id =
+            in_process_chain_member_root_locked(&g, &thread_id)?.ok_or_else(|| {
+                anyhow!("unspawned in-process child {thread_id} is not an in-process chain member")
+            })?;
         replay_in_process_chain_member_link_locked(
             &g,
             &chain_root_id,
@@ -24468,8 +24683,8 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_native::TestStateStore;
+    use super::*;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use std::io::Write as _;
     use tempfile::tempdir;
@@ -24565,22 +24780,51 @@ mod tests {
             .unwrap();
         assert_eq!(expected.storage_class, "indexed");
         let scoped = [
-            store.replay_events(thread, Some(thread), None, 10, 1024 * 1024)
-                .unwrap().events,
-            store.replay_events_through(thread, Some(thread), None, expected.chain_seq, 10, 1024 * 1024)
-                .unwrap().events,
+            store
+                .replay_events(thread, Some(thread), None, 10, 1024 * 1024)
+                .unwrap()
+                .events,
+            store
+                .replay_events_through(
+                    thread,
+                    Some(thread),
+                    None,
+                    expected.chain_seq,
+                    10,
+                    1024 * 1024,
+                )
+                .unwrap()
+                .events,
             store.latest_thread_events(thread, 10).unwrap(),
-            vec![store.latest_thread_event_by_type_prefix(thread, "thread_").unwrap().unwrap()],
+            vec![
+                store
+                    .latest_thread_event_by_type_prefix(thread, "thread_")
+                    .unwrap()
+                    .unwrap(),
+            ],
         ];
         for events in scoped {
             assert_eq!(events.len(), 1);
-            assert_eq!(serde_json::to_value(&events[0]).unwrap(), serde_json::to_value(&expected).unwrap());
+            assert_eq!(
+                serde_json::to_value(&events[0]).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
         }
         let node_events = store.latest_node_events(10, &[]).unwrap();
         assert_eq!(node_events.len(), 2);
-        assert!(node_events.iter().all(|event| event.storage_class == "indexed"));
-        let owned = node_events.iter().find(|event| event.thread_id == thread).unwrap();
-        assert_eq!(serde_json::to_value(owned).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert!(
+            node_events
+                .iter()
+                .all(|event| event.storage_class == "indexed")
+        );
+        let owned = node_events
+            .iter()
+            .find(|event| event.thread_id == thread)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(owned).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
     }
 
     fn rooted_bundle_proof_fixture(
@@ -24660,7 +24904,8 @@ mod tests {
             lillux::sha256_hex(lillux::canonical_json(&plan).unwrap().as_bytes());
         let protocol_document = String::new();
         let protocol_hash = lillux::sha256_hex(protocol_document.as_bytes());
-        let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
+
+        ryeos_state::objects::AdmittedLaunchCapsule {
             schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_owned(),
             exact_program,
@@ -24709,8 +24954,7 @@ mod tests {
             parent_delegation_caps: None,
             runtime_ref: "runtime:fixture".to_owned(),
             executor_ref: "tool:test/executor".to_owned(),
-        };
-        capsule
+        }
     }
 
     #[test]
@@ -24922,9 +25166,9 @@ mod tests {
     fn abandoned_external_guest_package_is_removed_on_state_store_reopen() {
         let temporary = tempdir().unwrap();
         let app_root = temporary.path().to_path_buf();
-        let runtime_state_dir = app_root.join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -24934,7 +25178,7 @@ mod tests {
         let trust = Arc::new(trust);
         let open = || {
             TestStateStore::open(&app_root, Arc::clone(&signer), Arc::clone(&trust))
-            .expect("state store")
+                .expect("state store")
         };
 
         let store = open();
@@ -25194,8 +25438,9 @@ mod tests {
 
     fn test_store() -> TestStateStore {
         let tmp = tempdir().expect("tempdir").keep();
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -28038,9 +28283,9 @@ mod tests {
     #[test]
     fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         let tmp = tempdir().expect("tempdir");
-        let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -28048,7 +28293,7 @@ mod tests {
             *identity.verifying_key(),
         );
         let store = TestStateStore::open(tmp.path(), signer.clone(), Arc::new(head_trust))
-        .expect("state store");
+            .expect("state store");
         let authority = store.pinned_state_authority().expect("state authority");
         let guard = authority.acquire_shared_guard().expect("CAS guard");
         let principal_key = "1".repeat(64);
@@ -28808,9 +29053,9 @@ mod tests {
     #[test]
     fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -28820,7 +29065,7 @@ mod tests {
         let trust = Arc::new(trust);
         let open = || {
             TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
-            .expect("state store")
+                .expect("state store")
         };
 
         let store = open();
@@ -28865,9 +29110,9 @@ mod tests {
     #[test]
     fn recreated_credential_profile_persists_its_advanced_generation() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -28877,7 +29122,7 @@ mod tests {
         let trust = Arc::new(trust);
         let open = || {
             TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
-            .expect("state store")
+                .expect("state store")
         };
 
         let store = open();
@@ -28932,9 +29177,9 @@ mod tests {
     #[test]
     fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -28944,7 +29189,7 @@ mod tests {
         let trust = Arc::new(trust);
         let open = || {
             TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&trust))
-            .expect("state store")
+                .expect("state store")
         };
 
         let store = open();
@@ -29140,8 +29385,9 @@ mod tests {
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(
@@ -29149,7 +29395,9 @@ mod tests {
             *identity.verifying_key(),
         );
         let trust = Arc::new(trust);
-        let state = ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+        let state =
+            ryeos_state::test_support::TestState::open(&runtime_state_dir, Arc::clone(&trust))
+                .unwrap();
         let authority = state.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
         let active = ryeos_state::objects::ExternalContentBinding::active(
@@ -31263,7 +31511,7 @@ mod tests {
                 runtime_custody: None,
                 launch_authority:
                     crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
-                        allocation: allocation,
+                        allocation,
                         recovery: None,
                     },
             },
@@ -31720,11 +31968,7 @@ mod tests {
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let trust = Arc::new(trust);
-        let runtime = root.path().join(".ai/state");
-        let open = || {
-            TestStateStore::open(root.path(), signer.clone(), trust.clone())
-            .unwrap()
-        };
+        let open = || TestStateStore::open(root.path(), signer.clone(), trust.clone()).unwrap();
         let store = open();
         let (original, reservation) =
             scratch_reservation_fixture(&store, "scratch-restart-lost-ack");
@@ -32700,10 +32944,9 @@ mod tests {
     #[test]
     fn attached_process_registry_is_seeded_from_durable_runtime_state() {
         let tmp = tempdir().expect("tempdir").keep();
-        let runtime_state_dir = tmp.join(".ai/state");
-        let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
-            .expect("test node identity");
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+                .expect("test node identity");
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
@@ -32713,7 +32956,7 @@ mod tests {
         let head_trust = Arc::new(head_trust);
         let open_store = || {
             TestStateStore::open(&tmp, Arc::clone(&signer), Arc::clone(&head_trust))
-            .expect("state store")
+                .expect("state store")
         };
 
         let thread_id = "T-attached-process-reopen";
@@ -33379,7 +33622,10 @@ mod tests {
         let outcome = store
             .finalize_in_process_handler_owned(child_id, &owner, &requested_failure())
             .expect("owner settles the newborn child");
-        assert!(matches!(outcome, FinalizeIfNonterminalOutcome::Finalized { .. }));
+        assert!(matches!(
+            outcome,
+            FinalizeIfNonterminalOutcome::Finalized { .. }
+        ));
         let child = store
             .get_thread(child_id)
             .expect("read child")

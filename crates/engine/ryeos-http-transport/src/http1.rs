@@ -334,7 +334,9 @@ impl Read for ResponseBody {
                 Ok(progress) => progress,
                 Err(_) => {
                     body.failed = true;
-                    return Err(crate::ResponseRefusal::io("invalid HTTP response body framing"));
+                    return Err(crate::ResponseRefusal::io(
+                        "invalid HTTP response body framing",
+                    ));
                 }
             };
             body.incoming.drain(..used);
@@ -345,7 +347,9 @@ impl Read for ResponseBody {
                 }
                 if (body.delivered as u128) + (emitted as u128) > body.maximum as u128 {
                     body.failed = true;
-                    return Err(crate::ResponseRefusal::io("HTTP response body exceeds its bound"));
+                    return Err(crate::ResponseRefusal::io(
+                        "HTTP response body exceeds its bound",
+                    ));
                 }
                 body.delivered += emitted as u64;
                 let copied = emitted.min(output.len());
@@ -361,7 +365,9 @@ impl Read for ResponseBody {
             }
             if body.incoming.len() >= body.maximum_framing_buffer {
                 body.failed = true;
-                return Err(crate::ResponseRefusal::io("HTTP response framing exceeds its bound"));
+                return Err(crate::ResponseRefusal::io(
+                    "HTTP response framing exceeds its bound",
+                ));
             }
             let received = match body.stream.read(&mut buffer) {
                 Ok(count) => count,
@@ -383,7 +389,9 @@ impl Read for ResponseBody {
             }
             if (body.wire_received as u128) + (received as u128) > body.maximum_wire as u128 {
                 body.failed = true;
-                return Err(crate::ResponseRefusal::io("HTTP response wire body exceeds its bound"));
+                return Err(crate::ResponseRefusal::io(
+                    "HTTP response wire body exceeds its bound",
+                ));
             }
             body.wire_received += received as u64;
             body.incoming.extend_from_slice(&buffer[..received]);
@@ -853,12 +861,14 @@ fn receive_response(
     let mut buffer = [0u8; IO_BUFFER_BYTES];
     let (head_bytes, head) = loop {
         check_response_policy(&cancellation, absolute_deadline)?;
-        let (used, parsed) = response.try_response(&incoming, false).map_err(|_| {
-            HttpError::refused("invalid HTTP response headers")
-        })?;
+        let (used, parsed) = response
+            .try_response(&incoming, false)
+            .map_err(|_| HttpError::refused("invalid HTTP response headers"))?;
         consumed_headers = consumed_headers.saturating_add(used);
         if consumed_headers > limits.response_header_bytes {
-            return Err(HttpError::refused("HTTP response headers exceed their bound"));
+            return Err(HttpError::refused(
+                "HTTP response headers exceed their bound",
+            ));
         }
         if let Some(head) = parsed {
             break (used, head);
@@ -869,7 +879,9 @@ fn receive_response(
         }
         let buffered = consumed_headers.saturating_add(incoming.len());
         if buffered >= limits.response_header_bytes {
-            return Err(HttpError::refused("HTTP response headers exceed their bound"));
+            return Err(HttpError::refused(
+                "HTTP response headers exceed their bound",
+            ));
         }
         let capacity = buffer
             .len()
@@ -906,7 +918,9 @@ fn receive_response(
         .collect();
     incoming.drain(..head_bytes);
     if incoming.len() as u128 > limits.response_body_wire_bytes as u128 {
-        return Err(HttpError::refused("HTTP response wire body exceeds its bound"));
+        return Err(HttpError::refused(
+            "HTTP response wire body exceeds its bound",
+        ));
     }
     match response.proceed() {
         Some(RecvResponseResult::RecvBody(recv)) => Ok(HttpResponse {
@@ -972,7 +986,9 @@ fn validate_response_framing(
     let content_lengths = headers.get_all("content-length");
     let transfer_encodings = headers.get_all("transfer-encoding");
     if content_lengths.iter().next().is_some() && transfer_encodings.iter().next().is_some() {
-        return Err(HttpError::refused("HTTP response has conflicting body framing"));
+        return Err(HttpError::refused(
+            "HTTP response has conflicting body framing",
+        ));
     }
     if transfer_encodings.iter().count() > 1
         || transfer_encodings.iter().any(|value| {
@@ -981,7 +997,9 @@ fn validate_response_framing(
                 .is_ok_and(|encoding| encoding.eq_ignore_ascii_case("chunked"))
         })
     {
-        return Err(HttpError::refused("HTTP response uses unsupported transfer encoding"));
+        return Err(HttpError::refused(
+            "HTTP response uses unsupported transfer encoding",
+        ));
     }
     if content_lengths.iter().count() > 1 {
         return Err(HttpError::refused("HTTP response repeats Content-Length"));
@@ -991,9 +1009,7 @@ fn validate_response_framing(
             .to_str()
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| {
-                HttpError::refused("invalid HTTP Content-Length")
-            })?;
+            .ok_or_else(|| HttpError::refused("invalid HTTP Content-Length"))?;
         if length > max_body || length > max_wire {
             return Err(HttpError::refused("HTTP response body exceeds its bound"));
         }

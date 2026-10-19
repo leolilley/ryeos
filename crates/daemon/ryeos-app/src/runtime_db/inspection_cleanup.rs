@@ -3,9 +3,7 @@
 //! the actual terminal owner plus removal receipt; no physical-byte claim.
 //! Empty-root removal uses the original preserved guard and retained phases.
 
-use super::{
-    RuntimeInspectionRelease, SqliteInspectionClosed, SqliteInspectionCopyLease,
-};
+use super::{RuntimeInspectionRelease, SqliteInspectionClosed, SqliteInspectionCopyLease};
 use anyhow::{Context, Result, ensure};
 use lillux::secure_fs::PlannedQuarantineStage;
 use lillux::time::{Duration, MonotonicDeadline};
@@ -809,7 +807,10 @@ mod controls {
                 b"replacement obligation"
             );
             lillux_sqlite::test_host::end_isolated_process(
-                (owner, disposal, main, closed, work, retained, state_lock, namespace, source, tmp),
+                (
+                    owner, disposal, main, closed, work, retained, state_lock, namespace, source,
+                    tmp,
+                ),
                 "closed copy body disposed with its charged pins",
             )
         }
@@ -818,7 +819,10 @@ mod controls {
     #[test]
     fn actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins() {
         closed_copy_body_disposal(
-            concat!(module_path!(), "::actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins"),
+            concat!(
+                module_path!(),
+                "::actual_closed_copy_body_disposal_retains_same_progress_and_charged_pins"
+            ),
             0,
         );
     }
@@ -826,7 +830,10 @@ mod controls {
     #[test]
     fn closed_copy_disposal_resumes_after_first_role_acknowledgement_loss() {
         closed_copy_body_disposal(
-            concat!(module_path!(), "::closed_copy_disposal_resumes_after_first_role_acknowledgement_loss"),
+            concat!(
+                module_path!(),
+                "::closed_copy_disposal_resumes_after_first_role_acknowledgement_loss"
+            ),
             1,
         );
     }
@@ -834,7 +841,10 @@ mod controls {
     #[test]
     fn closed_copy_disposal_resumes_after_root_acknowledgement_loss() {
         closed_copy_body_disposal(
-            concat!(module_path!(), "::closed_copy_disposal_resumes_after_root_acknowledgement_loss"),
+            concat!(
+                module_path!(),
+                "::closed_copy_disposal_resumes_after_root_acknowledgement_loss"
+            ),
             2,
         );
     }

@@ -68,7 +68,9 @@ impl OfflineNativeQuota {
             }
         }
         if self.max_cleanup_steps >= self.max_native_allocator_steps {
-            bail!("offline native cleanup steps must be a strict sub-reservation of allocator steps");
+            bail!(
+                "offline native cleanup steps must be a strict sub-reservation of allocator steps"
+            );
         }
         self.max_operation_millis
             .checked_add(self.max_cleanup_millis)
@@ -88,12 +90,17 @@ impl OfflineNativeQuota {
     ) -> anyhow::Result<()> {
         self.validate()?;
         if self.max_native_storage_bytes <= control_storage {
-            bail!("offline native storage must exceed the arena's {control_storage}-byte control storage");
+            bail!(
+                "offline native storage must exceed the arena's {control_storage}-byte control storage"
+            );
         }
         if self.max_native_connections > max_connections {
-            bail!("offline native connections exceed the arena's {max_connections}-ticket capacity");
+            bail!(
+                "offline native connections exceed the arena's {max_connections}-ticket capacity"
+            );
         }
-        let required = required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        let required =
+            required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
         if self.max_cleanup_steps < required {
             bail!(
                 "offline native cleanup reserves {} steps; the arena quote requires {required}",
@@ -108,7 +115,9 @@ impl OfflineNativeQuota {
 pub fn validate_offline_native_class(class: &str) -> anyhow::Result<()> {
     if class.is_empty()
         || class.len() > 64
-        || !class.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-')
+        || !class.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+        })
     {
         bail!("offline native class `{class}` must match [a-z0-9.-]{{1,64}}");
     }
@@ -159,7 +168,9 @@ impl OfflineResetQuota {
             bail!("offline reset operation and source-role quotas must be positive");
         }
         if self.max_source_roles < OFFLINE_RESET_SOURCE_ROLES {
-            bail!("offline reset source quota cannot cover Runtime, scheduler and Operational provenance");
+            bail!(
+                "offline reset source quota cannot cover Runtime, scheduler and Operational provenance"
+            );
         }
         for (name, value) in [
             ("copied bytes", self.max_copied_bytes),
@@ -232,8 +243,12 @@ impl OfflineResetQuota {
         required_cleanup_steps: impl FnOnce(u64, u32) -> anyhow::Result<u64>,
     ) -> anyhow::Result<()> {
         self.validate()?;
-        let allocation = allocation_funding_margin_steps(self.max_native_storage_bytes, self.max_native_connections)?;
-        let cleanup = required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
+        let allocation = allocation_funding_margin_steps(
+            self.max_native_storage_bytes,
+            self.max_native_connections,
+        )?;
+        let cleanup =
+            required_cleanup_steps(self.max_native_storage_bytes, self.max_native_connections)?;
         let required = self
             .max_sql_vm_steps
             .checked_add(allocation)
@@ -272,7 +287,9 @@ pub struct NodeMaintenanceSchedulePolicy {
 impl NodeMaintenancePolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 5 {
-            bail!("node maintenance policy schema is not current; reset the node policy generation");
+            bail!(
+                "node maintenance policy schema is not current; reset the node policy generation"
+            );
         }
         if let Some(quota) = &self.offline_reset {
             quota
@@ -492,15 +509,24 @@ mod tests {
         let mut undersized = quota();
         undersized.max_native_allocator_steps = 1048576;
         let error = undersized.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("SQL VM step ceiling"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("SQL VM step ceiling"),
+            "{error:#}"
+        );
         let allocation = |_: u64, _: u32| Ok(1_000_000);
         let cleanup = |_: u64, _: u32| Ok(200_000);
         quota().validate_native(allocation, cleanup).unwrap();
         let mut short = quota();
         short.max_native_allocator_steps = short.max_sql_vm_steps + 1_200_000 - 1;
         let error = short.validate_native(allocation, cleanup).unwrap_err();
-        assert!(format!("{error:#}").contains("at least 21200000"), "{error:#}");
-        assert!(format!("{error:#}").contains("minimum native allocation funding margin"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("at least 21200000"),
+            "{error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("minimum native allocation funding margin"),
+            "{error:#}"
+        );
         short.max_native_allocator_steps += 1;
         short.validate_native(allocation, cleanup).unwrap();
     }
@@ -525,7 +551,9 @@ mod tests {
             offline_native: BTreeMap::from([("replay-indexes".to_owned(), native_quota())]),
         };
         policy.validate().unwrap();
-        policy.offline_native.insert("Replay_Indexes".to_owned(), native_quota());
+        policy
+            .offline_native
+            .insert("Replay_Indexes".to_owned(), native_quota());
         assert!(policy.validate().is_err());
         policy.offline_native.remove("Replay_Indexes");
         let record = serde_json::to_value(native_quota()).unwrap();
@@ -536,7 +564,10 @@ mod tests {
             assert!(zero.validate().is_err(), "{name}");
             let mut missing = record.clone();
             missing.as_object_mut().unwrap().remove(name);
-            assert!(serde_json::from_value::<OfflineNativeQuota>(missing).is_err(), "{name}");
+            assert!(
+                serde_json::from_value::<OfflineNativeQuota>(missing).is_err(),
+                "{name}"
+            );
         }
         let quote = |_: u64, _: u32| Ok(1000);
         native_quota().validate_native(65_536, 64, quote).unwrap();

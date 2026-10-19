@@ -82,10 +82,15 @@ pub fn sign_content(
     sign_content_with_options(body, signing_key, prefix, suffix, false)
 }
 
-struct FixedSignedAt { bytes: [u8; 32], used: usize }
+struct FixedSignedAt {
+    bytes: [u8; 32],
+    used: usize,
+}
 impl std::fmt::Write for FixedSignedAt {
     fn write_str(&mut self, text: &str) -> std::fmt::Result {
-        if text.len() > self.bytes.len().saturating_sub(self.used) { return Err(std::fmt::Error); }
+        if text.len() > self.bytes.len().saturating_sub(self.used) {
+            return Err(std::fmt::Error);
+        }
         self.bytes[self.used..self.used + text.len()].copy_from_slice(text.as_bytes());
         self.used += text.len();
         Ok(())
@@ -113,19 +118,30 @@ pub fn sign_content_bounded(
     maximum_bytes: usize,
 ) -> Result<String, &'static str> {
     let newline = preferred_newline(body);
-    let mut signed_at = FixedSignedAt { bytes: [0; 32], used: 0 };
-    crate::time::iso8601_now_into(&mut signed_at).map_err(|_| "signature timestamp exceeds fixed storage")?;
+    let mut signed_at = FixedSignedAt {
+        bytes: [0; 32],
+        used: 0,
+    };
+    crate::time::iso8601_now_into(&mut signed_at)
+        .map_err(|_| "signature timestamp exceeds fixed storage")?;
     // Same envelope as sign_content_at_with_options with after_shebang=false:
     // prefix + space + marker + timestamp + three colons + SHA256 hex (64)
     // + Ed25519 base64 (88) + fingerprint hex (64) + optional suffix + newline.
-    let envelope = prefix.len().checked_add(1)
+    let envelope = prefix
+        .len()
+        .checked_add(1)
         .and_then(|n| n.checked_add(SIGNATURE_PREFIX.len()))
         .and_then(|n| n.checked_add(signed_at.used))
         .and_then(|n| n.checked_add(3 + 64 + 88 + 64))
         .and_then(|n| n.checked_add(newline.len()))
-        .and_then(|n| match suffix { Some(s) => n.checked_add(1)?.checked_add(s.len()), None => Some(n) })
+        .and_then(|n| match suffix {
+            Some(s) => n.checked_add(1)?.checked_add(s.len()),
+            None => Some(n),
+        })
         .ok_or("signature envelope size overflow")?;
-    let expected = body.len().checked_add(envelope)
+    let expected = body
+        .len()
+        .checked_add(envelope)
         .ok_or("signed content size overflow")?;
     if expected > maximum_bytes {
         return Err("signed content exceeds byte ceiling");
@@ -134,7 +150,9 @@ pub fn sign_content_bounded(
     // Exactly one output allocation. All hash/signature/header temporaries are
     // fixed stack arrays; no format!/String or growing base64 buffer is used.
     let mut output = Box::<[u8]>::new_uninit_slice(expected);
-    for slot in output.iter_mut() { slot.write(0); }
+    for slot in output.iter_mut() {
+        slot.write(0);
+    }
     // SAFETY: every output byte was initialized above; only bounded slices are
     // written below, and the final String checks the complete UTF-8 encoding.
     let mut output = unsafe { output.assume_init() };
@@ -144,22 +162,43 @@ pub fn sign_content_bounded(
     let encoded_len = base64::engine::general_purpose::STANDARD
         .encode_slice(signature.to_bytes(), &mut encoded)
         .map_err(|_| "signature base64 exceeds fixed storage")?;
-    if encoded_len != encoded.len() { return Err("signature base64 length changed"); }
+    if encoded_len != encoded.len() {
+        return Err("signature base64 length changed");
+    }
     let fingerprint = fixed_hex_digest(signing_key.verifying_key().as_bytes());
     let mut used = 0;
     let mut append = |bytes: &[u8]| -> Result<(), &'static str> {
-        if bytes.len() > output.len().saturating_sub(used) { return Err("signature envelope exceeds checked dimensions"); }
+        if bytes.len() > output.len().saturating_sub(used) {
+            return Err("signature envelope exceeds checked dimensions");
+        }
         output[used..used + bytes.len()].copy_from_slice(bytes);
         used += bytes.len();
         Ok(())
     };
-    for part in [prefix.as_bytes(), b" ", SIGNATURE_PREFIX.as_bytes(), &signed_at.bytes[..signed_at.used],
-        b":", &hash, b":", &encoded, b":", &fingerprint] { append(part)?; }
-    if let Some(suffix) = suffix { append(b" ")?; append(suffix.as_bytes())?; }
+    for part in [
+        prefix.as_bytes(),
+        b" ",
+        SIGNATURE_PREFIX.as_bytes(),
+        &signed_at.bytes[..signed_at.used],
+        b":",
+        &hash,
+        b":",
+        &encoded,
+        b":",
+        &fingerprint,
+    ] {
+        append(part)?;
+    }
+    if let Some(suffix) = suffix {
+        append(b" ")?;
+        append(suffix.as_bytes())?;
+    }
     append(newline.as_bytes())?;
     append(body.as_bytes())?;
     drop(append);
-    if used != expected { return Err("signature envelope differs from checked dimensions"); }
+    if used != expected {
+        return Err("signature envelope differs from checked dimensions");
+    }
     String::from_utf8(output.into_vec()).map_err(|_| "signed content is not UTF-8")
 }
 
@@ -295,7 +334,10 @@ pub fn strip_canonical_signature_with_envelope(
     // Observe canonical positions without allocating a line table or a list of
     // permitted indices. Iteration preserves str::lines()'s CRLF behavior.
     let has_shebang = after_shebang
-        && content.lines().next().is_some_and(|line| line.starts_with("#!"));
+        && content
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("#!"));
     let mut header = None;
     for (index, line) in content.lines().enumerate() {
         if is_signature_line(line, prefix, suffix) {
@@ -327,13 +369,25 @@ pub fn verified_leading_body<'a>(
     expected_fingerprint: &str,
 ) -> anyhow::Result<&'a str> {
     let (line, body) = content.split_once('\n').unwrap_or((content, ""));
-    anyhow::ensure!(!body.lines().any(|line| is_signature_line(line, prefix, suffix)),
-        "item contains a signature envelope outside its canonical position");
-    let payload = line.trim().strip_prefix(prefix).map(str::trim_start)
+    anyhow::ensure!(
+        !body
+            .lines()
+            .any(|line| is_signature_line(line, prefix, suffix)),
+        "item contains a signature envelope outside its canonical position"
+    );
+    let payload = line
+        .trim()
+        .strip_prefix(prefix)
+        .map(str::trim_start)
         .and_then(|line| line.strip_prefix(SIGNATURE_PREFIX))
-        .ok_or_else(|| anyhow::anyhow!("required leading signature envelope absent or malformed"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("required leading signature envelope absent or malformed")
+        })?;
     let payload = match suffix {
-        Some(suffix) => payload.trim_end().strip_suffix(suffix).map(str::trim_end)
+        Some(suffix) => payload
+            .trim_end()
+            .strip_suffix(suffix)
+            .map(str::trim_end)
             .ok_or_else(|| anyhow::anyhow!("required signature suffix absent"))?,
         None => payload.trim_end(),
     };
@@ -341,9 +395,21 @@ pub fn verified_leading_body<'a>(
     let fingerprint = fields.next().unwrap_or("");
     let signature = fields.next().unwrap_or("");
     let hash = fields.next().unwrap_or("");
-    anyhow::ensure!(fields.next().is_some(), "malformed leading signature fields");
-    anyhow::ensure!(is_valid_signature_for(hash, signature, fingerprint, body,
-        verifying_key, expected_fingerprint), "invalid leading signature");
+    anyhow::ensure!(
+        fields.next().is_some(),
+        "malformed leading signature fields"
+    );
+    anyhow::ensure!(
+        is_valid_signature_for(
+            hash,
+            signature,
+            fingerprint,
+            body,
+            verifying_key,
+            expected_fingerprint
+        ),
+        "invalid leading signature"
+    );
     Ok(body)
 }
 
@@ -361,11 +427,11 @@ pub fn verify_signature(
         .decode_slice(signature_b64, &mut bytes)
         .or_else(|_| {
             let stripped = signature_b64.trim_end_matches('=');
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode_slice(stripped, &mut bytes)
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode_slice(stripped, &mut bytes)
         })
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE
-            .decode_slice(signature_b64, &mut bytes));
+        .or_else(|_| {
+            base64::engine::general_purpose::URL_SAFE.decode_slice(signature_b64, &mut bytes)
+        });
     match decoded {
         Ok(64) => match ed25519_dalek::Signature::from_slice(&bytes[..64]) {
             Ok(sig) => verifying_key.verify(content_hash.as_bytes(), &sig).is_ok(),
@@ -490,19 +556,27 @@ mod tests {
         let fingerprint = compute_fingerprint(&key.verifying_key());
         for body in ["{\"text\":\"é\"}", "first\r\nsecond\r\n"] {
             let signed = sign_content(body, &key, "#", None);
-            let borrowed = verified_leading_body(&signed, "#", None,
-                &key.verifying_key(), &fingerprint).unwrap();
+            let borrowed =
+                verified_leading_body(&signed, "#", None, &key.verifying_key(), &fingerprint)
+                    .unwrap();
             assert_eq!(borrowed, body);
-            assert_eq!(borrowed.as_ptr(), signed[signed.find('\n').unwrap() + 1..].as_ptr());
+            assert_eq!(
+                borrowed.as_ptr(),
+                signed[signed.find('\n').unwrap() + 1..].as_ptr()
+            );
         }
         // Even an authentically signed body cannot move another envelope into
         // body content. Preserve canonical resolution's refusal, not stripping.
         let embedded = sign_content("text\n# ryeos:signed malformed\n", &key, "#", None);
-        assert!(verified_leading_body(&embedded, "#", None,
-            &key.verifying_key(), &fingerprint).is_err());
+        assert!(
+            verified_leading_body(&embedded, "#", None, &key.verifying_key(), &fingerprint)
+                .is_err()
+        );
         let valid = sign_content("payload", &key, "#", None);
-        assert!(verified_leading_body(&valid, "#", None,
-            &key.verifying_key(), &"0".repeat(64)).is_err());
+        assert!(
+            verified_leading_body(&valid, "#", None, &key.verifying_key(), &"0".repeat(64))
+                .is_err()
+        );
     }
 
     #[test]
@@ -515,14 +589,18 @@ mod tests {
             let ordinary = sign_content(body, &key, prefix, suffix);
             let signed = sign_content_bounded(body, &key, prefix, suffix, ordinary.len()).unwrap();
             assert_eq!(signed.len(), ordinary.len());
-            let (decoded, header) = strip_canonical_signature_with_envelope(
-                &signed, prefix, suffix, false,
-            ).unwrap();
+            let (decoded, header) =
+                strip_canonical_signature_with_envelope(&signed, prefix, suffix, false).unwrap();
             let header = header.unwrap();
             assert_eq!(decoded, body);
-            assert!(is_valid_signature_for(&header.content_hash, &header.signature_b64,
-                &header.signer_fingerprint, &decoded, &key.verifying_key(),
-                &compute_fingerprint(&key.verifying_key())));
+            assert!(is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                &decoded,
+                &key.verifying_key(),
+                &compute_fingerprint(&key.verifying_key())
+            ));
             assert!(sign_content_bounded(body, &key, prefix, suffix, ordinary.len() - 1).is_err());
         }
     }
@@ -786,10 +864,16 @@ mod tests {
         // through every accepted encoding branch. No prefix may be accepted.
         for length in [65, 66, 67, 1024] {
             let payload = vec![0xa5; length];
-            for engine in [base64::engine::general_purpose::STANDARD,
+            for engine in [
+                base64::engine::general_purpose::STANDARD,
                 base64::engine::general_purpose::URL_SAFE,
-                base64::engine::general_purpose::URL_SAFE_NO_PAD] {
-                assert!(!verify_signature(&hash, &engine.encode(&payload), &sk.verifying_key()));
+                base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            ] {
+                assert!(!verify_signature(
+                    &hash,
+                    &engine.encode(&payload),
+                    &sk.verifying_key()
+                ));
             }
         }
     }

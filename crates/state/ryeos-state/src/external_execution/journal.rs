@@ -2089,11 +2089,11 @@ fn retained_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::TransactionBehavior;
     use crate::external_execution::{ExecutionFrame, ExternalStopReason};
     use anyhow::ensure;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
+    use rusqlite::TransactionBehavior;
 
     #[test]
     fn full_q_ordinary_journal_preserves_whole_finish_and_exact_receipts() {
@@ -2611,7 +2611,11 @@ mod tests {
         fn transient() -> Self {
             let host = crate::test_support::shared_test_host();
             let connection = host.open_transient();
-            Self { connection: Some(connection), file: None, host: Some(host) }
+            Self {
+                connection: Some(connection),
+                file: None,
+                host: Some(host),
+            }
         }
 
         /// Create the journal file `name` beneath `directory`.
@@ -2623,9 +2627,17 @@ mod tests {
             );
             let name = std::ffi::OsString::from(name);
             let host = crate::test_support::shared_test_host();
-            let connection =
-                open_journal_file(&host, &root, &name, lillux_sqlite::OriginalNativeBoundMode::CreateExclusive);
-            Self { connection: Some(connection), file: Some((root, name)), host: Some(host) }
+            let connection = open_journal_file(
+                &host,
+                &root,
+                &name,
+                lillux_sqlite::OriginalNativeBoundMode::CreateExclusive,
+            );
+            Self {
+                connection: Some(connection),
+                file: Some((root, name)),
+                host: Some(host),
+            }
         }
 
         /// Close the journal file into the census and open it again: the
@@ -2649,7 +2661,9 @@ mod tests {
         fn sql<T>(&self, work: impl FnOnce(&Connection) -> T) -> T {
             let connection = self.connection.as_ref().expect("test journal open");
             let outcome = connection.with_sql(|conn| {
-                Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(conn))))
+                Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || work(conn),
+                )))
             });
             match outcome {
                 Ok(Ok(value)) => value,
@@ -2668,7 +2682,9 @@ mod tests {
             };
             match connection.close().or_else(|failure| failure.retry()) {
                 Ok(closed) => {
-                    host.retain_terminal(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(closed));
+                    host.retain_terminal(lillux_sqlite::OriginalNativeConnectionTerminal::Closed(
+                        closed,
+                    ));
                     crate::test_support::release_shared_test_host(host);
                 }
                 Err(failure) if !std::thread::panicking() => {
@@ -3965,7 +3981,8 @@ mod tests {
                 let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
                     .unwrap();
                 assert!(
-                    append_frame(&tx, &TestOwner, &binding.placement_thread_id, &ready_wire).unwrap()
+                    append_frame(&tx, &TestOwner, &binding.placement_thread_id, &ready_wire)
+                        .unwrap()
                 );
             }
             assert_eq!(
@@ -4016,7 +4033,8 @@ mod tests {
             {
                 let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
                     .unwrap();
-                record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+                record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire)
+                    .unwrap();
                 append_frame(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
                 finish_application(
                     &tx,
@@ -4372,8 +4390,8 @@ mod tests {
                 );
             }
         };
-        let (release_ack, output, eof, stopped, cancel_digest, output_digest, eof_digest) =
-            journal.sql(|conn| {
+        let (release_ack, output, eof, stopped, cancel_digest, output_digest, eof_digest) = journal
+            .sql(|conn| {
                 let ready_digest = ready(conn, &binding, &supervisor);
                 let (release, release_digest) = wire(
                     &binding,
@@ -4516,7 +4534,15 @@ mod tests {
                 append(conn, &binding, &stopped).unwrap();
                 assert_output_pending(conn);
                 validate_channels(conn, &TestOwner).unwrap();
-                (release_ack, output, eof, stopped, cancel_digest, output_digest, eof_digest)
+                (
+                    release_ack,
+                    output,
+                    eof,
+                    stopped,
+                    cancel_digest,
+                    output_digest,
+                    eof_digest,
+                )
             });
         journal.reopen();
         journal.sql(|conn| {
@@ -4622,7 +4648,8 @@ mod tests {
             {
                 let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
                     .unwrap();
-                record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+                record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire)
+                    .unwrap();
                 append_frame(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
                 tx.commit().unwrap();
             }
@@ -4935,7 +4962,9 @@ mod tests {
             );
             let tx =
                 Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
-            assert!(record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel).unwrap());
+            assert!(
+                record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel).unwrap()
+            );
             tx.commit().unwrap();
             let tx =
                 Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();

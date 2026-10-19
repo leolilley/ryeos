@@ -17,8 +17,8 @@ use ryeos_scheduler_contract::{
 
 use crate::retirement_attempt::RetirementAttempt;
 use crate::retirement_journal::{
-    ResetNativeReadScope, reset_native_scope,
-    AuthenticatedInterruptedGeneration, RetirementJournal, authorized_role_sources,
+    AuthenticatedInterruptedGeneration, ResetNativeReadScope, RetirementJournal,
+    authorized_role_sources, reset_native_scope,
 };
 
 #[derive(Debug)]
@@ -103,7 +103,11 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
                 Vec::new(),
             )
         };
-        RetirementJournal::reserve_pre_effect_capacity(runtime, permit.node_identity(), new_generation)?;
+        RetirementJournal::reserve_pre_effect_capacity(
+            runtime,
+            permit.node_identity(),
+            new_generation,
+        )?;
         validate_preview_source_continuity(permit, &interrupted)?;
         Ok(())
     }
@@ -316,14 +320,12 @@ impl SchedulerHistoryResetParticipant for SchedulerHistoryReset {
         permit: &SchedulerAcknowledgedReset<'_>,
     ) -> Result<usize> {
         let runtime = permit.runtime_directory()?;
-        let journals = RetirementJournal::retire_acknowledged_evidence(
-            runtime,
-            permit.node_identity(),
-        )
-        .context("remove the acknowledged scheduler retirement journals")?;
+        let journals =
+            RetirementJournal::retire_acknowledged_evidence(runtime, permit.node_identity())
+                .context("remove the acknowledged scheduler retirement journals")?;
         permit.runtime_directory()?;
-        let fires_root = remove_empty_fires_root(runtime)
-            .context("remove the empty scheduler fires root")?;
+        let fires_root =
+            remove_empty_fires_root(runtime).context("remove the empty scheduler fires root")?;
         Ok(journals + usize::from(fires_root))
     }
 }
@@ -347,7 +349,9 @@ fn remove_empty_fires_root(runtime: &lillux::PinnedDirectory) -> Result<bool> {
     if !fires_root.entry_names_bounded(1)?.is_empty() {
         return Ok(false);
     }
-    Ok(runtime.remove_empty_child_if_same(name, &fires_root)?.is_some())
+    Ok(runtime
+        .remove_empty_child_if_same(name, &fires_root)?
+        .is_some())
 }
 
 fn verify_source_identity(
@@ -810,7 +814,8 @@ fn begin_original_stopped<'a>(
             None => RetirementJournal::begin(permit, plan.clone()),
         }
     })?;
-    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit).map_err(intake_owners_end)?;
+    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit)
+        .map_err(intake_owners_end)?;
     let drained = retry_while_held("acknowledge original stopped scheduler intake", || {
         permit.runtime_directory()?;
         in_service_scope(factory, || {
@@ -907,7 +912,8 @@ fn begin_stopped_recovery<'a>(
         RetirementJournal::begin_recovery(permit, &parent, contract_plan.clone())
     })?;
     let native_plan = native_stopped_plan(&runtime, &contract_plan)?;
-    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit).map_err(intake_owners_end)?;
+    let db = capture_stopped_intake(factory, &runtime, &native_plan, permit)
+        .map_err(intake_owners_end)?;
     let drained = retry_while_held("acknowledge stopped scheduler recovery intake", || {
         in_service_scope(factory, || {
             db.retry_stopped_projection(&native_plan)
@@ -1014,15 +1020,15 @@ fn capture_stopped_intake(
     let mut held: Option<std::result::Result<SchedulerDb, SchedulerDbOpenFailure>> = None;
     let mut last_refusal = None;
     for attempt in 0..=HELD_RETRY_ATTEMPTS {
-        if attempt > 0 {
-            if let Err(error) = permit.runtime_directory() {
-                retry_notice(
-                    "revalidate stopped scheduler intake authority while retaining owner",
-                    &error,
-                );
-                last_refusal = Some(error);
-                continue;
-            }
+        if attempt > 0
+            && let Err(error) = permit.runtime_directory()
+        {
+            retry_notice(
+                "revalidate stopped scheduler intake authority while retaining owner",
+                &error,
+            );
+            last_refusal = Some(error);
+            continue;
         }
         let refusal = match factory.with_original_stopped_intake(|_| match held.take() {
             None => SchedulerDb::capture_stopped_projection(Arc::clone(runtime), plan.clone()),
@@ -1058,7 +1064,8 @@ fn capture_stopped_intake(
             // owner ends here, in a service scope so its native frees run in
             // this arena; a refused scope ends it all the same.
             let ended = factory.with_original_service_scope(move |_| drop(db));
-            let refusal = last_refusal.unwrap_or_else(|| anyhow::anyhow!("stopped intake scope refused"));
+            let refusal =
+                last_refusal.unwrap_or_else(|| anyhow::anyhow!("stopped intake scope refused"));
             Err(match ended {
                 Ok(()) => refusal.context(refused),
                 Err(failure) => refusal.context(format!(
@@ -1087,7 +1094,9 @@ fn in_service_scope<T>(
         Err(failure) => {
             let (refusal, completed) = failure.into_parts();
             Err(match completed {
-                Some(Err(error)) => refusal.context(format!("the scheduler native step also refused: {error:#}")),
+                Some(Err(error)) => {
+                    refusal.context(format!("the scheduler native step also refused: {error:#}"))
+                }
                 Some(Ok(_)) | None => refusal,
             })
         }
@@ -1240,11 +1249,14 @@ impl SchedulerHistoryRetirementAttempt for ServiceRetirementAttempt<'_> {
     ) -> Result<Option<SchedulerHistoryRetirement>> {
         let factory = reset_factory(permit)?;
         let _scope = ResetNativeReadScope::enter(Some(factory));
-        Ok(in_service_scope(factory, || self.attempt.advance(permit))?
-            .map(|retirement| SchedulerHistoryRetirement {
-                journal_artifacts: self.prior_artifacts + retirement.journal_artifacts,
-                ..retirement
-            }))
+        Ok(
+            in_service_scope(factory, || self.attempt.advance(permit))?.map(|retirement| {
+                SchedulerHistoryRetirement {
+                    journal_artifacts: self.prior_artifacts + retirement.journal_artifacts,
+                    ..retirement
+                }
+            }),
+        )
     }
 }
 
@@ -1366,7 +1378,8 @@ mod source_continuity_controls {
                     .atomic_create_regular(
                         std::ffi::OsStr::new(name),
                         b"foreign fixed candidate",
-                        0o600, crate::SCHEDULER_TEMP_PURPOSE
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE
                     )?
                     .is_some()
             );
@@ -1387,7 +1400,8 @@ mod source_continuity_controls {
                     .atomic_create_regular(
                         std::ffi::OsStr::new(&name),
                         b"foreign after release",
-                        0o600, crate::SCHEDULER_TEMP_PURPOSE
+                        0o600,
+                        crate::SCHEDULER_TEMP_PURPOSE
                     )?
                     .is_some()
             );
@@ -1467,8 +1481,9 @@ mod late_source_controls {
     -> Result<()> {
         for count in 0..=9 {
             let directory = tempfile::tempdir()?;
-            let identity =
-                ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("identity.key"))?;
+            let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+                &directory.path().join("identity.key"),
+            )?;
             let path = directory.path().join("runtime");
             std::fs::create_dir(&path)?;
             let runtime =
@@ -1549,8 +1564,9 @@ mod late_source_controls {
         };
         for remaining in ["u", "r", "absent"] {
             let directory = tempfile::tempdir()?;
-            let identity =
-                ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("identity.key"))?;
+            let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+                &directory.path().join("identity.key"),
+            )?;
             let path = directory.path().join("runtime");
             std::fs::create_dir(&path)?;
             let runtime =
@@ -1702,8 +1718,9 @@ mod late_source_controls {
     {
         for count in [10, 11, 12, 13, 21, 27] {
             let directory = tempfile::tempdir()?;
-            let identity =
-                ryeos_node_runtime::identity::NodeIdentity::create(&directory.path().join("identity.key"))?;
+            let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+                &directory.path().join("identity.key"),
+            )?;
             let path = directory.path().join("runtime");
             std::fs::create_dir(&path)?;
             let runtime =
@@ -1738,7 +1755,7 @@ mod late_source_controls {
             let quarantine = path.join(format!(
                 "scheduler-retirement.role.{generation}.main.quarantine"
             ));
-            if count >= 11 && count <= 12 {
+            if (11..=12).contains(&count) {
                 std::fs::rename(&canonical, &quarantine)?;
             }
             if count >= 13 {

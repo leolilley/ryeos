@@ -194,20 +194,6 @@ pub fn collect_chain_reachable_from_head(
     Ok(set)
 }
 
-pub(crate) fn collect_chain_reachable_from_head_with_cas(
-    cas: &lillux::CasStore,
-    chain_root_id: &str,
-    chain_head_hash: &str,
-) -> Result<ReachableSet> {
-    let mut set = ReachableSet {
-        authoritative_root_count: 1,
-        ..ReachableSet::default()
-    };
-    set.chain_root_ids.push(chain_root_id.to_string());
-    merge_object_closure_with_cas(cas, [chain_head_hash.to_string()], &mut set)?;
-    Ok(set)
-}
-
 /// Walk one exact chain head from the pinned CAS authority under transfer
 /// ceilings. Sync callers use this instead of the local-maintenance traversal
 /// so object and blob limits apply while the closure is being discovered.
@@ -270,7 +256,8 @@ fn merge_object_closure_with_cas_and_limits(
     set: &mut ReachableSet,
     limits: crate::object_closure::ObjectClosureLimits,
 ) -> Result<()> {
-    let closure = crate::object_closure::collect_object_closure_with_cas_and_limits(cas, roots, limits)?;
+    let closure =
+        crate::object_closure::collect_object_closure_with_cas_and_limits(cas, roots, limits)?;
     merge_complete_object_closure(closure, set)
 }
 

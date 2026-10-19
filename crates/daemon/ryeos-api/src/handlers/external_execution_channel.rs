@@ -90,9 +90,9 @@ fn exchange_blocking(req: &ExchangeRequest, state: &AppState) -> Result<Value> {
         Err(error) => {
             // A frame that refuses the lease records the refusal durably;
             // the standing it left names the verdict.
-            if let Err(ryeos_app::external_placement::ExternalChannelStreamRefusal::OccurrenceRefused(
-                _,
-            )) = ryeos_app::external_placement::external_channel_stream_admission(
+            if let Err(
+                ryeos_app::external_placement::ExternalChannelStreamRefusal::OccurrenceRefused(_),
+            ) = ryeos_app::external_placement::external_channel_stream_admission(
                 state,
                 &req.placement_thread_id,
                 &req.occurrence_id,

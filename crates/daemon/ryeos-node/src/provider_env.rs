@@ -194,7 +194,11 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         profiles.sort();
-        assert_eq!(profiles.len(), 16, "update provider-environment profile expectations");
+        assert_eq!(
+            profiles.len(),
+            16,
+            "update provider-environment profile expectations"
+        );
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         for path in profiles {
             let profile_name = path
@@ -206,8 +210,7 @@ mod tests {
             let body = lillux::signature::strip_signature_lines(&raw);
             let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                 serde_yaml::from_str(&body).unwrap();
-            let provider: ProviderEnvironmentPolicy =
-                profile.typed_policy(&table, &path).unwrap();
+            let provider: ProviderEnvironmentPolicy = profile.typed_policy(&table, &path).unwrap();
             let execution: NodeExecutionAdmissionPolicy =
                 profile.typed_policy(&table, &path).unwrap();
             validate_declaration(&provider, &execution)
@@ -215,7 +218,9 @@ mod tests {
             let expected: &[&str] = match profile_name.as_str() {
                 "f5r-controller" | "hosted-workflow" => &["OPENAI_API_KEY"],
                 // Authority-class profiles never declare a provider source.
-                "release-authority" | "central-host" | "standard-central-auth"
+                "release-authority"
+                | "central-host"
+                | "standard-central-auth"
                 | "bundle-source" => &[],
                 "contained-workflow" | "core" | "core-knowledge" | "core-scheduling"
                 | "core-workflow" | "development" | "full" | "hosted-node" | "local-inference"

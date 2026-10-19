@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::Context;
 use ryeos_app::node_config::loader::NodeConfigLoader;
-use ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
+use ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader;
 use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_runtime::{CommandDef, CommandDispatch};
@@ -45,14 +45,17 @@ pub fn load_verified_snapshot_with_trust(
     let bundles = bootstrap
         .load_bundle_section()
         .context("load verified node bundle registrations")?;
-    NodeConfigLoader { app_root, trust_store }
-        .load_full(
-            &NodeConfigTable::new(),
-            &bundles,
-            policy.require::<CommandRegistrationAuthority>()?,
-            &NodePolicyTable::new(),
-        )
-        .context("load verified node config")
+    NodeConfigLoader {
+        app_root,
+        trust_store,
+    }
+    .load_full(
+        &NodeConfigTable::new(),
+        &bundles,
+        policy.require::<CommandRegistrationAuthority>()?,
+        &NodePolicyTable::new(),
+    )
+    .context("load verified node config")
 }
 
 pub fn load_verified_policy_snapshot(app_root: &Path) -> anyhow::Result<NodePolicySnapshot> {

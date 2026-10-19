@@ -697,11 +697,15 @@ impl<O: ChannelStreamOwner> ChannelStreamSession<O> {
                     error = %format!("{error:#}"),
                     "external channel stream exchange refused"
                 );
-                return Err(if ryeos_app::external_placement::ExternalChannelExchangeUnavailable::marks(&error) {
-                    ChannelStreamRefusal::ExchangeUnavailable
-                } else {
-                    ChannelStreamRefusal::ExchangeRefused
-                });
+                return Err(
+                    if ryeos_app::external_placement::ExternalChannelExchangeUnavailable::marks(
+                        &error,
+                    ) {
+                        ChannelStreamRefusal::ExchangeUnavailable
+                    } else {
+                        ChannelStreamRefusal::ExchangeRefused
+                    },
+                );
             }
             Err(error) => {
                 tracing::warn!(error = %error, "external channel stream exchange task failed");

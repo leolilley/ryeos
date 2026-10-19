@@ -626,11 +626,11 @@ impl RyeOsCore {
             }
             Some(super::content::AffordanceInvoke::Rye { notice, .. })
             | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
-                if self.refuse_blocked_mutation_for_instance(&invocation_origin) {
+                if self.refuse_blocked_mutation_for_instance(invocation_origin) {
                     return Vec::new();
                 }
                 let Some((request, request_bounds)) = self.compiled_binding_operation(
-                    &invocation_origin,
+                    invocation_origin,
                     crate::ui::binding::UiBindingCoordinate::Affordance {
                         view_ref: view_ref.to_string(),
                         affordance_id: affordance_id.to_string(),

@@ -755,11 +755,11 @@ fn compile_direct_program_from_plan(
         .external_endpoint_binding
         .clone()
         .context("external direct endpoint has not been sealed")?;
-    let spec = ordinary_direct_subprocess(&plan)?;
+    let spec = ordinary_direct_subprocess(plan)?;
     inputs.validate()?;
-    let project_file_destination = project_file::require_inputs(&plan, inputs, project_file)?;
+    let project_file_destination = project_file::require_inputs(plan, inputs, project_file)?;
     ensure!(
-        inputs.workspace_view == direct_workspace_view(&plan)?,
+        inputs.workspace_view == direct_workspace_view(plan)?,
         "external direct workspace view differs from its retained plan ceiling"
     );
     let source_mounts = inputs
@@ -833,8 +833,7 @@ fn compile_direct_program_from_plan(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    let environment =
-        compile_direct_environment(spec, &retained, thread_id, chain_root_id, source)?;
+    let environment = compile_direct_environment(spec, retained, thread_id, chain_root_id, source)?;
     match environment.get("PATH") {
         Some(path) => ensure!(
             path == &inputs.executable_search.join(":"),
@@ -856,7 +855,7 @@ fn compile_direct_program_from_plan(
         .transpose()?
         .unwrap_or_default();
     let requested = plan.subprocess_limits;
-    let target_limits = direct_target_limits(&plan)?;
+    let target_limits = direct_target_limits(plan)?;
     let stdout_max_bytes = requested
         .and_then(|limits| limits.max_stdout_bytes)
         .map_or(stdout_max_bytes, |limit| stdout_max_bytes.min(limit));
@@ -864,7 +863,7 @@ fn compile_direct_program_from_plan(
         .and_then(|limits| limits.max_stderr_bytes)
         .map_or(stderr_max_bytes, |limit| stderr_max_bytes.min(limit));
     let projection = ExternalDirectCommandProjection {
-        workspace_view: direct_workspace_view(&plan)?,
+        workspace_view: direct_workspace_view(plan)?,
         target_limits,
         argv0: AdmittedExternalDirectProgram::guest_executable_for_command(match closure {
             AdmittedExecutionClosure::DirectItemExecutor { command, .. } => command,

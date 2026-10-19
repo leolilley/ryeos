@@ -61,7 +61,11 @@ pub enum SecureTempClass<'a> {
     /// The name does not carry the `.secure.tmp.` prefix.
     NotTemp,
     /// An exact `.secure.tmp.<purpose>.<pid>.<seq>` name.
-    Temp { purpose: &'a str, pid: u32, seq: u64 },
+    Temp {
+        purpose: &'a str,
+        pid: u32,
+        seq: u64,
+    },
     /// Any other name carrying the prefix, including the retired
     /// `.secure.tmp.<pid>.<seq>` spelling.
     Malformed,
@@ -168,21 +172,39 @@ mod tests {
         }
         assert_eq!(
             class(".secure.tmp.content.0.0"),
-            SecureTempClass::Temp { purpose: "content", pid: 0, seq: 0 }
+            SecureTempClass::Temp {
+                purpose: "content",
+                pid: 0,
+                seq: 0
+            }
         );
         assert_eq!(
             class(".secure.tmp.a-1.4294967295.18446744073709551615"),
-            SecureTempClass::Temp { purpose: "a-1", pid: u32::MAX, seq: u64::MAX }
+            SecureTempClass::Temp {
+                purpose: "a-1",
+                pid: u32::MAX,
+                seq: u64::MAX
+            }
         );
         assert_eq!(
             class(".secure.tmp.abcdefghijklmnop.1.2"),
-            SecureTempClass::Temp { purpose: "abcdefghijklmnop", pid: 1, seq: 2 }
+            SecureTempClass::Temp {
+                purpose: "abcdefghijklmnop",
+                pid: 1,
+                seq: 2
+            }
         );
     }
 
     #[test]
     fn non_temp_names_are_not_temp() {
-        for name in ["", "state.json", ".secure.tmp", ".secure.authoring.1.2", "secure.tmp.state.1.2"] {
+        for name in [
+            "",
+            "state.json",
+            ".secure.tmp",
+            ".secure.authoring.1.2",
+            "secure.tmp.state.1.2",
+        ] {
             assert_eq!(class(name), SecureTempClass::NotTemp, "{name}");
         }
     }
@@ -247,7 +269,10 @@ mod tests {
     fn invalid_tokens_are_refused_at_construction() {
         for token in ["", "State", "1x", "-x", "x_y", "x.y", "abcdefghijklmnopq"] {
             assert!(!purpose_is_valid(token.as_bytes()), "{token}");
-            assert!(std::panic::catch_unwind(|| TempPurpose::new(token)).is_err(), "{token}");
+            assert!(
+                std::panic::catch_unwind(|| TempPurpose::new(token)).is_err(),
+                "{token}"
+            );
         }
         assert!(TempPurpose("Bad").require_valid().is_err());
         #[cfg(unix)]
@@ -286,7 +311,9 @@ mod tests {
         ) -> anyhow::Result<()> {
             let name = OsStr::new(target);
             match writer {
-                "create" => directory.atomic_create_regular(name, bytes, 0o600, purpose).map(drop),
+                "create" => directory
+                    .atomic_create_regular(name, bytes, 0o600, purpose)
+                    .map(drop),
                 "reader" => directory
                     .atomic_create_regular_from_reader(
                         name,
@@ -316,7 +343,9 @@ mod tests {
             };
             let (writer, path) = request.split_once(':').unwrap();
             crate::disable_process_core_dumps().unwrap();
-            let directory = PinnedDirectory::open(std::path::Path::new(path)).unwrap().unwrap();
+            let directory = PinnedDirectory::open(std::path::Path::new(path))
+                .unwrap()
+                .unwrap();
             set_atomic_create_hook(
                 AtomicCreateHookSelector {
                     purpose: ABORT_PURPOSE,
@@ -351,7 +380,11 @@ mod tests {
                 let names = entry_names(root.path());
                 assert_eq!(names.len(), 1, "{writer}: {names:?}");
                 match parse_secure_temp_name(OsStr::new(&names[0])) {
-                    SecureTempClass::Temp { purpose, pid: owner, .. } => {
+                    SecureTempClass::Temp {
+                        purpose,
+                        pid: owner,
+                        ..
+                    } => {
                         assert_eq!(purpose, "hook-abort", "{writer}");
                         assert_eq!(owner, pid, "{writer}");
                     }
@@ -381,13 +414,22 @@ mod tests {
                 let target = format!("target-{writer}");
                 // Neither another target nor another owner advances the count.
                 write_with(writer, &directory, "other", b"x", FAIL_PURPOSE).unwrap();
-                write_with(writer, &directory, &format!("{target}.a"), b"x", ABORT_PURPOSE)
-                    .unwrap();
+                write_with(
+                    writer,
+                    &directory,
+                    &format!("{target}.a"),
+                    b"x",
+                    ABORT_PURPOSE,
+                )
+                .unwrap();
                 write_with(writer, &directory, &target, b"first", FAIL_PURPOSE).unwrap();
                 std::fs::remove_file(root.path().join(&target)).unwrap();
-                let error = write_with(writer, &directory, &target, b"second", FAIL_PURPOSE)
-                    .unwrap_err();
-                assert!(format!("{error:#}").contains("armed test hook"), "{writer}: {error:#}");
+                let error =
+                    write_with(writer, &directory, &target, b"second", FAIL_PURPOSE).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("armed test hook"),
+                    "{writer}: {error:#}"
+                );
                 if let Some(failure) =
                     error.downcast_ref::<crate::secure_fs::AtomicRegularCreationFailure>()
                 {
@@ -400,7 +442,10 @@ mod tests {
                     );
                     assert!(matches!(
                         parse_secure_temp_name(failure.temporary_name()),
-                        SecureTempClass::Temp { purpose: "hook-fail", .. }
+                        SecureTempClass::Temp {
+                            purpose: "hook-fail",
+                            ..
+                        }
                     ));
                     directory
                         .remove_if_same(failure.temporary_name(), failure.original_file())

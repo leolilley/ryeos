@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
+use lillux::PinnedDirectory;
 use lillux::crypto::{Signer, SigningKey};
 use lillux::time::MonotonicDeadline;
-use lillux::PinnedDirectory;
 use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
 use ryeos_node_runtime::state_lock::StateLock;
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,8 @@ use super::anchor::RetainedAnchor;
 use super::redo::Operation;
 use super::{
     CapacityRecord, NativeCapacityAccountBinding, REISSUANCE_DOCUMENT_BOUND,
-    REISSUANCE_DOCUMENT_NAME, REISSUANCE_SCHEMA, ReissuanceBody, ReissuanceDocument,
-    RetainedStore, encode, genesis_consumed, hex_digest, verify_reissuance_document,
+    REISSUANCE_DOCUMENT_NAME, REISSUANCE_SCHEMA, ReissuanceBody, ReissuanceDocument, RetainedStore,
+    encode, genesis_consumed, hex_digest, verify_reissuance_document,
 };
 
 /// Evidence of every epoch an operator opened on this node, oldest first.
@@ -78,7 +78,13 @@ pub struct CapacityReissueEvidence {
 /// single epoch: a published anchor is recognised by its document digest and
 /// only repaired, never renewed again.
 pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
-    let ReissueRequest { app_root, state_lock, operator_key, reason, command } = request;
+    let ReissueRequest {
+        app_root,
+        state_lock,
+        operator_key,
+        reason,
+        command,
+    } = request;
     state_lock.ensure_protects_app_root(app_root)?;
     let report = crate::init::verify_init_completion(app_root)?
         .context("re-issuance requires completed initialization")?;
@@ -103,8 +109,8 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
     );
     let onboarding = PinnedDirectory::open(&app_root.join(".ai/config/onboarding"))?
         .context("operator onboarding absent")?;
-    let state = PinnedDirectory::open(&app_root.join(".ai/state"))?
-        .context("capacity runtime absent")?;
+    let state =
+        PinnedDirectory::open(&app_root.join(".ai/state"))?.context("capacity runtime absent")?;
     let identity = ReissueIdentity {
         operator_key,
         operator_fingerprint,
@@ -120,7 +126,12 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
         &identity.policy,
     )?;
     state_lock.ensure_protects_app_root(app_root)?;
-    owner.reissue(&identity, lillux::process_control::ControllerAccount::current(), reason, command)
+    owner.reissue(
+        &identity,
+        lillux::process_control::ControllerAccount::current(),
+        reason,
+        command,
+    )
 }
 
 /// Every recorded re-issuance, oldest first. An unreadable line is an error,
@@ -169,9 +180,15 @@ struct Budget {
 
 impl Budget {
     fn pay(&self, steps: u64) -> Result<()> {
-        ensure!(!self.deadline.has_elapsed(), "operator re-issuance interval exhausted");
+        ensure!(
+            !self.deadline.has_elapsed(),
+            "operator re-issuance interval exhausted"
+        );
         self.work.set(
-            self.work.get().checked_sub(steps).context("operator re-issuance work exhausted")?,
+            self.work
+                .get()
+                .checked_sub(steps)
+                .context("operator re-issuance work exhausted")?,
         );
         Ok(())
     }
@@ -207,13 +224,18 @@ impl StoppedCapacityAccount {
     }
 
     fn crash_after(&self, step: Step) -> Result<()> {
-        ensure!(self.fail_after.get() != Some(step), "injected re-issuance interruption after {step:?}");
+        ensure!(
+            self.fail_after.get() != Some(step),
+            "injected re-issuance interruption after {step:?}"
+        );
         Ok(())
     }
 
     /// The document currently published beside the issuance, if any.
     fn existing_document(&self) -> Result<Option<(lillux::PinnedRegularFile, Vec<u8>)>> {
-        let Some(file) = self.onboarding.open_pinned_regular(OsStr::new(REISSUANCE_DOCUMENT_NAME), false)?
+        let Some(file) = self
+            .onboarding
+            .open_pinned_regular(OsStr::new(REISSUANCE_DOCUMENT_NAME), false)?
         else {
             return Ok(None);
         };
@@ -239,16 +261,27 @@ impl StoppedCapacityAccount {
                 "operator re-issuance refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
             )
         })?;
-        ensure!(reason.chars().count() <= REASON_BOUND_CHARS, "re-issuance reason exceeds its bound");
+        ensure!(
+            reason.chars().count() <= REASON_BOUND_CHARS,
+            "re-issuance reason exceeds its bound"
+        );
         // The log this run must end by extending is checked before the first
         // write, so a refused log never leaves an epoch without its evidence.
-        if let Some(log) = self.state.open_pinned_regular(OsStr::new(REISSUE_EVIDENCE_LOG), false)? {
+        if let Some(log) = self
+            .state
+            .open_pinned_regular(OsStr::new(REISSUE_EVIDENCE_LOG), false)?
+        {
             require_owned_evidence_log(&log)?;
         }
         let policy = &identity.policy;
-        self.anchor.load(policy, &self.issuance, self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        self.anchor
+            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
+                self.budget.pay(steps)
+            })?;
         let current = *self.anchor.current()?;
-        let bytes = self.account.read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        let bytes = self
+            .account
+            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
         ensure!(
             current.accepts_account_bytes(&bytes)?,
             "capacity account corruption has no permitted redo"
@@ -258,8 +291,9 @@ impl StoppedCapacityAccount {
         if current.operation() == Operation::OperatorReissue {
             // The anchor already opened an epoch under a document. Only the
             // document it names may complete it; a rerun repairs and reports.
-            let (_, document_bytes) = existing.as_ref()
-                .context("operator re-issuance anchor has no document; the stopped node cannot be repaired")?;
+            let (_, document_bytes) = existing.as_ref().context(
+                "operator re-issuance anchor has no document; the stopped node cannot be repaired",
+            )?;
             let document_digest: [u8; 32] = sha2::Sha256::digest(document_bytes).into();
             ensure!(
                 document_digest == current.authorization(),
@@ -272,9 +306,15 @@ impl StoppedCapacityAccount {
                 &identity.node_fingerprint,
                 &self.issuance,
             )?;
-            ensure!(body.to_epoch == current.epoch(), "operator re-issuance document names another epoch");
+            ensure!(
+                body.to_epoch == current.epoch(),
+                "operator re-issuance document names another epoch"
+            );
             if bytes != encode(current.target())? {
-                self.account.apply_redo(&current, self.budget.deadline, &|steps| self.budget.pay(steps))?;
+                self.account
+                    .apply_redo(&current, self.budget.deadline, &|steps| {
+                        self.budget.pay(steps)
+                    })?;
             }
             let evidence = CapacityReissueEvidence {
                 document_digest: hex_digest(&document_digest),
@@ -304,18 +344,30 @@ impl StoppedCapacityAccount {
         // inferred from a numeric pid; only the exact incarnation decides.
         if let Some(debit) = current.target().outstanding {
             ensure!(
-                debit.process.exact()?.has_ended().map_err(anyhow::Error::msg)?,
+                debit
+                    .process
+                    .exact()?
+                    .has_ended()
+                    .map_err(anyhow::Error::msg)?,
                 "outstanding native incarnation remains live or unproved; stop it first"
             );
         }
         if bytes != encode(current.target())? {
-            self.account.apply_redo(&current, self.budget.deadline, &|steps| self.budget.pay(steps))?;
+            self.account
+                .apply_redo(&current, self.budget.deadline, &|steps| {
+                    self.budget.pay(steps)
+                })?;
         }
         let before = *current.target();
         let from_epoch = before.epoch;
-        let to_epoch = from_epoch.checked_add(1).context("capacity epoch counter exhausted")?;
+        let to_epoch = from_epoch
+            .checked_add(1)
+            .context("capacity epoch counter exhausted")?;
         if let Some(maximum) = policy.renewal.maximum_epochs {
-            ensure!(to_epoch <= maximum, "capacity epoch bound reached: the signed policy allows {maximum} epochs");
+            ensure!(
+                to_epoch <= maximum,
+                "capacity epoch bound reached: the signed policy allows {maximum} epochs"
+            );
         }
 
         let anchor_bytes = current.encode(policy)?;
@@ -327,7 +379,8 @@ impl StoppedCapacityAccount {
             from_epoch,
             to_epoch,
             anchor_digest: hex_digest(&sha2::Sha256::digest(anchor_bytes).into()),
-            previous_reissuance_digest: existing.as_ref()
+            previous_reissuance_digest: existing
+                .as_ref()
                 .map(|(_, previous)| hex_digest(&sha2::Sha256::digest(previous).into())),
             reason: reason.to_owned(),
             issued_at: lillux::time::iso8601_now(),
@@ -365,9 +418,18 @@ impl StoppedCapacityAccount {
             ..before
         };
         let next = current.renew(Operation::OperatorReissue, target, document_digest, policy)?;
-        self.anchor.publish(next, policy, &self.issuance, self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        self.anchor.publish(
+            next,
+            policy,
+            &self.issuance,
+            self.budget.deadline,
+            &|steps| self.budget.pay(steps),
+        )?;
         self.crash_after(Step::Anchor)?;
-        self.account.apply_redo(self.anchor.current()?, self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        self.account
+            .apply_redo(self.anchor.current()?, self.budget.deadline, &|steps| {
+                self.budget.pay(steps)
+            })?;
         self.crash_after(Step::Account)?;
 
         let evidence = CapacityReissueEvidence {
@@ -393,7 +455,10 @@ impl StoppedCapacityAccount {
     /// append owes exactly one line; a rerun after a complete run owes none.
     fn append_evidence_once(&self, evidence: &CapacityReissueEvidence) -> Result<()> {
         let recorded = read_evidence(&self.state)?;
-        if recorded.iter().any(|entry| entry.document_digest == evidence.document_digest) {
+        if recorded
+            .iter()
+            .any(|entry| entry.document_digest == evidence.document_digest)
+        {
             return Ok(());
         }
         append_evidence(&self.state, evidence)
@@ -422,8 +487,9 @@ fn read_evidence(directory: &PinnedDirectory) -> Result<Vec<CapacityReissueEvide
     raw.split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| {
-            serde_json::from_slice(line)
-                .map_err(|error| anyhow::anyhow!("re-issuance evidence entry is unreadable: {error}"))
+            serde_json::from_slice(line).map_err(|error| {
+                anyhow::anyhow!("re-issuance evidence entry is unreadable: {error}")
+            })
         })
         .collect()
 }
@@ -442,7 +508,10 @@ fn append_evidence(directory: &PinnedDirectory, evidence: &CapacityReissueEviden
     };
     let mut line = serde_json::to_vec(evidence)?;
     line.push(b'\n');
-    ensure!(line.len() <= REISSUE_EVIDENCE_LOG_BOUND, "re-issuance evidence entry exceeds the log bound");
+    ensure!(
+        line.len() <= REISSUE_EVIDENCE_LOG_BOUND,
+        "re-issuance evidence entry exceeds the log bound"
+    );
     while body.len() + line.len() > REISSUE_EVIDENCE_LOG_BOUND {
         match body.iter().position(|byte| *byte == b'\n') {
             Some(end) => {
@@ -498,7 +567,8 @@ mod controls {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let exact = lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        let exact =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
         drop(child.stdin.take());
         child.wait().unwrap();
         assert!(exact.has_ended().unwrap());
@@ -511,10 +581,16 @@ mod controls {
             std::fs::create_dir_all(temporary.path().join("native-capacity")).unwrap();
             std::fs::create_dir_all(temporary.path().join("onboarding")).unwrap();
             std::fs::create_dir_all(temporary.path().join("state")).unwrap();
-            let directory = PinnedDirectory::open(&temporary.path().join("native-capacity")).unwrap().unwrap();
+            let directory = PinnedDirectory::open(&temporary.path().join("native-capacity"))
+                .unwrap()
+                .unwrap();
             directory.tighten_owner_private_directory().unwrap();
-            let onboarding = PinnedDirectory::open(&temporary.path().join("onboarding")).unwrap().unwrap();
-            let state = PinnedDirectory::open(&temporary.path().join("state")).unwrap().unwrap();
+            let onboarding = PinnedDirectory::open(&temporary.path().join("onboarding"))
+                .unwrap()
+                .unwrap();
+            let state = PinnedDirectory::open(&temporary.path().join("state"))
+                .unwrap()
+                .unwrap();
             let (policy, genesis, debit_target) = redo::controls::fixture();
             let ended = ended_process();
             let dead = IncarnationDebit {
@@ -522,10 +598,24 @@ mod controls {
                 process: redo::StoredProcess::capture(&ended).unwrap(),
                 ..debit_target.outstanding.unwrap()
             };
-            let account = directory.atomic_create_pinned_regular(OsStr::new("account"),
-                &encode(genesis.target()).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
-            directory.atomic_create_pinned_regular(OsStr::new("anchor"),
-                &genesis.encode(&policy).unwrap(), 0o600, crate::NODE_TEMP_PURPOSE).unwrap().unwrap();
+            let account = directory
+                .atomic_create_pinned_regular(
+                    OsStr::new("account"),
+                    &encode(genesis.target()).unwrap(),
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )
+                .unwrap()
+                .unwrap();
+            directory
+                .atomic_create_pinned_regular(
+                    OsStr::new("anchor"),
+                    &genesis.encode(&policy).unwrap(),
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )
+                .unwrap()
+                .unwrap();
             Self {
                 _temporary: temporary,
                 directory,
@@ -542,7 +632,9 @@ mod controls {
         fn identity(&self) -> ReissueIdentity<'_> {
             ReissueIdentity {
                 operator_key: &self.operator,
-                operator_fingerprint: ryeos_engine::trust::compute_fingerprint(&self.operator.verifying_key()),
+                operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
+                    &self.operator.verifying_key(),
+                ),
                 node_fingerprint: "c".repeat(64),
                 policy: self.policy.clone(),
             }
@@ -556,7 +648,8 @@ mod controls {
                 self.state.try_clone().unwrap(),
                 self.issuance,
                 &self.policy,
-            ).unwrap()
+            )
+            .unwrap()
         }
 
         fn run(&self, fail_after: Option<Step>) -> Result<ReissueReport> {
@@ -574,9 +667,20 @@ mod controls {
         fn current(&self) -> (AccountRedo, [u8; RECORD_BYTES]) {
             let owner = self.owner();
             let mut owner = owner;
-            owner.anchor.load(&self.policy, &self.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
+            owner
+                .anchor
+                .load(
+                    &self.policy,
+                    &self.issuance,
+                    owner.budget.deadline,
+                    &|steps| owner.budget.pay(steps),
+                )
+                .unwrap();
             let current = *owner.anchor.current().unwrap();
-            let bytes = owner.account.read_bytes(owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
+            let bytes = owner
+                .account
+                .read_bytes(owner.budget.deadline, &|steps| owner.budget.pay(steps))
+                .unwrap();
             (current, bytes)
         }
 
@@ -586,17 +690,52 @@ mod controls {
             let (current, _) = self.current();
             let before = *current.target();
             let (sequence, consumed) = before
-                .prepare_debit(self.policy.allowance, self.policy.incarnation.units).unwrap();
-            let target = CapacityRecord { sequence, consumed, outstanding: Some(self.dead), ..before };
-            let next = current.successor(Operation::Debit, target, &self.policy).unwrap();
+                .prepare_debit(self.policy.allowance, self.policy.incarnation.units)
+                .unwrap();
+            let target = CapacityRecord {
+                sequence,
+                consumed,
+                outstanding: Some(self.dead),
+                ..before
+            };
+            let next = current
+                .successor(Operation::Debit, target, &self.policy)
+                .unwrap();
             let mut owner = self.owner();
-            owner.anchor.load(&self.policy, &self.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
-            owner.anchor.publish(next, &self.policy, &self.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
-            owner.account.apply_redo(owner.anchor.current().unwrap(), owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
+            owner
+                .anchor
+                .load(
+                    &self.policy,
+                    &self.issuance,
+                    owner.budget.deadline,
+                    &|steps| owner.budget.pay(steps),
+                )
+                .unwrap();
+            owner
+                .anchor
+                .publish(
+                    next,
+                    &self.policy,
+                    &self.issuance,
+                    owner.budget.deadline,
+                    &|steps| owner.budget.pay(steps),
+                )
+                .unwrap();
+            owner
+                .account
+                .apply_redo(
+                    owner.anchor.current().unwrap(),
+                    owner.budget.deadline,
+                    &|steps| owner.budget.pay(steps),
+                )
+                .unwrap();
         }
 
         fn document_path(&self) -> std::path::PathBuf {
-            self._temporary.path().join("onboarding").join(REISSUANCE_DOCUMENT_NAME)
+            self._temporary
+                .path()
+                .join("onboarding")
+                .join(REISSUANCE_DOCUMENT_NAME)
         }
 
         fn evidence(&self) -> Vec<CapacityReissueEvidence> {
@@ -611,9 +750,15 @@ mod controls {
         let (debit, _) = f.current();
         assert_eq!(debit.epoch(), 1);
         let report = f.run(None).unwrap();
-        assert_eq!((report.from_epoch, report.to_epoch, report.already_applied), (1, 2, false));
+        assert_eq!(
+            (report.from_epoch, report.to_epoch, report.already_applied),
+            (1, 2, false)
+        );
         let expected_settled = hex_digest(&f.dead.process_digest);
-        assert_eq!(report.settled_incarnation.as_deref(), Some(expected_settled.as_str()));
+        assert_eq!(
+            report.settled_incarnation.as_deref(),
+            Some(expected_settled.as_str())
+        );
         let (current, bytes) = f.current();
         assert_eq!(current.operation(), Operation::OperatorReissue);
         assert_eq!(current.epoch(), 2);
@@ -626,10 +771,19 @@ mod controls {
         let digest: [u8; 32] = sha2::Sha256::digest(&document).into();
         assert_eq!(digest, current.authorization());
         assert_eq!(report.document_digest, hex_digest(&digest));
-        let body = verify_reissuance_document(&document, &f.operator.verifying_key(),
-            &f.identity().operator_fingerprint, &f.identity().node_fingerprint, &f.issuance).unwrap();
+        let body = verify_reissuance_document(
+            &document,
+            &f.operator.verifying_key(),
+            &f.identity().operator_fingerprint,
+            &f.identity().node_fingerprint,
+            &f.issuance,
+        )
+        .unwrap();
         assert_eq!((body.from_epoch, body.to_epoch), (1, 2));
-        assert_eq!(body.anchor_digest, hex_digest(&sha2::Sha256::digest(debit.encode(&f.policy).unwrap()).into()));
+        assert_eq!(
+            body.anchor_digest,
+            hex_digest(&sha2::Sha256::digest(debit.encode(&f.policy).unwrap()).into())
+        );
         assert_eq!(body.previous_reissuance_digest, None);
         let evidence = f.evidence();
         assert_eq!(evidence.len(), 1);
@@ -656,11 +810,22 @@ mod controls {
         // Only a debit in the new epoch lets the operator open another.
         f.debit_dead_incarnation();
         let second = f.run(None).unwrap();
-        assert_eq!((second.from_epoch, second.to_epoch, second.already_applied), (2, 3, false));
-        let body = verify_reissuance_document(&std::fs::read(f.document_path()).unwrap(),
-            &f.operator.verifying_key(), &f.identity().operator_fingerprint,
-            &f.identity().node_fingerprint, &f.issuance).unwrap();
-        assert_eq!(body.previous_reissuance_digest.as_deref(), Some(first.document_digest.as_str()));
+        assert_eq!(
+            (second.from_epoch, second.to_epoch, second.already_applied),
+            (2, 3, false)
+        );
+        let body = verify_reissuance_document(
+            &std::fs::read(f.document_path()).unwrap(),
+            &f.operator.verifying_key(),
+            &f.identity().operator_fingerprint,
+            &f.identity().node_fingerprint,
+            &f.issuance,
+        )
+        .unwrap();
+        assert_eq!(
+            body.previous_reissuance_digest.as_deref(),
+            Some(first.document_digest.as_str())
+        );
         assert_eq!(f.evidence().len(), 2);
     }
 
@@ -671,7 +836,10 @@ mod controls {
             f.debit_dead_incarnation();
             let (debit, debit_bytes) = f.current();
             let error = f.run(Some(step)).unwrap_err();
-            assert!(error.to_string().contains("injected"), "{step:?}: {error:#}");
+            assert!(
+                error.to_string().contains("injected"),
+                "{step:?}: {error:#}"
+            );
             let (interrupted, bytes) = f.current();
             match step {
                 Step::Document => {
@@ -700,7 +868,8 @@ mod controls {
             let evidence = f.evidence();
             assert_eq!(evidence.len(), 1, "{step:?}");
             assert_eq!(evidence[0].document_digest, report.document_digest);
-            let digest: [u8; 32] = sha2::Sha256::digest(std::fs::read(f.document_path()).unwrap()).into();
+            let digest: [u8; 32] =
+                sha2::Sha256::digest(std::fs::read(f.document_path()).unwrap()).into();
             assert_eq!(digest, current.authorization(), "{step:?}");
             // A further rerun changes nothing.
             let again = f.run(None).unwrap();
@@ -720,7 +889,9 @@ mod controls {
         assert!(f.run(Some(Step::Anchor)).is_err());
         let (published, _) = f.current();
         let target = encode(published.target()).unwrap();
-        let cuts = (0..=super::super::PROCESS_END).chain((super::super::PROCESS_END..RECORD_BYTES).step_by(251)).chain([RECORD_BYTES - 1, RECORD_BYTES]);
+        let cuts = (0..=super::super::PROCESS_END)
+            .chain((super::super::PROCESS_END..RECORD_BYTES).step_by(251))
+            .chain([RECORD_BYTES - 1, RECORD_BYTES]);
         for cut in cuts {
             let mut torn = before;
             torn[..cut].copy_from_slice(&target[..cut]);
@@ -752,7 +923,8 @@ mod controls {
         // Tampered: a body byte changed and re-encoded.
         let f = Fixture::new();
         f.run(None).unwrap();
-        let mut document: ReissuanceDocument = serde_json::from_slice(&std::fs::read(f.document_path()).unwrap()).unwrap();
+        let mut document: ReissuanceDocument =
+            serde_json::from_slice(&std::fs::read(f.document_path()).unwrap()).unwrap();
         document.body.reason.push('!');
         std::fs::write(f.document_path(), serde_json::to_vec(&document).unwrap()).unwrap();
         let error = f.run(None).unwrap_err();
@@ -775,7 +947,9 @@ mod controls {
             issuance_digest: hex_digest(&f.issuance),
             from_epoch: 1,
             to_epoch: 2,
-            anchor_digest: hex_digest(&sha2::Sha256::digest(current.encode(&f.policy).unwrap()).into()),
+            anchor_digest: hex_digest(
+                &sha2::Sha256::digest(current.encode(&f.policy).unwrap()).into(),
+            ),
             previous_reissuance_digest: None,
             reason: "foreign".to_owned(),
             issued_at: lillux::time::iso8601_now(),
@@ -784,20 +958,49 @@ mod controls {
         let signature = foreign.sign(canonical.as_bytes());
         let document = serde_json::to_vec(&ReissuanceDocument {
             body,
-            signature: format!("ed25519:{}", base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())),
-        }).unwrap();
+            signature: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+            ),
+        })
+        .unwrap();
         std::fs::write(f.document_path(), &document).unwrap();
         let digest: [u8; 32] = sha2::Sha256::digest(&document).into();
-        let target = CapacityRecord { epoch: 2, consumed: genesis_consumed(), outstanding: None, ..*current.target() };
-        let next = current.renew(Operation::OperatorReissue, target, digest, &f.policy).unwrap();
+        let target = CapacityRecord {
+            epoch: 2,
+            consumed: genesis_consumed(),
+            outstanding: None,
+            ..*current.target()
+        };
+        let next = current
+            .renew(Operation::OperatorReissue, target, digest, &f.policy)
+            .unwrap();
         let mut owner = f.owner();
-        owner.anchor.load(&f.policy, &f.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
-        owner.anchor.publish(next, &f.policy, &f.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
+        owner
+            .anchor
+            .load(&f.policy, &f.issuance, owner.budget.deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        owner
+            .anchor
+            .publish(
+                next,
+                &f.policy,
+                &f.issuance,
+                owner.budget.deadline,
+                &|steps| owner.budget.pay(steps),
+            )
+            .unwrap();
         drop(owner);
         let error = f.run(None).unwrap_err();
         assert!(!error.to_string().contains("stale"), "{error:#}");
         let (_, bytes) = f.current();
-        assert_eq!(decode(&bytes).unwrap().epoch, 1, "a foreign document repairs nothing");
+        assert_eq!(
+            decode(&bytes).unwrap().epoch,
+            1,
+            "a foreign document repairs nothing"
+        );
         assert!(f.evidence().is_empty());
     }
 
@@ -829,19 +1032,49 @@ mod controls {
         let f = Fixture::new();
         let (current, _) = f.current();
         let before = *current.target();
-        let (sequence, consumed) = before.prepare_debit(f.policy.allowance, f.policy.incarnation.units).unwrap();
+        let (sequence, consumed) = before
+            .prepare_debit(f.policy.allowance, f.policy.incarnation.units)
+            .unwrap();
         let live = lillux::process_control::capture_current_process_identity().unwrap();
         let outstanding = IncarnationDebit {
             process_digest: live.incarnation_digest_bytes().unwrap(),
             process: redo::StoredProcess::capture(&live).unwrap(),
             ..f.dead
         };
-        let target = CapacityRecord { sequence, consumed, outstanding: Some(outstanding), ..before };
-        let next = current.successor(Operation::Debit, target, &f.policy).unwrap();
+        let target = CapacityRecord {
+            sequence,
+            consumed,
+            outstanding: Some(outstanding),
+            ..before
+        };
+        let next = current
+            .successor(Operation::Debit, target, &f.policy)
+            .unwrap();
         let mut owner = f.owner();
-        owner.anchor.load(&f.policy, &f.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
-        owner.anchor.publish(next, &f.policy, &f.issuance, owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
-        owner.account.apply_redo(owner.anchor.current().unwrap(), owner.budget.deadline, &|steps| owner.budget.pay(steps)).unwrap();
+        owner
+            .anchor
+            .load(&f.policy, &f.issuance, owner.budget.deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        owner
+            .anchor
+            .publish(
+                next,
+                &f.policy,
+                &f.issuance,
+                owner.budget.deadline,
+                &|steps| owner.budget.pay(steps),
+            )
+            .unwrap();
+        owner
+            .account
+            .apply_redo(
+                owner.anchor.current().unwrap(),
+                owner.budget.deadline,
+                &|steps| owner.budget.pay(steps),
+            )
+            .unwrap();
         drop(owner);
         let error = f.run(None).unwrap_err();
         assert!(error.to_string().contains("remains live"), "{error:#}");
@@ -855,7 +1088,10 @@ mod controls {
         for expected in 2..=25 {
             f.debit_dead_incarnation();
             let report = f.run(None).unwrap();
-            assert_eq!((report.from_epoch, report.to_epoch, report.already_applied), (expected - 1, expected, false));
+            assert_eq!(
+                (report.from_epoch, report.to_epoch, report.already_applied),
+                (expected - 1, expected, false)
+            );
             let (current, bytes) = f.current();
             assert_eq!(current.epoch(), expected);
             assert_eq!(current.recovery_attempts(), 0);
@@ -872,14 +1108,27 @@ mod controls {
     fn an_unrecordable_actor_refuses_before_any_write() {
         // The refusal ControllerAccount::current() gives for root, supplied
         // directly: the test process is not root.
-        let refused = || Err::<lillux::process_control::ControllerAccount, _>(
-            "controller account must not be root".to_owned());
+        let refused = || {
+            Err::<lillux::process_control::ControllerAccount, _>(
+                "controller account must not be root".to_owned(),
+            )
+        };
         let f = Fixture::new();
         f.debit_dead_incarnation();
         let (debit, debit_bytes) = f.current();
         let mut owner = f.owner();
-        let error = owner.reissue(&f.identity(), refused(), "controls", "ryeos node capacity reissue").unwrap_err();
-        assert!(error.to_string().contains("refused before any write"), "{error:#}");
+        let error = owner
+            .reissue(
+                &f.identity(),
+                refused(),
+                "controls",
+                "ryeos node capacity reissue",
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("refused before any write"),
+            "{error:#}"
+        );
         assert!(error.to_string().contains("must not be root"), "{error:#}");
         assert!(!f.document_path().exists());
         assert_eq!(f.current(), (debit, debit_bytes));
@@ -890,8 +1139,18 @@ mod controls {
         assert!(f.run(Some(Step::Account)).is_err());
         let (opened, opened_bytes) = f.current();
         let mut owner = f.owner();
-        let error = owner.reissue(&f.identity(), refused(), "controls", "ryeos node capacity reissue").unwrap_err();
-        assert!(error.to_string().contains("refused before any write"), "{error:#}");
+        let error = owner
+            .reissue(
+                &f.identity(),
+                refused(),
+                "controls",
+                "ryeos node capacity reissue",
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("refused before any write"),
+            "{error:#}"
+        );
         assert_eq!(f.current(), (opened, opened_bytes));
         assert!(f.evidence().is_empty());
         assert!(f.run(None).unwrap().already_applied);
@@ -913,16 +1172,25 @@ mod controls {
         let error = f.run(None).unwrap_err();
         assert!(format!("{error:#}").contains("evidence log"), "{error:#}");
         assert_eq!(std::fs::read(&log).unwrap(), recorded);
-        assert_eq!(f.current(), (debit, debit_bytes), "a refused log opens no epoch");
+        assert_eq!(
+            f.current(),
+            (debit, debit_bytes),
+            "a refused log opens no epoch"
+        );
         assert_eq!(std::fs::read(f.document_path()).unwrap(), document);
         let entry = CapacityReissueEvidence {
             document_digest: hex_digest(&[1; 32]),
-            from_epoch: 9, to_epoch: 10, settled_incarnation: None,
+            from_epoch: 9,
+            to_epoch: 10,
+            settled_incarnation: None,
             recorded_at: "2026-10-14T00:00:00Z".to_owned(),
             actor: lillux::process_control::ControllerAccount::current().unwrap(),
             command: "x".to_owned(),
         };
-        assert!(format!("{:#}", append_evidence(&f.state, &entry).unwrap_err()).contains("evidence log"));
+        assert!(
+            format!("{:#}", append_evidence(&f.state, &entry).unwrap_err())
+                .contains("evidence log")
+        );
         assert_eq!(std::fs::read(&log).unwrap(), recorded);
     }
 
@@ -931,7 +1199,9 @@ mod controls {
         let f = Fixture::new();
         let entry = |n: u64| CapacityReissueEvidence {
             document_digest: hex_digest(&[n as u8; 32]),
-            from_epoch: n, to_epoch: n + 1, settled_incarnation: None,
+            from_epoch: n,
+            to_epoch: n + 1,
+            settled_incarnation: None,
             recorded_at: "2026-10-14T00:00:00Z".to_owned(),
             actor: lillux::process_control::ControllerAccount::current().unwrap(),
             command: "x".repeat(4000),
@@ -945,7 +1215,11 @@ mod controls {
         assert_eq!(recorded.len(), fits);
         assert_eq!(recorded[0].from_epoch, 3);
         assert_eq!(recorded.last().unwrap().from_epoch, fits as u64 + 2);
-        assert!(std::fs::metadata(f._temporary.path().join("state").join(REISSUE_EVIDENCE_LOG)).unwrap().len()
-            <= REISSUE_EVIDENCE_LOG_BOUND as u64);
+        assert!(
+            std::fs::metadata(f._temporary.path().join("state").join(REISSUE_EVIDENCE_LOG))
+                .unwrap()
+                .len()
+                <= REISSUE_EVIDENCE_LOG_BOUND as u64
+        );
     }
 }

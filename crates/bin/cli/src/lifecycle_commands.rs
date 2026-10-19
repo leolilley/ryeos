@@ -2635,7 +2635,7 @@ fn capability_section(
     ));
     section.rows.push(crate::tty::Row::key_value(
         "bundles",
-        &composition.bundles.join(", "),
+        composition.bundles.join(", "),
     ));
     section.rows.push(crate::tty::Row::key_value(
         "compiled features",
@@ -2702,7 +2702,7 @@ fn capability_section(
     };
     section.rows.push(crate::tty::Row::key_value(
         "report",
-        &format!("{} ({generation})", report.generated_at),
+        format!("{} ({generation})", report.generated_at),
     ));
     let basis_name = |proof: &lillux::process_control::ResidencyProof| {
         proof.capability_name().unwrap_or("an unknown basis")
@@ -2749,11 +2749,8 @@ fn capability_section(
             ),
         };
         section.rows.push(
-            crate::tty::Row::key_value(
-                "residency now",
-                &format!("{now} (checked from this shell)"),
-            )
-            .with_tone(tone),
+            crate::tty::Row::key_value("residency now", format!("{now} (checked from this shell)"))
+                .with_tone(tone),
         );
     }
     let host = &report.host;
@@ -2791,7 +2788,7 @@ fn capability_section(
     section.rows.push(
         crate::tty::Row::key_value(
             "requires",
-            &format!(
+            format!(
                 "{} — {}",
                 floor
                     .requires

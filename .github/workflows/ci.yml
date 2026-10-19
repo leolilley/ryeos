@@ -213,7 +213,7 @@ jobs:
       - name: Scan commits introduced from next
         run: |
           base="$(git merge-base HEAD origin/next)"
-          gitleaks git --redact --exit-code=2 --log-opts="$base..HEAD"
+          gitleaks git --redact --verbose --exit-code=2 --config .gitleaks.toml --log-opts="$base..HEAD"
 
   test:
     name: Workspace tests
@@ -253,6 +253,21 @@ jobs:
           rustc --version
           cargo --version
           cargo nextest --version
+
+      - name: Place scratch on the attached volume
+        # The durable-root probe refuses an app root on a virtual machine's
+        # root disk.
+        # On the current hosted image /mnt shares the root disk, so a
+        # loop-mounted ext4 volume stands in for an attached disk: the node
+        # judges durability by the mount being distinct from /.
+        run: |
+          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
+          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
+          sudo mkdir -p /mnt/ryeos-tmp
+          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          findmnt --target /mnt/ryeos-tmp
+          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
       - name: Run workspace gate
         # --refresh-bundles populates + dev-key-signs the bundle bin trees the
@@ -360,6 +375,21 @@ jobs:
           rustc --version
           cargo --version
           cargo nextest --version
+
+      - name: Place scratch on the attached volume
+        # The durable-root probe refuses an app root on a virtual machine's
+        # root disk.
+        # On the current hosted image /mnt shares the root disk, so a
+        # loop-mounted ext4 volume stands in for an attached disk: the node
+        # judges durability by the mount being distinct from /.
+        run: |
+          sudo fallocate -l 6G /var/tmp/ryeos-volume.img
+          sudo mkfs.ext4 -q -F /var/tmp/ryeos-volume.img
+          sudo mkdir -p /mnt/ryeos-tmp
+          sudo mount -o loop /var/tmp/ryeos-volume.img /mnt/ryeos-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/ryeos-tmp
+          findmnt --target /mnt/ryeos-tmp
+          echo "TMPDIR=/mnt/ryeos-tmp" >> "$GITHUB_ENV"
 
       - name: Run crash recovery qualification
         env:

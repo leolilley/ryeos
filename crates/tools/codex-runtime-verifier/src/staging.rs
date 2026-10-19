@@ -1029,7 +1029,7 @@ pub fn stage_direct_target_probe(
     let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
     let command_environment = materialize_command_environment(
         &roots.configurations,
-        &controller_executable,
+        controller_executable,
         &guest_cwd,
         &scenario.command_environment_template_sha256,
     )?;
@@ -1427,14 +1427,14 @@ mod tests {
             0o755,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap();
+        .unwrap();
         bin.atomic_create_pinned_regular(
             OsStr::new("rg"),
             b"signed-search",
             0o755,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap();
+        .unwrap();
         let target = root.create_child(OsStr::new("target"), 0o700).unwrap();
         let expected = ryeos_state::external_content_manifest_digest(
             &ryeos_state::observe_external_content_tree_exact(&source).unwrap(),

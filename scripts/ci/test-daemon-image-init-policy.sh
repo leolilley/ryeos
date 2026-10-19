@@ -512,6 +512,18 @@ fi
     [[ "$(stat -c '%u:%g' "$nested_root/inner" "$nested_root/inner/file")" == "$before" ]]
     rm -rf "$nested_root"
 
+    # The app root is handed over as an owner-private directory: exactly
+    # 0700, with an inherited set-group-id bit cleared, owned by the caller.
+    handed_root="$policy_test_root/handed-root"
+    mkdir -p "$handed_root"
+    chmod 2775 "$handed_root"
+    # The node account is the invoking user here, since no other owner can be
+    # assigned unprivileged.
+    NODE_UID="$(id -u)" NODE_GID="$(id -g)" hand_app_root_to_node_account "$handed_root"
+    [[ "$(stat -c '%a' "$handed_root")" == 700 ]]
+    [[ "$(stat -c '%u' "$handed_root")" == "$(id -u)" ]]
+    rm -rf "$handed_root"
+
     # Execution-history schema cuts carry their exact predecessor/current
     # epochs. Repeated boots are handled by the CLI's idempotent cut contract.
     build_execution_history_schema_cut_args "$policy_test_root"
@@ -564,7 +576,7 @@ fi
     hold_status=0
     RYEOS_OPERATOR_HOLD=yes operator_hold_requested 2>/dev/null || hold_status=$?
     [[ "$hold_status" -eq 2 ]]
-    ! RYEOS_OPERATOR_HOLD= operator_hold_requested
+    ! RYEOS_OPERATOR_HOLD='' operator_hold_requested
     RYEOS_OPERATOR_HOLD=1
     operator_hold_requested
     OPERATOR_HOLD_POLL_SECONDS=1

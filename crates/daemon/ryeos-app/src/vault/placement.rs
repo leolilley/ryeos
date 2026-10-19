@@ -214,13 +214,13 @@ mod tests {
                 },
                 &[name.to_owned()],
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(
-                ryeos_state::objects::EnvironmentAuthority::Vault {
-                    namespace: "operator".to_string(),
-                    name_authority:
-                        ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
-                },
-            )
-            .unwrap(),
+                    ryeos_state::objects::EnvironmentAuthority::Vault {
+                        namespace: "operator".to_string(),
+                        name_authority:
+                            ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                    },
+                )
+                .unwrap(),
             )
             .is_err()
         );

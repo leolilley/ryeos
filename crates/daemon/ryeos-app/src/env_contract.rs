@@ -703,7 +703,12 @@ mod tests {
             )
             .unwrap_err();
         assert!(format!("{err:#}").contains("SHARED_NAME"));
-        for reserved in ["RYEOS_TOKEN", "RYEOSD_SOCKET_PATH", "LD_PRELOAD", "HTTPS_PROXY"] {
+        for reserved in [
+            "RYEOS_TOKEN",
+            "RYEOSD_SOCKET_PATH",
+            "LD_PRELOAD",
+            "HTTPS_PROXY",
+        ] {
             assert!(
                 EnvContractBuilder::new()
                     .with_declared_secret_names([reserved])
@@ -717,7 +722,10 @@ mod tests {
     fn secret_binding_debug_elides_value() {
         let binding = EnvBinding::new("API_KEY", "sk-value", EnvSourceDetail::DeclaredSecret);
         let rendered = format!("{binding:?}");
-        assert!(rendered.contains("API_KEY") && !rendered.contains("sk-value"), "{rendered}");
+        assert!(
+            rendered.contains("API_KEY") && !rendered.contains("sk-value"),
+            "{rendered}"
+        );
         let plain = EnvBinding::new("PATH", "/bin", EnvSourceDetail::BaseAllowlist);
         assert!(format!("{plain:?}").contains("/bin"));
     }

@@ -188,7 +188,7 @@ impl QualificationWorkerLaunchContract {
             .and_then(Value::as_bool)
             .context("Q WorkerExecution has no recovery policy")?;
         validate_profile_routes(
-            &profile,
+            profile,
             &route_set,
             &allowed_effect_classes,
             [&session_start_route, &turn_start_route],

@@ -126,7 +126,8 @@ impl PendingNamespaceWatchdog {
         // Map the already-owned deadline conservatively; neither readiness
         // nor fork preparation grants a fresh service interval.
         let before_clock = Instant::now();
-        let fork_deadline = before_clock.checked_add(original_deadline.remaining())
+        let fork_deadline = before_clock
+            .checked_add(original_deadline.remaining())
             .ok_or("original namespace fork deadline overflow")?;
         let fork_guard = quiesce_fork_sensitive_descriptors(fork_deadline)?;
         // The parent write end stays open until the fork has happened or
@@ -190,9 +191,9 @@ impl PendingNamespaceWatchdog {
                     format!("{error}; namespace watchdog disposal unproved: {cleanup}")
                 }
                 (Ok(()), Err(fact)) => format!("{error}; {fact}"),
-                (Err(cleanup), Err(fact)) => format!(
-                    "{error}; namespace watchdog disposal unproved: {cleanup}; {fact}"
-                ),
+                (Err(cleanup), Err(fact)) => {
+                    format!("{error}; namespace watchdog disposal unproved: {cleanup}; {fact}")
+                }
             });
         }
         // READY follows the child dup2/close_range/stdio disposal boundary.

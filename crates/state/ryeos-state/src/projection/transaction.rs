@@ -41,12 +41,11 @@ impl ProjectionDb {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectionDb;
-
     #[test]
     fn commit_failure_rolls_back_and_leaves_connection_usable() {
         let db = crate::test_support::TestProjection::open();
-        db.with_sql(|connection| Ok(connection.execute_batch(
+        db.with_sql(|connection| {
+            Ok(connection.execute_batch(
                 "PRAGMA foreign_keys = ON;
                  CREATE TABLE tx_parent (id INTEGER PRIMARY KEY);
                  CREATE TABLE tx_child (
@@ -54,19 +53,28 @@ mod tests {
                      FOREIGN KEY (parent_id) REFERENCES tx_parent(id)
                          DEFERRABLE INITIALLY DEFERRED
                  );",
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
 
         let error = db
             .immediate_transaction("commit failure", || {
-                db.with_sql(|connection| Ok(connection.execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?))?;
+                db.with_sql(|connection| {
+                    Ok(connection.execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?)
+                })?;
                 Ok(())
             })
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("failed to commit commit failure transaction"));
-        assert!(db.with_sql(|connection| Ok(connection.is_autocommit())).unwrap());
-        let rows: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?))
+        assert!(
+            db.with_sql(|connection| Ok(connection.is_autocommit()))
+                .unwrap()
+        );
+        let rows: i64 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(rows, 0, "failed commit must not leave projected rows live");
     }

@@ -1320,7 +1320,7 @@ pub fn prepare_linux_sandbox_from_sealed_source(
 }
 
 fn prepare_linux_sandbox_inner(
-    mut request: LinuxSandboxRequest,
+    request: LinuxSandboxRequest,
     stdio: Option<&[std::fs::File; 3]>,
     private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
 ) -> Result<HeldLinuxSandboxProcess, String> {
@@ -2333,8 +2333,12 @@ mod imp {
                 .checked_add(std::time::Duration::from_secs(5))
                 .ok_or("sandbox inspection fork wait bound overflow")?;
             let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(deadline)?;
-            let preserved = [inherited_directory.file().as_raw_fd(), inherited_bytes.file().as_raw_fd()]
-                .into_iter().collect();
+            let preserved = [
+                inherited_directory.file().as_raw_fd(),
+                inherited_bytes.file().as_raw_fd(),
+            ]
+            .into_iter()
+            .collect();
             let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
             let child_barrier = fork_guard.prepare_child_descriptor_barrier(&preserved)?;
             // The parent write end stays open until the fork has happened or
@@ -2362,7 +2366,9 @@ mod imp {
                 ));
             }
             if pid == 0 {
-                for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
+                for fd in &child_close_fds {
+                    unsafe { libc::close(*fd) };
+                }
                 unsafe { child_barrier.install_in_actual_fork_child() };
                 close_fd(report[0]);
                 let result = (|| {
@@ -4815,25 +4821,41 @@ mod imp {
         // descriptors. Preserve only actual admitted/setup inputs; borrowed
         // native lease descriptors may never become target capabilities.
         let before_clock = std::time::Instant::now();
-        let remaining = occupancy.as_ref().map(|watchdog| watchdog.original_deadline().remaining())
+        let remaining = occupancy
+            .as_ref()
+            .map(|watchdog| watchdog.original_deadline().remaining())
             .unwrap_or(std::time::Duration::from_secs(5));
-        let fork_deadline = before_clock.checked_add(remaining)
+        let fork_deadline = before_clock
+            .checked_add(remaining)
             .ok_or("sandbox target fork deadline overflow")?;
         let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(fork_deadline)?;
-        let mut preserved = request.target_channels.iter().map(|(source, _)| raw_fd(*source))
+        let mut preserved = request
+            .target_channels
+            .iter()
+            .map(|(source, _)| raw_fd(*source))
             .chain(request.mounts.iter().map(|mount| raw_fd(mount.source_fd)))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        if let Some(stdio) = stdio { preserved.extend(stdio.iter().map(std::os::fd::AsRawFd::as_raw_fd)); }
-        if let LinuxSandboxLifecycle::AwaitRelease { release_fd, release_keepalive_fd } = request.lifecycle {
+        if let Some(stdio) = stdio {
+            preserved.extend(stdio.iter().map(std::os::fd::AsRawFd::as_raw_fd));
+        }
+        if let LinuxSandboxLifecycle::AwaitRelease {
+            release_fd,
+            release_keepalive_fd,
+        } = request.lifecycle
+        {
             preserved.insert(raw_fd(release_fd)?);
             preserved.insert(raw_fd(release_keepalive_fd)?);
         }
         // This registered writer is disposed by the explicit first-child hook,
         // whose consumed close is checked; avoid closing it twice.
-        if let Some(fd) = terminal_scrub_descriptor { preserved.insert(fd); }
+        if let Some(fd) = terminal_scrub_descriptor {
+            preserved.insert(fd);
+        }
         let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
         let mut child_preserved = preserved.clone();
-        if let Some(fd) = terminal_scrub_descriptor { child_preserved.remove(&fd); }
+        if let Some(fd) = terminal_scrub_descriptor {
+            child_preserved.remove(&fd);
+        }
         let child_barrier = fork_guard.prepare_child_descriptor_barrier(&child_preserved)?;
         // The parent write end stays open until the fork has happened or
         // failed. Every later end except observed readiness settles through
@@ -4945,7 +4967,9 @@ mod imp {
             if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
                 unsafe { libc::_exit(125) };
             }
-            for fd in &child_close_fds { unsafe { libc::close(*fd) }; }
+            for fd in &child_close_fds {
+                unsafe { libc::close(*fd) };
+            }
             if let Some(descriptor) = terminal_scrub_descriptor {
                 // Immediately after the existing first PDEATHSIG syscall:
                 // the target must not retain the adapter's publication end.
@@ -7379,7 +7403,11 @@ mod imp {
                 ("", DescriptorKind::Directory),
             ] {
                 prepare_descriptor_mount_target(
-                    &if relative.is_empty() { destination.clone() } else { destination.join(relative) },
+                    &if relative.is_empty() {
+                        destination.clone()
+                    } else {
+                        destination.join(relative)
+                    },
                     kind,
                     Some(&destination),
                     &[],

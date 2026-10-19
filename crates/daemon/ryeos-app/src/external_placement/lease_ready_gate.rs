@@ -104,11 +104,14 @@ fn drive(
         ExternalLeaseRecordState::Admitted => return Ok(LeaseReadyGate::Proceed),
         ExternalLeaseRecordState::Refused => bail!(
             "external channel refused: the lease was refused: {}",
-            record.refusal_reason.as_deref().unwrap_or("no reason recorded")
+            record
+                .refusal_reason
+                .as_deref()
+                .unwrap_or("no reason recorded")
         ),
-        ExternalLeaseRecordState::Reserved => bail!(
-            "external channel refused: the lease is not activated, so it accepts no frame"
-        ),
+        ExternalLeaseRecordState::Reserved => {
+            bail!("external channel refused: the lease is not activated, so it accepts no frame")
+        }
         ExternalLeaseRecordState::Activated => {}
     }
     let refuse = |reason: String| -> Result<LeaseReadyGate> {
@@ -123,7 +126,11 @@ fn drive(
     };
     match (sequence, kind) {
         (1, FrameKind::Ready) => {
-            if record.held_ready_frame.as_deref().is_some_and(|held| held != wire) {
+            if record
+                .held_ready_frame
+                .as_deref()
+                .is_some_and(|held| held != wire)
+            {
                 return refuse("the guest sent a second, different Ready".into());
             }
             no_verdict(ports.hold_ready(wire))?;
@@ -133,7 +140,11 @@ fn drive(
             if record.held_ready_frame.is_none() {
                 return refuse("the guest sent its capability report before Ready".into());
             }
-            if record.held_report_frame.as_deref().is_some_and(|held| held != wire) {
+            if record
+                .held_report_frame
+                .as_deref()
+                .is_some_and(|held| held != wire)
+            {
                 return refuse("the guest sent a second, different capability report".into());
             }
             no_verdict(ports.hold_report(wire))?;
@@ -152,7 +163,11 @@ fn drive(
         }
         (1 | 2, _) => refuse(format!(
             "the guest's frame {sequence} is not the {} the lease waits for",
-            if sequence == 1 { "Ready" } else { "capability report" }
+            if sequence == 1 {
+                "Ready"
+            } else {
+                "capability report"
+            }
         )),
         _ => refuse(format!(
             "the guest sent frame {sequence} before its lease was admitted"
@@ -176,9 +191,10 @@ impl GatePorts for StatePorts<'_> {
     }
 
     fn hold_report(&self, wire: &[u8]) -> Result<()> {
-        self.state
-            .state_store
-            .hold_external_lease_report_frame(&self.allocation.reservation.placement_thread_id, wire)
+        self.state.state_store.hold_external_lease_report_frame(
+            &self.allocation.reservation.placement_thread_id,
+            wire,
+        )
     }
 
     fn record(&self) -> Result<ExternalLeaseRecord> {
@@ -261,7 +277,11 @@ pub(super) fn refuse_lease(state: &AppState, placement: &str, reason: &str) -> R
 /// Refuse a lease like `refuse_lease`, but only if it is still activated when
 /// the refusal commits. A lease admitted since the caller listed it is left
 /// alone and no cleanup starts.
-pub(super) fn refuse_activated_lease(state: &AppState, placement: &str, reason: &str) -> Result<()> {
+pub(super) fn refuse_activated_lease(
+    state: &AppState,
+    placement: &str,
+    reason: &str,
+) -> Result<()> {
     if state
         .state_store
         .refuse_activated_external_lease_and_cancel(placement, &bounded_refusal(reason))?
@@ -514,11 +534,18 @@ mod tests {
             .frame(2, FrameKind::CapabilityReport, b"report")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("the guest reports a route that is open"), "{error}");
+        assert!(
+            error.contains("the guest reports a route that is open"),
+            "{error}"
+        );
         assert_eq!(ports.refused.borrow().len(), 1);
         assert!(ports.admitted.borrow().is_empty());
         // A refused lease stays refused for every later frame.
-        assert!(ports.frame(2, FrameKind::CapabilityReport, b"report").is_err());
+        assert!(
+            ports
+                .frame(2, FrameKind::CapabilityReport, b"report")
+                .is_err()
+        );
         assert_eq!(*ports.judged.borrow(), 1);
     }
 
@@ -572,12 +599,19 @@ mod tests {
 
         let ports = FakePorts::new();
         ports.frame(1, FrameKind::Ready, b"ready").unwrap();
-        assert!(ports.frame(2, FrameKind::CapabilityReport, b"report").is_err());
+        assert!(
+            ports
+                .frame(2, FrameKind::CapabilityReport, b"report")
+                .is_err()
+        );
         let different = ports
             .frame(2, FrameKind::CapabilityReport, b"another report")
             .unwrap_err()
             .to_string();
-        assert!(different.contains("second, different capability report"), "{different}");
+        assert!(
+            different.contains("second, different capability report"),
+            "{different}"
+        );
         assert_eq!(ports.refused.borrow().len(), 1);
         assert_eq!(*ports.judged.borrow(), 1);
     }
@@ -623,18 +657,27 @@ mod tests {
         let unavailable = ports
             .frame(2, FrameKind::CapabilityReport, b"report")
             .unwrap_err();
-        assert!(ExternalChannelExchangeUnavailable::marks(&unavailable), "{unavailable:#}");
+        assert!(
+            ExternalChannelExchangeUnavailable::marks(&unavailable),
+            "{unavailable:#}"
+        );
 
         ports.script_terminate();
         let refused = ports
             .frame(2, FrameKind::CapabilityReport, b"report")
             .unwrap_err();
-        assert!(!ExternalChannelExchangeUnavailable::marks(&refused), "{refused:#}");
+        assert!(
+            !ExternalChannelExchangeUnavailable::marks(&refused),
+            "{refused:#}"
+        );
         // A lease that is already refused, or out of order, is a refusal too.
         let again = ports
             .frame(2, FrameKind::CapabilityReport, b"report")
             .unwrap_err();
-        assert!(!ExternalChannelExchangeUnavailable::marks(&again), "{again:#}");
+        assert!(
+            !ExternalChannelExchangeUnavailable::marks(&again),
+            "{again:#}"
+        );
     }
 
     #[test]

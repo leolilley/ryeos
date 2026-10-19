@@ -20,6 +20,7 @@ use super::*;
 /// The largest frame a record holds, in bytes.
 pub(crate) const MAX_HELD_LEASE_FRAME_BYTES: usize = 64 * 1024;
 /// The longest refusal reason a record stores, in bytes.
+#[cfg(test)]
 const MAX_REFUSAL_REASON_BYTES: usize = 1024;
 /// The longest lease identifier a record stores, in bytes.
 const MAX_LEASE_ID_BYTES: usize = 256;
@@ -246,7 +247,11 @@ fn read(conn: &Connection, placement: &str) -> Result<Option<ExternalLeaseRecord
     rows.next()?.map(record_from_row).transpose()
 }
 
-fn read_many(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<ExternalLeaseRecord>> {
+fn read_many(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<ExternalLeaseRecord>> {
     let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query(params)?;
     let mut records = Vec::new();
@@ -328,13 +333,16 @@ impl ExternalLeaseActivation {
         validate_sha256("lease activation request", &self.activation_request_digest)?;
         validate_sha256("lease signed import", &self.signed_import_sha256)?;
         validate_sha256("lease guest package", &self.guest_package_sha256)?;
-        ensure!(self.ready_deadline_ms > 0, "lease ready deadline must be positive");
+        ensure!(
+            self.ready_deadline_ms > 0,
+            "lease ready deadline must be positive"
+        );
         Ok(())
     }
 }
 
 impl ExternalLeaseAdmission {
-    fn validate(&self) -> Result<()> {
+    pub(in crate::runtime_db) fn validate(&self) -> Result<()> {
         validate_sha256("lease ready frame", &self.ready_frame_digest)?;
         validate_sha256("lease report frame", &self.report_frame_digest)?;
         ensure!(
@@ -348,7 +356,10 @@ impl ExternalLeaseAdmission {
 
 impl RuntimeDb {
     /// The lease record of `placement`, if it has one.
-    pub(crate) fn external_lease_record(&self, placement: &str) -> Result<Option<ExternalLeaseRecord>> {
+    pub(crate) fn external_lease_record(
+        &self,
+        placement: &str,
+    ) -> Result<Option<ExternalLeaseRecord>> {
         self.conn.with_sql(|conn| read(conn, placement))
     }
 
@@ -440,6 +451,7 @@ impl RuntimeDb {
     }
 
     /// Activated to admitted: the adapter accepted the held frames.
+    #[cfg(test)]
     pub(crate) fn admit_external_lease_record(
         &self,
         placement: &str,
@@ -469,6 +481,7 @@ impl RuntimeDb {
 
     /// Any state to refused, terminally. Refusing a refused record keeps its
     /// first reason and succeeds.
+    #[cfg(test)]
     pub(crate) fn refuse_external_lease_record(
         &self,
         placement: &str,
@@ -554,7 +567,10 @@ mod tests {
     use super::super::tests::{reservation, reserve as reserve_session};
     use super::*;
 
-    fn open() -> (tempfile::TempDir, crate::runtime_db::test_native::TestRuntime) {
+    fn open() -> (
+        tempfile::TempDir,
+        crate::runtime_db::test_native::TestRuntime,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let db =
             crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
@@ -685,10 +701,11 @@ mod tests {
         db.cancel_external_allocation(&placement).unwrap();
         let plain = reservation(&db, "plain");
         reserve_session(&db, &plain).unwrap();
-        assert!(db
-            .external_lease_record(&plain.placement_thread_id)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.external_lease_record(&plain.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             sql(&db, "DELETE FROM external_execution_lease WHERE 0").unwrap(),
             0
@@ -700,21 +717,27 @@ mod tests {
         let (_dir, db) = open();
         let (placement, _) = leased(&db, "walk");
         let bound = activation('a');
-        db.activate_external_lease_record(&placement, &bound, 10).unwrap();
-        db.hold_external_lease_ready_frame(&placement, b"ready", 11).unwrap();
+        db.activate_external_lease_record(&placement, &bound, 10)
+            .unwrap();
+        db.hold_external_lease_ready_frame(&placement, b"ready", 11)
+            .unwrap();
         // Holding the same frame again passes; a different one does not.
-        db.hold_external_lease_ready_frame(&placement, b"ready", 12).unwrap();
-        assert!(db
-            .hold_external_lease_ready_frame(&placement, b"other", 12)
-            .is_err());
-        db.hold_external_lease_report_frame(&placement, b"report", 13).unwrap();
+        db.hold_external_lease_ready_frame(&placement, b"ready", 12)
+            .unwrap();
+        assert!(
+            db.hold_external_lease_ready_frame(&placement, b"other", 12)
+                .is_err()
+        );
+        db.hold_external_lease_report_frame(&placement, b"report", 13)
+            .unwrap();
         let record = db.external_lease_record(&placement).unwrap().unwrap();
         assert_eq!(record.state, ExternalLeaseRecordState::Activated);
         assert_eq!(record.activation, Some(bound.clone()));
         assert_eq!(record.held_ready_frame.as_deref(), Some(&b"ready"[..]));
         assert_eq!(record.held_report_frame.as_deref(), Some(&b"report"[..]));
 
-        db.admit_external_lease_record(&placement, &admission(), 14).unwrap();
+        db.admit_external_lease_record(&placement, &admission(), 14)
+            .unwrap();
         let record = db.external_lease_record(&placement).unwrap().unwrap();
         assert_eq!(record.state, ExternalLeaseRecordState::Admitted);
         assert_eq!(record.admission, Some(admission()));
@@ -727,12 +750,19 @@ mod tests {
     fn a_report_frame_needs_the_ready_frame_and_frames_are_bounded() {
         let (_dir, db) = open();
         let placement = activated(&db, "frames");
-        assert!(db
-            .hold_external_lease_report_frame(&placement, b"report", 11)
-            .is_err());
-        assert!(db.hold_external_lease_ready_frame(&placement, b"", 11).is_err());
+        assert!(
+            db.hold_external_lease_report_frame(&placement, b"report", 11)
+                .is_err()
+        );
+        assert!(
+            db.hold_external_lease_ready_frame(&placement, b"", 11)
+                .is_err()
+        );
         let big = vec![0u8; MAX_HELD_LEASE_FRAME_BYTES + 1];
-        assert!(db.hold_external_lease_ready_frame(&placement, &big, 11).is_err());
+        assert!(
+            db.hold_external_lease_ready_frame(&placement, &big, 11)
+                .is_err()
+        );
         db.hold_external_lease_ready_frame(&placement, &big[..MAX_HELD_LEASE_FRAME_BYTES], 11)
             .unwrap();
     }
@@ -742,87 +772,147 @@ mod tests {
         let (_dir, db) = open();
         let (placement, _) = leased(&db, "path");
         // Reserved cannot be admitted, hold frames, or be admitted by raw SQL.
-        assert!(db.admit_external_lease_record(&placement, &admission(), 10).is_err());
-        assert!(db.hold_external_lease_ready_frame(&placement, b"r", 10).is_err());
-        assert!(sql(
-            &db,
-            "UPDATE external_execution_lease SET state='admitted',lease_id='x',
+        assert!(
+            db.admit_external_lease_record(&placement, &admission(), 10)
+                .is_err()
+        );
+        assert!(
+            db.hold_external_lease_ready_frame(&placement, b"r", 10)
+                .is_err()
+        );
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET state='admitted',lease_id='x',
                 activation_request_digest=printf('%064d',1),signed_import_sha256=printf('%064d',1),
                 guest_package_sha256=printf('%064d',1),ready_deadline_ms=1,
                 ready_frame_digest=printf('%064d',1),report_frame_digest=printf('%064d',1),
                 resume_state_json='{}'"
-        )
-        .is_err());
+            )
+            .is_err()
+        );
         // Reserved to reserved is no transition.
-        assert!(sql(&db, "UPDATE external_execution_lease SET updated_at_ms=updated_at_ms+1").is_err());
-        assert_eq!(state_of(&db, &placement), ExternalLeaseRecordState::Reserved);
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET updated_at_ms=updated_at_ms+1"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            state_of(&db, &placement),
+            ExternalLeaseRecordState::Reserved
+        );
 
-        db.activate_external_lease_record(&placement, &activation('a'), 10).unwrap();
+        db.activate_external_lease_record(&placement, &activation('a'), 10)
+            .unwrap();
         // Activated cannot be activated again, even with the same inputs.
-        assert!(db
-            .activate_external_lease_record(&placement, &activation('a'), 11)
-            .is_err());
+        assert!(
+            db.activate_external_lease_record(&placement, &activation('a'), 11)
+                .is_err()
+        );
         // Activated cannot go back to reserved.
         assert!(sql(&db, "UPDATE external_execution_lease SET state='reserved'").is_err());
 
-        db.admit_external_lease_record(&placement, &admission(), 12).unwrap();
+        db.admit_external_lease_record(&placement, &admission(), 12)
+            .unwrap();
         // Admitted is not admitted twice, activated again, or held to.
-        assert!(db.admit_external_lease_record(&placement, &admission(), 13).is_err());
-        assert!(db.hold_external_lease_report_frame(&placement, b"r", 13).is_err());
+        assert!(
+            db.admit_external_lease_record(&placement, &admission(), 13)
+                .is_err()
+        );
+        assert!(
+            db.hold_external_lease_report_frame(&placement, b"r", 13)
+                .is_err()
+        );
         assert!(sql(&db, "UPDATE external_execution_lease SET state='activated'").is_err());
         assert!(sql(&db, "UPDATE external_execution_lease SET state='reserved'").is_err());
-        assert!(sql(&db, "UPDATE external_execution_lease SET updated_at_ms=updated_at_ms+1").is_err());
-        assert_eq!(state_of(&db, &placement), ExternalLeaseRecordState::Admitted);
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET updated_at_ms=updated_at_ms+1"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            state_of(&db, &placement),
+            ExternalLeaseRecordState::Admitted
+        );
     }
 
     #[test]
     fn a_refusal_comes_from_any_state_and_is_terminal() {
         let (_dir, db) = open();
         let (reserved, _) = leased(&db, "r");
-        db.refuse_external_lease_record(&reserved, "never activated", 20).unwrap();
+        db.refuse_external_lease_record(&reserved, "never activated", 20)
+            .unwrap();
         let record = db.external_lease_record(&reserved).unwrap().unwrap();
         assert_eq!(record.state, ExternalLeaseRecordState::Refused);
         assert_eq!(record.refusal_reason.as_deref(), Some("never activated"));
         assert!(record.activation.is_none());
 
         let active = activated(&db, "s");
-        db.hold_external_lease_ready_frame(&active, b"ready", 11).unwrap();
-        db.refuse_external_lease_record(&active, "bad report", 21).unwrap();
+        db.hold_external_lease_ready_frame(&active, b"ready", 11)
+            .unwrap();
+        db.refuse_external_lease_record(&active, "bad report", 21)
+            .unwrap();
         let record = db.external_lease_record(&active).unwrap().unwrap();
         assert_eq!(record.state, ExternalLeaseRecordState::Refused);
         assert_eq!(record.activation, Some(activation('a')));
         assert_eq!(record.held_ready_frame.as_deref(), Some(&b"ready"[..]));
 
         let (admitted, _) = leased(&db, "t");
-        db.activate_external_lease_record(&admitted, &activation('a'), 10).unwrap();
-        db.admit_external_lease_record(&admitted, &admission(), 12).unwrap();
-        db.refuse_external_lease_record(&admitted, "controller restarted", 22).unwrap();
+        db.activate_external_lease_record(&admitted, &activation('a'), 10)
+            .unwrap();
+        db.admit_external_lease_record(&admitted, &admission(), 12)
+            .unwrap();
+        db.refuse_external_lease_record(&admitted, "controller restarted", 22)
+            .unwrap();
         let record = db.external_lease_record(&admitted).unwrap().unwrap();
         assert_eq!(record.admission, Some(admission()));
 
         // Terminal: nothing moves a refused record, and a second refusal
         // keeps the first reason.
         for placement in [&reserved, &active, &admitted] {
-            db.refuse_external_lease_record(placement, "again", 30).unwrap();
+            db.refuse_external_lease_record(placement, "again", 30)
+                .unwrap();
             assert_eq!(
-                db.external_lease_record(placement).unwrap().unwrap().refusal_reason.as_deref(),
+                db.external_lease_record(placement)
+                    .unwrap()
+                    .unwrap()
+                    .refusal_reason
+                    .as_deref(),
                 Some(match placement.as_str() {
                     p if p == reserved => "never activated",
                     p if p == active => "bad report",
                     _ => "controller restarted",
                 })
             );
-            assert!(db.activate_external_lease_record(placement, &activation('a'), 30).is_err());
-            assert!(db.admit_external_lease_record(placement, &admission(), 30).is_err());
+            assert!(
+                db.activate_external_lease_record(placement, &activation('a'), 30)
+                    .is_err()
+            );
+            assert!(
+                db.admit_external_lease_record(placement, &admission(), 30)
+                    .is_err()
+            );
         }
         for target in ["reserved", "activated", "admitted"] {
-            assert!(sql(
-                &db,
-                &format!("UPDATE external_execution_lease SET state='{target}'")
-            )
-            .is_err());
+            assert!(
+                sql(
+                    &db,
+                    &format!("UPDATE external_execution_lease SET state='{target}'")
+                )
+                .is_err()
+            );
         }
-        assert!(sql(&db, "UPDATE external_execution_lease SET refusal_reason='changed'").is_err());
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET refusal_reason='changed'"
+            )
+            .is_err()
+        );
         assert!(db.refuse_external_lease_record(&reserved, "", 30).is_err());
     }
 
@@ -830,7 +920,8 @@ mod tests {
     fn identity_and_written_values_are_immutable() {
         let (_dir, db) = open();
         let placement = activated(&db, "imm");
-        db.hold_external_lease_ready_frame(&placement, b"ready", 11).unwrap();
+        db.hold_external_lease_ready_frame(&placement, b"ready", 11)
+            .unwrap();
         for change in [
             "placement_thread_id='T-other'",
             "admission_request_sha256=printf('%064d',9)",
@@ -845,18 +936,27 @@ mod tests {
             "held_ready_frame=NULL",
         ] {
             assert!(
-                sql(&db, &format!("UPDATE external_execution_lease SET {change}")).is_err(),
+                sql(
+                    &db,
+                    &format!("UPDATE external_execution_lease SET {change}")
+                )
+                .is_err(),
                 "{change}"
             );
         }
-        db.admit_external_lease_record(&placement, &admission(), 12).unwrap();
+        db.admit_external_lease_record(&placement, &admission(), 12)
+            .unwrap();
         for change in [
             "lease_id='lease-z'",
             "ready_deadline_ms=1",
             "ready_frame_digest=printf('%064d',9)",
         ] {
             assert!(
-                sql(&db, &format!("UPDATE external_execution_lease SET {change}")).is_err(),
+                sql(
+                    &db,
+                    &format!("UPDATE external_execution_lease SET {change}")
+                )
+                .is_err(),
                 "{change}"
             );
         }
@@ -873,7 +973,8 @@ mod tests {
         let (_dir, db) = open();
         let (placement, _) = leased(&db, "del");
         assert!(sql(&db, "DELETE FROM external_execution_lease").is_err());
-        db.refuse_external_lease_record(&placement, "done", 20).unwrap();
+        db.refuse_external_lease_record(&placement, "done", 20)
+            .unwrap();
         assert!(sql(&db, "DELETE FROM external_execution_lease").is_err());
         sql(
             &db,
@@ -904,7 +1005,8 @@ mod tests {
         // An allocation that has left the reserved phase.
         let plain = reservation(&db, "plain");
         reserve_session(&db, &plain).unwrap();
-        db.cancel_external_allocation(&plain.placement_thread_id).unwrap();
+        db.cancel_external_allocation(&plain.placement_thread_id)
+            .unwrap();
         assert!(insert(&plain.placement_thread_id, "reserved").is_err());
 
         // A fresh allocation takes a reserved record only.
@@ -914,10 +1016,11 @@ mod tests {
         assert!(insert(&fresh.placement_thread_id, "activated").is_err());
         insert(&fresh.placement_thread_id, "reserved").unwrap();
         assert!(insert(&fresh.placement_thread_id, "reserved").is_err());
-        assert!(db
-            .external_lease_record(&fresh.placement_thread_id)
-            .unwrap()
-            .is_some());
+        assert!(
+            db.external_lease_record(&fresh.placement_thread_id)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -926,28 +1029,60 @@ mod tests {
         let (placement, _) = leased(&db, "cols");
         // A reserved row carries nothing, and an activated one needs all of
         // its identity.
-        assert!(sql(&db, "UPDATE external_execution_lease SET state='activated',lease_id='x'").is_err());
-        assert!(sql(&db, "UPDATE external_execution_lease SET refusal_reason='x'").is_err());
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET state='activated',lease_id='x'"
+            )
+            .is_err()
+        );
+        assert!(
+            sql(
+                &db,
+                "UPDATE external_execution_lease SET refusal_reason='x'"
+            )
+            .is_err()
+        );
         assert!(sql(&db, "UPDATE external_execution_lease SET lease_id=''").is_err());
         // Out-of-bound activation inputs are refused before the row.
         let mut bad = activation('a');
         bad.signed_import_sha256 = "short".into();
-        assert!(db.activate_external_lease_record(&placement, &bad, 10).is_err());
+        assert!(
+            db.activate_external_lease_record(&placement, &bad, 10)
+                .is_err()
+        );
         bad = activation('a');
         bad.lease_id = String::new();
-        assert!(db.activate_external_lease_record(&placement, &bad, 10).is_err());
+        assert!(
+            db.activate_external_lease_record(&placement, &bad, 10)
+                .is_err()
+        );
         bad = activation('a');
         bad.ready_deadline_ms = 0;
-        assert!(db.activate_external_lease_record(&placement, &bad, 10).is_err());
-        assert_eq!(state_of(&db, &placement), ExternalLeaseRecordState::Reserved);
-        assert!(db
-            .activate_external_lease_record("T-missing", &activation('a'), 10)
-            .is_err());
+        assert!(
+            db.activate_external_lease_record(&placement, &bad, 10)
+                .is_err()
+        );
+        assert_eq!(
+            state_of(&db, &placement),
+            ExternalLeaseRecordState::Reserved
+        );
+        assert!(
+            db.activate_external_lease_record("T-missing", &activation('a'), 10)
+                .is_err()
+        );
         let mut bad_admission = admission();
         bad_admission.resume_state_json = String::new();
-        db.activate_external_lease_record(&placement, &activation('a'), 10).unwrap();
-        assert!(db.admit_external_lease_record(&placement, &bad_admission, 11).is_err());
-        assert_eq!(state_of(&db, &placement), ExternalLeaseRecordState::Activated);
+        db.activate_external_lease_record(&placement, &activation('a'), 10)
+            .unwrap();
+        assert!(
+            db.admit_external_lease_record(&placement, &bad_admission, 11)
+                .is_err()
+        );
+        assert_eq!(
+            state_of(&db, &placement),
+            ExternalLeaseRecordState::Activated
+        );
     }
 
     #[test]
@@ -957,19 +1092,29 @@ mod tests {
         let (second, _) = leased(&db, "late-b");
         let mut later = activation('b');
         later.ready_deadline_ms = 9_000;
-        db.activate_external_lease_record(&second, &later, 10).unwrap();
+        db.activate_external_lease_record(&second, &later, 10)
+            .unwrap();
         let (_reserved, _) = leased(&db, "late-c");
 
         assert!(db.overdue_external_lease_records(4_999).unwrap().is_empty());
         let overdue = db.overdue_external_lease_records(5_000).unwrap();
         assert_eq!(
-            overdue.iter().map(|r| r.placement_thread_id.clone()).collect::<Vec<_>>(),
+            overdue
+                .iter()
+                .map(|r| r.placement_thread_id.clone())
+                .collect::<Vec<_>>(),
             vec![first.clone()]
         );
         assert_eq!(db.overdue_external_lease_records(9_000).unwrap().len(), 2);
-        db.refuse_external_lease_record(&first, "late", 9_000).unwrap();
-        db.admit_external_lease_record(&second, &admission(), 9_000).unwrap();
-        assert!(db.overdue_external_lease_records(99_000).unwrap().is_empty());
+        db.refuse_external_lease_record(&first, "late", 9_000)
+            .unwrap();
+        db.admit_external_lease_record(&second, &admission(), 9_000)
+            .unwrap();
+        assert!(
+            db.overdue_external_lease_records(99_000)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn worker_row(db: &RuntimeDb, placement: &str, worker: &str, generation: &str) {
@@ -983,7 +1128,13 @@ mod tests {
                         placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                      ) VALUES (?1, ?2, ?3, 1, 1, '{}', 'fd:fixture', 'live', ?4, ?5,
                                'owned', 1, 1)",
-                    params![worker, "b".repeat(64), "a".repeat(64), generation, placement],
+                    params![
+                        worker,
+                        "b".repeat(64),
+                        "a".repeat(64),
+                        generation,
+                        placement
+                    ],
                 )?)
             })
             .unwrap();
@@ -1006,7 +1157,8 @@ mod tests {
         // lease is a predecessor's; under a later one, both are.
         assert_eq!(listed("daemon-first"), vec![lost.clone()]);
         assert_eq!(listed("daemon-second"), vec![kept.clone(), lost.clone()]);
-        db.refuse_external_lease_record(&lost, "controller restarted", 50).unwrap();
+        db.refuse_external_lease_record(&lost, "controller restarted", 50)
+            .unwrap();
         assert_eq!(listed("daemon-second"), vec![kept.clone()]);
         // A settled allocation no longer holds its lease.
         sql(

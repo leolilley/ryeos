@@ -43,7 +43,10 @@ struct StandaloneAuthority {
 
 impl OfflineNativeAuthority for StandaloneAuthority {
     fn checkpoint(&self, cleanup: bool) -> Result<()> {
-        ensure!(self.process == std::process::id(), "inherited standalone native host refused");
+        ensure!(
+            self.process == std::process::id(),
+            "inherited standalone native host refused"
+        );
         self.state_lock.ensure_protects_app_root(&self.app_root)?;
         self.runtime.ensure_path_binding()?;
         if let Some(namespace) = &self.namespace {
@@ -85,14 +88,29 @@ struct StandaloneLeaseAuthority {
 impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for StandaloneLeaseAuthority {
     fn require_original(&self, factory: &Arc<OriginalNativeFactory>, cleanup: bool) -> Result<()> {
         self.authority.checkpoint(cleanup)?;
-        let issued = self.factory.upgrade().context("standalone native factory absent")?;
-        ensure!(Arc::ptr_eq(&issued, factory), "standalone lease selects a foreign factory");
+        let issued = self
+            .factory
+            .upgrade()
+            .context("standalone native factory absent")?;
+        ensure!(
+            Arc::ptr_eq(&issued, factory),
+            "standalone lease selects a foreign factory"
+        );
         Ok(())
     }
-    fn fork_deadline(&self, factory: &Arc<OriginalNativeFactory>, cleanup: bool)
-        -> Result<lillux::time::MonotonicDeadline> {
-        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(self, factory, cleanup)?;
-        Ok(if cleanup { self.authority.cleanup } else { self.authority.operation })
+    fn fork_deadline(
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        cleanup: bool,
+    ) -> Result<lillux::time::MonotonicDeadline> {
+        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(
+            self, factory, cleanup,
+        )?;
+        Ok(if cleanup {
+            self.authority.cleanup
+        } else {
+            self.authority.operation
+        })
     }
 }
 
@@ -142,7 +160,14 @@ impl StandaloneNativeHost {
         admit_residency: &dyn Fn(&ResidencyProof) -> Result<()>,
     ) -> Result<Self> {
         namespace.ensure_protects(&runtime)?;
-        Self::issue_inner(config, identity, state_lock, runtime, Some(namespace.clone()), admit_residency)
+        Self::issue_inner(
+            config,
+            identity,
+            state_lock,
+            runtime,
+            Some(namespace.clone()),
+            admit_residency,
+        )
     }
 
     fn issue_inner(
@@ -173,8 +198,10 @@ impl StandaloneNativeHost {
                 format!("node maintenance policy grants no offline native quota for `{STANDALONE_STATE_CLASS}`")
             })?
             .clone();
-        ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_native_quota(&quota)
-            .with_context(|| format!("offline native `{STANDALONE_STATE_CLASS}` quota"))?;
+        ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_native_quota(
+            &quota,
+        )
+        .with_context(|| format!("offline native `{STANDALONE_STATE_CLASS}` quota"))?;
         let operation = Duration::from_millis(quota.max_operation_millis);
         let cleanup = operation
             .checked_add(Duration::from_millis(quota.max_cleanup_millis))
@@ -221,8 +248,9 @@ impl StandaloneNativeHost {
                 if let Err(error) = admitted {
                     return Err(match host.finish() {
                         Ok(_) => error,
-                        Err(retained) => anyhow::Error::new(retained)
-                            .context(format!("standalone native host refused on its residency: {error:#}")),
+                        Err(retained) => anyhow::Error::new(retained).context(format!(
+                            "standalone native host refused on its residency: {error:#}"
+                        )),
                     });
                 }
                 let lease: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
@@ -234,12 +262,18 @@ impl StandaloneNativeHost {
                         Err(error) => {
                             return Err(match host.finish() {
                                 Ok(_) => error.context("standalone native host has no factory"),
-                                Err(retained) => anyhow::Error::new(retained)
-                                    .context(format!("standalone native host has no factory: {error:#}")),
+                                Err(retained) => anyhow::Error::new(retained).context(format!(
+                                    "standalone native host has no factory: {error:#}"
+                                )),
                             });
                         }
                     };
-                Ok(Self { authority, host, lease, retirements: std::cell::RefCell::new(Vec::new()) })
+                Ok(Self {
+                    authority,
+                    host,
+                    lease,
+                    retirements: std::cell::RefCell::new(Vec::new()),
+                })
             }
             Err(failure) => match failure.release() {
                 Ok(error) => Err(error.context("issue standalone native host")),
@@ -252,7 +286,9 @@ impl StandaloneNativeHost {
         self.host.factory()
     }
 
-    pub fn destination(&self) -> Result<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>> {
+    pub fn destination(
+        &self,
+    ) -> Result<Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>> {
         self.host.destination()
     }
 
@@ -260,7 +296,13 @@ impl StandaloneNativeHost {
     pub fn retain_terminal(
         &self,
         terminal: lillux_sqlite::OriginalNativeConnectionTerminal,
-    ) -> std::result::Result<(), (lillux_sqlite::OriginalNativeConnectionTerminal, anyhow::Error)> {
+    ) -> std::result::Result<
+        (),
+        (
+            lillux_sqlite::OriginalNativeConnectionTerminal,
+            anyhow::Error,
+        ),
+    > {
         self.host.retain_terminal(terminal)
     }
 
@@ -278,12 +320,17 @@ impl StandaloneNativeHost {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<crate::state_store::StateStore> {
         ensure!(
-            self.authority.namespace.is_some() && self.authority.runtime.is_same_directory(runtime)?,
+            self.authority.namespace.is_some()
+                && self.authority.runtime.is_same_directory(runtime)?,
             "projection rebuild needs a host issued under this runtime namespace lock"
         );
         let factory = Arc::clone(self.factory()?);
-        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| self.host.retain_terminal(terminal);
-        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| self.host.retain_lease(lease);
+        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| {
+            self.host.retain_terminal(terminal)
+        };
+        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| {
+            self.host.retain_lease(lease)
+        };
         let retire_after = |retirement: ryeos_state::state_db::GenerationLeaseRetirement| {
             self.retirements.borrow_mut().push(retirement)
         };
@@ -325,12 +372,17 @@ impl StandaloneNativeHost {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<crate::state_store::StateStore> {
         ensure!(
-            self.authority.namespace.is_some() && self.authority.runtime.is_same_directory(runtime)?,
+            self.authority.namespace.is_some()
+                && self.authority.runtime.is_same_directory(runtime)?,
             "projection verification needs a host issued under this runtime namespace lock"
         );
         let factory = Arc::clone(self.factory()?);
-        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| self.host.retain_terminal(terminal);
-        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| self.host.retain_lease(lease);
+        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| {
+            self.host.retain_terminal(terminal)
+        };
+        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| {
+            self.host.retain_lease(lease)
+        };
         let retire_after = |retirement: ryeos_state::state_db::GenerationLeaseRetirement| {
             self.retirements.borrow_mut().push(retirement)
         };
@@ -361,8 +413,12 @@ impl StandaloneNativeHost {
     /// this host's census.
     pub fn close_control_store(&self, store: Arc<crate::state_store::StateStore>) -> Result<()> {
         let factory = Arc::clone(self.factory()?);
-        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| self.host.retain_terminal(terminal);
-        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| self.host.retain_lease(lease);
+        let retain = |terminal: lillux_sqlite::OriginalNativeConnectionTerminal| {
+            self.host.retain_terminal(terminal)
+        };
+        let retain_lease = |lease: Arc<lillux_sqlite::ClosedOriginalProjectionLease>| {
+            self.host.retain_lease(lease)
+        };
         let retire_after = |retirement: ryeos_state::state_db::GenerationLeaseRetirement| {
             self.retirements.borrow_mut().push(retirement)
         };
@@ -371,7 +427,9 @@ impl StandaloneNativeHost {
 
     /// The lease authority for a Store opened on this host: it admits only
     /// this host's factory, within the class windows.
-    pub fn lease_authority(&self) -> Result<Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>> {
+    pub fn lease_authority(
+        &self,
+    ) -> Result<Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>> {
         Ok(Arc::clone(&self.lease))
     }
 
@@ -440,7 +498,9 @@ impl StandaloneNativeHost {
         let original = anyhow::anyhow!("standalone Store open refused: {message}");
         let released = match failure.close_retained() {
             Ok(released) => released,
-            Err(failure) => return ryeos_state::operational::CarriedOwners::carry(original, failure),
+            Err(failure) => {
+                return ryeos_state::operational::CarriedOwners::carry(original, failure);
+            }
         };
         let factory = match self.factory() {
             Ok(factory) => Arc::clone(factory),
@@ -461,7 +521,12 @@ impl StandaloneNativeHost {
     }
 
     fn retain_census(&self, census: crate::state_store::StateStoreCensus) -> Result<()> {
-        let crate::state_store::StateStoreCensus { terminals, leases, lease_retirements, prior_refusal } = census;
+        let crate::state_store::StateStoreCensus {
+            terminals,
+            leases,
+            lease_retirements,
+            prior_refusal,
+        } = census;
         self.retirements.borrow_mut().extend(lease_retirements);
         let mut refused_terminals = Vec::new();
         let mut refused_leases = Vec::new();
@@ -480,7 +545,10 @@ impl StandaloneNativeHost {
         }
         if !reasons.is_empty() {
             return Err(ryeos_state::operational::CarriedOwners::carry(
-                anyhow::anyhow!("standalone Store census not retained: {}", reasons.join("; ")),
+                anyhow::anyhow!(
+                    "standalone Store census not retained: {}",
+                    reasons.join("; ")
+                ),
                 (refused_terminals, refused_leases),
             ));
         }
@@ -493,7 +561,12 @@ impl StandaloneNativeHost {
     /// Finish the host and return the facts its release captured. A refusal
     /// keeps the host for retry.
     pub fn finish(self) -> std::result::Result<OfflineNativeFacts, (Option<Self>, anyhow::Error)> {
-        let Self { authority, mut host, lease, retirements } = self;
+        let Self {
+            authority,
+            mut host,
+            lease,
+            retirements,
+        } = self;
         // Closed generation leases retire against the finished backend, then
         // the host releases; a refusal keeps every owner for retry.
         let retired = host.finish_backend().and_then(|backend| {
@@ -503,19 +576,40 @@ impl StandaloneNativeHost {
             Ok(())
         });
         if let Err(error) = retired {
-            return Err((Some(Self { authority, host, lease, retirements }), error));
+            return Err((
+                Some(Self {
+                    authority,
+                    host,
+                    lease,
+                    retirements,
+                }),
+                error,
+            ));
         }
         match host.finish() {
-            Ok(OfflineNativeReleased { facts, region: _, durability_pins: _ }) => {
+            Ok(OfflineNativeReleased {
+                facts,
+                region: _,
+                durability_pins: _,
+            }) => {
                 // The lease authority ends only once the host has released.
                 drop(lease);
                 facts.ok_or_else(|| {
-                    (None, anyhow::anyhow!("standalone native host released without backend facts"))
+                    (
+                        None,
+                        anyhow::anyhow!("standalone native host released without backend facts"),
+                    )
                 })
             }
-            Err(OfflineNativeRetained { host, error }) => {
-                Err((Some(Self { authority, host, lease, retirements }), error))
-            }
+            Err(OfflineNativeRetained { host, error }) => Err((
+                Some(Self {
+                    authority,
+                    host,
+                    lease,
+                    retirements,
+                }),
+                error,
+            )),
         }
     }
 }

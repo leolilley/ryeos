@@ -2,7 +2,7 @@
 //! original SchedulerDb owner in place; successful native mutations advance
 //! to an acknowledgement-only step so retry never repeats the mutation.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use ryeos_app::execution_history_reset::{SchedulerHistoryRetirement, SchedulerResetRetirement};
 use ryeos_scheduler::SchedulerDb;
 use ryeos_scheduler_contract::{
@@ -13,7 +13,7 @@ use ryeos_scheduler_contract::{
 use std::{marker::PhantomData, rc::Rc};
 
 use crate::retirement_journal::{
-    native_resolution_projection, role_identity, ResolutionReservation, RetirementJournal,
+    ResolutionReservation, RetirementJournal, native_resolution_projection, role_identity,
 };
 
 #[derive(Clone, Copy)]

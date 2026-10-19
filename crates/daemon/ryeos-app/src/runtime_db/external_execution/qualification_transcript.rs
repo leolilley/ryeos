@@ -280,7 +280,7 @@ impl RuntimeDb {
         placement: &str,
     ) -> Result<QualificationWorkerTranscriptSource> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             let retained = source(&tx, placement)?;
             tx.commit()?;
             Ok(retained)
@@ -302,7 +302,7 @@ impl RuntimeDb {
                 ryeos_state::objects::canonical_value_digest(&value)? == manifest_hash,
                 "Q transcript staged manifest hash differs"
             );
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = source(&tx, &expected.command.placement_thread_id)?;
             ensure!(
                 current == *expected,
@@ -357,25 +357,25 @@ mod tests {
             .unwrap();
             let binding = "a".repeat(64);
             let frame = "b".repeat(64);
-            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            assert!(require_applied_native_frame(conn, &binding, &frame).is_err());
             conn.execute(
                 "INSERT INTO external_execution_frame VALUES(?1,?2,'supervisor_to_owner','pending')",
                 params![&binding, &frame],
             )
             .unwrap();
-            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            assert!(require_applied_native_frame(conn, &binding, &frame).is_err());
             conn.execute(
                 "UPDATE external_execution_frame SET application='claimed'",
                 [],
             )
             .unwrap();
-            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            assert!(require_applied_native_frame(conn, &binding, &frame).is_err());
             conn.execute(
                 "UPDATE external_execution_frame SET application='applied'",
                 [],
             )
             .unwrap();
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred).unwrap();
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred).unwrap();
             require_applied_native_frame(&tx, &binding, &frame).unwrap();
             assert!(require_applied_native_frame(&tx, &"c".repeat(64), &frame).is_err());
             assert!(require_applied_native_frame(&tx, &binding, &"d".repeat(64)).is_err());
@@ -386,7 +386,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            assert!(require_applied_native_frame(&conn, &binding, &frame).is_err());
+            assert!(require_applied_native_frame(conn, &binding, &frame).is_err());
             Ok(())
         });
     }

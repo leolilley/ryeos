@@ -56,7 +56,7 @@ async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
     let state_store = state.state_store.clone();
 
     let report = tokio::task::spawn_blocking(move || -> Result<ProjectionMaintenanceReport> {
-        let mut scheduler_guard = scheduler_guard;
+        let scheduler_guard = scheduler_guard;
         let rebuilt = match operation {
             Operation::Verify => None,
             Operation::Rebuild => Some(state_store.rebuild_projection_generation()?),

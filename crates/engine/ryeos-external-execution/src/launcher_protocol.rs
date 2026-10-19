@@ -1302,24 +1302,25 @@ impl DirectCommandObservation {
                 });
             }
         }
-        if self.stdout.closed && self.stderr.closed {
-            if let Some(target_exit) = self.target_exit {
-                let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
-                    bytes: bytes.len() as u64,
-                    sha256: lillux::sha256_hex(bytes),
-                    truncated: false,
-                };
-                let observation = ExternalCommandTermination {
-                    target_exit,
-                    reason: self
-                        .reason
-                        .context("direct target exit has no observation reason")?,
-                    stdout: commitment(&self.stdout_bytes),
-                    stderr: commitment(&self.stderr_bytes),
-                };
-                self.terminal_sent = true;
-                return Ok(CandidateExecutionOutput::CommandTerminated { observation });
-            }
+        if self.stdout.closed
+            && self.stderr.closed
+            && let Some(target_exit) = self.target_exit
+        {
+            let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+                bytes: bytes.len() as u64,
+                sha256: lillux::sha256_hex(bytes),
+                truncated: false,
+            };
+            let observation = ExternalCommandTermination {
+                target_exit,
+                reason: self
+                    .reason
+                    .context("direct target exit has no observation reason")?,
+                stdout: commitment(&self.stdout_bytes),
+                stderr: commitment(&self.stderr_bytes),
+            };
+            self.terminal_sent = true;
+            return Ok(CandidateExecutionOutput::CommandTerminated { observation });
         }
         // EOF, including EOF following forced cleanup, supplies no target exit.
         Ok(CandidateExecutionOutput::Idle)

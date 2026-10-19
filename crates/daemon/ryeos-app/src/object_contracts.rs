@@ -91,8 +91,7 @@ fn validate_generation(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::BundleGeneration::from_current_value(value).map(|_| ())
 }
 fn validate_payload_ownership(value: &Value) -> anyhow::Result<()> {
-    ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(value)
-        .map(|_| ())
+    ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(value).map(|_| ())
 }
 fn validate_materialization(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::PublisherMaterializationResult::from_current_value(value)

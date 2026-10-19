@@ -225,10 +225,10 @@ impl ProjectScheduleRecoveryOwners {
             .owners
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(owner) = owners.get_mut(job_id).and_then(|owners| owners.last_mut()) {
-            if matches!(owner, ProjectScheduleRecoveryOwner::AcquiringSession) {
-                *owner = ProjectScheduleRecoveryOwner::PendingSessionAcquisition;
-            }
+        if let Some(owner) = owners.get_mut(job_id).and_then(|owners| owners.last_mut())
+            && matches!(owner, ProjectScheduleRecoveryOwner::AcquiringSession)
+        {
+            *owner = ProjectScheduleRecoveryOwner::PendingSessionAcquisition;
         }
     }
 

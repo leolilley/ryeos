@@ -2243,9 +2243,10 @@ impl Engine {
             .map_err(|error| EngineError::IsolationPolicyRefused {
                 reason: error.to_string(),
             })?;
-        if let Some(target) = target {
-            if target.requests_resources() {
-                self.execution_resource_policy
+        if let Some(target) = target
+            && target.requests_resources()
+        {
+            self.execution_resource_policy
                     .as_ref()
                     .ok_or_else(|| EngineError::IsolationPolicyRefused {
                         reason: "node execution resource authority is disabled for a resource-bearing target"
@@ -2255,7 +2256,6 @@ impl Engine {
                     .map_err(|error| EngineError::IsolationPolicyRefused {
                         reason: error.to_string(),
                     })?;
-            }
         }
         Ok(())
     }
@@ -4849,7 +4849,10 @@ formats:
                 canonical_root: chosen_root.clone(),
             },
         ]);
-        assert_eq!(engine.registered_bundle_name_at(&chosen_root), Some("chosen"));
+        assert_eq!(
+            engine.registered_bundle_name_at(&chosen_root),
+            Some("chosen")
+        );
         assert_eq!(
             engine.registered_bundle_name_at(&chosen_root.join(AI_DIR)),
             None
@@ -4859,7 +4862,8 @@ formats:
         let hook = CanonicalRef::parse("tool:chosen/hook").unwrap();
         assert_eq!(engine.resolve(&ctx, &hook).unwrap().source_path, early_path);
 
-        for selection in [crate::item_resolution::RegisteredBundleSelection::Only] {
+        {
+            let selection = crate::item_resolution::RegisteredBundleSelection::Only;
             let selected = engine
                 .with_registered_bundle_selection("chosen", selection)
                 .unwrap();

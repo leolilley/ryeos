@@ -87,7 +87,10 @@ impl FacadeTransport for HttpFacadeTransport<'_> {
             headers: vec![
                 Header::new("Accept", "application/json"),
                 Header::new("Content-Type", "application/json"),
-                Header::new_sensitive(KEY_HEADER, Zeroizing::new(self.token.key.as_bytes().to_vec())),
+                Header::new_sensitive(
+                    KEY_HEADER,
+                    Zeroizing::new(self.token.key.as_bytes().to_vec()),
+                ),
                 Header::new_sensitive(
                     SECRET_HEADER,
                     Zeroizing::new(self.token.secret.as_bytes().to_vec()),
@@ -183,7 +186,15 @@ mod tests {
         let token = ProxyToken::parse(&Zeroizing::new("wk-abc:ws-def_1".to_owned())).unwrap();
         assert_eq!(token.key.as_str(), "wk-abc");
         assert_eq!(token.secret.as_str(), "ws-def_1");
-        for bad in ["", "nocolon", ":secret", "id:", "a:b:c", "a b:c", "id:sec ret"] {
+        for bad in [
+            "",
+            "nocolon",
+            ":secret",
+            "id:",
+            "a:b:c",
+            "a b:c",
+            "id:sec ret",
+        ] {
             assert!(
                 ProxyToken::parse(&Zeroizing::new(bad.to_owned())).is_err(),
                 "{bad:?}"
@@ -193,8 +204,16 @@ mod tests {
 
     #[test]
     fn limits_follow_the_route_body_bound() {
-        for route in [RouteName::Create, RouteName::Stage, RouteName::Upload, RouteName::RunOnce] {
-            assert_eq!(limits_for(route).request_body_bytes, route.request_body_limit());
+        for route in [
+            RouteName::Create,
+            RouteName::Stage,
+            RouteName::Upload,
+            RouteName::RunOnce,
+        ] {
+            assert_eq!(
+                limits_for(route).request_body_bytes,
+                route.request_body_limit()
+            );
         }
         assert!(limits_for(RouteName::Stage).request_body_bytes > 32 * 1024 * 1024);
     }
@@ -209,10 +228,19 @@ mod tests {
 
     #[test]
     fn json_content_type_is_exact() {
-        for good in ["application/json", "Application/JSON; charset=utf-8", "application/json;charset=\"utf-8\""] {
+        for good in [
+            "application/json",
+            "Application/JSON; charset=utf-8",
+            "application/json;charset=\"utf-8\"",
+        ] {
             assert!(is_json_content_type_value(good), "{good}");
         }
-        for bad in ["text/json", "application/json; charset=latin1", "application/json; a=b; c=d", "application/jsonx"] {
+        for bad in [
+            "text/json",
+            "application/json; charset=latin1",
+            "application/json; a=b; c=d",
+            "application/jsonx",
+        ] {
             assert!(!is_json_content_type_value(bad), "{bad}");
         }
     }

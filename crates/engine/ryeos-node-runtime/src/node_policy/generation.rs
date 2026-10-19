@@ -123,7 +123,12 @@ impl NodeInitProfile {
             .as_any()
             .downcast_ref::<T>()
             .cloned()
-            .with_context(|| format!("node policy compiler `{}` returned the wrong typed record", T::SECTION_NAME))
+            .with_context(|| {
+                format!(
+                    "node policy compiler `{}` returned the wrong typed record",
+                    T::SECTION_NAME
+                )
+            })
     }
 }
 
@@ -722,9 +727,7 @@ mod tests {
                 profile
                     .for_host_class(&host_class)
                     .and_then(|selected| selected.validated_generation(&table, &path))
-                    .unwrap_or_else(|error| {
-                        panic!("{} {host_class}: {error:#}", path.display())
-                    });
+                    .unwrap_or_else(|error| panic!("{} {host_class}: {error:#}", path.display()));
             }
         }
     }
@@ -744,9 +747,16 @@ mod tests {
         let path = Path::new("profile.yaml");
         for name in ["core", "core-scheduling", "f5r-controller", "standard"] {
             let profile = authored_profile(name);
-            assert_eq!(profile.host_classes().unwrap(), ["hosted", "local"], "{name}");
+            assert_eq!(
+                profile.host_classes().unwrap(),
+                ["hosted", "local"],
+                "{name}"
+            );
             // The unselected profile is not a node generation.
-            let error = format!("{:#}", profile.validated_generation(&table, path).unwrap_err());
+            let error = format!(
+                "{:#}",
+                profile.validated_generation(&table, path).unwrap_err()
+            );
             assert!(error.contains("exactly one host class"), "{name}: {error}");
             let refused = format!("{:#}", profile.for_host_class("edge").unwrap_err());
             assert!(
@@ -781,9 +791,20 @@ mod tests {
             .iter()
             .map(|entry| entry.label())
             .collect::<Vec<_>>();
-        assert!(names.contains(&"any_of(accounting, residency:swap_absent)".to_owned()), "{names:?}");
-        assert!(names.iter().any(|label| label.contains("termination:enclosure_trusted_init")), "{names:?}");
-        assert!(hosted.required_process_scope_capabilities().is_empty(), "{names:?}");
+        assert!(
+            names.contains(&"any_of(accounting, residency:swap_absent)".to_owned()),
+            "{names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|label| label.contains("termination:enclosure_trusted_init")),
+            "{names:?}"
+        );
+        assert!(
+            hosted.required_process_scope_capabilities().is_empty(),
+            "{names:?}"
+        );
         let local: ryeos_engine::isolation::IsolationPolicy = authored_profile("core")
             .for_host_class("local")
             .unwrap()
@@ -792,7 +813,10 @@ mod tests {
         assert!(!local.required_process_scope_capabilities().is_empty());
         // A profile without a hosted variant declares only its local class.
         assert_eq!(authored_profile("full").host_classes().unwrap(), ["local"]);
-        assert_eq!(authored_profile("hosted-node").host_classes().unwrap(), ["hosted"]);
+        assert_eq!(
+            authored_profile("hosted-node").host_classes().unwrap(),
+            ["hosted"]
+        );
     }
 
     #[test]
@@ -886,7 +910,10 @@ mod tests {
             .err()
             .expect("a replacement for another host class is refused")
         );
-        assert!(refused.contains("a node's host class does not change"), "{refused}");
+        assert!(
+            refused.contains("a node's host class does not change"),
+            "{refused}"
+        );
         // A different obsolete body is still a different predecessor. Exact
         // byte authority matters even though the retired schema is opaque.
         std::fs::write(

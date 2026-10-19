@@ -14,9 +14,10 @@ use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
+pub mod consumer_qualification_context;
 pub mod content_qualification;
 pub mod product_build;
 pub mod product_composition;
@@ -455,18 +456,19 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content component exceeds current node import policy");
     }
-    let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
-        max_depth: maximum_depth,
-        max_entries: maximum_entries,
-        max_file_bytes: maximum_file_bytes,
-        max_total_bytes: maximum_bytes,
-        store_budget_bytes: policy
-            .store_budget_bytes
-            .min(import_policy.limits.store_budget_bytes),
-        minimum_free_bytes: policy
-            .minimum_free_bytes
-            .max(import_policy.limits.minimum_free_bytes),
-    };
+    let limits =
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
+            max_depth: maximum_depth,
+            max_entries: maximum_entries,
+            max_file_bytes: maximum_file_bytes,
+            max_total_bytes: maximum_bytes,
+            store_budget_bytes: policy
+                .store_budget_bytes
+                .min(import_policy.limits.store_budget_bytes),
+            minimum_free_bytes: policy
+                .minimum_free_bytes
+                .max(import_policy.limits.minimum_free_bytes),
+        };
     let policy_digest = crate::managed_external_content_operation::managed_policy_digest(
         &import_policy.limits,
         policy,
@@ -1945,6 +1947,34 @@ fn validate_relative_path(value: &str) -> anyhow::Result<()> {
     ryeos_state::objects::validate_canonical_project_relative_path(value)
 }
 
+fn open_directory_relative(
+    base: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<lillux::PinnedDirectory> {
+    let mut current = base.try_clone()?;
+    for component in relative.split('/') {
+        let child = current
+            .open_child_directory(OsStr::new(component))?
+            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
+        current.ensure_open_child_same_mount(&child)?;
+        current = child;
+    }
+    Ok(current)
+}
+
+fn open_file_parent<'a>(
+    base: &lillux::PinnedDirectory,
+    relative: &'a str,
+) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
+    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    let parent = if parent.is_empty() {
+        base.try_clone()?
+    } else {
+        open_directory_relative(base, parent)?
+    };
+    Ok((parent, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,32 +2435,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn open_directory_relative(
-    base: &lillux::PinnedDirectory,
-    relative: &str,
-) -> anyhow::Result<lillux::PinnedDirectory> {
-    let mut current = base.try_clone()?;
-    for component in relative.split('/') {
-        let child = current
-            .open_child_directory(OsStr::new(component))?
-            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
-        current.ensure_open_child_same_mount(&child)?;
-        current = child;
-    }
-    Ok(current)
-}
-
-fn open_file_parent<'a>(
-    base: &lillux::PinnedDirectory,
-    relative: &'a str,
-) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
-    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
-    let parent = if parent.is_empty() {
-        base.try_clone()?
-    } else {
-        open_directory_relative(base, parent)?
-    };
-    Ok((parent, name))
 }

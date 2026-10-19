@@ -21,7 +21,11 @@ pub(super) struct OriginalBackendSlot {
     /// The released host's plain facts, region release fact and how its
     /// release ended the census durability pins. Once the host is released,
     /// its facts are answered from here.
-    released: Option<(OfflineNativeFacts, HostStorageRegionReleaseFact, DurabilityPinRelease)>,
+    released: Option<(
+        OfflineNativeFacts,
+        HostStorageRegionReleaseFact,
+        DurabilityPinRelease,
+    )>,
     /// Names of the controller and settlement owners the alias quiesce has
     /// ended, so a release refusal can say which known holders are gone.
     quiesced: Vec<&'static str>,
@@ -54,17 +58,27 @@ struct RetainedNativeOwner<T> {
 }
 impl<T> std::fmt::Debug for RetainedNativeOwner<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RetainedNativeOwner").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("RetainedNativeOwner")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl<T> std::fmt::Display for RetainedNativeOwner<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#} ({} retained)", self.error, std::any::type_name::<T>())
+        write!(
+            f,
+            "{:#} ({} retained)",
+            self.error,
+            std::any::type_name::<T>()
+        )
     }
 }
 impl<T> std::error::Error for RetainedNativeOwner<T> {}
 fn retained<T: Send + Sync + 'static>(error: anyhow::Error, owner: T) -> anyhow::Error {
-    anyhow::Error::new(RetainedNativeOwner { error, _owner: Opaque(owner) })
+    anyhow::Error::new(RetainedNativeOwner {
+        error,
+        _owner: Opaque(owner),
+    })
 }
 /// Hides an owner's own formatting; only its type name is reported.
 struct Opaque<T>(T);
@@ -82,7 +96,10 @@ impl InspectionControllerCustody {
         &self,
         issued: std::result::Result<OfflineNativeHost, OfflineNativeHostFailure>,
     ) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
-        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let occupied = slot.host.is_some() || slot.issue_failure.is_some();
         match issued {
             Ok(host) => {
@@ -99,11 +116,19 @@ impl InspectionControllerCustody {
             Err(failure) => {
                 drop(slot);
                 let failure = match failure.release() {
-                    Ok(error) => return Err(error.context("issue offline native host for the reset")),
+                    Ok(error) => {
+                        return Err(error.context("issue offline native host for the reset"));
+                    }
                     Err(failure) => failure,
                 };
-                let error = anyhow!("offline native host issuance refused; partial host release retained: {:#}", failure.error);
-                let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+                let error = anyhow!(
+                    "offline native host issuance refused; partial host release retained: {:#}",
+                    failure.error
+                );
+                let mut slot = self
+                    .native_backend
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 if slot.issue_failure.is_some() {
                     return Err(retained(error, failure));
                 }
@@ -116,21 +141,38 @@ impl InspectionControllerCustody {
     /// The same factory after the backend finished, for the post-backend
     /// steps: final acknowledgement and retirements after the backend.
     pub(super) fn post_backend_factory(&self) -> Result<Arc<lillux_sqlite::OriginalNativeFactory>> {
-        let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(slot.host.as_ref().context("offline native host absent")?.post_backend_factory()?.clone())
+        let slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        Ok(slot
+            .host
+            .as_ref()
+            .context("offline native host absent")?
+            .post_backend_factory()?
+            .clone())
     }
 
     /// How the released host's release ended its census durability pins.
     pub(super) fn released_durability_pins(&self) -> Result<DurabilityPinRelease> {
-        let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        let (_, _, pins) = slot.released.as_ref().context("offline native host is not released")?;
+        let slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_, _, pins) = slot
+            .released
+            .as_ref()
+            .context("offline native host is not released")?;
         Ok(*pins)
     }
 
     /// The host's plain facts, once its backend finished; after the host is
     /// released, the facts it was released with.
     pub(super) fn native_facts(&self) -> Result<OfflineNativeFacts> {
-        let slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        let slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         match (&slot.host, &slot.released) {
             (Some(host), _) => host.facts(),
             (None, Some((facts, _, _))) => Ok(facts.clone()),
@@ -147,12 +189,16 @@ impl InspectionControllerCustody {
     /// ended are kept, so a later release refusal can name what was already
     /// ended and so point at a holder outside this custody.
     pub(super) fn quiesce_native_aliases(&self) -> Result<()> {
-        self.native_facts().context("quiesce before the host's backend facts")?;
+        self.native_facts()
+            .context("quiesce before the host's backend facts")?;
         let mut ended: Vec<&'static str> = Vec::new();
         let result = self.quiesce_native_aliases_into(&mut ended);
         // Owners already ended stay recorded whether or not a later step
         // refused, so a release refusal can still name them.
-        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         for name in ended {
             if !slot.quiesced.contains(&name) {
                 slot.quiesced.push(name);
@@ -164,9 +210,18 @@ impl InspectionControllerCustody {
     fn quiesce_native_aliases_into(&self, ended: &mut Vec<&'static str>) -> Result<()> {
         // Every slot refusal is decided first, under slot locks held until
         // that slot's owners end, so a refusal here ends nothing.
-        let mut state = self.state_projection.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self
+            .state_projection
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         {
-            let OfflineStateProjectionSlot { issued: _, factory: _, retained, closed, close_failure } = &*state;
+            let OfflineStateProjectionSlot {
+                issued: _,
+                factory: _,
+                retained,
+                closed,
+                close_failure,
+            } = &*state;
             ensure!(
                 retained.is_none() && close_failure.is_none(),
                 "State projection still holds a live or refused owner; quiesce refused"
@@ -182,7 +237,10 @@ impl InspectionControllerCustody {
                 );
             }
         }
-        let mut runtime = self.runtime_mutation.lock().unwrap_or_else(|p| p.into_inner());
+        let mut runtime = self
+            .runtime_mutation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         {
             let OfflineRuntimeSlot {
                 issued: _,
@@ -198,11 +256,21 @@ impl InspectionControllerCustody {
                 "Runtime still holds a live or refused owner; quiesce refused"
             );
         }
-        let mut operational_inspection = self.operational_inspection.lock().unwrap_or_else(|p| p.into_inner());
-        let mut operational_mutation = self.operational_mutation.lock().unwrap_or_else(|p| p.into_inner());
+        let mut operational_inspection = self
+            .operational_inspection
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut operational_mutation = self
+            .operational_mutation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         operational_inspection.require_quiescent()?;
         operational_mutation.require_quiescent()?;
-        let settlement = self.settlement.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let settlement = self
+            .settlement
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         if let Some(settlement) = &settlement {
             ended.extend(settlement.quiesce_native_owners()?);
         }
@@ -218,7 +286,13 @@ impl InspectionControllerCustody {
         drop(operational_mutation);
         drop(operational_inspection);
         {
-            let OfflineStateProjectionSlot { issued: _, factory, retained: _, closed, close_failure: _ } = &mut *state;
+            let OfflineStateProjectionSlot {
+                issued: _,
+                factory,
+                retained: _,
+                closed,
+                close_failure: _,
+            } = &mut *state;
             let ended_state = (closed.take(), factory.take());
             if ended_state.0.is_some() || ended_state.1.is_some() {
                 ended.push("State projection");
@@ -244,25 +318,51 @@ impl InspectionControllerCustody {
             drop(ended_runtime);
         }
         let references = std::mem::take(
-            &mut self.runtime_inspection_reference.lock().unwrap_or_else(|p| p.into_inner()).references,
+            &mut self
+                .runtime_inspection_reference
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .references,
         );
         if !references.is_empty() {
             ended.push("Runtime inspection references");
         }
         drop(references);
         let cleanup = std::mem::take(&mut *self.cleanup.lock().unwrap_or_else(|p| p.into_inner()));
-        let disposals = std::mem::take(&mut *self.completed_disposals.lock().unwrap_or_else(|p| p.into_inner()));
+        let disposals = std::mem::take(
+            &mut *self
+                .completed_disposals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        );
         let closed = std::mem::take(&mut *self.closed.lock().unwrap_or_else(|p| p.into_inner()));
         let unproven = std::mem::take(
-            &mut self.scheduler_unproven.lock().unwrap_or_else(|p| p.into_inner()).terminals,
+            &mut self
+                .scheduler_unproven
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .terminals,
         );
-        let runtime = std::mem::take(&mut *self.runtime_released.lock().unwrap_or_else(|p| p.into_inner()));
-        let failures = std::mem::take(&mut *self.cleanup_failures.lock().unwrap_or_else(|p| p.into_inner()));
+        let runtime = std::mem::take(
+            &mut *self
+                .runtime_released
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        );
+        let failures = std::mem::take(
+            &mut *self
+                .cleanup_failures
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        );
         for (empty, name) in [
             (cleanup.is_empty(), "inspection cleanup owners"),
             (disposals.is_empty(), "completed copy disposals"),
             (closed.is_empty(), "closed inspections"),
-            (unproven.is_empty(), "unproven scheduler inspection terminals"),
+            (
+                unproven.is_empty(),
+                "unproven scheduler inspection terminals",
+            ),
             (runtime.is_empty(), "released Runtime inspections"),
             (failures.is_empty(), "retained cleanup refusals"),
         ] {
@@ -280,7 +380,10 @@ impl InspectionControllerCustody {
         drop(failures);
         let census = {
             let mut slot = self.native_census.lock().unwrap_or_else(|p| p.into_inner());
-            let OriginalNativeCensusSlot { terminals, cleanup_inputs } = &mut *slot;
+            let OriginalNativeCensusSlot {
+                terminals,
+                cleanup_inputs,
+            } = &mut *slot;
             (cleanup_inputs.take(), terminals.take())
         };
         if census.0.is_some() || census.1.is_some() {
@@ -288,7 +391,10 @@ impl InspectionControllerCustody {
         }
         drop(census);
         let handed = {
-            let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+            let mut slot = self
+                .native_backend
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             let OriginalBackendSlot {
                 host: _,
                 issue_failure: _,
@@ -297,7 +403,10 @@ impl InspectionControllerCustody {
                 released: _,
                 quiesced: _,
             } = &mut *slot;
-            (std::mem::take(handed_terminals), std::mem::take(handed_leases))
+            (
+                std::mem::take(handed_terminals),
+                std::mem::take(handed_leases),
+            )
         };
         if !handed.0.is_empty() || !handed.1.is_empty() {
             ended.push("handed host terminals and leases");
@@ -313,26 +422,43 @@ impl InspectionControllerCustody {
     /// returned. After this no factory, terminal or region API is reachable.
     pub(super) fn release_native_host(self: &Arc<Self>) -> Result<HostStorageRegionReleaseFact> {
         let host = {
-            let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+            let mut slot = self
+                .native_backend
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             match slot.host.take() {
                 Some(host) => host,
                 None => {
-                    let (_, region, _) = slot.released.as_ref().context("offline native host absent; nothing to release")?;
+                    let (_, region, _) = slot
+                        .released
+                        .as_ref()
+                        .context("offline native host absent; nothing to release")?;
                     return Ok(*region);
                 }
             }
         };
         match host.release() {
             Ok(released) => {
-                let lillux_sqlite::offline_host::OfflineNativeReleased { facts, region, durability_pins } = released;
-                let facts = facts.context("released offline native host lacks its backend facts")?;
-                let region = region.context("released offline native host lacks its region release fact")?;
-                self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).released =
-                    Some((facts, region, durability_pins));
+                let lillux_sqlite::offline_host::OfflineNativeReleased {
+                    facts,
+                    region,
+                    durability_pins,
+                } = released;
+                let facts =
+                    facts.context("released offline native host lacks its backend facts")?;
+                let region =
+                    region.context("released offline native host lacks its region release fact")?;
+                self.native_backend
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .released = Some((facts, region, durability_pins));
                 Ok(region)
             }
             Err(OfflineNativeRetained { host, error }) => {
-                let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
+                let mut slot = self
+                    .native_backend
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 slot.host = Some(host);
                 let ended = if slot.quiesced.is_empty() {
                     "none".to_owned()
@@ -342,7 +468,9 @@ impl InspectionControllerCustody {
                 drop(slot);
                 // Only a surviving strong alias points outside this custody;
                 // any other release refusal names its own cause.
-                let alias = error.chain().any(|cause| cause.downcast_ref::<OfflineNativeAliasRefusal>().is_some());
+                let alias = error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<OfflineNativeAliasRefusal>().is_some());
                 let error = if alias {
                     error.context(format!(
                         "offline native host release retained; the alias quiesce already ended: {ended}; \
@@ -359,19 +487,38 @@ impl InspectionControllerCustody {
     /// Hand closed projection leases to the host's census. SQL terminals
     /// cannot substitute for a lease. A lease already handed over is skipped,
     /// so a retry never enters one twice. A refused lease rides the error.
-    pub(super) fn retain_native_leases(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>) -> Result<()> {
-        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        let OriginalBackendSlot { host, issue_failure: _, handed_terminals: _, handed_leases, released: _, quiesced: _ } =
-            &mut *slot;
-        let host = host.as_ref().context("offline native host absent; leases not retained")?;
+    pub(super) fn retain_native_leases(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        leases: Vec<Arc<lillux_sqlite::ClosedOriginalProjectionLease>>,
+    ) -> Result<()> {
+        let mut slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let OriginalBackendSlot {
+            host,
+            issue_failure: _,
+            handed_terminals: _,
+            handed_leases,
+            released: _,
+            quiesced: _,
+        } = &mut *slot;
+        let host = host
+            .as_ref()
+            .context("offline native host absent; leases not retained")?;
         let mut refused = Vec::new();
         for lease in leases {
-            if handed_leases.iter().any(|handed| Arc::ptr_eq(handed, &lease)) {
+            if handed_leases
+                .iter()
+                .any(|handed| Arc::ptr_eq(handed, &lease))
+            {
                 continue;
             }
             let checked = lease.require_original(factory);
-            match checked.and_then(|()| host.retain_lease(lease.clone()).map_err(|(_, error)| error)) {
+            match checked
+                .and_then(|()| host.retain_lease(lease.clone()).map_err(|(_, error)| error))
+            {
                 Ok(()) => handed_leases.push(lease),
                 Err(error) => refused.push((lease, error)),
             }
@@ -380,9 +527,19 @@ impl InspectionControllerCustody {
         if refused.is_empty() {
             return Ok(());
         }
-        let reasons = refused.iter().map(|(_, error)| format!("{error:#}")).collect::<Vec<_>>().join("; ");
-        let leases = refused.into_iter().map(|(lease, _)| lease).collect::<Vec<_>>();
-        Err(retained(anyhow!("projection lease census refused: {reasons}"), leases))
+        let reasons = refused
+            .iter()
+            .map(|(_, error)| format!("{error:#}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let leases = refused
+            .into_iter()
+            .map(|(lease, _)| lease)
+            .collect::<Vec<_>>();
+        Err(retained(
+            anyhow!("projection lease census refused: {reasons}"),
+            leases,
+        ))
     }
 
     /// Hand every role terminal to the host's census. A terminal already
@@ -392,13 +549,27 @@ impl InspectionControllerCustody {
         &self,
         terminals: &[lillux_sqlite::OriginalNativeConnectionTerminal],
     ) -> Result<()> {
-        let mut slot = self.native_backend.lock().unwrap_or_else(|p| p.into_inner());
-        let OriginalBackendSlot { host, issue_failure: _, handed_terminals, handed_leases: _, released: _, quiesced: _ } =
-            &mut *slot;
-        let host = host.as_ref().context("offline native host absent; terminals not retained")?;
+        let mut slot = self
+            .native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let OriginalBackendSlot {
+            host,
+            issue_failure: _,
+            handed_terminals,
+            handed_leases: _,
+            released: _,
+            quiesced: _,
+        } = &mut *slot;
+        let host = host
+            .as_ref()
+            .context("offline native host absent; terminals not retained")?;
         let mut refused = Vec::new();
         for terminal in terminals {
-            if handed_terminals.iter().any(|handed| same_terminal(handed, terminal)) {
+            if handed_terminals
+                .iter()
+                .any(|handed| same_terminal(handed, terminal))
+            {
                 continue;
             }
             match host.retain_terminal(terminal.clone()) {
@@ -410,9 +581,19 @@ impl InspectionControllerCustody {
         if refused.is_empty() {
             return Ok(());
         }
-        let reasons = refused.iter().map(|(_, error)| format!("{error:#}")).collect::<Vec<_>>().join("; ");
-        let terminals = refused.into_iter().map(|(terminal, _)| terminal).collect::<Vec<_>>();
-        Err(retained(anyhow!("native terminal census refused: {reasons}"), terminals))
+        let reasons = refused
+            .iter()
+            .map(|(_, error)| format!("{error:#}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let terminals = refused
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect::<Vec<_>>();
+        Err(retained(
+            anyhow!("native terminal census refused: {reasons}"),
+            terminals,
+        ))
     }
 
     /// Finish the host's backend after the cleanup scope returns: close
@@ -437,7 +618,10 @@ impl InspectionControllerCustody {
             self.require_cleanup_inputs(&host)
         };
         let finished = precondition.and_then(|()| host.finish_backend());
-        self.native_backend.lock().unwrap_or_else(|p| p.into_inner()).host = Some(host);
+        self.native_backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host = Some(host);
         finished.map_err(|error| {
             self.retain_failure(error.context("offline native host backend finish retained"))
         })
@@ -469,7 +653,10 @@ mod tests {
     }
     impl OfflineNativeAuthority for CleanupGate {
         fn checkpoint(&self, cleanup: bool) -> Result<()> {
-            ensure!(!(cleanup && self.refuse.load(Ordering::Acquire)), "cleanup window refused");
+            ensure!(
+                !(cleanup && self.refuse.load(Ordering::Acquire)),
+                "cleanup window refused"
+            );
             Ok(())
         }
         fn require_runtime(&self, _runtime: &lillux::PinnedDirectory) -> Result<()> {
@@ -482,7 +669,9 @@ mod tests {
 
     #[test]
     fn host_release_keeps_the_host_until_every_alias_is_quiesced() {
-        let gate = Arc::new(CleanupGate { refuse: AtomicBool::new(false) });
+        let gate = Arc::new(CleanupGate {
+            refuse: AtomicBool::new(false),
+        });
         let (host, _serial) = lillux_sqlite::test_host::issue_offline_host(
             lillux_sqlite::test_host::TestNativeEnvelope::default(),
             gate.clone(),
@@ -491,7 +680,10 @@ mod tests {
         let factory = custody.adopt_native_host(Ok(host)).unwrap();
         // The State projection slot keeps a factory alias, as its permit does.
         custody.state_projection.lock().unwrap().factory = Some(factory.clone());
-        assert!(custody.quiesce_native_aliases().is_err(), "quiesce needs the host's backend facts");
+        assert!(
+            custody.quiesce_native_aliases().is_err(),
+            "quiesce needs the host's backend facts"
+        );
         let terminal = custody
             .native_backend
             .lock()
@@ -505,31 +697,70 @@ mod tests {
 
         // A closed cleanup window refuses the release and keeps the host.
         gate.refuse.store(true, Ordering::Release);
-        let refused = custody.release_native_host().err().expect("closed cleanup window refuses");
-        assert!(format!("{refused:#}").contains("cleanup window refused"), "{refused:#}");
-        assert!(custody.native_backend.lock().unwrap().host.is_some(), "refusal keeps the host");
+        let refused = custody
+            .release_native_host()
+            .err()
+            .expect("closed cleanup window refuses");
+        assert!(
+            format!("{refused:#}").contains("cleanup window refused"),
+            "{refused:#}"
+        );
+        assert!(
+            custody.native_backend.lock().unwrap().host.is_some(),
+            "refusal keeps the host"
+        );
         gate.refuse.store(false, Ordering::Release);
 
         // Surviving aliases refuse the release, naming the strong counts.
-        let refused = format!("{:#}", custody.release_native_host().err().expect("terminal alias refuses"));
-        assert!(refused.contains("backend terminal strong count 2"), "{refused}");
+        let refused = format!(
+            "{:#}",
+            custody
+                .release_native_host()
+                .err()
+                .expect("terminal alias refuses")
+        );
+        assert!(
+            refused.contains("backend terminal strong count 2"),
+            "{refused}"
+        );
         drop(terminal);
         drop(factory);
-        let refused = format!("{:#}", custody.release_native_host().err().expect("controller alias refuses"));
-        assert!(refused.contains("factory strong count 3 (host holds 2)"), "{refused}");
-        assert!(refused.contains("the alias quiesce already ended: none"), "{refused}");
-        assert!(custody.native_backend.lock().unwrap().host.is_some(), "refusal keeps the host");
+        let refused = format!(
+            "{:#}",
+            custody
+                .release_native_host()
+                .err()
+                .expect("controller alias refuses")
+        );
+        assert!(
+            refused.contains("factory strong count 3 (host holds 2)"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("the alias quiesce already ended: none"),
+            "{refused}"
+        );
+        assert!(
+            custody.native_backend.lock().unwrap().host.is_some(),
+            "refusal keeps the host"
+        );
 
         // The quiesce ends the controller alias; the release then succeeds.
         custody.quiesce_native_aliases().unwrap();
         assert!(custody.state_projection.lock().unwrap().factory.is_none());
         let region = custody.release_native_host().unwrap();
         assert_eq!(region.generation().unwrap(), facts.generation);
-        assert_eq!(u64::try_from(region.bytes().unwrap()).unwrap(), facts.region_bytes);
+        assert_eq!(
+            u64::try_from(region.bytes().unwrap()).unwrap(),
+            facts.region_bytes
+        );
         // After the release the facts are answered from the record, a retry
         // returns the same region fact, and no factory is reachable.
         assert_eq!(custody.native_facts().unwrap(), facts);
-        assert_eq!(custody.release_native_host().unwrap().generation().unwrap(), facts.generation);
+        assert_eq!(
+            custody.release_native_host().unwrap().generation().unwrap(),
+            facts.generation
+        );
         assert!(custody.post_backend_factory().is_err());
     }
 }

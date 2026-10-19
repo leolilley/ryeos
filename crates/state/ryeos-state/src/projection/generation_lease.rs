@@ -135,7 +135,12 @@ impl OriginalGenerationLease {
                 // possibly released native arena is never consulted.
                 let Self { inner, identity } = owner;
                 match inner.take_whole() {
-                    Ok(LeaseParts { factory, root, name, custody }) => {
+                    Ok(LeaseParts {
+                        factory,
+                        root,
+                        name,
+                        custody,
+                    }) => {
                         drop(factory);
                         drop(name);
                         drop(custody);
@@ -155,7 +160,8 @@ impl OriginalGenerationLease {
         );
         self.inner.root.ensure_path_binding()?;
         let current = self
-            .inner.root
+            .inner
+            .root
             .entry_no_follow(&self.inner.name)?
             .context("original generation lease sidecar absent")?;
         anyhow::ensure!(
@@ -173,7 +179,8 @@ impl OriginalGenerationLease {
         terminal.require_original(&factory)?;
         let retired = {
             let mut custody = self
-                .inner.custody
+                .inner
+                .custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease retirement custody busy"))?;
             anyhow::ensure!(
@@ -194,7 +201,8 @@ impl OriginalGenerationLease {
     /// lease keeps that factory alias for the life of the process.
     pub(crate) fn is_retired(&self) -> Result<bool> {
         let custody = self
-            .inner.custody
+            .inner
+            .custody
             .try_lock()
             .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
         Ok(matches!(&*custody, LeaseCustody::Retired))
@@ -202,7 +210,8 @@ impl OriginalGenerationLease {
     pub(crate) fn metadata(&self) -> Result<std::fs::Metadata> {
         let factory = self.factory()?;
         self.require_coordinate(&factory)?;
-        self.inner.root
+        self.inner
+            .root
             .open_mount_entry(&self.inner.name)?
             .context("original lease metadata absent")?
             .metadata()
@@ -210,19 +219,18 @@ impl OriginalGenerationLease {
     }
     pub(crate) fn factory(&self) -> Result<Arc<OriginalNativeFactory>> {
         let factory = self
-            .inner.factory
+            .inner
+            .factory
             .upgrade()
             .context("original generation factory retired")?;
         factory.require_original_process()?;
         Ok(factory)
     }
-    pub(crate) fn identity(&self) -> (u64, u64) {
-        self.identity
-    }
     pub(crate) fn require_active(&self, factory: &Arc<OriginalNativeFactory>) -> Result<()> {
         self.require_coordinate(factory)?;
         let custody = self
-            .inner.custody
+            .inner
+            .custody
             .try_lock()
             .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
         anyhow::ensure!(
@@ -236,7 +244,8 @@ impl OriginalGenerationLease {
         self.require_coordinate(&factory)?;
         let checkout = {
             let mut custody = self
-                .inner.custody
+                .inner
+                .custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
             anyhow::ensure!(
@@ -257,7 +266,8 @@ impl OriginalGenerationLease {
         // Restore even if an earlier observation poisoned bookkeeping; the
         // original native owner cannot be discarded by a retry refusal.
         *self
-            .inner.custody
+            .inner
+            .custody
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         anyhow::ensure!(
@@ -277,7 +287,8 @@ impl OriginalGenerationLease {
         self.require_coordinate(factory)?;
         let checkout = {
             let mut custody = self
-                .inner.custody
+                .inner
+                .custody
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("generation lease custody busy"))?;
             anyhow::ensure!(
@@ -319,7 +330,8 @@ impl OriginalGenerationLease {
         };
         let receipt = {
             let mut custody = self
-                .inner.custody
+                .inner
+                .custody
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *custody = next;
@@ -381,10 +393,15 @@ mod custody_drop_tests {
         let _serial = crate::test_support::abandoned_custody_serial();
         let checkout = Arc::new(lease(LeaseCustody::Checkout));
         let before = lillux::custody::abandoned_custody().count(KIND);
-        let checkout = checkout.try_into_metadata_root().err().expect("an unretired lease is refused");
+        let checkout = checkout
+            .try_into_metadata_root()
+            .err()
+            .expect("an unretired lease is refused");
         drop(checkout);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
-        let root = Arc::new(lease(LeaseCustody::Retired)).try_into_metadata_root().ok()
+        let root = Arc::new(lease(LeaseCustody::Retired))
+            .try_into_metadata_root()
+            .ok()
             .expect("a retired lease transfers its root");
         drop(root);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
@@ -414,12 +431,21 @@ mod tests {
     /// Lease authority that admits every lease for the test's own host.
     struct AdmittedLease;
     impl OriginalNativeProjectionLeaseAuthority for AdmittedLease {
-        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
+        fn require_original(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<()> {
             Ok(())
         }
-        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
-            -> Result<lillux::time::MonotonicDeadline> {
-            Ok(lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(60)))
+        fn fork_deadline(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> Result<lillux::time::MonotonicDeadline> {
+            Ok(lillux::time::MonotonicDeadline::after(
+                std::time::Duration::from_secs(60),
+            ))
         }
     }
 
@@ -461,7 +487,10 @@ mod tests {
             Ok(_) => panic!("an unretired lease must keep the host from releasing"),
             Err(OfflineNativeRetained { host, error }) => {
                 let error = format!("{error:#}");
-                assert!(error.contains("factory strong count 3 (host holds 2)"), "{error}");
+                assert!(
+                    error.contains("factory strong count 3 (host holds 2)"),
+                    "{error}"
+                );
                 host
             }
         };

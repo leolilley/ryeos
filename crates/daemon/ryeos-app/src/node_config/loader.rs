@@ -26,16 +26,19 @@ use serde_json::Value;
 
 use ryeos_engine::trust::TrustStore;
 
-use ryeos_node_runtime::node_config_source::{VerifiedNodeConfigItem, scan_yaml_files, scan_yaml_files_recursive, verify_and_parse, check_bundle_collisions};
-#[cfg(test)]
-use ryeos_node_runtime::node_config_source::strip_signature;
 use super::sections::command::CommandRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
     SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
-use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use crate::route_raw::RawRouteSpec;
+#[cfg(test)]
+use ryeos_node_runtime::node_config_source::strip_signature;
+use ryeos_node_runtime::node_config_source::{
+    VerifiedNodeConfigItem, check_bundle_collisions, scan_yaml_files, scan_yaml_files_recursive,
+    verify_and_parse,
+};
+use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 
 /// Full loader for domain node-config items.
 ///
@@ -262,7 +265,8 @@ impl<'a> NodeConfigLoader<'a> {
         command_registration_authority: &CommandRegistrationAuthority,
         policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
     ) -> Result<NodeConfigSnapshot> {
-        let node_fingerprint = ryeos_node_runtime::identity::node_identity_fingerprint(self.app_root)?;
+        let node_fingerprint =
+            ryeos_node_runtime::identity::node_identity_fingerprint(self.app_root)?;
         command_registration_authority
             .require_bundle_sources(bundles.iter().map(|bundle| bundle.name.as_str()))?;
         let mut builder =
@@ -310,16 +314,15 @@ impl<'a> NodeConfigLoader<'a> {
                                 )
                             })?;
                     verify_section_signer(section, &verified, &node_fingerprint)?;
-                    let record =
-                        section
-                            .parse(verified.context(), verified.body())
-                            .with_context(|| {
-                                format!(
-                                    "failed to parse node config item {} in section '{}'",
-                                    verified.path().display(),
-                                    section_name
-                                )
-                            })?;
+                    let record = section
+                        .parse(verified.context(), verified.body())
+                        .with_context(|| {
+                            format!(
+                                "failed to parse node config item {} in section '{}'",
+                                verified.path().display(),
+                                section_name
+                            )
+                        })?;
                     builder.admit(record, &verified, &scan_root.source)?;
                     count = count.saturating_add(1);
                 }
@@ -330,7 +333,6 @@ impl<'a> NodeConfigLoader<'a> {
         builder.finish()
     }
 }
-
 
 fn system_scan_root(app_root: &Path, policy: &CommandRegistrationAuthority) -> NodeConfigScanRoot {
     NodeConfigScanRoot {
@@ -495,7 +497,6 @@ fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<B
     Ok(validated)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,8 +531,13 @@ mod tests {
         let write = |body: &Value| {
             fs::write(
                 &path,
-                ryeos_node_runtime::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
-                    .unwrap(),
+                ryeos_node_runtime::node_document::render_signed_item(
+                    SECTION_NAME,
+                    "primary",
+                    body,
+                    &identity,
+                )
+                .unwrap(),
             )
             .unwrap()
         };

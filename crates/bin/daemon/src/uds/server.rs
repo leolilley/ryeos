@@ -1371,11 +1371,13 @@ fn spawn_machine_continuation_launch(
     // a pointer here rather than the whole successor launch.
     tokio::spawn(async move {
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-        match Box::pin(ryeos_executor::execution::launch::launch_prepared_machine_successor(
-            st,
-            &successor_id,
-            prepared,
-        ))
+        match Box::pin(
+            ryeos_executor::execution::launch::launch_prepared_machine_successor(
+                st,
+                &successor_id,
+                prepared,
+            ),
+        )
         .await
         {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
@@ -1936,7 +1938,6 @@ mod tests {
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
-    use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::NewThreadRecord;
@@ -1944,6 +1945,7 @@ mod tests {
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
     use ryeos_app::write_barrier::WriteBarrier;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -2208,7 +2210,8 @@ mod tests {
     /// Build a minimal AppState for UDS dispatch tests. The Store owner sits
     /// between the directory and the application so destructuring drops the
     /// application before the Store closes; it stays on the building thread.
-    pub(super) fn setup_app_state() -> (TempDir, ryeos_app::test_support::TestStateStore, AppState) {
+    pub(super) fn setup_app_state() -> (TempDir, ryeos_app::test_support::TestStateStore, AppState)
+    {
         let tmpdir = TempDir::new().unwrap();
         let runtime_db_path =
             ryeos_app::test_support::TestStateStore::runtime_state_dir(tmpdir.path())
@@ -2238,7 +2241,13 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = WriteBarrier::new();
-        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust)).unwrap();
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            tmpdir.path(),
+            signer,
+            write_barrier,
+            Arc::new(head_trust),
+        )
+        .unwrap();
         let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
@@ -2347,9 +2356,12 @@ mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-                )]),
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    Arc::new(
+                        ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
+                        ),
+                    ),
+                ]),
             ),
             provider_env: Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
@@ -6130,12 +6142,14 @@ mod tests {
         );
     }
 
-    async fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority_body() {
+    async fn internal_workload_callback_inherits_deadline_without_widening_settlement_authority_body()
+     {
         let (tmp, _state_owner, mut state) = setup_app_state();
         let thread_id = "T-workload-budget";
         create_running_test_thread(&state, thread_id);
         let ledger_owner =
-            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("workload-budget")).unwrap();
+            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("workload-budget"))
+                .unwrap();
         let ledger = ledger_owner.shared();
         let execution_budget_id = "execution-workload-budget";
         ledger

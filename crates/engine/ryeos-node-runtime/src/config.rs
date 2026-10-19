@@ -149,7 +149,7 @@ impl Config {
                 .app_root
                 .unwrap_or(Self::default_app_root()?));
         }
-        Ok(Self::default_app_root()?)
+        Self::default_app_root()
     }
 
     pub fn load(sources: &ConfigSources) -> Result<Self> {
@@ -551,7 +551,10 @@ mod tests {
         .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("re-run `ryeos init`"), "{message}");
-        assert!(message.contains(&config_path.display().to_string()), "{message}");
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "{message}"
+        );
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), stored);
     }
 }

@@ -750,8 +750,8 @@ impl Walker {
         // GraphStarted and its hooks remain ordered before this checkpoint:
         // it retains their checked accounting but does not claim to protect
         // a crash inside those earlier hooks.
-        if !resumed {
-            if let CommitResult::Terminate(result) = self
+        if !resumed
+            && let CommitResult::Terminate(result) = self
                 .write_checkpoint_or_error(
                     &graph_run_id,
                     &current,
@@ -763,9 +763,8 @@ impl Walker {
                     &inputs,
                 )
                 .await
-            {
-                return Ok(*result);
-            }
+        {
+            return Ok(*result);
         }
 
         // ── F3 main loop: run_node_body → commit_step ───────────

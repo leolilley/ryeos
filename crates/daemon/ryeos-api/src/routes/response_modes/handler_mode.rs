@@ -643,7 +643,8 @@ fn validate_request_config(
         return Err(RouteConfigError::InvalidSourceConfig {
             id: raw.id.clone(),
             src: "handler".into(),
-            reason: "objects_put_v1 is reserved for the exact objects/put JSON service route".into(),
+            reason: "objects_put_v1 is reserved for the exact objects/put JSON service route"
+                .into(),
         });
     }
     for header in &config.headers {
@@ -781,7 +782,8 @@ fn body_envelope(mode: &RawRequestBody, raw: &[u8]) -> Result<BodyEnvelope, Rout
     match mode {
         RawRequestBody::None => Ok(BodyEnvelope::None),
         RawRequestBody::ObjectsPutV1 => Err(RouteDispatchError::BadRequest(
-            "objects_put_v1 body profile is only valid for the objects/put JSON service route".into(),
+            "objects_put_v1 body profile is only valid for the objects/put JSON service route"
+                .into(),
         )),
         RawRequestBody::Json => {
             let json = serde_json::from_slice(raw).map_err(|err| {

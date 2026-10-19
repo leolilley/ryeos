@@ -112,7 +112,8 @@ pub(crate) fn open_oci_membership(init_pid: u32) -> Result<File, String> {
 fn observed_oci_membership(membership: &File) -> Result<std::path::PathBuf, String> {
     let relative = unified_cgroup_from_file(membership, OCI_INIT_SUBJECT)?;
     Ok(Path::new("/sys/fs/cgroup").join(
-        relative.strip_prefix("/")
+        relative
+            .strip_prefix("/")
             .map_err(|_| "OCI cgroup membership is not root-relative")?,
     ))
 }
@@ -180,8 +181,12 @@ pub(crate) fn prepare_oci_controller_root(
     }
     // The original held init is the sole direct member. Refuse unknown child
     // lifetimes before creating either selected leaf or changing limits.
-    if lifecycle.entries_no_follow_bounded(256).map_err(display)?.iter()
-        .any(|entry| entry.entry_type == crate::PinnedEntryType::Directory) {
+    if lifecycle
+        .entries_no_follow_bounded(256)
+        .map_err(display)?
+        .iter()
+        .any(|entry| entry.entry_type == crate::PinnedEntryType::Directory)
+    {
         return Err("OCI lifetime has unowned pre-existing descendant scopes".to_owned());
     }
     let node_resources = effective_oci_node_limits(&lifecycle_fd, requested_resources)?;
@@ -211,9 +216,14 @@ pub(crate) fn prepare_oci_controller_root(
     progress!(InitCreating, None, None);
     let init_name = child_name(OCI_INIT_LEAF)?;
     if unsafe { libc::mkdirat(lifecycle_fd.as_raw_fd(), init_name.as_ptr(), 0o700) } != 0 {
-        return Err(format!("create exact OCI init leaf: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "create exact OCI init leaf: {}",
+            io::Error::last_os_error()
+        ));
     }
-    let init_leaf = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?
+    let init_leaf = lifecycle
+        .open_child_directory(OCI_INIT_LEAF.as_ref())
+        .map_err(display)?
         .ok_or("created OCI init leaf disappeared")?;
     let init_fd = init_leaf.try_clone_descriptor().map_err(display)?;
     let init_identity = init_leaf.identity().map_err(display)?;
@@ -229,8 +239,16 @@ pub(crate) fn prepare_oci_controller_root(
     require_oci_membership(init_pid, &lifecycle_path)?;
     progress!(InitMoving, None, None);
     write_control(&init_placement, init_pid.to_string().as_bytes())?;
-    if !read_control(&open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?)?.trim().is_empty()
-        || read_control(&open_control(&init_fd, c"cgroup.procs", libc::O_RDONLY)?)?.trim() != expected_member {
+    if !read_control(&open_control(
+        &lifecycle_fd,
+        c"cgroup.procs",
+        libc::O_RDONLY,
+    )?)?
+    .trim()
+    .is_empty()
+        || read_control(&open_control(&init_fd, c"cgroup.procs", libc::O_RDONLY)?)?.trim()
+            != expected_member
+    {
         return Err("OCI init placement did not establish exact empty-direct lifecycle".to_owned());
     }
     if super::capture_exact_process_identity(init_pid, None)? != init_process {
@@ -298,7 +316,9 @@ pub(crate) fn prepare_oci_controller_root(
         Ok(())
     })();
     if let Err(error) = validation {
-        return Err(format!("{error}; original OCI preparation retained for ended-lifetime recovery"));
+        return Err(format!(
+            "{error}; original OCI preparation retained for ended-lifetime recovery"
+        ));
     }
     Ok(prepared)
 }
@@ -335,8 +355,15 @@ fn reconcile_unidentified_oci_controller_absence(
     let name = controller_path
         .file_name()
         .ok_or("OCI controller path has no child name")?;
-    if lifecycle.open_child_directory(name).map_err(display)?.is_none()
-        && lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?.is_none() {
+    if lifecycle
+        .open_child_directory(name)
+        .map_err(display)?
+        .is_none()
+        && lifecycle
+            .open_child_directory(OCI_INIT_LEAF.as_ref())
+            .map_err(display)?
+            .is_none()
+    {
         return Ok(());
     }
     Err(
@@ -367,7 +394,9 @@ pub(crate) fn retire_ended_oci_scopes(
     let name = controller_path
         .file_name()
         .ok_or("OCI controller path has no child name")?;
-    let init_leaf = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?;
+    let init_leaf = lifecycle
+        .open_child_directory(OCI_INIT_LEAF.as_ref())
+        .map_err(display)?;
     if let Some(init_leaf) = &init_leaf {
         if Some(init_leaf.identity().map_err(display)?) != init_identity {
             return Err("OCI init leaf was replaced before retirement".to_owned());
@@ -376,29 +405,43 @@ pub(crate) fn retire_ended_oci_scopes(
     }
     let controller = lifecycle.open_child_directory(name).map_err(display)?;
     if let Some(controller) = &controller {
-    if Some(controller.identity().map_err(display)?) != controller_identity {
-        return Err("OCI controller path was replaced before retirement".to_owned());
-    }
-    retire_empty_oci_descendants(controller)?;
-    let name = child_name(
-        name.to_str()
-            .ok_or("OCI controller child name is not UTF-8")?,
-    )?;
-    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-        return Err(format!(
-            "retire ended OCI controller root: {}",
-            io::Error::last_os_error()
-        ));
-    }
+        if Some(controller.identity().map_err(display)?) != controller_identity {
+            return Err("OCI controller path was replaced before retirement".to_owned());
+        }
+        retire_empty_oci_descendants(controller)?;
+        let name = child_name(
+            name.to_str()
+                .ok_or("OCI controller child name is not UTF-8")?,
+        )?;
+        if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
+            != 0
+        {
+            return Err(format!(
+                "retire ended OCI controller root: {}",
+                io::Error::last_os_error()
+            ));
+        }
     }
     if init_leaf.is_some() {
-        let current = lifecycle.open_child_directory(OCI_INIT_LEAF.as_ref()).map_err(display)?
+        let current = lifecycle
+            .open_child_directory(OCI_INIT_LEAF.as_ref())
+            .map_err(display)?
             .ok_or("OCI init leaf disappeared before removal")?;
         if Some(current.identity().map_err(display)?) != init_identity {
             return Err("OCI init leaf changed before exact removal".to_owned());
         }
-        if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), c"ryeos-init".as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-            return Err(format!("retire ended OCI init leaf: {}", io::Error::last_os_error()));
+        if unsafe {
+            libc::unlinkat(
+                lifecycle_fd.as_raw_fd(),
+                c"ryeos-init".as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } != 0
+        {
+            return Err(format!(
+                "retire ended OCI init leaf: {}",
+                io::Error::last_os_error()
+            ));
         }
     }
     Ok(())
@@ -582,11 +625,18 @@ pub(crate) fn install_oci_controller_mount(
     // the same exclusion as native lease owners, then close its snapshot
     // before any mount setup. This is a local fork-wait cap, not service
     // authority or a renewal of a caller's admitted operation window.
-    let fork_deadline = Instant::now().checked_add(Duration::from_secs(5))
+    let fork_deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
         .ok_or("OCI mount fork wait bound overflow")?;
     let fork_guard = crate::exec::quiesce_fork_sensitive_descriptors(fork_deadline)?;
-    let preserved = [namespace.as_raw_fd(), membership.as_raw_fd(), target.as_raw_fd(),
-        mount_tree.as_raw_fd()].into_iter().collect();
+    let preserved = [
+        namespace.as_raw_fd(),
+        membership.as_raw_fd(),
+        target.as_raw_fd(),
+        mount_tree.as_raw_fd(),
+    ]
+    .into_iter()
+    .collect();
     let child_close_fds = fork_guard.fork_child_close_fds(&preserved)?;
     // The parent write end stays open until the fork has happened or failed.
     // The installer never execs, so its copy closes only when it exits.
@@ -637,9 +687,7 @@ pub(crate) fn install_oci_controller_mount(
     let reaped = Instant::now()
         .checked_add(OCI_MOUNT_INSTALL_BOUND)
         .ok_or_else(|| "OCI mount installer bound overflow".to_owned())
-        .and_then(|bound| {
-            crate::exec::reap_fork_holder_until(child, bound, "OCI mount installer")
-        });
+        .and_then(|bound| crate::exec::reap_fork_holder_until(child, bound, "OCI mount installer"));
     // A reaped installer has closed its witness copy, so this reopens at
     // once. Without that proof the window strands with its fact instead of
     // letting an original lease close claim inherited locks settled.
@@ -689,7 +737,9 @@ pub(super) fn unified_cgroup_from_file(
     let raw = std::str::from_utf8(&bytes)
         .map_err(|_| format!("{subject} cgroup membership is not UTF-8"))?;
     if raw.len() > MAX_CONTROL_RECORD_BYTES {
-        return Err(format!("{subject} cgroup membership exceeds the bounded record"));
+        return Err(format!(
+            "{subject} cgroup membership exceeds the bounded record"
+        ));
     }
     let mut unified = raw.lines().filter_map(|line| line.strip_prefix("0::"));
     let value = unified
@@ -934,7 +984,14 @@ fn current_user_namespace_owner() -> Result<u32, String> {
     let namespace = File::open("/proc/self/ns/user")
         .map_err(|error| format!("open current user namespace: {error}"))?;
     let mut owner: libc::uid_t = 0;
-    if unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_OWNER_UID as _, &mut owner as *mut libc::uid_t) } != 0 {
+    if unsafe {
+        libc::ioctl(
+            namespace.as_raw_fd(),
+            NS_GET_OWNER_UID as _,
+            &mut owner as *mut libc::uid_t,
+        )
+    } != 0
+    {
         return Err(format!(
             "read current user namespace owner: {}",
             io::Error::last_os_error()
@@ -1193,7 +1250,8 @@ pub(crate) struct ControllerBootstrap {
 
 impl ControllerBootstrap {
     pub(crate) fn install_resource_limits(
-        &self, limits: super::scope::ProcessScopeResourceLimits,
+        &self,
+        limits: super::scope::ProcessScopeResourceLimits,
     ) -> Result<(), String> {
         // The enclosing delegation, not its controller leaf, dominates every
         // placement the controller may perform for itself and worker scopes.
@@ -1291,7 +1349,11 @@ pub(crate) fn controller_rlimit_plan(
 }
 
 fn display_rlimit(value: u64) -> String {
-    if value == libc::RLIM_INFINITY as u64 { "unlimited".to_owned() } else { value.to_string() }
+    if value == libc::RLIM_INFINITY as u64 {
+        "unlimited".to_owned()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Administrator-side, before credential drop: raising a hard ceiling needs
@@ -1308,11 +1370,20 @@ pub(crate) fn install_controller_rlimits(
     ];
     // The resource type differs between C libraries; let it be inferred.
     let current_rlimit = |resource, name: &str| -> Result<ProcessRlimit, String> {
-        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if unsafe { libc::getrlimit(resource, &mut limit) } != 0 {
-            return Err(format!("read controller {name}: {}", io::Error::last_os_error()));
+            return Err(format!(
+                "read controller {name}: {}",
+                io::Error::last_os_error()
+            ));
         }
-        Ok(ProcessRlimit { soft: limit.rlim_cur as u64, hard: limit.rlim_max as u64 })
+        Ok(ProcessRlimit {
+            soft: limit.rlim_cur as u64,
+            hard: limit.rlim_max as u64,
+        })
     };
     let memlock = current_rlimit(resources[0].0, resources[0].1)?;
     let nofile = current_rlimit(resources[1].0, resources[1].1)?;
@@ -1397,6 +1468,7 @@ pub(crate) struct SelectedCgroupPreparation {
 }
 
 impl SelectedCgroupPreparation {
+    #[cfg(test)]
     pub(crate) fn planned(
         name: &str,
         expected_parent: PinnedDirectoryIdentity,
@@ -1414,11 +1486,13 @@ impl SelectedCgroupPreparation {
         if let Some(limits) = limits {
             limits.validate()?;
         }
-        let limit_values = limits.map(|limits| [
-            limits.maximum_memory_bytes.to_string(),
-            "0".to_owned(),
-            limits.maximum_processes.to_string(),
-        ]);
+        let limit_values = limits.map(|limits| {
+            [
+                limits.maximum_memory_bytes.to_string(),
+                "0".to_owned(),
+                limits.maximum_processes.to_string(),
+            ]
+        });
         Ok(Self {
             name: name.to_owned(),
             name_c: child_name(name)?,
@@ -1469,7 +1543,10 @@ impl SelectedCgroupPreparation {
             self.created = true;
             Ok(())
         } else {
-            Err(format!("selected cgroup create: {}", io::Error::last_os_error()))
+            Err(format!(
+                "selected cgroup create: {}",
+                io::Error::last_os_error()
+            ))
         }
     }
 
@@ -1490,26 +1567,37 @@ impl SelectedCgroupPreparation {
         if !self.completed {
             return Err("selected native scope incomplete".into());
         }
-        self.identity.as_ref().ok_or("selected native identity absent".into())
+        self.identity
+            .as_ref()
+            .ok_or("selected native identity absent".into())
     }
 
     pub(crate) fn is_empty(&self) -> Result<bool, String> {
         self.identity()?;
-        let events = self.events.as_ref().ok_or("selected native events absent")?;
+        let events = self
+            .events
+            .as_ref()
+            .ok_or("selected native events absent")?;
         // Fixed-capacity one-read observation; no wait or new deadline.
         Ok(!parse_events(&read_control(events)?)?.populated)
     }
 
     pub(crate) fn launch_ready(&self) -> bool {
         self.require_created_incarnation().is_ok()
-            && self.completed && (self.limits.is_none() || self.limits_installed)
+            && self.completed
+            && (self.limits.is_none() || self.limits_installed)
     }
 
     fn install_selected_limits(&mut self) -> Result<(), String> {
         if self.limits.is_none() {
             return Ok(());
         }
-        if self.limits_started || self.limit_write_attempted.iter().any(|attempted| *attempted) {
+        if self.limits_started
+            || self
+                .limit_write_attempted
+                .iter()
+                .any(|attempted| *attempted)
+        {
             return Err("selected limits already attempted".into());
         }
         self.limits_started = true;
@@ -1519,24 +1607,63 @@ impl SelectedCgroupPreparation {
         }
         // All handles go straight into this SAME preallocated frame. Reuse the
         // pinned original child; no namespace reopen or replacement.
-        let directory = self.directory.as_ref().ok_or("selected limits directory absent")?;
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or("selected limits directory absent")?;
         // The descriptor is already held in PinnedDirectory. Its accessor
         // clones, so retain that acquired alias before any controller open.
         // This clone's slot is the original raw-file slot now empty after pin.
         self.directory_file = Some(directory.try_clone_descriptor().map_err(display)?);
-        let fd = self.directory_file.as_ref().ok_or("selected limits descriptor absent")?;
-        open_selected_control_into(fd, c"memory.max", libc::O_RDWR, &mut self.memory_limit, self.original)?;
-        open_selected_control_into(fd, c"memory.swap.max", libc::O_RDWR, &mut self.swap_limit, self.original)?;
-        open_selected_control_into(fd, c"pids.max", libc::O_RDWR, &mut self.process_limit, self.original)?;
-        let values = self.limit_values.as_ref().ok_or("selected limit values absent")?;
+        let fd = self
+            .directory_file
+            .as_ref()
+            .ok_or("selected limits descriptor absent")?;
+        open_selected_control_into(
+            fd,
+            c"memory.max",
+            libc::O_RDWR,
+            &mut self.memory_limit,
+            self.original,
+        )?;
+        open_selected_control_into(
+            fd,
+            c"memory.swap.max",
+            libc::O_RDWR,
+            &mut self.swap_limit,
+            self.original,
+        )?;
+        open_selected_control_into(
+            fd,
+            c"pids.max",
+            libc::O_RDWR,
+            &mut self.process_limit,
+            self.original,
+        )?;
+        let values = self
+            .limit_values
+            .as_ref()
+            .ok_or("selected limit values absent")?;
         for (index, control) in [
-            self.memory_limit.as_ref().ok_or("selected memory control absent")?,
-            self.swap_limit.as_ref().ok_or("selected swap control absent")?,
-            self.process_limit.as_ref().ok_or("selected process control absent")?,
-        ].into_iter().enumerate() {
+            self.memory_limit
+                .as_ref()
+                .ok_or("selected memory control absent")?,
+            self.swap_limit
+                .as_ref()
+                .ok_or("selected swap control absent")?,
+            self.process_limit
+                .as_ref()
+                .ok_or("selected process control absent")?,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             write_selected_limit_once(
-                control, &values[index], &mut self.limit_write_attempted[index],
-                &mut self.limit_readback[index], self.original,
+                control,
+                &values[index],
+                &mut self.limit_write_attempted[index],
+                &mut self.limit_readback[index],
+                self.original,
             )?;
         }
         if !self.is_empty()? {
@@ -1553,9 +1680,13 @@ impl SelectedCgroupPreparation {
         original: crate::time::MonotonicDeadline,
     ) -> Result<(), String> {
         self.identity()?;
-        let members = self.members.as_ref().ok_or("selected native members absent")?;
+        let members = self
+            .members
+            .as_ref()
+            .ok_or("selected native members absent")?;
         if membership_contains_with_expiry(
-            |buffer, offset| members.read_at(buffer, offset), pid,
+            |buffer, offset| members.read_at(buffer, offset),
+            pid,
             || original.has_elapsed(),
         )? {
             Ok(())
@@ -1624,7 +1755,12 @@ fn write_selected_limit_once(
     selected_allocation_live(original)?;
     *readback = Some(read_control(control)?);
     selected_allocation_live(original)?;
-    if readback.as_ref().ok_or("selected limit readback absent")?.trim() != value {
+    if readback
+        .as_ref()
+        .ok_or("selected limit readback absent")?
+        .trim()
+        != value
+    {
         return Err("selected resource ceiling did not retain exact value".into());
     }
     Ok(())
@@ -1650,10 +1786,15 @@ fn open_selected_control_into(
         )
     };
     if fd < 0 {
-        return Err(format!("selected control open: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "selected control open: {}",
+            io::Error::last_os_error()
+        ));
     }
     *destination = Some(unsafe { File::from_raw_fd(fd) });
-    let retained = destination.as_ref().ok_or("selected control installation absent")?;
+    let retained = destination
+        .as_ref()
+        .ok_or("selected control installation absent")?;
     require_cgroup2(retained)?;
     selected_allocation_live(original)
 }
@@ -1762,14 +1903,21 @@ impl DelegatedCgroup {
         if self.directory.identity().map_err(display)? != frame.expected_parent {
             return Err("selected parent incarnation changed".into());
         }
-        let parent = frame.parent.as_ref().ok_or("selected parent descriptor absent")?;
+        let parent = frame
+            .parent
+            .as_ref()
+            .ok_or("selected parent descriptor absent")?;
         require_cgroup2(parent)?;
         selected_create_open_stages(
             frame,
             |retained| unsafe {
                 // Parent presence was established before entering the stages.
                 libc::mkdirat(
-                    retained.parent.as_ref().expect("retained selected parent").as_raw_fd(),
+                    retained
+                        .parent
+                        .as_ref()
+                        .expect("retained selected parent")
+                        .as_raw_fd(),
                     retained.name_c.as_ptr(),
                     0o700,
                 )
@@ -1777,28 +1925,64 @@ impl DelegatedCgroup {
             |retained| {
                 let fd = unsafe {
                     libc::openat(
-                        retained.parent.as_ref().ok_or("selected parent descriptor absent")?.as_raw_fd(),
+                        retained
+                            .parent
+                            .as_ref()
+                            .ok_or("selected parent descriptor absent")?
+                            .as_raw_fd(),
                         retained.name_c.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW
-                            | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                        libc::O_RDONLY
+                            | libc::O_DIRECTORY
+                            | libc::O_NOFOLLOW
+                            | libc::O_CLOEXEC
+                            | libc::O_NONBLOCK,
                     )
                 };
                 if fd < 0 {
                     // Created-but-unpinned remains unresolved; no second lookup.
-                    return Err(format!("selected directory open: {}", io::Error::last_os_error()));
+                    return Err(format!(
+                        "selected directory open: {}",
+                        io::Error::last_os_error()
+                    ));
                 }
                 Ok(unsafe { File::from_raw_fd(fd) })
             },
             |retained| {
-                let directory = retained.directory_file.as_ref().ok_or("selected raw directory absent")?;
+                let directory = retained
+                    .directory_file
+                    .as_ref()
+                    .ok_or("selected raw directory absent")?;
                 require_cgroup2(directory)?;
-                open_selected_control_into(directory, c"cgroup.type", libc::O_RDONLY, &mut retained.domain, retained.original)?;
-                if read_control(retained.domain.as_ref().ok_or("selected domain control absent")?)?.trim() != "domain" {
+                open_selected_control_into(
+                    directory,
+                    c"cgroup.type",
+                    libc::O_RDONLY,
+                    &mut retained.domain,
+                    retained.original,
+                )?;
+                if read_control(
+                    retained
+                        .domain
+                        .as_ref()
+                        .ok_or("selected domain control absent")?,
+                )?
+                .trim()
+                    != "domain"
+                {
                     return Err("selected scope is not a domain".into());
                 }
                 retained.live()?;
-                open_selected_control_into(directory, c"cgroup.procs", libc::O_RDONLY, &mut retained.members, retained.original)?;
-                let members = retained.members.as_ref().ok_or("selected member control absent")?;
+                open_selected_control_into(
+                    directory,
+                    c"cgroup.procs",
+                    libc::O_RDONLY,
+                    &mut retained.members,
+                    retained.original,
+                )?;
+                let members = retained
+                    .members
+                    .as_ref()
+                    .ok_or("selected member control absent")?;
                 if membership_contains_with_expiry(
                     |buffer, offset| members.read_at(buffer, offset),
                     std::process::id(),
@@ -1812,26 +1996,65 @@ impl DelegatedCgroup {
         // Currently unreachable: no concrete creation-exclusion issuer exists.
         // Do not open writable controls, install limits or complete an observed
         // replacement. Existing downstream owners remain for a reviewed issuer.
-        let directory = frame.directory_file.as_ref().ok_or("selected raw directory absent")?;
-        open_selected_control_into(directory, c"cgroup.events", libc::O_RDONLY, &mut frame.events, frame.original)?;
-        open_selected_control_into(directory, c"cgroup.freeze", libc::O_RDWR, &mut frame.freeze, frame.original)?;
-        open_selected_control_into(directory, c"cgroup.kill", libc::O_WRONLY, &mut frame.kill, frame.original)?;
-        open_selected_control_into(directory, c"cgroup.procs", libc::O_WRONLY, &mut frame.placement, frame.original)?;
-        let events = parse_events(&read_control(frame.events.as_ref().ok_or("selected events absent")?)?)?;
+        let directory = frame
+            .directory_file
+            .as_ref()
+            .ok_or("selected raw directory absent")?;
+        open_selected_control_into(
+            directory,
+            c"cgroup.events",
+            libc::O_RDONLY,
+            &mut frame.events,
+            frame.original,
+        )?;
+        open_selected_control_into(
+            directory,
+            c"cgroup.freeze",
+            libc::O_RDWR,
+            &mut frame.freeze,
+            frame.original,
+        )?;
+        open_selected_control_into(
+            directory,
+            c"cgroup.kill",
+            libc::O_WRONLY,
+            &mut frame.kill,
+            frame.original,
+        )?;
+        open_selected_control_into(
+            directory,
+            c"cgroup.procs",
+            libc::O_WRONLY,
+            &mut frame.placement,
+            frame.original,
+        )?;
+        let events = parse_events(&read_control(
+            frame.events.as_ref().ok_or("selected events absent")?,
+        )?)?;
         if events.populated || events.frozen {
             return Err("selected new scope is populated or frozen".into());
         }
         frame.live()?;
-        let path = frame.diagnostic_path.take().ok_or("selected diagnostic path absent")?;
+        let path = frame
+            .diagnostic_path
+            .take()
+            .ok_or("selected diagnostic path absent")?;
         PinnedDirectory::adopt_retained_directory_into(
             path,
             &mut frame.directory_file,
             &mut frame.directory,
-        ).map_err(display)?;
+        )
+        .map_err(display)?;
         frame.live()?;
-        let retained = frame.directory.as_ref().ok_or("selected exact directory absent")?;
+        let retained = frame
+            .directory
+            .as_ref()
+            .ok_or("selected exact directory absent")?;
         let entries = retained.entries_no_follow_bounded(1024).map_err(display)?;
-        if entries.iter().any(|entry| entry.entry_type == crate::PinnedEntryType::Directory) {
+        if entries
+            .iter()
+            .any(|entry| entry.entry_type == crate::PinnedEntryType::Directory)
+        {
             return Err("selected scope must be an exact leaf".into());
         }
         let identity = CgroupIdentity {
@@ -1840,8 +2063,11 @@ impl DelegatedCgroup {
             name: frame.name.clone(),
         };
         frame.live()?;
-        if frame.members.is_none() || frame.events.is_none() || frame.freeze.is_none()
-            || frame.kill.is_none() || frame.placement.is_none()
+        if frame.members.is_none()
+            || frame.events.is_none()
+            || frame.freeze.is_none()
+            || frame.kill.is_none()
+            || frame.placement.is_none()
         {
             return Err("selected native control frame incomplete".into());
         }
@@ -2121,16 +2347,18 @@ impl ProcessCgroup {
             child_disposal_proved = true;
             let remaining = || deadline.saturating_duration_since(Instant::now());
             if !barrier {
-                return self.terminate_and_wait(remaining()).map(|()| ProbeBarrier::NotRequested);
+                return self
+                    .terminate_and_wait(remaining())
+                    .map(|()| ProbeBarrier::NotRequested);
             }
             barrier_requested = true;
             match self.freeze(remaining()) {
                 Ok(frozen) => frozen.terminate(remaining()).map(|()| ProbeBarrier::Held),
                 // The kill does not depend on the barrier, so the probe still
                 // proves termination; only quiescence is withheld.
-                Err(refusal) => {
-                    self.terminate_and_wait(remaining()).map(|()| ProbeBarrier::Refused(refusal))
-                }
+                Err(refusal) => self
+                    .terminate_and_wait(remaining())
+                    .map(|()| ProbeBarrier::Refused(refusal)),
             }
         })();
         drop(reader);
@@ -2789,17 +3017,24 @@ pub(super) mod tests {
         for (relative, expected) in [
             ("/lillux-host-services/ryeos-fixture/controller", true),
             ("/lillux-host-services/ryeos-fixture", false),
-            ("/lillux-host-services/ryeos-fixture/controller/worker", false),
+            (
+                "/lillux-host-services/ryeos-fixture/controller/worker",
+                false,
+            ),
             ("/lillux-host-services/ryeos-other/controller", false),
             ("/user.slice/user-1000.slice/session-1.scope", false),
         ] {
             let mut fixture = tempfile::NamedTempFile::new().unwrap();
-            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes()).unwrap();
+            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes())
+                .unwrap();
             let result = require_controller_membership_file(fixture.as_file(), delegation);
             assert_eq!(result.is_ok(), expected, "{relative}: {result:?}");
             if let Err(error) = result {
                 assert!(error.contains("supervised launch refused"), "{error}");
-                assert!(error.contains(&format!("/sys/fs/cgroup{relative}")), "{error}");
+                assert!(
+                    error.contains(&format!("/sys/fs/cgroup{relative}")),
+                    "{error}"
+                );
                 assert!(error.contains("ryeos-fixture/controller"), "{error}");
             }
         }
@@ -2814,10 +3049,30 @@ pub(super) mod tests {
             ("         0          0 4294967295\n", RUNTIME, true, ""),
             ("0 0 4294967295", RUNTIME, true, ""),
             ("         0     100000      65536\n", OVERFLOW, true, ""),
-            ("         0       1000          1\n      1000     100000      65536\n", RUNTIME, true, ""),
-            ("      1000       1000          1\n", ACCOUNT, false, "uid 0 is not mapped"),
-            ("         0     100000      65536\n", ACCOUNT, false, "created by the controller account"),
-            ("         0          0 4294967295\n", ACCOUNT, false, "created by the controller account"),
+            (
+                "         0       1000          1\n      1000     100000      65536\n",
+                RUNTIME,
+                true,
+                "",
+            ),
+            (
+                "      1000       1000          1\n",
+                ACCOUNT,
+                false,
+                "uid 0 is not mapped",
+            ),
+            (
+                "         0     100000      65536\n",
+                ACCOUNT,
+                false,
+                "created by the controller account",
+            ),
+            (
+                "         0          0 4294967295\n",
+                ACCOUNT,
+                false,
+                "created by the controller account",
+            ),
             ("", RUNTIME, false, "empty"),
             ("0 0", RUNTIME, false, "malformed"),
         ] {
@@ -2839,7 +3094,8 @@ pub(super) mod tests {
         let uid = unsafe { libc::geteuid() };
         let error = require_current_process_in_controller(delegation, uid).unwrap_err();
         assert!(error.contains("supervised launch refused"), "{error}");
-        let error = require_current_process_in_controller(delegation, uid.wrapping_add(1)).unwrap_err();
+        let error =
+            require_current_process_in_controller(delegation, uid.wrapping_add(1)).unwrap_err();
         assert!(error.contains("controller account"), "{error}");
     }
 
@@ -2855,12 +3111,30 @@ pub(super) mod tests {
         // runsvdir on the reference host: 8 MiB memlock, 1024/4096 descriptors.
         let plan = controller_rlimit_plan(
             limits,
-            ProcessRlimit { soft: 8 * MIB, hard: 8 * MIB },
-            ProcessRlimit { soft: 1024, hard: 4096 },
+            ProcessRlimit {
+                soft: 8 * MIB,
+                hard: 8 * MIB,
+            },
+            ProcessRlimit {
+                soft: 1024,
+                hard: 4096,
+            },
         );
         // Bounded by the fixed controller ceiling, not the whole envelope.
-        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: ceiling, hard: ceiling }));
-        assert_eq!(plan.nofile, Some(ProcessRlimit { soft: 4096, hard: 4096 }));
+        assert_eq!(
+            plan.memlock,
+            Some(ProcessRlimit {
+                soft: ceiling,
+                hard: ceiling
+            })
+        );
+        assert_eq!(
+            plan.nofile,
+            Some(ProcessRlimit {
+                soft: 4096,
+                hard: 4096
+            })
+        );
         assert!(ceiling > 64 * MIB && ceiling < limits.maximum_memory_bytes);
         // A smaller envelope bounds the lock ceiling.
         let small = super::super::scope::ProcessScopeResourceLimits {
@@ -2869,30 +3143,69 @@ pub(super) mod tests {
         };
         let plan = controller_rlimit_plan(
             small,
-            ProcessRlimit { soft: 8 * MIB, hard: 8 * MIB },
-            ProcessRlimit { soft: 1024, hard: 1024 },
+            ProcessRlimit {
+                soft: 8 * MIB,
+                hard: 8 * MIB,
+            },
+            ProcessRlimit {
+                soft: 1024,
+                hard: 1024,
+            },
         );
-        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: 128 * MIB, hard: 128 * MIB }));
+        assert_eq!(
+            plan.memlock,
+            Some(ProcessRlimit {
+                soft: 128 * MIB,
+                hard: 128 * MIB
+            })
+        );
         assert_eq!(plan.nofile, None);
         // A higher inherited hard ceiling is kept; a huge descriptor hard
         // limit raises the soft limit only to the named ceiling.
         let plan = controller_rlimit_plan(
             limits,
-            ProcessRlimit { soft: 8 * MIB, hard: infinity },
-            ProcessRlimit { soft: 1024, hard: 524_288 },
+            ProcessRlimit {
+                soft: 8 * MIB,
+                hard: infinity,
+            },
+            ProcessRlimit {
+                soft: 1024,
+                hard: 524_288,
+            },
         );
-        assert_eq!(plan.memlock, Some(ProcessRlimit { soft: ceiling, hard: infinity }));
-        assert_eq!(plan.nofile, Some(ProcessRlimit {
-            soft: super::super::CONTROLLER_NOFILE_SOFT_CEILING,
-            hard: 524_288,
-        }));
+        assert_eq!(
+            plan.memlock,
+            Some(ProcessRlimit {
+                soft: ceiling,
+                hard: infinity
+            })
+        );
+        assert_eq!(
+            plan.nofile,
+            Some(ProcessRlimit {
+                soft: super::super::CONTROLLER_NOFILE_SOFT_CEILING,
+                hard: 524_288,
+            })
+        );
         // Already sufficient or unlimited ceilings are left untouched.
         let plan = controller_rlimit_plan(
             limits,
-            ProcessRlimit { soft: infinity, hard: infinity },
-            ProcessRlimit { soft: 65536, hard: 1_048_576 },
+            ProcessRlimit {
+                soft: infinity,
+                hard: infinity,
+            },
+            ProcessRlimit {
+                soft: 65536,
+                hard: 1_048_576,
+            },
         );
-        assert_eq!(plan, ControllerRlimitPlan { memlock: None, nofile: None });
+        assert_eq!(
+            plan,
+            ControllerRlimitPlan {
+                memlock: None,
+                nofile: None
+            }
+        );
     }
 
     #[test]
@@ -2906,20 +3219,25 @@ pub(super) mod tests {
             (format!("/container/{OCI_INIT_LEAF}"), true),
         ] {
             let mut fixture = tempfile::NamedTempFile::new().unwrap();
-            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes()).unwrap();
-            assert_eq!(require_prepared_oci_init_membership_file(fixture.as_file(), lifecycle).is_ok(), expected);
+            std::io::Write::write_all(fixture.as_file_mut(), format!("0::{relative}\n").as_bytes())
+                .unwrap();
+            assert_eq!(
+                require_prepared_oci_init_membership_file(fixture.as_file(), lifecycle).is_ok(),
+                expected
+            );
         }
     }
-
 
     // Test-only injection entry. Uses the SAME production stage sequence and
     // actual temporary directory/File owners, without cgroup/native positives.
     fn selected_stage_fixture(parent: &Path) -> SelectedCgroupPreparation {
         let pin = PinnedDirectory::open(parent).unwrap().unwrap();
         let mut frame = SelectedCgroupPreparation::planned(
-            "created", pin.identity().unwrap(),
+            "created",
+            pin.identity().unwrap(),
             crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).unwrap();
+        )
+        .unwrap();
         frame.parent = Some(File::open(parent).unwrap());
         frame
     }
@@ -2948,12 +3266,21 @@ pub(super) mod tests {
         assert!(outcome.is_err());
         assert!(frame.created && frame.directory_file.is_none());
         assert_eq!(frame.parent.as_ref().unwrap().as_raw_fd(), parent_fd);
-        assert!(selected_create_open_stages(
-            &mut frame,
-            |_| { mkdirs.set(mkdirs.get() + 1); 0 },
-            |_| { opens.set(opens.get() + 1); Err("second open".into()) },
-            |_| Ok(()),
-        ).is_err());
+        assert!(
+            selected_create_open_stages(
+                &mut frame,
+                |_| {
+                    mkdirs.set(mkdirs.get() + 1);
+                    0
+                },
+                |_| {
+                    opens.set(opens.get() + 1);
+                    Err("second open".into())
+                },
+                |_| Ok(()),
+            )
+            .is_err()
+        );
         assert_eq!((mkdirs.get(), opens.get()), (1, 1));
         assert!(frame.complete().is_none() && !frame.launch_ready());
         assert!(frame.is_empty().is_err());
@@ -2975,7 +3302,11 @@ pub(super) mod tests {
             },
             |_| {
                 // Keep original inode alive so replacement cannot reuse it.
-                std::fs::rename(fixture.path().join("created"), fixture.path().join("displaced")).unwrap();
+                std::fs::rename(
+                    fixture.path().join("created"),
+                    fixture.path().join("displaced"),
+                )
+                .unwrap();
                 std::fs::create_dir(fixture.path().join("created")).unwrap();
                 let observed = File::open(fixture.path().join("created")).unwrap();
                 opened_fd.set(observed.as_raw_fd());
@@ -2988,9 +3319,16 @@ pub(super) mod tests {
                 Ok(())
             },
         );
-        assert!(outcome.unwrap_err().contains("created incarnation unjoined"));
+        assert!(
+            outcome
+                .unwrap_err()
+                .contains("created incarnation unjoined")
+        );
         assert!(frame.created && frame.attempted);
-        assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), opened_fd.get());
+        assert_eq!(
+            frame.directory_file.as_ref().unwrap().as_raw_fd(),
+            opened_fd.get()
+        );
         assert!(fixture.path().join("displaced").is_dir());
         assert!(fixture.path().join("created").is_dir());
         assert!(frame.complete().is_none() && !frame.launch_ready());
@@ -3016,7 +3354,9 @@ pub(super) mod tests {
                     opened_fd.set(retained.directory_file.as_ref().unwrap().as_raw_fd());
                     if !fail_member {
                         // Actual pinned-parent identity mismatch after acquisition.
-                        let child = PinnedDirectory::open(&fixture.path().join("created")).unwrap().unwrap();
+                        let child = PinnedDirectory::open(&fixture.path().join("created"))
+                            .unwrap()
+                            .unwrap();
                         if child.identity().unwrap() != retained.expected_parent {
                             return Err("injected identity mismatch".into());
                         }
@@ -3039,7 +3379,10 @@ pub(super) mod tests {
             );
             assert!(outcome.is_err());
             assert!(frame.created && frame.attempted);
-            assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), opened_fd.get());
+            assert_eq!(
+                frame.directory_file.as_ref().unwrap().as_raw_fd(),
+                opened_fd.get()
+            );
             if fail_member {
                 assert_eq!(frame.members.as_ref().unwrap().as_raw_fd(), member_fd.get());
             }
@@ -3078,12 +3421,21 @@ pub(super) mod tests {
             );
             assert!(outcome.is_err());
             let fd = frame.directory_file.as_ref().unwrap().as_raw_fd();
-            assert!(selected_create_open_stages(
-                &mut frame,
-                |_| { calls.set(calls.get() + 1); 0 },
-                |_| { calls.set(calls.get() + 1); Err("second open".into()) },
-                |_| Ok(()),
-            ).is_err());
+            assert!(
+                selected_create_open_stages(
+                    &mut frame,
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        0
+                    },
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        Err("second open".into())
+                    },
+                    |_| Ok(()),
+                )
+                .is_err()
+            );
             assert_eq!(calls.get(), 2);
             assert_eq!(frame.directory_file.as_ref().unwrap().as_raw_fd(), fd);
             assert!(frame.created && frame.complete().is_none() && !frame.launch_ready());
@@ -3100,16 +3452,28 @@ pub(super) mod tests {
         let mut readback = None;
         // Actual read-only temporary descriptor causes the shared writer to
         // fail; no kernel cgroup/controller or resource positive is supplied.
-        assert!(write_selected_limit_once(&retained, "42", &mut attempted, &mut readback, original).is_err());
+        assert!(
+            write_selected_limit_once(&retained, "42", &mut attempted, &mut readback, original)
+                .is_err()
+        );
         assert!(attempted && readback.is_none());
         assert_eq!(retained.as_raw_fd(), fd);
-        assert!(write_selected_limit_once(&retained, "84", &mut attempted, &mut readback, original).is_err());
+        assert!(
+            write_selected_limit_once(&retained, "84", &mut attempted, &mut readback, original)
+                .is_err()
+        );
         assert_eq!(retained.as_raw_fd(), fd);
         let mut untouched = false;
-        assert!(write_selected_limit_once(
-            &retained, "42", &mut untouched, &mut readback,
-            crate::time::MonotonicDeadline::after(Duration::ZERO),
-        ).is_err());
+        assert!(
+            write_selected_limit_once(
+                &retained,
+                "42",
+                &mut untouched,
+                &mut readback,
+                crate::time::MonotonicDeadline::after(Duration::ZERO),
+            )
+            .is_err()
+        );
         assert!(!untouched && readback.is_none());
     }
 
@@ -3118,10 +3482,14 @@ pub(super) mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let control = tempfile::NamedTempFile::new().unwrap();
         let pin = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
-        let mut frame = Arc::new(SelectedCgroupPreparation::planned(
-            "unwind-files-only", pin.identity().unwrap(),
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).unwrap());
+        let mut frame = Arc::new(
+            SelectedCgroupPreparation::planned(
+                "unwind-files-only",
+                pin.identity().unwrap(),
+                crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            )
+            .unwrap(),
+        );
         let address = Arc::as_ptr(&frame);
         let parent_fd = std::cell::Cell::new(-1);
         let control_fd = std::cell::Cell::new(-1);
@@ -3149,16 +3517,28 @@ pub(super) mod tests {
         std::fs::write(fixture.path().join("events"), b"fixture").unwrap();
         let directory = File::open(fixture.path()).unwrap();
         let mut retained = None;
-        assert!(open_selected_control_into(
-            &directory, c"events", libc::O_RDONLY, &mut retained,
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).is_err());
+        assert!(
+            open_selected_control_into(
+                &directory,
+                c"events",
+                libc::O_RDONLY,
+                &mut retained,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            )
+            .is_err()
+        );
         let fd = retained.as_ref().unwrap().as_raw_fd();
         let mut later = None;
-        assert!(open_selected_control_into(
-            &directory, c"absent-later-control", libc::O_RDONLY, &mut later,
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).is_err());
+        assert!(
+            open_selected_control_into(
+                &directory,
+                c"absent-later-control",
+                libc::O_RDONLY,
+                &mut later,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            )
+            .is_err()
+        );
         assert_eq!(retained.as_ref().unwrap().as_raw_fd(), fd);
         assert!(retained.as_ref().unwrap().metadata().unwrap().is_file());
         assert!(later.is_none());
@@ -3167,14 +3547,23 @@ pub(super) mod tests {
     #[test]
     fn selected_each_control_stage_keeps_fd_before_validation_refusal() {
         let fixture = tempfile::tempdir().unwrap();
-        for name in ["cgroup.type", "cgroup.procs", "cgroup.events", "cgroup.freeze", "cgroup.kill"] {
+        for name in [
+            "cgroup.type",
+            "cgroup.procs",
+            "cgroup.events",
+            "cgroup.freeze",
+            "cgroup.kill",
+        ] {
             std::fs::write(fixture.path().join(name), b"fixture").unwrap();
         }
         let pin = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
         let original = crate::time::MonotonicDeadline::after(Duration::from_secs(5));
         let mut frame = SelectedCgroupPreparation::planned(
-            "stage-files-only", pin.identity().unwrap(), original,
-        ).unwrap();
+            "stage-files-only",
+            pin.identity().unwrap(),
+            original,
+        )
+        .unwrap();
         frame.directory_file = Some(File::open(fixture.path()).unwrap());
         let directory = frame.directory_file.as_ref().unwrap();
         for (name, access, slot) in [
@@ -3201,16 +3590,28 @@ pub(super) mod tests {
         let directory = File::open(fixture.path()).unwrap();
         let mut retained = Some(File::open(fixture.path()).unwrap());
         let fd = retained.as_ref().unwrap().as_raw_fd();
-        assert!(open_selected_control_into(
-            &directory, c"absent", libc::O_RDONLY, &mut retained,
-            crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).is_err());
+        assert!(
+            open_selected_control_into(
+                &directory,
+                c"absent",
+                libc::O_RDONLY,
+                &mut retained,
+                crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
+            )
+            .is_err()
+        );
         assert_eq!(retained.as_ref().unwrap().as_raw_fd(), fd);
         let mut empty = None;
-        assert!(open_selected_control_into(
-            &directory, c"absent", libc::O_RDONLY, &mut empty,
-            crate::time::MonotonicDeadline::after(Duration::ZERO),
-        ).is_err());
+        assert!(
+            open_selected_control_into(
+                &directory,
+                c"absent",
+                libc::O_RDONLY,
+                &mut empty,
+                crate::time::MonotonicDeadline::after(Duration::ZERO),
+            )
+            .is_err()
+        );
         assert!(empty.is_none());
     }
 
@@ -3219,9 +3620,11 @@ pub(super) mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let parent = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
         let mut frame = SelectedCgroupPreparation::planned(
-            "stage-fixture", parent.identity().unwrap(),
+            "stage-fixture",
+            parent.identity().unwrap(),
             crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).unwrap();
+        )
+        .unwrap();
         frame.parent = Some(File::open(fixture.path()).unwrap());
         let fd = frame.parent.as_ref().unwrap().as_raw_fd();
         frame.begin_attempt().unwrap();
@@ -3243,9 +3646,11 @@ pub(super) mod tests {
             directory: PinnedDirectory::open(fixture.path()).unwrap().unwrap(),
         };
         let mut frame = SelectedCgroupPreparation::planned(
-            "no-cgroup-create", parent.identity().unwrap(),
+            "no-cgroup-create",
+            parent.identity().unwrap(),
             crate::time::MonotonicDeadline::after(Duration::from_secs(5)),
-        ).unwrap();
+        )
+        .unwrap();
         // Ordinary filesystem fails cgroup qualification before mkdir.
         assert!(parent.create_into_selected_slot(&mut frame).is_err());
         let fd = frame.parent.as_ref().unwrap().as_raw_fd();
@@ -3534,7 +3939,9 @@ pub(super) mod tests {
         // A probe must obey the existing daemon fork/descriptor authority,
         // even though it never runs a workload or executes an image.
         let lease = crate::try_retain_fork_sensitive_descriptors().unwrap();
-        let refused = sibling.probe_lifecycle(Duration::from_secs(1), true).unwrap_err();
+        let refused = sibling
+            .probe_lifecycle(Duration::from_secs(1), true)
+            .unwrap_err();
         assert!(
             refused.contains("calling thread retains fork-sensitive descriptor authority"),
             "{refused}"
@@ -3548,7 +3955,9 @@ pub(super) mod tests {
             .create(&format!("{name}-unfrozen"), Duration::from_secs(5))
             .unwrap();
         assert_eq!(
-            unfrozen.probe_lifecycle(Duration::from_secs(5), false).unwrap(),
+            unfrozen
+                .probe_lifecycle(Duration::from_secs(5), false)
+                .unwrap(),
             super::super::scope::ProbeBarrier::NotRequested
         );
         assert_eq!(read_control(&unfrozen.freeze).unwrap().trim(), "0");
@@ -3795,46 +4204,50 @@ pub(super) mod tests {
 // One physical limit installer shared by execution and controller leaves.
 // The caller supplies the exact retained leaf and its admission authority.
 fn install_empty_scope_resource_limits(
-    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
 ) -> Result<(), String> {
-        limits.validate()?;
-        let events = open_control(directory, c"cgroup.events", libc::O_RDONLY)?;
-        if parse_events(&read_control(&events)?)?.populated {
-            return Err("cannot change resource limits on a populated process scope".to_owned());
+    limits.validate()?;
+    let events = open_control(directory, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("cannot change resource limits on a populated process scope".to_owned());
+    }
+    // Open every required controller before the first mutation. A host
+    // that did not delegate memory and pids cannot silently downgrade the
+    // admitted product to rlimits or an unbounded cgroup.
+    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
+    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
+    let processes = open_control(directory, c"pids.max", libc::O_RDWR)?;
+    for (control, name, value) in [
+        (
+            &memory,
+            "memory.max",
+            limits.maximum_memory_bytes.to_string(),
+        ),
+        // The memory ceiling includes no separately available swap budget.
+        (&swap, "memory.swap.max", "0".to_owned()),
+        (&processes, "pids.max", limits.maximum_processes.to_string()),
+    ] {
+        write_control(control, value.as_bytes())?;
+        if read_control(control)?.trim() != value {
+            return Err(format!("{name} did not retain the exact resource ceiling"));
         }
-        // Open every required controller before the first mutation. A host
-        // that did not delegate memory and pids cannot silently downgrade the
-        // admitted product to rlimits or an unbounded cgroup.
-        let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
-        let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
-        let processes = open_control(directory, c"pids.max", libc::O_RDWR)?;
-        for (control, name, value) in [
-            (
-                &memory,
-                "memory.max",
-                limits.maximum_memory_bytes.to_string(),
-            ),
-            // The memory ceiling includes no separately available swap budget.
-            (&swap, "memory.swap.max", "0".to_owned()),
-            (&processes, "pids.max", limits.maximum_processes.to_string()),
-        ] {
-            write_control(control, value.as_bytes())?;
-            if read_control(control)?.trim() != value {
-                return Err(format!("{name} did not retain the exact resource ceiling"));
-            }
-        }
-        if parse_events(&read_control(&events)?)?.populated {
-            return Err("process scope became populated during resource configuration".to_owned());
-        }
-        Ok(())
+    }
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("process scope became populated during resource configuration".to_owned());
+    }
+    Ok(())
 }
 
 fn require_protected_ancestor_placement(directory: &File) -> Result<(), String> {
     let metadata = directory.metadata().map_err(display)?;
     let placement = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
     let control = placement.metadata().map_err(display)?;
-    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0
-        || control.uid() != 0 || control.mode() & 0o022 != 0 {
+    if metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || control.uid() != 0
+        || control.mode() & 0o022 != 0
+    {
         return Err("outside node ancestor placement must remain administrator-only".to_owned());
     }
     Ok(())
@@ -3845,14 +4258,17 @@ fn require_protected_node_limit_controls(directory: &File) -> Result<(), String>
         let control = open_control(directory, name, libc::O_RDONLY)?;
         let metadata = control.metadata().map_err(display)?;
         if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err("enclosing node resource controls must remain administrator-owned".to_owned());
+            return Err(
+                "enclosing node resource controls must remain administrator-owned".to_owned(),
+            );
         }
     }
     Ok(())
 }
 
 fn require_scope_resource_limits(
-    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
 ) -> Result<(), String> {
     limits.validate()?;
     for (name, expected) in [
@@ -3868,7 +4284,10 @@ fn require_scope_resource_limits(
     Ok(())
 }
 
-fn enable_node_resource_controllers(directory: &File, actual_cgroup_root: bool) -> Result<(), String> {
+fn enable_node_resource_controllers(
+    directory: &File,
+    actual_cgroup_root: bool,
+) -> Result<(), String> {
     let available = open_control(directory, c"cgroup.controllers", libc::O_RDONLY)?;
     let subtree = open_control(directory, c"cgroup.subtree_control", libc::O_RDWR)?;
     let metadata = subtree.metadata().map_err(display)?;
@@ -3876,11 +4295,19 @@ fn enable_node_resource_controllers(directory: &File, actual_cgroup_root: bool) 
         return Err("node subtree controller selection must remain administrator-owned".to_owned());
     }
     let available = read_control(&available)?;
-    if !["memory", "pids"].iter().all(|required| available.split_ascii_whitespace().any(|name| name == *required)) {
+    if !["memory", "pids"].iter().all(|required| {
+        available
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
         return Err("node enclosing resource controllers are not available".to_owned());
     }
     let enabled = read_control(&subtree)?;
-    if ["memory", "pids"].iter().all(|required| enabled.split_ascii_whitespace().any(|name| name == *required)) {
+    if ["memory", "pids"].iter().all(|required| {
+        enabled
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
         return Ok(());
     }
     if !actual_cgroup_root {
@@ -3891,53 +4318,83 @@ fn enable_node_resource_controllers(directory: &File, actual_cgroup_root: bool) 
     }
     write_control(&subtree, b"+memory +pids")?;
     let enabled = read_control(&subtree)?;
-    if !["memory", "pids"].iter().all(|required| enabled.split_ascii_whitespace().any(|name| name == *required)) {
+    if !["memory", "pids"].iter().all(|required| {
+        enabled
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
         return Err("node memory/process controllers were not retained".to_owned());
     }
     Ok(())
 }
 
 fn effective_oci_node_limits(
-    directory: &File, requested: super::scope::ProcessScopeResourceLimits,
+    directory: &File,
+    requested: super::scope::ProcessScopeResourceLimits,
 ) -> Result<super::scope::ProcessScopeResourceLimits, String> {
     requested.validate()?;
     require_protected_node_limit_controls(directory)?;
     let finite_min = |name: &CStr, requested: u64| -> Result<u64, String> {
         let control = open_control(directory, name, libc::O_RDONLY)?;
         let current = read_control(&control)?;
-        if current.trim() == "max" { return Ok(requested); }
-        let current: u64 = current.trim().parse().map_err(|_| "invalid existing OCI resource ceiling")?;
-        if current == 0 { return Err("existing OCI resource ceiling is zero".to_owned()); }
+        if current.trim() == "max" {
+            return Ok(requested);
+        }
+        let current: u64 = current
+            .trim()
+            .parse()
+            .map_err(|_| "invalid existing OCI resource ceiling")?;
+        if current == 0 {
+            return Err("existing OCI resource ceiling is zero".to_owned());
+        }
         Ok(current.min(requested))
     };
     let limits = super::scope::ProcessScopeResourceLimits {
         maximum_memory_bytes: finite_min(c"memory.max", requested.maximum_memory_bytes)?,
-        maximum_processes: u32::try_from(finite_min(c"pids.max", u64::from(requested.maximum_processes))?)
-            .map_err(|_| "effective OCI process ceiling overflow")?,
+        maximum_processes: u32::try_from(finite_min(
+            c"pids.max",
+            u64::from(requested.maximum_processes),
+        )?)
+        .map_err(|_| "effective OCI process ceiling overflow")?,
     };
-    for (name, maximum) in [(c"memory.current", limits.maximum_memory_bytes),
-        (c"pids.current", u64::from(limits.maximum_processes)), (c"memory.swap.current", 0)] {
-        let usage: u64 = read_control(&open_control(directory, name, libc::O_RDONLY)?)?.trim()
-            .parse().map_err(|_| "invalid OCI resource usage")?;
-        if usage > maximum { return Err("held OCI usage exceeds effective node envelope".to_owned()); }
+    for (name, maximum) in [
+        (c"memory.current", limits.maximum_memory_bytes),
+        (c"pids.current", u64::from(limits.maximum_processes)),
+        (c"memory.swap.current", 0),
+    ] {
+        let usage: u64 = read_control(&open_control(directory, name, libc::O_RDONLY)?)?
+            .trim()
+            .parse()
+            .map_err(|_| "invalid OCI resource usage")?;
+        if usage > maximum {
+            return Err("held OCI usage exceeds effective node envelope".to_owned());
+        }
     }
     Ok(limits)
 }
 
 fn install_held_oci_node_limits(
-    directory: &File, limits: super::scope::ProcessScopeResourceLimits,
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
 ) -> Result<(), String> {
     // Only the original held-init prestart path uses this populated-subtree
     // installer, after proving its exact init leaf and no foreign descendants.
     let effective = effective_oci_node_limits(directory, limits)?;
-    if effective != limits { return Err("OCI resource ceiling changed during preparation".to_owned()); }
+    if effective != limits {
+        return Err("OCI resource ceiling changed during preparation".to_owned());
+    }
     let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
     let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
     let pids = open_control(directory, c"pids.max", libc::O_RDWR)?;
-    for (control, value) in [(&memory, limits.maximum_memory_bytes.to_string()),
-        (&swap, "0".to_owned()), (&pids, limits.maximum_processes.to_string())] {
+    for (control, value) in [
+        (&memory, limits.maximum_memory_bytes.to_string()),
+        (&swap, "0".to_owned()),
+        (&pids, limits.maximum_processes.to_string()),
+    ] {
         write_control(control, value.as_bytes())?;
-        if read_control(control)?.trim() != value { return Err("OCI effective ceiling was not retained".to_owned()); }
+        if read_control(control)?.trim() != value {
+            return Err("OCI effective ceiling was not retained".to_owned());
+        }
     }
     require_scope_resource_limits(directory, limits)
 }

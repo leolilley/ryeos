@@ -25,7 +25,10 @@ const SCHEDULER_SERVICE_REFS: [&str; 7] = [
 /// without the scheduler refuses a composition that selects it instead of
 /// silently running scheduler-free; it proceeds scheduler-free only when the
 /// composition does not select the scheduler.
-pub fn scheduler_selection_for_build(composition_selects: bool, build_has_scheduler: bool) -> Result<bool> {
+pub fn scheduler_selection_for_build(
+    composition_selects: bool,
+    build_has_scheduler: bool,
+) -> Result<bool> {
     anyhow::ensure!(
         build_has_scheduler || !composition_selects,
         "this build lacks the scheduler but the installed composition selects it; rebuild with the `scheduling` feature, or switch the node to a scheduler-free profile with `ryeos node reset policy-generation`"
@@ -40,7 +43,10 @@ pub fn resolve_scheduler_selection(
     engine: &ryeos_engine::engine::Engine,
     build_has_scheduler: bool,
 ) -> Result<bool> {
-    scheduler_selection_for_build(scheduler_selected_by_composition(engine)?, build_has_scheduler)
+    scheduler_selection_for_build(
+        scheduler_selected_by_composition(engine)?,
+        build_has_scheduler,
+    )
 }
 
 /// Whether the node's installed, trusted composition selects the scheduler.
@@ -70,7 +76,10 @@ pub fn scheduler_selected_by_composition(engine: &ryeos_engine::engine::Engine) 
                     ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             })
             .collect::<Vec<_>>();
-        for (canonical, effective) in scheduler_refs.iter().zip(generation.effective_items(&requests)) {
+        for (canonical, effective) in scheduler_refs
+            .iter()
+            .zip(generation.effective_items(&requests))
+        {
             let effective = effective
                 .with_context(|| format!("resolve installed scheduler service {canonical}"))?;
             anyhow::ensure!(
@@ -87,13 +96,20 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use super::{scheduler_selected_by_composition, scheduler_selection_for_build, SCHEDULER_SERVICE_REFS};
+    use super::{
+        SCHEDULER_SERVICE_REFS, scheduler_selected_by_composition, scheduler_selection_for_build,
+    };
 
     #[test]
     fn a_build_without_the_scheduler_refuses_a_composition_that_selects_it() {
-        let error = scheduler_selection_for_build(true, false).unwrap_err().to_string();
+        let error = scheduler_selection_for_build(true, false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("this build lacks the scheduler"), "{error}");
-        assert!(error.contains("ryeos node reset policy-generation"), "{error}");
+        assert!(
+            error.contains("ryeos node reset policy-generation"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -110,15 +126,24 @@ mod tests {
             .expect("read scheduling bundle scheduler services")
             .map(|entry| {
                 let path = entry.expect("directory entry").path();
-                assert_eq!(path.extension().and_then(|e| e.to_str()), Some("yaml"), "{path:?}");
+                assert_eq!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("yaml"),
+                    "{path:?}"
+                );
                 format!(
                     "service:scheduler/{}",
-                    path.file_stem().and_then(|s| s.to_str()).expect("utf-8 file stem")
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .expect("utf-8 file stem")
                 )
             })
             .collect();
         on_disk.sort();
-        let mut listed: Vec<String> = SCHEDULER_SERVICE_REFS.iter().map(|r| (*r).to_owned()).collect();
+        let mut listed: Vec<String> = SCHEDULER_SERVICE_REFS
+            .iter()
+            .map(|r| (*r).to_owned())
+            .collect();
         listed.sort();
         assert_eq!(on_disk, listed);
     }

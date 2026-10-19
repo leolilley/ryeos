@@ -142,25 +142,31 @@ impl<'a> Fixture<'a> {
             provider_observation_digest: "9".repeat(64),
         };
         allocation_occurrence.validate(&reservation).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
-                params![
-                    backend.digest(),
-                    backend.capacity_owner(),
-                    backend.canonical_json().unwrap()
-                ],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
+                    params![
+                        backend.digest(),
+                        backend.capacity_owner(),
+                        backend.canonical_json().unwrap()
+                    ],
+                )?)
+            })
             .unwrap();
         // Retained storage inputs, deliberately not a fresh admission/callback.
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'bound',?4,1,1)",
-                params![
-                    placement,
-                    reservation.capacity_owner,
-                    canonical(&reservation),
-                    canonical(&allocation_occurrence)
-                ],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,'bound',?4,1,1)",
+                    params![
+                        placement,
+                        reservation.capacity_owner,
+                        canonical(&reservation),
+                        canonical(&allocation_occurrence)
+                    ],
+                )?)
+            })
             .unwrap();
         // Typed retained activation/package testimony closes the full cold
         // journal invariant. It does not claim a provider call/package upload.
@@ -205,10 +211,13 @@ impl<'a> Fixture<'a> {
         activation
             .validate_contract(&reservation, &allocation_occurrence, &contract)
             .unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
-                params![placement, canonical(&activation)],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
+                    params![placement, canonical(&activation)],
+                )?)
+            })
             .unwrap();
         db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_execution_channel(placement_thread_id,binding_digest,binding_json,state) VALUES(?1,?2,?3,'prepared')",
             params![placement,binding.digest().unwrap(),canonical(&binding)])?)).unwrap();
@@ -243,51 +252,59 @@ impl<'a> Fixture<'a> {
         direction: ChannelDirection,
         payload: ExecutionChannelPayload,
     ) -> AuthenticatedExecutionFrame {
-        self.db.conn.with_mutable_sql(|connection| {
-let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
-        let key = if direction == ChannelDirection::OwnerToSupervisor {
-            &self.owner
-        } else {
-            &self.supervisor
-        };
-        let frame = journal::author_frame(
-            &tx,
-            &channel::NodeJournalOwner,
-            &self.binding.placement_thread_id,
-            direction,
-            key,
-            payload,
-        )
-        .unwrap();
-        tx.commit().unwrap();
-Ok(frame)
-}).unwrap()
+        self.db
+            .conn
+            .with_mutable_sql(|connection| {
+                let tx =
+                    Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
+                let key = if direction == ChannelDirection::OwnerToSupervisor {
+                    &self.owner
+                } else {
+                    &self.supervisor
+                };
+                let frame = journal::author_frame(
+                    &tx,
+                    &channel::NodeJournalOwner,
+                    &self.binding.placement_thread_id,
+                    direction,
+                    key,
+                    payload,
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                Ok(frame)
+            })
+            .unwrap()
     }
 
     fn apply(&self, frame: &AuthenticatedExecutionFrame) {
-        self.db.conn.with_mutable_sql(|connection| {
-let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
-        journal::claim_application(
-            &tx,
-            &channel::NodeJournalOwner,
-            &self.binding.placement_thread_id,
-            frame.frame().direction,
-            frame.frame().sequence,
-            frame.digest(),
-        )
-        .unwrap();
-        journal::finish_application(
-            &tx,
-            &channel::NodeJournalOwner,
-            &self.binding.placement_thread_id,
-            frame.frame().direction,
-            frame.frame().sequence,
-            frame.digest(),
-        )
-        .unwrap();
-        tx.commit().unwrap();
-Ok(())
-}).unwrap();
+        self.db
+            .conn
+            .with_mutable_sql(|connection| {
+                let tx =
+                    Transaction::new_unchecked(connection, TransactionBehavior::Immediate).unwrap();
+                journal::claim_application(
+                    &tx,
+                    &channel::NodeJournalOwner,
+                    &self.binding.placement_thread_id,
+                    frame.frame().direction,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )
+                .unwrap();
+                journal::finish_application(
+                    &tx,
+                    &channel::NodeJournalOwner,
+                    &self.binding.placement_thread_id,
+                    frame.frame().direction,
+                    frame.frame().sequence,
+                    frame.digest(),
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn retain_worker_testimony(
@@ -374,22 +391,31 @@ Ok(())
         next.workspace_identity = Some(
             serde_json::from_value(serde_json::json!({"containing_device":1,"inode":123})).unwrap(),
         );
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db
+            .conn
+            .with_sql(|connection| qualification_local_start::transition(connection, &local, &next))
+            .unwrap();
         local = next;
         let mut next = local.clone();
         next.directory_borrow_intent = Some(
             qualification_local_start::QualificationWorkspaceBorrowIntent {
                 workspace_id: workspace_id.clone(),
-                directory_identity: next.workspace_identity.clone().unwrap(),
+                directory_identity: next.workspace_identity.unwrap(),
                 reserved_at_ms: 1,
             },
         );
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db
+            .conn
+            .with_sql(|connection| qualification_local_start::transition(connection, &local, &next))
+            .unwrap();
         local = next;
         let mut next = local.clone();
         next.phase = qualification_local_start::QualificationLocalStartPhase::WorkerAttached;
         next.worker_incarnation_digest = Some(identity.owner_incarnation_digest().unwrap());
-        self.db.conn.with_sql(|connection| Ok(qualification_local_start::transition(connection, &local, &next)?)).unwrap();
+        self.db
+            .conn
+            .with_sql(|connection| qualification_local_start::transition(connection, &local, &next))
+            .unwrap();
         self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)])?)).unwrap();
         self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
@@ -556,7 +582,14 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .to_string()
             .contains("death-settled local Worker")
     );
-    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
+    assert!(
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap()
+            .is_none()
+    );
     fixture.retain_terminal_testimony();
     assert!(
         fixture
@@ -576,7 +609,14 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .to_string()
             .contains("has not been applied")
     );
-    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
+    assert!(
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap()
+            .is_none()
+    );
     let plan = fixture
         .db
         .prepare_external_qualification_scope_settlement(placement)
@@ -606,7 +646,11 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
         .bind_qualification_worker_transcript(&source, &prepared.manifest, &prepared.manifest_hash)
         .unwrap();
     assert_eq!(
-        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap(),
         Some(first.clone())
     );
     assert_eq!(
@@ -622,7 +666,12 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
     );
     // Close fresh occurrence contact through its real durable owner. Historical
     // publication remains readable/replayable without renewing admission.
-    let allocation = fixture.db.conn.with_sql(|connection| read(connection, placement)).unwrap().unwrap();
+    let allocation = fixture
+        .db
+        .conn
+        .with_sql(|connection| read(connection, placement))
+        .unwrap()
+        .unwrap();
     let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
     else {
         unreachable!()
@@ -644,7 +693,14 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
         .reserve_qualification_termination(&termination)
         .unwrap();
     assert!(
-        fixture.db.conn.with_sql(|connection| require_contactable_qualification_owner(connection, &allocation.reservation)).is_err()
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| require_contactable_qualification_owner(
+                connection,
+                &allocation.reservation
+            ))
+            .is_err()
     );
     assert_eq!(
         fixture
@@ -672,7 +728,11 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
             .contains("source changed")
     );
     assert_eq!(
-        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap(),
         Some(first)
     );
 }
@@ -701,7 +761,14 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
             .qualification_worker_transcript_source(placement)
             .is_err()
     );
-    assert!(fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap().is_none());
+    assert!(
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap()
+            .is_none()
+    );
     let root = tempfile::tempdir().unwrap();
     let state = ryeos_state::test_support::TestState::open(
         root.path(),
@@ -869,7 +936,11 @@ fn retained_capture_publication_requires_original_verified_receiver_and_exact_co
         first
     );
     assert_eq!(
-        fixture.db.conn.with_sql(|connection| read_record(connection, placement)).unwrap(),
+        fixture
+            .db
+            .conn
+            .with_sql(|connection| read_record(connection, placement))
+            .unwrap(),
         Some(first)
     );
 }

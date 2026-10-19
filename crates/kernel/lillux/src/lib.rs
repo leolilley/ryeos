@@ -30,6 +30,11 @@ pub use character_device::{
     CharacterDeviceAccess, CharacterDeviceAuthority, CharacterDeviceIdentity, CharacterDeviceSet,
     CharacterDeviceSpec, resource_observation_contract_digest,
 };
+pub use custody::{
+    Abandoned, AbandonedCustodyReport, Held, Settled, abandon, abandoned_custody, foreign_process,
+    relinquish_in_foreign_process,
+};
+pub use environment::take_environment_values;
 pub use exec::InheritedReadonlyDocument;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
@@ -49,19 +54,14 @@ pub use exec::{
     validate_subprocess_limits,
 };
 pub use exec::{
-    inherited_executable_path, take_inherited_descriptor_authority,
-    take_inherited_descriptor_authority_from_env,
-};
-pub use exec::{
     ForkSensitiveDescriptorLeaseRefused, current_thread_retains_fork_sensitive_descriptors,
     fork_exclusions_held_until_exit, in_forked_child, retain_fork_sensitive_descriptors_until,
     try_retain_fork_sensitive_descriptors,
 };
-pub use custody::{
-    Abandoned, AbandonedCustodyReport, Held, Settled, abandon, abandoned_custody, foreign_process,
-    relinquish_in_foreign_process,
+pub use exec::{
+    inherited_executable_path, take_inherited_descriptor_authority,
+    take_inherited_descriptor_authority_from_env,
 };
-pub use environment::take_environment_values;
 pub use sandbox::{
     HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
 };
@@ -88,13 +88,14 @@ pub use local_ipc::{
     authenticated_unix_peer_from_stream,
 };
 pub use locks::{
-    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExactLockHeld, ExclusiveFileLock, SharedFileLock,
-    with_exclusive_file_lock,
+    ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExactLockHeld, ExclusiveFileLock,
+    SharedFileLock, with_exclusive_file_lock,
 };
 pub use process_control::{
-    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent, OciPreparationPhase, OciPreparationProgress,
-    ProcessHostLifetime, ProcessScope, ProcessScopeAllocation, ProcessScopeCapability,
-    ProcessScopeConfiguration, ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
+    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,
+    OciPreparationPhase, OciPreparationProgress, ProcessHostLifetime, ProcessScope,
+    ProcessScopeAllocation, ProcessScopeCapability, ProcessScopeConfiguration,
+    ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
     ProcessScopeResourceLimits, QuiescedProcessScope, ResourceLimitedProcessScope,
     require_administrator,
 };
@@ -121,6 +122,29 @@ pub use exec::{
 };
 #[cfg(unix)]
 pub use secure_fs::PATH_MAX_BYTES;
+pub use secure_fs::{
+    AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
+    ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
+    NoFollowDirectoryTree, OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation,
+    OpenedPath, PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata,
+    PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile,
+    PinnedRegularFileIdentity, ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader,
+    canonicalize_existing_path, collect_directory_tree_no_follow,
+    collect_pinned_regular_files_no_follow_bounded, collect_regular_files_no_follow,
+    current_user_home, digest_open_regular_file_stable_chunked_exact,
+    digest_open_regular_file_stable_exact, ensure_open_regular_file_unchanged,
+    inspect_optional_entry_no_follow, matches_pinned_regular_file_identity,
+    matches_regular_file_identity, normalized_portable_regular_mode, observe_open_file_identity,
+    observe_open_regular_file, open_mount_entry_kind, open_pinned_regular_file_no_follow,
+    path_owner_ids, path_pin_open_regular_file, pin_canonical_mount_source,
+    pinned_regular_file_identity, protected_system_write_roots, read_open_regular_file_bounded,
+    read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
+    read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
+    read_regular_file_bounded_no_follow, read_regular_file_no_follow,
+    read_regular_file_to_string_no_follow, require_effective_user_owned_executable,
+    require_effective_user_owned_regular, same_open_file_identity, set_open_regular_file_mode,
+    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,
+};
 #[cfg(target_os = "linux")]
 pub use secure_fs::{
     MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
@@ -130,31 +154,6 @@ pub use secure_fs::{
 pub use secure_fs::{
     SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
     parse_secure_temp_name,
-};
-pub use secure_fs::{
-    AtomicRegularCreationFailure, AtomicRegularCreationPhase, CapturedRegularFile,
-    ChildDirectoryCreationFailure, DirectoryTraversalBudget, FilesystemCapacity,
-    NoFollowDirectoryTree, OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation,
-    OpenedPath, PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryEntryMetadata,
-    PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile,
-    PinnedRegularFileIdentity,
-    ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
-    collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,
-    collect_regular_files_no_follow, current_user_home,
-    digest_open_regular_file_stable_chunked_exact, digest_open_regular_file_stable_exact,
-    ensure_open_regular_file_unchanged, inspect_optional_entry_no_follow,
-    matches_pinned_regular_file_identity, matches_regular_file_identity,
-    normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
-    open_mount_entry_kind, open_pinned_regular_file_no_follow, path_owner_ids,
-    path_pin_open_regular_file,
-    pin_canonical_mount_source,
-    pinned_regular_file_identity, protected_system_write_roots, read_open_regular_file_bounded,
-    read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
-    read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
-    read_regular_file_bounded_no_follow, read_regular_file_no_follow,
-    read_regular_file_to_string_no_follow, require_effective_user_owned_executable,
-    require_effective_user_owned_regular, same_open_file_identity, set_open_regular_file_mode,
-    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,
 };
 
 pub use sandbox::{
@@ -167,13 +166,12 @@ pub use sandbox::{
     LinuxSandboxMountPreparationReceipt, LinuxSandboxNativeTerminalObservation,
     LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
     LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest, LinuxSandboxTermination,
-    create_linux_overlay_template, exit_with_linux_sandbox_status, inspect_linux_sandbox,
-    launch_linux_sandbox, launch_linux_sandbox_with_loopback_ingress,
-    linux_sandbox_mount_overlaps_managed_namespace, operate_linux_overlay_workspace,
-    MAX_CURRENT_EXECUTABLE_BYTES, current_executable_digest, read_sealed_inherited_descriptor,
+    MAX_CURRENT_EXECUTABLE_BYTES, create_linux_overlay_template, current_executable_digest,
+    exit_with_linux_sandbox_status, inspect_linux_sandbox, launch_linux_sandbox,
+    launch_linux_sandbox_with_loopback_ingress, linux_sandbox_mount_overlaps_managed_namespace,
+    operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
     read_sealed_inherited_descriptor_from_env, validate_connected_unix_stream_descriptor,
-    validate_current_executable_descriptor,
-    write_inherited_descriptor,
+    validate_current_executable_descriptor, write_inherited_descriptor,
 };
 
 pub use identity::envelope::{

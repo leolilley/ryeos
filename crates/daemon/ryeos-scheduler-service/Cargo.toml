@@ -32,3 +32,6 @@ tracing = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-scheduler = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

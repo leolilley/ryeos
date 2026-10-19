@@ -733,15 +733,13 @@ impl RuntimeDb {
             // allowed to disappear or move while that attempt remains unsettled,
             // even if a later caller presents an otherwise valid launch claim.
             validate_unsettled_scoped_child_lifetime(&tx)?;
-            if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
-                if incumbent != lifetime {
-                    if !incumbent.has_ended().map_err(anyhow::Error::msg)?
-                        || self.unsettled_process_scope_count(None)? != 0
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime
+                    && (!incumbent.has_ended().map_err(anyhow::Error::msg)?
+                        || self.unsettled_process_scope_count(None)? != 0)
                     {
                         bail!("scoped child reservation crosses an unsettled host-lifetime fence");
                     }
-                }
-            }
             let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
             tx.execute(
                 "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
@@ -1168,9 +1166,8 @@ impl RuntimeDb {
         &self,
         attempt_id: &str,
     ) -> Result<Option<ScopedChildAttemptRecord>> {
-        self.conn.with_sql(|conn| {
-            read_scoped_child_attempt(&conn, attempt_id)
-        })
+        self.conn
+            .with_sql(|conn| read_scoped_child_attempt(conn, attempt_id))
     }
 
     /// Exact root-owner point lookup for lost START acknowledgements. The
@@ -1190,7 +1187,7 @@ impl RuntimeDb {
                 .optional()?;
             attempt_id
                 .as_deref()
-                .map(|id| read_scoped_child_attempt(&conn, id))
+                .map(|id| read_scoped_child_attempt(conn, id))
                 .transpose()
                 .map(|record| record.flatten())
         })
@@ -2073,10 +2070,13 @@ mod tests {
             .unwrap(),
             ScopedChildInputReservation::Reserved
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "UPDATE thread_runtime SET stop_requested_at_ms=1 WHERE thread_id=?1",
-                [&initial.owner.thread_id],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE thread_runtime SET stop_requested_at_ms=1 WHERE thread_id=?1",
+                    [&initial.owner.thread_id],
+                )?)
+            })
             .unwrap();
         assert!(
             db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
@@ -2395,15 +2395,23 @@ mod tests {
         let (initial, recovery, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_some()
+        );
         assert!(
             db.claim_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
         );
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "DELETE FROM thread_launch_claim WHERE thread_id=?1",
-                [&initial.owner.thread_id],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    [&initial.owner.thread_id],
+                )?)
+            })
             .unwrap();
         db.claim_unbound_scoped_child_discard(&initial.attempt_id)
             .unwrap();
@@ -2436,7 +2444,12 @@ mod tests {
             db.complete_unbound_scoped_child_discard(&initial.attempt_id)
                 .is_err()
         );
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2473,10 +2486,14 @@ mod tests {
             let mut tampered = mount_evidence(&identity);
             tampered.observed.destination_access_sha256[0] ^= 1;
             let encoded = lillux::canonical_json(&serde_json::to_value(tampered).unwrap()).unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
                 "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
                 params![initial.attempt_id, encoded],
-            )?)).unwrap();
+            )?)
+                })
+                .unwrap();
         }
         crate::runtime_db::test_native::live_open_refusal(&path);
     }
@@ -2574,15 +2591,22 @@ mod tests {
                 .unwrap()
                 .remove("prepared_directory_sources");
             former_bytes = lillux::canonical_json(&former).unwrap();
-            db.conn.with_sql(|connection| Ok(connection.execute(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
                 "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
                 params![initial.attempt_id, former_bytes],
-            )?)).unwrap();
-            db.conn.with_sql(|connection| Ok(connection.pragma_update(
-                    None,
-                    "application_id",
-                    RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
-                )?))
+            )?)
+                })
+                .unwrap();
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.pragma_update(
+                        None,
+                        "application_id",
+                        RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+                    )?)
+                })
                 .unwrap();
         }
         let message = crate::runtime_db::test_native::live_open_refusal(&path);
@@ -2591,7 +2615,10 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains(&format!("stored schema_epoch={}", RUNTIME_OPERATOR_SCHEMA_EPOCH - 1)),
+            message.contains(&format!(
+                "stored schema_epoch={}",
+                RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+            )),
             "{message}"
         );
         let retained: String = crate::runtime_db::test_native::read_existing(&path, |conn| {
@@ -2621,10 +2648,13 @@ mod tests {
                     lifetime["backend"]["boot_id"] = "11111111-1111-4111-8111-111111111111".into();
                     lillux::canonical_json(&lifetime).unwrap()
                 });
-                db.conn.with_sql(|connection| Ok(connection.execute(
+                db.conn
+                    .with_sql(|connection| {
+                        Ok(connection.execute(
                         "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
                         [replacement],
-                    )?))
+                    )?)
+                    })
                     .unwrap();
                 let mut second = initial.clone();
                 second.attempt_id = "producer-two".into();
@@ -2646,10 +2676,13 @@ mod tests {
         let (initial, _, _) = fixture();
         seed_owner(&db, &initial.owner);
         db.reserve_scoped_child_attempt(&initial).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "DELETE FROM thread_launch_claim WHERE thread_id=?1",
-                [&initial.owner.thread_id],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    [&initial.owner.thread_id],
+                )?)
+            })
             .unwrap();
         db.claim_unbound_scoped_child_discard(&initial.attempt_id)
             .unwrap();
@@ -2679,27 +2712,43 @@ mod tests {
         seed_owner(&db, &second.owner);
         db.reserve_scoped_child_attempt(&first).unwrap();
         db.reserve_scoped_child_attempt(&second).unwrap();
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "DELETE FROM thread_launch_claim WHERE thread_id=?1",
-                [&first.owner.thread_id],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    [&first.owner.thread_id],
+                )?)
+            })
             .unwrap();
         db.claim_unbound_scoped_child_discard(&first.attempt_id)
             .unwrap();
         db.complete_unbound_scoped_child_discard(&first.attempt_id)
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_some());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(db.unsettled_process_scope_count(None).unwrap(), 1);
-        db.conn.with_sql(|connection| Ok(connection.execute(
-                "DELETE FROM thread_launch_claim WHERE thread_id=?1",
-                [&second.owner.thread_id],
-            )?))
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    [&second.owner.thread_id],
+                )?)
+            })
             .unwrap();
         db.claim_unbound_scoped_child_discard(&second.attempt_id)
             .unwrap();
         db.complete_unbound_scoped_child_discard(&second.attempt_id)
             .unwrap();
-        assert!(db.conn.with_sql(|connection| Ok(read_scope_lifetime_fence(connection)?)).unwrap().is_none());
+        assert!(
+            db.conn
+                .with_sql(|connection| read_scope_lifetime_fence(connection))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

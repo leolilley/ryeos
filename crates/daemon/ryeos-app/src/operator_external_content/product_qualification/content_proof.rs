@@ -17,11 +17,11 @@ use super::{
 };
 use crate::handler_context::HandlerContext;
 use crate::managed_external_content_operation::AcquisitionMode;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::operator_external_content::content_qualification::{
     ContentQualificationLaunchRequest, prepare_source,
 };
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -327,12 +327,12 @@ fn prove_blocking(
             project_context_resolver: None,
             pinned_admission: None,
         },
-        Some(&admitted),
+        Some(admitted),
     )?;
     let _source = crate::source_closure_admission::recover_source_closure(
         state,
         current.request_engine.as_ref(),
-        &admitted,
+        admitted,
     )?;
     let d2 = sealed.effective_definition_digest().as_str();
     if current.artifact_identity != capsule.artifact_identity
@@ -359,7 +359,7 @@ fn prove_blocking(
         context,
         &terminal,
         &capsule,
-        &admitted,
+        admitted,
         &current,
         &purpose.execution_view()?,
         None,

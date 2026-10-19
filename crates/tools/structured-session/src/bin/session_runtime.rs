@@ -314,47 +314,44 @@ async fn run_session(
         }
         return Ok(terminal_result(thread_id, started));
     }
-    if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. }) {
-        if let Some(outcome) = started
+    if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. })
+        && let Some(outcome) = started
             .get("bounded_outcome")
             .filter(|value| !value.is_null())
             .cloned()
             .map(serde_json::from_value::<DedicatedSessionBoundedOutcome>)
             .transpose()
             .context("decode durable bounded outcome")?
-        {
-            let terminal = if outcome.kind == DedicatedSessionBoundedOutcomeKind::Completed {
-                let completion = serde_json::from_value::<HostedCommandCompletionFence>(
-                    started
-                        .get("completion_fence")
-                        .filter(|value| !value.is_null())
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow!("durable completed bounded outcome has no completion fence")
-                        })?,
-                )
-                .context("decode durable bounded completion fence")?;
-                client
-                    .terminate_completed_dedicated_session(
-                        DedicatedSessionCompletedTerminateRequest {
-                            thread_id: thread_id.clone(),
-                            completion,
-                        },
-                    )
-                    .await
-                    .map_err(|error| anyhow!(error.to_string()))?
-            } else {
-                client
-                    .terminate_dedicated_session(DedicatedSessionTerminateRequest {
-                        thread_id: thread_id.clone(),
-                        reason: "cancelled".to_owned(),
-                        bounded_outcome: Some(outcome),
-                    })
-                    .await
-                    .map_err(|error| anyhow!(error.to_string()))?
-            };
-            return Ok(terminal_result(thread_id, terminal));
-        }
+    {
+        let terminal = if outcome.kind == DedicatedSessionBoundedOutcomeKind::Completed {
+            let completion = serde_json::from_value::<HostedCommandCompletionFence>(
+                started
+                    .get("completion_fence")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!("durable completed bounded outcome has no completion fence")
+                    })?,
+            )
+            .context("decode durable bounded completion fence")?;
+            client
+                .terminate_completed_dedicated_session(DedicatedSessionCompletedTerminateRequest {
+                    thread_id: thread_id.clone(),
+                    completion,
+                })
+                .await
+                .map_err(|error| anyhow!(error.to_string()))?
+        } else {
+            client
+                .terminate_dedicated_session(DedicatedSessionTerminateRequest {
+                    thread_id: thread_id.clone(),
+                    reason: "cancelled".to_owned(),
+                    bounded_outcome: Some(outcome),
+                })
+                .await
+                .map_err(|error| anyhow!(error.to_string()))?
+        };
+        return Ok(terminal_result(thread_id, terminal));
     }
     let mut deadline = if matches!(&config.mode, WorkerExecutionMode::BoundedTurn { .. }) {
         let created_at_ms = started

@@ -253,16 +253,22 @@ pub struct ExactExclusiveFileLockObservation {
     parent: crate::OpenFileIdentity,
 }
 impl ExactExclusiveFileLockObservation {
-    pub fn target(&self) -> crate::OpenFileIdentity { self.target }
-    pub fn parent(&self) -> crate::OpenFileIdentity { self.parent }
+    pub fn target(&self) -> crate::OpenFileIdentity {
+        self.target
+    }
+    pub fn parent(&self) -> crate::OpenFileIdentity {
+        self.parent
+    }
 }
 
 impl ExactExclusiveFileLock {
     /// Reject copied process-local custody before touching retained descriptor
     /// coordinates or the fork-child registration. This issues no lock grant.
     pub fn require_original_process(&self) -> Result<()> {
-        anyhow::ensure!(self.process == std::process::id(),
-            "exact operational lock belongs to another process incarnation");
+        anyhow::ensure!(
+            self.process == std::process::id(),
+            "exact operational lock belongs to another process incarnation"
+        );
         Ok(())
     }
     /// Observe the actual retained descriptors without reopening, duplicating
@@ -271,9 +277,14 @@ impl ExactExclusiveFileLock {
     #[cfg(target_os = "linux")]
     pub fn observe_retained_descriptors(&self) -> Result<ExactExclusiveFileLockObservation> {
         self.require_original_process()?;
-        anyhow::ensure!(self.file.is_registered_live(), "operator target no longer live");
-        anyhow::ensure!(self.file.metadata()?.is_file() && self.parent.metadata()?.is_dir(),
-            "original operator descriptor roles changed");
+        anyhow::ensure!(
+            self.file.is_registered_live(),
+            "operator target no longer live"
+        );
+        anyhow::ensure!(
+            self.file.metadata()?.is_file() && self.parent.metadata()?.is_dir(),
+            "original operator descriptor roles changed"
+        );
         Ok(ExactExclusiveFileLockObservation {
             target: crate::observe_open_file_identity(&self.file)?,
             parent: crate::observe_open_file_identity(&self.parent)?,
@@ -399,7 +410,11 @@ impl ExactExclusiveFileLock {
                 let holder = linux_flock_holder_pid(&file)
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                return Err(ExactLockHeld { holder, waited: wait_timeout }.into());
+                return Err(ExactLockHeld {
+                    holder,
+                    waited: wait_timeout,
+                }
+                .into());
             }
             if create_missing {
                 file.set_len(0)?;
@@ -432,7 +447,9 @@ impl ExactExclusiveFileLock {
         original: crate::time::MonotonicDeadline,
     ) -> Result<bool> {
         self.require_original_process()?;
-        self.file.try_retire_registered(original).map_err(anyhow::Error::msg)
+        self.file
+            .try_retire_registered(original)
+            .map_err(anyhow::Error::msg)
     }
 
     /// Move the SAME retained parent after successful explicit target close.
@@ -440,12 +457,17 @@ impl ExactExclusiveFileLock {
     /// The caller must still physically retire this parent under its original
     /// funded controller; moving it does not produce a parent-close receipt.
     #[cfg(target_os = "linux")]
-    pub fn into_retired_target_parent(self) -> std::result::Result<fs::File, (Self, anyhow::Error)> {
+    pub fn into_retired_target_parent(
+        self,
+    ) -> std::result::Result<fs::File, (Self, anyhow::Error)> {
         if let Err(error) = self.require_original_process() {
             return Err((self, error));
         }
         if !self.file.explicitly_retired() {
-            return Err((self, anyhow::anyhow!("registered lock target has no successful close observation")));
+            return Err((
+                self,
+                anyhow::anyhow!("registered lock target has no successful close observation"),
+            ));
         }
         Ok(self.parent)
     }
@@ -455,7 +477,10 @@ impl ExactExclusiveFileLock {
     pub fn ensure_path_binding(&self, target: &Path) -> Result<()> {
         self.require_original_process()?;
         #[cfg(target_os = "linux")]
-        anyhow::ensure!(self.file.is_registered_live(), "operational lock target no longer live");
+        anyhow::ensure!(
+            self.file.is_registered_live(),
+            "operational lock target no longer live"
+        );
         #[cfg(not(unix))]
         {
             let _ = target;
@@ -998,21 +1023,34 @@ mod tests {
         let parent_identity = lock.parent.metadata().unwrap();
         let original_observation = lock.observe_retained_descriptors().unwrap();
         assert_eq!(original_observation.parent().inode(), parent_identity.ino());
-        assert_eq!(original_observation.target().inode(), lock.file.metadata().unwrap().ino());
-        assert!(!lock.try_retire_registered_target(
-            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
-        ).unwrap());
+        assert_eq!(
+            original_observation.target().inode(),
+            lock.file.metadata().unwrap().ino()
+        );
+        assert!(
+            !lock
+                .try_retire_registered_target(crate::time::MonotonicDeadline::after(
+                    std::time::Duration::ZERO
+                ),)
+                .unwrap()
+        );
         lock.ensure_path_binding(&path).unwrap();
         assert!(ExactExclusiveFileLock::acquire(&path).is_err());
-        assert!(lock.try_retire_registered_target(
-            crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
-        ).unwrap());
+        assert!(
+            lock.try_retire_registered_target(crate::time::MonotonicDeadline::after(
+                std::time::Duration::from_secs(1)
+            ),)
+                .unwrap()
+        );
         assert!(lock.ensure_path_binding(&path).is_err());
         let replacement = ExactExclusiveFileLock::acquire(&path).unwrap();
         // Cached physical success must not close the newly acquired descriptor.
-        assert!(lock.try_retire_registered_target(
-            crate::time::MonotonicDeadline::after(std::time::Duration::ZERO),
-        ).unwrap());
+        assert!(
+            lock.try_retire_registered_target(crate::time::MonotonicDeadline::after(
+                std::time::Duration::ZERO
+            ),)
+                .unwrap()
+        );
         replacement.ensure_path_binding(&path).unwrap();
         assert!(ExactExclusiveFileLock::acquire(&path).is_err());
         let parent = match lock.into_retired_target_parent() {
@@ -1020,7 +1058,10 @@ mod tests {
             Err(_) => panic!("successful registered close must retain its exact parent"),
         };
         let observed = parent.metadata().unwrap();
-        assert_eq!((observed.dev(), observed.ino()), (parent_identity.dev(), parent_identity.ino()));
+        assert_eq!(
+            (observed.dev(), observed.ino()),
+            (parent_identity.dev(), parent_identity.ino())
+        );
     }
 
     #[cfg(unix)]

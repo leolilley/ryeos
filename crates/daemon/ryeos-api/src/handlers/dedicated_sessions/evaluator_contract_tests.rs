@@ -80,7 +80,11 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
             },
         ]));
         let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
-        kind_roots.extend(workflow.iter().map(|root| root.join(".ai/node/engine/kinds")));
+        kind_roots.extend(
+            workflow
+                .iter()
+                .map(|root| root.join(".ai/node/engine/kinds")),
+        );
         let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
         let (parsers, _) =
             ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
@@ -118,16 +122,22 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 state.isolation.clone(),
                 &roots,
             )?;
-        let registered = ["core", "knowledge", "directive", "graph", "evaluator-fixture"]
-            .into_iter()
-            .zip(&roots)
-            .map(
-                |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                    name: name.into(),
-                    canonical_root: root.clone(),
-                },
-            )
-            .collect();
+        let registered = [
+            "core",
+            "knowledge",
+            "directive",
+            "graph",
+            "evaluator-fixture",
+        ]
+        .into_iter()
+        .zip(&roots)
+        .map(
+            |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: name.into(),
+                canonical_root: root.clone(),
+            },
+        )
+        .collect();
         state.engine = Arc::new(
             ryeos_engine::engine::Engine::new(
                 kinds,

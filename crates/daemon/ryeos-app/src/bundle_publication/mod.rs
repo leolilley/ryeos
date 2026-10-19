@@ -147,11 +147,10 @@ pub fn verify_bundle_generation(
     generation.validate()?;
 
     let ownership_value = read_exact(objects, &generation.payload_ownership_hash)?;
-    let ownership =
-        ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(
-            &ownership_value,
-        )
-        .context("bundle generation references an invalid payload ownership")?;
+    let ownership = ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(
+        &ownership_value,
+    )
+    .context("bundle generation references an invalid payload ownership")?;
     if ownership.content_hash()? != generation.payload_ownership_hash {
         bail!("bundle generation payload ownership identity changed");
     }

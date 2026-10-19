@@ -418,7 +418,11 @@ fn require_root_regular(directory: &PinnedDirectory, name: &str, expected: &[u8]
     Ok(())
 }
 
-fn require_logger(directory: &PinnedDirectory, name: &str, launch: &HostServiceLaunch) -> Result<()> {
+fn require_logger(
+    directory: &PinnedDirectory,
+    name: &str,
+    launch: &HostServiceLaunch,
+) -> Result<()> {
     let logger = directory
         .open_child_directory(OsStr::new(LOG_SERVICE))?
         .context("configured host service has no adapter logger")?;
@@ -754,7 +758,10 @@ mod tests {
                 .unwrap();
         assert!(rendered.contains("'/var/log/lillux-host-service/it'\"'\"'s'"));
         for name in ["", ".", "..", "a/b", "nul\0name", "line\nbreak"] {
-            assert!(log_program(name, &launch(serde_json::json!({}))).is_err(), "{name:?}");
+            assert!(
+                log_program(name, &launch(serde_json::json!({}))).is_err(),
+                "{name:?}"
+            );
         }
         let mut root = serde_json::to_value(launch(serde_json::json!({}))).unwrap();
         root["account"]["uid"] = 0.into();

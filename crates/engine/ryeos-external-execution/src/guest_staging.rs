@@ -884,8 +884,11 @@ mod tests {
     #[test]
     fn exact_base_closure_can_be_staged_without_publishing_it() {
         let state = tempfile::tempdir().unwrap();
-        let db = ryeos_state::test_support::TestState::open(state.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            state.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();

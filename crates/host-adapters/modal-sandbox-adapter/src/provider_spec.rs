@@ -13,9 +13,9 @@ use ryeos_external_execution_contract::{
     valid_lease_budget_weight,
 };
 use ryeos_remote_lease_core::{
-    AllowListCapability, EgressHostSyntax, EgressPolicy, EgressProtocol,
-    GuestChannelProfile, LEASE_CREATE_BOUND, LEASE_LIFETIME_BOUND, LEASE_NETWORK_POLICY,
-    LEASE_TERMINATE_OBSERVED, LeaseProviderFacts, NetworkPolicyCapability, NetworkPolicyType,
+    AllowListCapability, EgressHostSyntax, EgressPolicy, EgressProtocol, GuestChannelProfile,
+    LEASE_CREATE_BOUND, LEASE_LIFETIME_BOUND, LEASE_NETWORK_POLICY, LEASE_TERMINATE_OBSERVED,
+    LeaseProviderFacts, NetworkPolicyCapability, NetworkPolicyType,
 };
 use serde::Deserialize;
 
@@ -59,7 +59,11 @@ const fn largest_payload_within(ceiling: u64) -> u64 {
 /// transport's in-memory ceiling, so it is stricter.
 pub const LAUNCHER_UPLOAD_BYTES: u64 = {
     let fit = largest_payload_within(TRANSPORT_IN_MEMORY_BODY_BYTES);
-    if fit < UPLOAD_BYTES { fit } else { UPLOAD_BYTES }
+    if fit < UPLOAD_BYTES {
+        fit
+    } else {
+        UPLOAD_BYTES
+    }
 };
 /// The largest stdin the facade's run-once route takes.
 pub const RUN_STDIN_BYTES: u64 = 64 * 1024;
@@ -511,6 +515,16 @@ impl ProviderSpec {
         self.operations.activate_supervisor == OperationDecl::activate_supervisor()
     }
 
+    /// The guest runtime descriptor belongs to the staged activation
+    /// sequence: it must arrive exactly when the signed spec declares it.
+    pub fn require_guest_runtime_descriptor(&self, supplied: bool) -> Result<()> {
+        ensure!(
+            supplied == self.declares_activation(),
+            "guest runtime descriptor differs from the signed activation declaration"
+        );
+        Ok(())
+    }
+
     pub fn reconciles_allocation(&self) -> bool {
         self.operations.reconcile_allocation == OperationDecl::reconcile_allocation()
     }
@@ -545,6 +559,10 @@ impl ProviderSpec {
         }
         if self.declares_activation() {
             capabilities.insert(LifecycleCapability::SupervisorActivation);
+            // Staging uploads the runtime the controller seals for this
+            // activation, so the provider admits the guest runtime itself
+            // rather than relying on a prior qualification.
+            capabilities.insert(LifecycleCapability::IndependentGuestRuntimeAdmission);
         }
         capabilities
     }
@@ -592,7 +610,9 @@ impl ModalNetworkPolicy {
                  bounds"
             ),
         };
-        capability.validate().context("provider spec network policy")?;
+        capability
+            .validate()
+            .context("provider spec network policy")?;
         Ok(capability)
     }
 }
@@ -712,7 +732,7 @@ mod tests {
         let spec = ProviderSpec::parse(FIXTURE, &schema_digest()).unwrap();
         assert_eq!(
             spec.facade().sha256,
-            "a06e28fb71e06cbf476499427375c2af54f158590dd8082536dc11664cfa5d03"
+            "2a15ddfced73703774fa4f09eb95be545688caeabb13ec231b08b5d65a69e103"
         );
         assert_eq!(spec.facade().app, "ryeos-lease-facade");
         assert_eq!(spec.facade().lease_app, "ryeos-lease-sandboxes");
@@ -746,7 +766,8 @@ mod tests {
     #[test]
     fn facade_path_names_the_checked_in_facade_file() {
         let spec = ProviderSpec::parse(FIXTURE, &schema_digest()).unwrap();
-        let facade = include_bytes!("../../../../bundles/modal-sandbox/facade/ryeos_lease_facade.py");
+        let facade =
+            include_bytes!("../../../../bundles/modal-sandbox/facade/ryeos_lease_facade.py");
         assert_eq!(spec.facade().path, "facade/ryeos_lease_facade.py");
         assert_eq!(lillux::sha256_hex(facade), spec.facade().sha256);
     }
@@ -791,7 +812,10 @@ mod tests {
     fn facade_pin_is_validated() {
         for (field, bad) in [
             ("sha256", "abc"),
-            ("sha256", "A9EBF7940E72BDFAD4264C5075DF04689681998AB1B0994D9588CC451FCB67BA"),
+            (
+                "sha256",
+                "A9EBF7940E72BDFAD4264C5075DF04689681998AB1B0994D9588CC451FCB67BA",
+            ),
             ("app", "Upper"),
             ("lease_app", ""),
             ("endpoint_label", "a b"),
@@ -824,7 +848,10 @@ mod tests {
             ("image", serde_json::json!("")),
             ("command", serde_json::json!([])),
             ("schema", serde_json::json!("ryeos.modal_lease_policy.v1")),
-            ("stage", serde_json::json!({"max_slots": 5, "max_chunk_bytes": 33554432, "max_slot_bytes": 4295032832u64})),
+            (
+                "stage",
+                serde_json::json!({"max_slots": 5, "max_chunk_bytes": 33554432, "max_slot_bytes": 4295032832u64}),
+            ),
             ("extra", serde_json::json!(1)),
         ] {
             let mut value = fixture_value();
@@ -880,11 +907,23 @@ mod tests {
     #[test]
     fn operations_must_equal_an_implemented_declaration() {
         for (operation, patch) in [
-            ("allocate", serde_json::json!({"kind": "create_once", "route": "get_by_id"})),
-            ("terminate", serde_json::json!({"kind": "observe_exact_occurrence"})),
+            (
+                "allocate",
+                serde_json::json!({"kind": "create_once", "route": "get_by_id"}),
+            ),
+            (
+                "terminate",
+                serde_json::json!({"kind": "observe_exact_occurrence"}),
+            ),
             ("snapshot", serde_json::json!({"kind": "create_once"})),
-            ("relay_file", serde_json::json!({"kind": "controller_relayed_guest_frames"})),
-            ("reconcile_termination", serde_json::json!({"kind": "unsupported_pending"})),
+            (
+                "relay_file",
+                serde_json::json!({"kind": "controller_relayed_guest_frames"}),
+            ),
+            (
+                "reconcile_termination",
+                serde_json::json!({"kind": "unsupported_pending"}),
+            ),
         ] {
             let mut value = fixture_value();
             value["operations"][operation] = patch;
@@ -892,7 +931,8 @@ mod tests {
         }
         // Reconciling by name and the channel may be switched off.
         let mut value = fixture_value();
-        value["operations"]["reconcile_allocation"] = serde_json::json!({"kind": "unsupported_pending"});
+        value["operations"]["reconcile_allocation"] =
+            serde_json::json!({"kind": "unsupported_pending"});
         let spec = parse_value(&value).unwrap();
         assert!(!spec.reconciles_allocation());
         assert!(
@@ -937,10 +977,26 @@ mod tests {
     fn activation_and_the_guest_channel_are_available_only_when_declared() {
         let spec = parse_value(&fixture_value()).unwrap();
         assert!(!spec.guest_activation_declared());
-        assert!(!spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        assert!(
+            !spec
+                .effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
+        assert!(
+            !spec
+                .effective_capabilities()
+                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        );
         let spec = parse_value(&declared_value()).unwrap();
         assert!(spec.guest_activation_declared());
-        assert!(spec.effective_capabilities().contains(&LifecycleCapability::SupervisorActivation));
+        assert!(
+            spec.effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
+        assert!(
+            spec.effective_capabilities()
+                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        );
         assert_eq!(
             spec.guest_channel_profile().unwrap(),
             GuestChannelProfile::UnsupportedPending
@@ -953,6 +1009,16 @@ mod tests {
             spec.guest_channel_profile().unwrap(),
             GuestChannelProfile::ControllerRelayedFrames
         );
+    }
+
+    #[test]
+    fn the_runtime_descriptor_is_required_exactly_when_activation_is_declared() {
+        let undeclared = parse_value(&fixture_value()).unwrap();
+        assert!(undeclared.require_guest_runtime_descriptor(true).is_err());
+        undeclared.require_guest_runtime_descriptor(false).unwrap();
+        let declared = parse_value(&declared_value()).unwrap();
+        assert!(declared.require_guest_runtime_descriptor(false).is_err());
+        declared.require_guest_runtime_descriptor(true).unwrap();
     }
 
     #[test]
@@ -1023,7 +1089,14 @@ mod tests {
     fn sandbox_id_form_matches_the_facade() {
         assert!(valid_sandbox_id("sb-abc123"));
         assert!(valid_sandbox_id(&format!("sb-{}", "a".repeat(64))));
-        for bad in ["", "sb-", "sb-a_b", "sbx-abc", "sb-é", &format!("sb-{}", "a".repeat(65))] {
+        for bad in [
+            "",
+            "sb-",
+            "sb-a_b",
+            "sbx-abc",
+            "sb-é",
+            &format!("sb-{}", "a".repeat(65)),
+        ] {
             assert!(!valid_sandbox_id(bad), "{bad:?}");
         }
     }

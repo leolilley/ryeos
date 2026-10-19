@@ -180,8 +180,8 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                             (name, value)
                         })
                         .collect::<BTreeMap<_, _>>();
-                    let environment_contributions = (!variables.is_empty())
-                        .then(|| {
+                    let environment_contributions = if !variables.is_empty() {
+                        {
                             BTreeMap::from([(
                                 ENVIRONMENT_BINDING.to_owned(),
                                 LaunchEnvironmentContributionRequestWire {
@@ -189,8 +189,10 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                                     variables,
                                 },
                             )])
-                        })
-                        .unwrap_or_default();
+                        }
+                    } else {
+                        Default::default()
+                    };
                     let workload_client_request = environment.workload_client;
                     (
                         environment.worker_ref,
@@ -972,6 +974,16 @@ fn validate_worker_environment(
     })
 }
 
+fn wire_error(code: &str, message: &str) -> LaunchPrepareError {
+    LaunchPrepareError {
+        code: code.to_string(),
+        message: message.to_string(),
+        classification: LaunchPrepareErrorClass::Internal,
+        binding: None,
+        details: BTreeMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1617,15 +1629,5 @@ mod tests {
                 .code,
             "worker_execution_mode_invalid"
         );
-    }
-}
-
-fn wire_error(code: &str, message: &str) -> LaunchPrepareError {
-    LaunchPrepareError {
-        code: code.to_string(),
-        message: message.to_string(),
-        classification: LaunchPrepareErrorClass::Internal,
-        binding: None,
-        details: BTreeMap::new(),
     }
 }

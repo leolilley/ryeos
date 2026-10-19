@@ -522,10 +522,9 @@ pub async fn prepare(
         .state_store
         .with_state_db(|db| db.get_sync_job(&job_id))
         .map_err(internal)?
+        && let Some(response) = classify_existing_target_prepare(&state, &req, &existing)?
     {
-        if let Some(response) = classify_existing_target_prepare(&state, &req, &existing)? {
-            return Ok(response);
-        }
+        return Ok(response);
     }
 
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
@@ -2447,10 +2446,9 @@ pub async fn reconcile_observed_target_handoff_attachments_before_detachment(
                 if let Some(session) = state
                     .state_store
                     .dedicated_session(&operation.successor_placement_thread_id)?
+                    && (session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some())
                 {
-                    if session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some() {
-                        bail!("target handoff attached a worker without durable progress");
-                    }
+                    bail!("target handoff attached a worker without durable progress");
                 }
                 continue;
             };
@@ -3293,7 +3291,9 @@ fn returning_local_operator_anchor(
     chain_root_id: &str,
     source_chain_head_hash: &str,
 ) -> Result<Option<String>> {
-    if admitted.principal_class != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient {
+    if admitted.principal_class
+        != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
+    {
         return Ok(None);
     }
     state
@@ -4697,7 +4697,13 @@ fn source_project_path_from_payload(
         bail!("transfer launch capsule content address changed");
     }
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::canonical_json_bounded(&value, ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?.as_slice() != entry.data {
+    if lillux::canonical_json_bounded(
+        &value,
+        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+    )?
+    .as_slice()
+        != entry.data
+    {
         bail!("transfer launch capsule content identity changed");
     }
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;

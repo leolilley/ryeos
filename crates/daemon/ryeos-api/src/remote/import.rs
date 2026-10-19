@@ -462,7 +462,8 @@ pub fn closure_response_to_export_payload(
                     anyhow::anyhow!("object closure entry missing verified raw canonical bytes")
                 })?;
                 anyhow::ensure!(
-                    lillux::canonical_json_bounded(value, data.len())?.as_slice() == data.as_slice(),
+                    lillux::canonical_json_bounded(value, data.len())?.as_slice()
+                        == data.as_slice(),
                     "object closure raw bytes differ from decoded value"
                 );
                 let hash = lillux::sha256_hex(&data);

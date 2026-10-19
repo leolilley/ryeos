@@ -17,7 +17,9 @@ mod common;
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_workflow_bundles};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use lillux::crypto::SigningKey;
 
@@ -229,34 +231,33 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "World"}),
     );
-    let (status, body) =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
-            Err(_) => {
-                let stderr = h.drain_stderr_nonblocking().await;
-                // Probe state dir for runtime exit + thread events
-                let state = h.state_path.clone();
-                // Ask the daemon, bounded, rather than opening its projection.
-                let projection_dump = match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    h.list_threads(10),
-                )
-                .await
+    let (status, body) = match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut)
+        .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            // Probe state dir for runtime exit + thread events
+            let state = h.state_path.clone();
+            // Ask the daemon, bounded, rather than opening its projection.
+            let projection_dump =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), h.list_threads(10))
+                    .await
                 {
                     Ok(Ok(threads)) => format!("threads = {threads:#?}"),
                     Ok(Err(error)) => format!("threads/list error: {error:#}"),
                     Err(_) => "threads/list timed out".into(),
                 };
-                panic!(
-                    "POST /execute timed out after 30s — directive-runtime hung.\n\
+            panic!(
+                "POST /execute timed out after 30s — directive-runtime hung.\n\
                  --- daemon stderr ---\n{stderr}\n\
                  --- projection ---\n{projection_dump}\n\
                  state_path={}",
-                    state.display()
-                );
-            }
-        };
+                state.display()
+            );
+        }
+    };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
@@ -357,7 +358,10 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mut threads = Vec::new();
     for _ in 0..40 {
         threads = h.list_threads(100).await.expect("threads/list");
-        if threads.iter().any(|t| t.item_ref == "directive:p3b3/subject") {
+        if threads
+            .iter()
+            .any(|t| t.item_ref == "directive:p3b3/subject")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -388,7 +392,9 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         .await
         .expect("threads/get")
         .expect("subject thread is visible to its requester");
-    let executor_ref = subject_detail["thread"]["executor_ref"].as_str().unwrap_or_default();
+    let executor_ref = subject_detail["thread"]["executor_ref"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         executor_ref.starts_with("native:"),
         "thread.executor_ref records the native runtime executor; got: {:?}",

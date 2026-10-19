@@ -257,9 +257,19 @@ impl OciHookState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OciPreparationPhase {
-    Origin, ControllerCreating, ControllerCreated, InitCreating, InitCreated,
-    InitMoving, InitMoved, LimitsApplying, LimitsApplied, ControllersEnabling,
-    ControllersEnabled, Delegating, Delegated,
+    Origin,
+    ControllerCreating,
+    ControllerCreated,
+    InitCreating,
+    InitCreated,
+    InitMoving,
+    InitMoved,
+    LimitsApplying,
+    LimitsApplied,
+    ControllersEnabling,
+    ControllersEnabled,
+    Delegating,
+    Delegated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,53 +287,95 @@ pub struct OciPreparationProgress {
 }
 
 impl OciPreparationProgress {
-    pub(crate) fn original(intent: &OciLifecycleIntent, node_resources: super::scope::ProcessScopeResourceLimits) -> Result<Self, String> {
+    pub(crate) fn original(
+        intent: &OciLifecycleIntent,
+        node_resources: super::scope::ProcessScopeResourceLimits,
+    ) -> Result<Self, String> {
         intent.validate()?;
         node_resources.validate()?;
-        Ok(Self { version: 1, intent_nonce: intent.nonce.clone(),
-            init_process: intent.init_process.clone(), lifecycle_scope: intent.lifecycle_scope,
-            lifecycle_path: intent.lifecycle_path.clone(), controller_scope: None,
-            init_scope: None, node_resources, phase: OciPreparationPhase::Origin })
+        Ok(Self {
+            version: 1,
+            intent_nonce: intent.nonce.clone(),
+            init_process: intent.init_process.clone(),
+            lifecycle_scope: intent.lifecycle_scope,
+            lifecycle_path: intent.lifecycle_path.clone(),
+            controller_scope: None,
+            init_scope: None,
+            node_resources,
+            phase: OciPreparationPhase::Origin,
+        })
     }
     pub fn require_intent(&self, intent: &OciLifecycleIntent) -> Result<(), String> {
         intent.validate()?;
         self.node_resources.validate()?;
-        if self.version != 1 || self.intent_nonce != intent.nonce || self.init_process != intent.init_process
-            || self.lifecycle_scope != intent.lifecycle_scope || self.lifecycle_path != intent.lifecycle_path {
+        if self.version != 1
+            || self.intent_nonce != intent.nonce
+            || self.init_process != intent.init_process
+            || self.lifecycle_scope != intent.lifecycle_scope
+            || self.lifecycle_path != intent.lifecycle_path
+        {
             return Err("OCI preparation differs from original durable intent".to_owned());
         }
         if (self.phase >= OciPreparationPhase::ControllerCreated) != self.controller_scope.is_some()
             || (self.phase >= OciPreparationPhase::InitCreated) != self.init_scope.is_some()
-            || self.controller_scope == Some(self.lifecycle_scope) || self.init_scope == Some(self.lifecycle_scope)
-            || self.controller_scope.is_some() && self.controller_scope == self.init_scope {
+            || self.controller_scope == Some(self.lifecycle_scope)
+            || self.init_scope == Some(self.lifecycle_scope)
+            || self.controller_scope.is_some() && self.controller_scope == self.init_scope
+        {
             return Err("OCI preparation scope/phase evidence is inconsistent".to_owned());
         }
         Ok(())
     }
     pub fn supersedes(&self, before: &Self) -> bool {
-        self.version == before.version && self.intent_nonce == before.intent_nonce
-            && self.init_process == before.init_process && self.lifecycle_scope == before.lifecycle_scope
-            && self.lifecycle_path == before.lifecycle_path && self.node_resources == before.node_resources
+        self.version == before.version
+            && self.intent_nonce == before.intent_nonce
+            && self.init_process == before.init_process
+            && self.lifecycle_scope == before.lifecycle_scope
+            && self.lifecycle_path == before.lifecycle_path
+            && self.node_resources == before.node_resources
             && self.phase >= before.phase
-            && before.controller_scope.is_none_or(|id| self.controller_scope == Some(id))
-            && before.init_scope.is_none_or(|id| self.init_scope == Some(id))
+            && before
+                .controller_scope
+                .is_none_or(|id| self.controller_scope == Some(id))
+            && before
+                .init_scope
+                .is_none_or(|id| self.init_scope == Some(id))
     }
-    pub(crate) fn advance(&mut self, phase: OciPreparationPhase,
-        controller: Option<crate::PinnedDirectoryIdentity>, init: Option<crate::PinnedDirectoryIdentity>) {
+    pub(crate) fn advance(
+        &mut self,
+        phase: OciPreparationPhase,
+        controller: Option<crate::PinnedDirectoryIdentity>,
+        init: Option<crate::PinnedDirectoryIdentity>,
+    ) {
         self.phase = phase;
-        if controller.is_some() { self.controller_scope = controller; }
-        if init.is_some() { self.init_scope = init; }
+        if controller.is_some() {
+            self.controller_scope = controller;
+        }
+        if init.is_some() {
+            self.init_scope = init;
+        }
     }
     pub fn prove_ended_and_retire(&self, intent: &OciLifecycleIntent) -> Result<(), String> {
         super::require_administrator().map_err(|error| error.to_string())?;
         self.require_intent(intent)?;
-        if intent.host_lifetime.has_ended()? { return Ok(()); }
+        if intent.host_lifetime.has_ended()? {
+            return Ok(());
+        }
         intent.require_ended()?;
         #[cfg(target_os = "linux")]
-        { super::cgroup::retire_ended_oci_scopes(&self.lifecycle_path, self.lifecycle_scope,
-            &intent.controller_path, self.controller_scope, self.init_scope) }
+        {
+            super::cgroup::retire_ended_oci_scopes(
+                &self.lifecycle_path,
+                self.lifecycle_scope,
+                &intent.controller_path,
+                self.controller_scope,
+                self.init_scope,
+            )
+        }
         #[cfg(not(target_os = "linux"))]
-        { Err("OCI preparation retirement requires Linux".to_owned()) }
+        {
+            Err("OCI preparation retirement requires Linux".to_owned())
+        }
     }
 }
 
@@ -403,7 +455,9 @@ impl OciLifecycleGeneration {
             return Err("OCI lifecycle generation digest is invalid".to_owned());
         }
         if self.lifecycle_scope == self.controller_scope
-            || self.lifecycle_scope == self.init_scope || self.controller_scope == self.init_scope {
+            || self.lifecycle_scope == self.init_scope
+            || self.controller_scope == self.init_scope
+        {
             return Err("OCI controller scope is not a strict lifecycle descendant".to_owned());
         }
         if !self.lifecycle_path.is_absolute()

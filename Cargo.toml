@@ -64,9 +64,20 @@ members = [
     "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
+    "crates/tools/modal-guest-launcher",
 ]
 exclude = ["vendor/libsqlite3-sys-0.28.0"]
 resolver = "2"
+
+# Workspace lint policy. The four clippy shape lints below are allowed for
+# the whole workspace: they judge error and type size and argument counts,
+# not correctness, and the daemon's typed refusals trip them by design.
+# Every other clippy and rustc warning stays denied in CI.
+[workspace.lints.clippy]
+result_large_err = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
 
 [workspace.package]
 license = "MIT"

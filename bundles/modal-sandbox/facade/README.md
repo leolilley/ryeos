@@ -255,8 +255,8 @@ sandbox:
    use that name).
 10. `terminate()` ends the sandbox and `poll()` reports it within 60 s. The
     SDK form `terminate(wait=True)` was not assumed.
-11. `exec(...).wait()` returns the exit code; `open(path, 'wb')` writes guest
-    files.
+11. `exec(...).wait()` returns the exit code; `exec` with raw bytes on stdin (proven by the launcher probe)
+    and `cat > path` writes guest files.
 12. The sandbox command's exit code is the sandbox's `returncode`, so the
     guest's exit is observed as the lease's terminal state; a sandbox ended
     by its timeout or by `terminate()` reports a non-`None` `poll()` and is
@@ -267,8 +267,9 @@ sandbox:
 15. The sandbox holds no Modal credentials: the guest cannot call
     `set_tags`, `exec` or any other Modal API on itself, so tag claims are out
     of its reach.
-16. `Sandbox.open` is available, and the user `exec` runs as can `mkdir`
-    under `/ryeos` and write `/ryeos/guest/entrypoint` and `/ryeos/run.stdin`.
+16. `Sandbox.open` and the rest of the legacy sandbox file API are refused by
+    the server (`UnimplementedError`), so every file write goes through
+    `exec`; the user `exec` runs as can `mkdir` under `/ryeos` and write `/ryeos/guest/entrypoint` and `/ryeos/run.stdin`.
 17. Egress: DNS resolution stays open (residual channel noted), listed hosts
     are reachable over TLS on 443, non-listed hosts and non-443 ports are
     denied, and `block_network` denies everything.
@@ -280,11 +281,15 @@ sandbox:
     (about 90 MB of JSON, its parsed string and the decoded bytes). Raising
     input concurrency needs this redone.
 
-21. `Sandbox.open(path, 'ab')` appends, and `exec(...)` exposes `stdout.read()`
+21. `exec('sh', '-c', 'cat >> "$1"', 'sh', path)` fed raw bytes on
+    `stdin` (`write`, `drain`, `write_eof`; binary-safe, proven by the
+    launcher probe at about 1.2 MB/s) appends them and
+    reports failure through a nonzero exit code, and `exec(...)` exposes
+    `stdout.read()`
     (used for `stat -c %s`, `sha256sum` and `ls -1`) before `wait()` returns
     the exit code.
 22. A slot can reach 4 GiB + 64 KiB by 32 MiB appends: the sandbox disk holds
-    it, the append of a 32 MiB chunk through `Sandbox.open` is accepted, and
+    it, the append of a 32 MiB chunk through the `exec` stdin write is accepted as raw stdin (32 MiB sha-verified by the launcher probe), and
     the facade function (1024 MiB) survives one full-size chunk request
     (about 43 MB of JSON, its parsed string and the decoded bytes).
 23. Modal's web request body limit admits the 32 MiB chunk frame (about 43

@@ -1090,11 +1090,12 @@ fn run_doctor(
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
     let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
 
-    let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: Some(app_root.clone()),
-        ..Default::default()
-    })
-    .context("load config for offline doctor engine")?;
+    let config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .context("load config for offline doctor engine")?;
     let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root);
     let policy_snapshot = (|| -> anyhow::Result<_> {
         let trust = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)?;
@@ -1317,8 +1318,9 @@ fn run_bundle_verify(
                 .expect("could not determine XDG data directory")
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&app_root)
-        .context("load node isolation policy")?;
+    let isolation =
+        ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(&app_root)
+            .context("load node isolation policy")?;
 
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         &source_path,

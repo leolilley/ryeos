@@ -733,12 +733,12 @@ pub(crate) struct FoldBackOutputsParams<'a> {
     pub authority: &'a ryeos_state::PinnedStateAuthority,
     pub cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
-    pub workspace_id: &'a str,
-    pub launch_owner: &'a str,
+    /// The frozen workspace evidence from `freeze_workspace_for_foldback`,
+    /// taken before the caller acquired its CAS mutation guard.
+    pub lifecycle: ryeos_engine::isolation::PinnedWorkspaceLifecycleResult,
     pub working_dir: &'a Path,
     pub pre_tree_hash: &'a str,
     pub policy_hash: &'a str,
-    pub base_snapshot_hash: &'a str,
     pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
     pub operational_shadow_paths: &'a [String],
     pub output_partition: Option<&'a ryeos_state::objects::WorkspaceOutputPartition>,
@@ -950,17 +950,56 @@ fn load_workspace_output_base_capture(
     Ok(Some(capture))
 }
 
+/// Freeze the workspace and capture its mutation evidence. The adapter
+/// starts a process, which a thread retaining a CAS mutation guard or other
+/// fork-sensitive descriptor authority cannot do, so every fold-back caller
+/// runs this before acquiring its guard. The result is plain evidence plus
+/// pinned workspace roots; nothing in it is staged CAS state.
+pub(crate) fn freeze_workspace_for_foldback(
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    workspace_id: &str,
+    launch_owner: &str,
+    base_snapshot_hash: &str,
+    working_dir: &Path,
+    workspace_record: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<ryeos_engine::isolation::PinnedWorkspaceLifecycleResult> {
+    let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
+    let lifecycle = isolation
+        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+            workspace_id,
+            launch_owner,
+            base_snapshot: base_snapshot_hash,
+            project_path: &layout.project,
+            mount_identity: workspace_record.mount_identity.as_deref(),
+        })
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pinned = lillux::canonical_json(&serde_json::to_value(
+        &lifecycle.evidence.pinned_root_identities,
+    )?)?;
+    if workspace_record.workspace_id != workspace_id
+        || workspace_record.base_snapshot != base_snapshot_hash
+        || workspace_record.launch_owner.as_deref() != Some(launch_owner)
+        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
+        || workspace_record.backend_version.as_deref()
+            != Some(lifecycle.evidence.backend_version.as_str())
+        || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
+        || workspace_record.mount_identity != lifecycle.evidence.mount_identity
+    {
+        anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
+    }
+    Ok(lifecycle)
+}
+
 pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<FoldBackCapture> {
     let FoldBackOutputsParams {
         authority,
         cas_mutation_guard,
         isolation,
-        workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir,
         pre_tree_hash,
         policy_hash,
-        base_snapshot_hash,
         workspace_record,
         operational_shadow_paths,
         output_partition,
@@ -1006,30 +1045,6 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
     };
 
     let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
-    let lifecycle = isolation
-        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
-            workspace_id,
-            launch_owner,
-            base_snapshot: base_snapshot_hash,
-            project_path: &layout.project,
-            mount_identity: workspace_record.mount_identity.as_deref(),
-        })
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let pinned = lillux::canonical_json(&serde_json::to_value(
-        &lifecycle.evidence.pinned_root_identities,
-    )?)?;
-    if workspace_record.workspace_id != workspace_id
-        || workspace_record.base_snapshot != base_snapshot_hash
-        || workspace_record.launch_owner.as_deref() != Some(launch_owner)
-        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
-        || workspace_record.backend_version.as_deref()
-            != Some(lifecycle.evidence.backend_version.as_str())
-        || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
-        || workspace_record.mount_identity != lifecycle.evidence.mount_identity
-    {
-        anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
-    }
     let mut captured_outputs = None;
     let new_tree = if daemon_mediated_source_capture {
         if output_partition.is_some() {
@@ -1200,7 +1215,7 @@ pub(crate) fn seal_callback_workspace_generation(
     // The caller does not commit it: Freezing is the durable contact fence;
     // a follow/continuation capture does not itself terminalize the root.
     let authority = pinned_state_authority(state)?;
-    let guard = authority.acquire_shared_guard()?;
+    let read_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
@@ -1257,6 +1272,18 @@ pub(crate) fn seal_callback_workspace_generation(
             quiesced: Some(quiesced),
         });
     }
+    // The freeze adapter starts a process, so the read guard ends first and
+    // the publishing guard is taken only after the evidence is in hand.
+    drop(read_guard);
+    let lifecycle = freeze_workspace_for_foldback(
+        &state.isolation,
+        workspace_id,
+        launch_owner,
+        base_snapshot_hash,
+        &workspace.root,
+        &record,
+    )?;
+    let guard = authority.acquire_shared_guard()?;
     let permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
@@ -1269,12 +1296,10 @@ pub(crate) fn seal_callback_workspace_generation(
         authority: &authority,
         cas_mutation_guard: &guard,
         isolation: &state.isolation,
-        workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir: &workspace.root,
         pre_tree_hash: &snapshot.project_tree_hash,
         policy_hash: &snapshot.effective_policy_hash,
-        base_snapshot_hash,
         workspace_record: &record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -1393,6 +1418,16 @@ pub(crate) fn capture_runtime_workspace_input_generation(
 
     let capture = (|| -> Result<(ryeos_state::objects::WorkspaceGenerationPair, PendingCasPublication)> {
         let authority = pinned_state_authority(state)?;
+        // The freeze adapter starts a process, so it runs before this
+        // thread takes the CAS mutation guard.
+        let lifecycle = freeze_workspace_for_foldback(
+            &state.isolation,
+            workspace_id,
+            launch_owner,
+            base_snapshot_hash,
+            &workspace.root,
+            &record,
+        )?;
         let guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
         let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
@@ -1410,12 +1445,10 @@ pub(crate) fn capture_runtime_workspace_input_generation(
             authority: &authority,
             cas_mutation_guard: &guard,
             isolation: &state.isolation,
-            workspace_id,
-            launch_owner,
+            lifecycle,
             working_dir: &workspace.root,
             pre_tree_hash: &snapshot.project_tree_hash,
             policy_hash: &snapshot.effective_policy_hash,
-            base_snapshot_hash,
             workspace_record: &record,
             operational_shadow_paths: &operational_shadow_paths,
             output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -1930,14 +1963,26 @@ fn recover_interrupted_workspace_freeze_inner(
         recovered_freeze_uses_daemon_mediated_source_capture(state, thread_id)?;
     assert_workspace_capture_processes_settled(state, record)?;
     let authority = pinned_state_authority(state)?;
-    let guard = authority.acquire_shared_guard()?;
     let (operational_shadow_paths, output_context) =
         admitted_workspace_capture_inputs(state, thread_id, record)?;
-    if let Some(generation) =
-        verified_frozen_generation(&authority, record, output_context.as_ref())?
     {
-        return Ok(generation);
+        let read_guard = authority.acquire_shared_guard()?;
+        let verified = verified_frozen_generation(&authority, record, output_context.as_ref())?;
+        authority.ensure_guard(&read_guard)?;
+        if let Some(generation) = verified {
+            return Ok(generation);
+        }
     }
+    // The freeze adapter starts a process, so it runs with no guard held.
+    let lifecycle = freeze_workspace_for_foldback(
+        &state.isolation,
+        &record.workspace_id,
+        launch_owner,
+        &record.base_snapshot,
+        Path::new(&record.root_path),
+        record,
+    )?;
+    let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
         &cas,
@@ -1956,12 +2001,10 @@ fn recover_interrupted_workspace_freeze_inner(
         authority: &authority,
         cas_mutation_guard: &guard,
         isolation: &state.isolation,
-        workspace_id: &record.workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir: Path::new(&record.root_path),
         pre_tree_hash: &base.project_tree_hash,
         policy_hash: &base.effective_policy_hash,
-        base_snapshot_hash: &record.base_snapshot,
         workspace_record: record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),

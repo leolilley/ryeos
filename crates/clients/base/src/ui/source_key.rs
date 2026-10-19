@@ -64,7 +64,7 @@ impl RyeOsSourceInstanceKey {
         if parts.first().copied() != Some(PREFIX) {
             return None;
         }
-        let host = decode_component(*parts.get(1)?)?;
+        let host = decode_component(parts.get(1)?)?;
         let view_instance = RyeOsViewInstanceKey::from_canonical(&host)?;
         let channel = match parts.as_slice() {
             [_, _, "source", channel] => RyeOsSourceChannel::Named(decode_component(channel)?),

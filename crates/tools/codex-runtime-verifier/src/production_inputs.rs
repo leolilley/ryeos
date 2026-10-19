@@ -453,8 +453,8 @@ mod tests {
                     0o755,
                     crate::VERIFIER_TEMP_PURPOSE,
                 )
-                    .unwrap()
-                    .unwrap();
+                .unwrap()
+                .unwrap();
                 let source = root
                     .open_inherited_regular(OsStr::new(id), false)
                     .unwrap()

@@ -50,7 +50,12 @@ fn acquire_shared_factory() -> Arc<lillux_sqlite::OriginalNativeFactory> {
 /// slot's destructor, which would otherwise try to release the host.
 #[cfg(test)]
 pub(crate) fn take_shared_host() -> Option<TestNativeHost> {
-    SHARED_HOST.with(|shared| shared.borrow_mut().take().map(|SharedHost { host, stores: _ }| host))
+    SHARED_HOST.with(|shared| {
+        shared
+            .borrow_mut()
+            .take()
+            .map(|SharedHost { host, stores: _ }| host)
+    })
 }
 
 /// Run `work` with this thread's shared host, for a test that opens a
@@ -61,7 +66,12 @@ pub(crate) fn take_shared_host() -> Option<TestNativeHost> {
 pub fn with_store_host<T>(work: impl FnOnce(&TestNativeHost) -> T) -> T {
     SHARED_HOST.with(|shared| {
         let shared = shared.borrow();
-        work(&shared.as_ref().expect("a live test StateStore holds the shared host").host)
+        work(
+            &shared
+                .as_ref()
+                .expect("a live test StateStore holds the shared host")
+                .host,
+        )
     })
 }
 
@@ -73,12 +83,18 @@ fn with_shared_host_release(record: impl FnOnce(&TestNativeHost)) {
         let entry = shared.as_mut().expect("test StateStore host present");
         record(&entry.host);
         entry.stores -= 1;
-        if entry.stores == 0 { shared.take() } else { None }
+        if entry.stores == 0 {
+            shared.take()
+        } else {
+            None
+        }
     });
     if let Some(SharedHost { host, stores: _ }) = released {
         let (issued, recorded) = host.ticket_census();
         if issued as usize != recorded {
-            eprintln!("test StateStore host census incomplete: {issued} tickets issued, {recorded} recorded");
+            eprintln!(
+                "test StateStore host census incomplete: {issued} tickets issued, {recorded} recorded"
+            );
         }
         // While a failed test unwinds, a release refusal must not panic a
         // second time: the host's own drop then retains a leaked arena.
@@ -105,7 +121,9 @@ fn record_census(
         host.retain_lease(lease);
     }
     for retirement in lease_retirements {
-        host.after_backend(Box::new(move |backend| retirement.retire_after_backend(backend)));
+        host.after_backend(Box::new(move |backend| {
+            retirement.retire_after_backend(backend)
+        }));
     }
 }
 
@@ -137,7 +155,9 @@ fn on_deep_stack<T: Send>(name: &str, work: impl FnOnce() -> T + Send) -> Result
             .stack_size(DEEP_STACK_BYTES)
             .spawn_scoped(scope, work)
             .context("spawn a deep-stack test StateStore thread")?;
-        running.join().map_err(|_| anyhow!("deep-stack test StateStore thread panicked"))
+        running
+            .join()
+            .map_err(|_| anyhow!("deep-stack test StateStore thread panicked"))
     })
 }
 
@@ -147,14 +167,29 @@ struct TestStoreLeaseAuthority {
     factory: std::sync::Weak<lillux_sqlite::OriginalNativeFactory>,
 }
 impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for TestStoreLeaseAuthority {
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool) -> Result<()> {
-        let issued = self.factory.upgrade().context("test Store factory absent")?;
-        anyhow::ensure!(Arc::ptr_eq(&issued, factory), "test Store lease selects a foreign factory");
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _cleanup: bool,
+    ) -> Result<()> {
+        let issued = self
+            .factory
+            .upgrade()
+            .context("test Store factory absent")?;
+        anyhow::ensure!(
+            Arc::ptr_eq(&issued, factory),
+            "test Store lease selects a foreign factory"
+        );
         Ok(())
     }
-    fn fork_deadline(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>, cleanup: bool)
-        -> Result<lillux::time::MonotonicDeadline> {
-        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(self, factory, cleanup)?;
+    fn fork_deadline(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        cleanup: bool,
+    ) -> Result<lillux::time::MonotonicDeadline> {
+        lillux_sqlite::OriginalNativeProjectionLeaseAuthority::require_original(
+            self, factory, cleanup,
+        )?;
         Ok(lillux::time::MonotonicDeadline::after(OPEN_DEADLINE))
     }
 }
@@ -192,6 +227,25 @@ impl TestStateStore {
         write_barrier: WriteBarrier,
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<Self> {
+        Self::open_with_bundle_admission_trust(
+            app_root,
+            signer,
+            write_barrier,
+            head_trust,
+            BundleAdmissionTrust::unbound(),
+        )
+    }
+
+    /// [`Self::open_with_barrier`] bound to the Bundle admission trust a node
+    /// binds, so retained Bundle executors revalidate as they do live. The
+    /// other opens are unbound and refuse every retained Bundle executor.
+    pub fn open_with_bundle_admission_trust(
+        app_root: &Path,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        bundle_admission_trust: BundleAdmissionTrust,
+    ) -> Result<Self> {
         let runtime_state_dir = Self::runtime_state_dir(app_root);
         lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
             .context("establish test State root")?;
@@ -201,7 +255,9 @@ impl TestStateStore {
         .context("acquire test operator lock")?;
         let factory = acquire_shared_factory();
         let lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
-            Arc::new(TestStoreLeaseAuthority { factory: Arc::downgrade(&factory) });
+            Arc::new(TestStoreLeaseAuthority {
+                factory: Arc::downgrade(&factory),
+            });
         let lease = Arc::new(lock.retain());
         let open_factory = Arc::clone(&factory);
         let app_root = app_root.to_path_buf();
@@ -214,13 +270,14 @@ impl TestStateStore {
             // factory; the operator lock of this exact App root is held by
             // the opening owner for the Store's whole life.
             let opened = unsafe {
-                StateStore::new_in_process_native(
+                StateStore::new_in_process_native_with_bundle_admission_trust(
                     app_root,
                     runtime_state_dir.clone(),
                     runtime_state_dir.join(RUNTIME_DB_FILENAME),
                     signer,
                     write_barrier,
                     head_trust,
+                    bundle_admission_trust,
                     lease,
                     Arc::clone(&open_factory),
                     lease_authority,
@@ -237,11 +294,13 @@ impl TestStateStore {
                     let settled = match error.downcast::<LiveStateStoreOpenFailure>() {
                         Ok(failure) => failure
                             .close_retained()
-                            .map_err(|failure| anyhow!("refused StateStore start release retained: {failure}"))
+                            .map_err(|failure| {
+                                anyhow!("refused StateStore start release retained: {failure}")
+                            })
                             .and_then(|released| {
-                                released
-                                    .into_census(open_factory)
-                                    .map_err(|failure| anyhow!("refused StateStore start census retained: {failure}"))
+                                released.into_census(open_factory).map_err(|failure| {
+                                    anyhow!("refused StateStore start census retained: {failure}")
+                                })
                             })
                             .map(Some),
                         Err(_unowned) => Ok(None),
@@ -261,7 +320,12 @@ impl TestStateStore {
                 drop(factory);
                 let mut settlement = Ok(());
                 with_shared_host_release(|host| match settled {
-                    Ok(Some(StateStoreCensus { terminals, leases, lease_retirements, prior_refusal: _ })) => {
+                    Ok(Some(StateStoreCensus {
+                        terminals,
+                        leases,
+                        lease_retirements,
+                        prior_refusal: _,
+                    })) => {
                         record_census(host, terminals, leases, lease_retirements);
                     }
                     Ok(None) => {}
@@ -284,7 +348,10 @@ impl TestStateStore {
         match Self::open(app_root, signer, head_trust) {
             Ok(store) => {
                 store.close().expect("close the admitted test StateStore");
-                panic!("test StateStore open of {} was admitted", app_root.display());
+                panic!(
+                    "test StateStore open of {} was admitted",
+                    app_root.display()
+                );
             }
             Err(error) => format!("{error:#}"),
         }
@@ -324,8 +391,14 @@ impl TestStateStore {
     }
 
     fn close_inner(&mut self) -> Result<()> {
-        let store = self.store.take().context("test StateStore already closed")?;
-        let factory = self.factory.take().context("test StateStore factory alias absent")?;
+        let store = self
+            .store
+            .take()
+            .context("test StateStore already closed")?;
+        let factory = self
+            .factory
+            .take()
+            .context("test StateStore factory alias absent")?;
         let prepared = end_process_registries(&store);
         // A refused close keeps every native owner inside its failure; the
         // host then reports its arena as leaked when it is released.
@@ -339,10 +412,16 @@ impl TestStateStore {
         drop(factory);
         let mut outcome = Ok(());
         with_shared_host_release(|host| match census {
-            Ok(StateStoreCensus { terminals, leases, lease_retirements, prior_refusal }) => {
+            Ok(StateStoreCensus {
+                terminals,
+                leases,
+                lease_retirements,
+                prior_refusal,
+            }) => {
                 record_census(host, terminals, leases, lease_retirements);
                 if let Some(error) = prior_refusal {
-                    outcome = Err(error.context("test StateStore close recorded an earlier refusal"));
+                    outcome =
+                        Err(error.context("test StateStore close recorded an earlier refusal"));
                 }
             }
             Err(error) => {
@@ -360,44 +439,44 @@ impl TestStateStore {
 /// remain for the next opening's rebuild.
 fn end_process_registries(store: &StateStore) -> Result<()> {
     (|| -> Result<()> {
-            store.close_process_attachment_admission()?;
-            store.attached_process_registry().clear();
-            store.live_worker_registry().clear();
-            // A test ends its launch tasks the way a daemon exit does: the
-            // in-memory owners and abort handles end, while every durable
-            // claim stays for the next opening's recovery.
-            store
-                .launch_task_abort_handles
+        store.close_process_attachment_admission()?;
+        store.attached_process_registry().clear();
+        store.live_worker_registry().clear();
+        // A test ends its launch tasks the way a daemon exit does: the
+        // in-memory owners and abort handles end, while every durable
+        // claim stays for the next opening's recovery.
+        store
+            .launch_task_abort_handles
+            .lock()
+            .map_err(|_| anyhow!("launch registry poisoned"))?
+            .clear();
+        store
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("Store owner poisoned"))?
+            .active_launch_owners
+            .clear();
+        // Recorded in-process handlers lose their owner at a daemon exit:
+        // every waiter observes the loss and the volatile map ends, while
+        // each handler's durable rows stay for the next opening.
+        let handlers = std::mem::take(
+            &mut *store
+                .active_in_process_handlers
                 .lock()
-                .map_err(|_| anyhow!("launch registry poisoned"))?
-                .clear();
-            store
-                .inner
-                .lock()
-                .map_err(|_| anyhow!("Store owner poisoned"))?
-                .active_launch_owners
-                .clear();
-            // Recorded in-process handlers lose their owner at a daemon exit:
-            // every waiter observes the loss and the volatile map ends, while
-            // each handler's durable rows stay for the next opening.
-            let handlers = std::mem::take(
-                &mut *store
-                    .active_in_process_handlers
-                    .lock()
-                    .map_err(|_| anyhow!("handler registry poisoned"))?,
-            );
-            for control in handlers.into_values() {
-                if control.completion().is_none() {
-                    control.mark_completed(super::InProcessHandlerCompletion::OwnerLostUnsettled);
-                }
+                .map_err(|_| anyhow!("handler registry poisoned"))?,
+        );
+        for control in handlers.into_values() {
+            if control.completion().is_none() {
+                control.mark_completed(super::InProcessHandlerCompletion::OwnerLostUnsettled);
             }
-            // Selected-invocation metadata is process memory as well.
-            store
-                .selected_invocations
-                .lock()
-                .map_err(|_| anyhow!("selected registry poisoned"))?
-                .end_process_records();
-            Ok(())
+        }
+        // Selected-invocation metadata is process memory as well.
+        store
+            .selected_invocations
+            .lock()
+            .map_err(|_| anyhow!("selected registry poisoned"))?
+            .end_process_records();
+        Ok(())
     })()
 }
 
@@ -416,20 +495,32 @@ pub(crate) type RetainedTestStoreContext = (
 /// an isolated child process. The frame keeps the Store's namespace
 /// exclusion and native context, so the child must end with it.
 #[cfg(test)]
-pub(crate) fn closed_store_for_test(app_root: &Path) -> (ClosedLiveStateStore, RetainedTestStoreContext) {
-    let identity = ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
-        .expect("test node identity");
+pub(crate) fn closed_store_for_test(
+    app_root: &Path,
+) -> (ClosedLiveStateStore, RetainedTestStoreContext) {
+    let identity =
+        ryeos_node_runtime::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+            .expect("test node identity");
     let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
     let mut head_trust = ryeos_state::refs::TrustStore::new();
-    head_trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
-    let mut opened = TestStateStore::open(app_root, signer, Arc::new(head_trust)).expect("test StateStore opens");
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        *identity.verifying_key(),
+    );
+    let mut opened = TestStateStore::open(app_root, signer, Arc::new(head_trust))
+        .expect("test StateStore opens");
     let store = opened.store.take().expect("test StateStore open");
-    let factory = opened.factory.take().expect("test StateStore factory alias");
+    let factory = opened
+        .factory
+        .take()
+        .expect("test StateStore factory alias");
     let lock = Arc::clone(&opened.lock);
     end_process_registries(&store).expect("test StateStore registries end");
     let close_factory = Arc::clone(&factory);
     let closed = on_deep_stack("test-store-close-live", move || {
-        store.close_live(close_factory).map_err(|failure| anyhow!("{failure:#}"))
+        store
+            .close_live(close_factory)
+            .map_err(|failure| anyhow!("{failure:#}"))
     })
     .and_then(|closed| closed)
     .expect("test StateStore closes into its frame");
@@ -483,13 +574,25 @@ impl TestAccountingDb {
         );
         let factory = acquire_shared_factory();
         let destination = SHARED_HOST.with(|shared| {
-            shared.borrow().as_ref().map(|entry| entry.host.destination())
+            shared
+                .borrow()
+                .as_ref()
+                .map(|entry| entry.host.destination())
         });
-        let mut owner = Self { db: None, ledger: None, factory: Some(Arc::clone(&factory)), _thread: std::marker::PhantomData };
+        let mut owner = Self {
+            db: None,
+            ledger: None,
+            factory: Some(Arc::clone(&factory)),
+            _thread: std::marker::PhantomData,
+        };
         let Some(destination) = destination else {
             return Err(owner.refused(anyhow!("test accounting host absent")));
         };
-        let opened = crate::accounting_db::AccountingDb::open_native_for_test(factory, &directory, destination);
+        let opened = crate::accounting_db::AccountingDb::open_native_for_test(
+            factory,
+            &directory,
+            destination,
+        );
         match opened {
             Ok((ledger, Ok(db))) => {
                 owner.ledger = Some(ledger);
@@ -524,7 +627,9 @@ impl TestAccountingDb {
     }
 
     fn close_inner(&mut self) -> Result<()> {
-        let Some(factory) = self.factory.take() else { return Ok(()) };
+        let Some(factory) = self.factory.take() else {
+            return Ok(());
+        };
         if let Some(db) = self.db.take() {
             if Arc::strong_count(&db) != 1 {
                 self.db = Some(db);
@@ -595,16 +700,23 @@ mod tests {
     use super::*;
 
     fn signer_and_trust(root: &Path) -> (Arc<dyn Signer>, Arc<ryeos_state::refs::TrustStore>) {
-        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut trust = ryeos_state::refs::TrustStore::new();
-        trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
+        trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
         (signer, Arc::new(trust))
     }
 
     fn census() -> (u32, usize) {
         SHARED_HOST.with(|shared| {
-            shared.borrow().as_ref().map_or((0, 0), |entry| entry.host.ticket_census())
+            shared
+                .borrow()
+                .as_ref()
+                .map_or((0, 0), |entry| entry.host.ticket_census())
         })
     }
 
@@ -615,16 +727,24 @@ mod tests {
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
         let (signer, trust) = signer_and_trust(first_root.path());
-        let first = TestStateStore::open(first_root.path(), Arc::clone(&signer), Arc::clone(&trust)).unwrap();
+        let first =
+            TestStateStore::open(first_root.path(), Arc::clone(&signer), Arc::clone(&trust))
+                .unwrap();
         let (issued_before, recorded_before) = census();
         let (second_signer, second_trust) = signer_and_trust(second_root.path());
         let refused = TestStateStore::open(second_root.path(), second_signer, second_trust);
         let (issued_after, recorded_after) = census();
         let issued = issued_after - issued_before;
         let recorded = recorded_after - recorded_before;
-        eprintln!("refused={:?} issued={issued} recorded={recorded}", refused.as_ref().err().map(|e| format!("{e:#}")));
+        eprintln!(
+            "refused={:?} issued={issued} recorded={recorded}",
+            refused.as_ref().err().map(|e| format!("{e:#}"))
+        );
         drop(refused);
-        assert_eq!(issued as usize, recorded, "every ticket the refused start issued reaches the census");
+        assert_eq!(
+            issued as usize, recorded,
+            "every ticket the refused start issued reaches the census"
+        );
         first.close().unwrap();
     }
 }

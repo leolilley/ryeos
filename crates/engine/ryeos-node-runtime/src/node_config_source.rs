@@ -144,7 +144,7 @@ pub fn verify_and_parse(
 
     let envelope = node_config_envelope();
 
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
         .with_context(|| {
             format!(
                 "node config item at {} has no valid signature line",
@@ -154,7 +154,7 @@ pub fn verify_and_parse(
     let signer_fingerprint = header.signer_fingerprint.clone();
 
     let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
+        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)?;
 
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
         bail!(
@@ -170,7 +170,7 @@ pub fn verify_and_parse(
         .verifying_key
         .to_bytes();
 
-    let body_str = strip_signature(&content);
+    let body_str = strip_signature(content);
     let body: Value = serde_yaml::from_str(&body_str)
         .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
 

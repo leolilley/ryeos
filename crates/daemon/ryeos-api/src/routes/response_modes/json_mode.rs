@@ -104,8 +104,8 @@ impl ResponseMode for JsonMode {
                 &self.kinds,
             )?;
 
-        let raw_objects_put_v1 = raw.request.body
-            == ryeos_app::route_raw::RawRequestBody::ObjectsPutV1;
+        let raw_objects_put_v1 =
+            raw.request.body == ryeos_app::route_raw::RawRequestBody::ObjectsPutV1;
         if raw_objects_put_v1 {
             let expected_methods = std::collections::HashSet::from(["POST".to_string()]);
             let valid = raw.id == "objects/put"
@@ -113,9 +113,10 @@ impl ResponseMode for JsonMode {
                 && raw.methods == expected_methods
                 && raw.auth == "ryeos_signed"
                 && source_str == "service:objects/put"
-                && mechanics == crate::routes::invokers::CanonicalRefInvocationMechanics::InProcess(
-                    ryeos_engine::kind_registry::InProcessRegistryKind::Services,
-                )
+                && mechanics
+                    == crate::routes::invokers::CanonicalRefInvocationMechanics::InProcess(
+                        ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                    )
                 && raw.response.source_config.is_null()
                 && raw.limits.body_bytes_max == 104_857_600;
             if !valid {
@@ -172,7 +173,11 @@ impl ResponseMode for JsonMode {
             invoker,
             source_ref: source_str.to_string(),
             source_config_template: raw.response.source_config.clone(),
-            body_is_json: matches!(raw.request.body, ryeos_app::route_raw::RawRequestBody::Json | ryeos_app::route_raw::RawRequestBody::ObjectsPutV1),
+            body_is_json: matches!(
+                raw.request.body,
+                ryeos_app::route_raw::RawRequestBody::Json
+                    | ryeos_app::route_raw::RawRequestBody::ObjectsPutV1
+            ),
             raw_objects_put_v1,
         }))
     }
@@ -199,8 +204,11 @@ impl CompiledResponseMode for CompiledJsonMode {
                     "objects_put_v1 requires a verified ryeos_signed principal".into(),
                 ));
             }
-            crate::handlers::objects_put::validate_raw_object_put_request(&ctx.body_raw)
-                .map_err(|error| RouteDispatchError::BadRequest(format!("invalid objects.put body: {error}")))?;
+            crate::handlers::objects_put::validate_raw_object_put_request(&ctx.body_raw).map_err(
+                |error| {
+                    RouteDispatchError::BadRequest(format!("invalid objects.put body: {error}"))
+                },
+            )?;
         }
         // Determine input:
         // 1. If source_config is set, interpolate it with path captures.
@@ -394,7 +402,11 @@ mod tests {
     }
 
     fn objects_put_profile_route() -> RawRouteSpec {
-        let mut raw = make_raw("/objects/put", Some("service:objects/put"), serde_json::Value::Null);
+        let mut raw = make_raw(
+            "/objects/put",
+            Some("service:objects/put"),
+            serde_json::Value::Null,
+        );
         raw.id = "objects/put".into();
         raw.methods = ["POST".into()].into_iter().collect();
         raw.request.body = RawRequestBody::ObjectsPutV1;

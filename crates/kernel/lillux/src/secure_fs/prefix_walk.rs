@@ -189,7 +189,11 @@ impl PrefixWalk {
 
     /// Every included entry below the root, at every depth, was reported.
     pub fn is_complete(&self) -> bool {
-        self.exhausted.is_none() && self.directories.iter().all(PrefixWalkDirectory::is_complete)
+        self.exhausted.is_none()
+            && self
+                .directories
+                .iter()
+                .all(PrefixWalkDirectory::is_complete)
     }
 }
 
@@ -304,8 +308,10 @@ impl PinnedDirectory {
                 continue;
             }
             let child_record = walk.directories.len();
-            walk.directories
-                .push(PrefixWalkDirectory::unvisited(relative.clone(), child_depth));
+            walk.directories.push(PrefixWalkDirectory::unvisited(
+                relative.clone(),
+                child_depth,
+            ));
             if !frame.stream_complete {
                 // The work budget already cut this directory's stream; the
                 // walk ends once its read names are inspected.
@@ -337,7 +343,14 @@ impl PinnedDirectory {
                     continue;
                 }
             };
-            match read_frame(child, relative, child_depth, child_record, &mut work, &mut walk)? {
+            match read_frame(
+                child,
+                relative,
+                child_depth,
+                child_record,
+                &mut work,
+                &mut walk,
+            )? {
                 FrameRead::Frame(child) => stack.push(child),
                 FrameRead::Failed(error) => {
                     let record = &mut walk.directories[child_record];
@@ -642,7 +655,10 @@ mod tests {
         assert_eq!(walk.exhausted, None);
         assert!(walk.is_complete());
         assert_eq!(walk.directories.len(), 2);
-        assert_eq!(record(&walk, "b").coverage, PrefixDirectoryCoverage::Complete);
+        assert_eq!(
+            record(&walk, "b").coverage,
+            PrefixDirectoryCoverage::Complete
+        );
         // Two directory opens, four names read and four inspections.
         assert_eq!(walk.work_used, 10);
     }
@@ -761,7 +777,10 @@ mod tests {
         assert_eq!(paths(&walk), ["d"]);
         assert_eq!(walk.exhausted, Some(PrefixWalkExhaustion::Work));
         assert_eq!(walk.root().coverage, PrefixDirectoryCoverage::Complete);
-        assert_eq!(record(&walk, "d").coverage, PrefixDirectoryCoverage::NotVisited);
+        assert_eq!(
+            record(&walk, "d").coverage,
+            PrefixDirectoryCoverage::NotVisited
+        );
         assert!(!walk.is_complete());
     }
 
@@ -781,7 +800,10 @@ mod tests {
         let no_depth = root
             .walk_prefix_no_follow(budget(0, 100, 100), include)
             .expect("walk without depth");
-        assert_eq!(no_depth.root().coverage, PrefixDirectoryCoverage::DepthLimit);
+        assert_eq!(
+            no_depth.root().coverage,
+            PrefixDirectoryCoverage::DepthLimit
+        );
         assert_eq!(no_depth.exhausted, None);
         assert!(!no_depth.is_complete());
 
@@ -816,8 +838,14 @@ mod tests {
 
         assert_eq!(paths(&walk), ["d", "d/e"]);
         assert_eq!(walk.exhausted, None);
-        assert_eq!(record(&walk, "d").coverage, PrefixDirectoryCoverage::Complete);
-        assert_eq!(record(&walk, "d/e").coverage, PrefixDirectoryCoverage::DepthLimit);
+        assert_eq!(
+            record(&walk, "d").coverage,
+            PrefixDirectoryCoverage::Complete
+        );
+        assert_eq!(
+            record(&walk, "d/e").coverage,
+            PrefixDirectoryCoverage::DepthLimit
+        );
         assert_eq!(record(&walk, "d/e").depth, 2);
         assert!(!walk.is_complete());
     }
@@ -884,7 +912,10 @@ mod tests {
             .expect("walk");
 
         assert_eq!(paths(&walk), ["link"]);
-        assert_eq!(walk.entries[0].metadata.entry_type, PinnedEntryType::Symlink);
+        assert_eq!(
+            walk.entries[0].metadata.entry_type,
+            PinnedEntryType::Symlink
+        );
         assert_eq!(walk.entries[0].size, None);
         assert_eq!(walk.directories.len(), 1);
         assert!(walk.is_complete());
@@ -935,7 +966,10 @@ mod tests {
             .expect("walk");
 
         assert_eq!(paths(&walk), ["d"]);
-        assert_eq!(record(&walk, "d").coverage, PrefixDirectoryCoverage::Replaced);
+        assert_eq!(
+            record(&walk, "d").coverage,
+            PrefixDirectoryCoverage::Replaced
+        );
         assert!(walk.root().changed);
         assert!(!walk.is_complete());
     }

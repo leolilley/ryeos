@@ -51,12 +51,9 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let bundle_root = workspace.join("bundles/core");
     let mut parser_roots = vec![bundle_root.clone()];
     parser_roots.extend(workflow_roots.iter().cloned());
-    let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &parser_roots,
-        &trust_store,
-        &kinds,
-    )
-    .expect("load parser tools");
+    let (parser_tools, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
+            .expect("load parser tools");
 
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(

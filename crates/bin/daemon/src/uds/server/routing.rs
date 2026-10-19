@@ -17,15 +17,11 @@ pub(super) async fn dispatch_dynamic(
 ) -> RpcResponse {
     let lifecycle = state.lifecycle();
     let application = state.application();
-    let app = application.as_ref().map(|publication| publication.app().as_ref());
-    let response = dispatch_with_state(
-        request,
-        app,
-        application.as_deref(),
-        &lifecycle,
-        peer,
-    )
-    .await;
+    let app = application
+        .as_ref()
+        .map(|publication| publication.app().as_ref());
+    let response =
+        dispatch_with_state(request, app, application.as_deref(), &lifecycle, peer).await;
     drop(application);
     response
 }

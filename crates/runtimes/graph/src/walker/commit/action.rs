@@ -72,23 +72,22 @@ impl Walker {
                 .project_observations
                 .extend(project_observations.iter().cloned());
         }
-        if let Some(observation) = observation {
-            if let Err(error) = self
+        if let Some(observation) = observation
+            && let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await
-            {
-                return self
-                    .commit_observation_failure(
-                        graph_run_id,
-                        step,
-                        state,
-                        suppressed_errors,
-                        guard,
-                        inputs,
-                        error,
-                    )
-                    .await;
-            }
+        {
+            return self
+                .commit_observation_failure(
+                    graph_run_id,
+                    step,
+                    state,
+                    suppressed_errors,
+                    guard,
+                    inputs,
+                    error,
+                )
+                .await;
         }
 
         // State mutation: `assign` was already evaluated in

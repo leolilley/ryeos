@@ -1434,13 +1434,13 @@ impl ProjectScheduleSession for ProjectScheduleSessionImpl {
         if self.phase == SessionPhase::Finalized {
             return Ok(());
         }
-        if self.phase != SessionPhase::Prepared {
-            if !matches!(
+        if self.phase != SessionPhase::Prepared
+            && !matches!(
                 self.phase,
                 SessionPhase::RecoveryPrepared | SessionPhase::RecoveryRequired
-            ) {
-                anyhow::bail!("project schedule session cannot finalize in its current phase");
-            }
+            )
+        {
+            anyhow::bail!("project schedule session cannot finalize in its current phase");
         }
         let recovery = self
             .recovery
@@ -2583,7 +2583,11 @@ mod deploy_recovery_tests {
             format!("{error:#}").contains("reuse not allowed"),
             "got: {error:#}"
         );
-        assert_eq!(fixture.observe(&node.db), baseline, "refusal mutates nothing");
+        assert_eq!(
+            fixture.observe(&node.db),
+            baseline,
+            "refusal mutates nothing"
+        );
         assert!(history.is_dir(), "the retained history is untouched");
         drop(session);
         fixture.close(&host, node);

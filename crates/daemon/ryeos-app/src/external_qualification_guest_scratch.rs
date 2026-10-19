@@ -249,22 +249,22 @@ fn prepare_original_qualification_guest_scratch_under_gate(
     authority.ensure_guard(&guard)?;
     drop(guard);
     let parent = state.state_store.qualification_guest_scratch_parent()?;
-    if let Some(prior) = state.state_store.qualification_guest_scratch(&placement)? {
-        if prior.phase == QualificationGuestScratchPhase::Reserved {
-            ensure!(
-                prior.coordinate == *coordinate
-                    && prior.qualification_operation_id == qualification_operation_id
-                    && prior.owner_principal == admission.owner_principal()
-                    && prior.program_digest == root.program().digest()?,
-                "Q precreation retry changed its original accepted owner"
-            );
-            state
-                .state_store
-                .retire_absent_reserved_qualification_guest_scratch(&prior, &parent)?;
-            anyhow::bail!(
-                "Q prior precreation attempt is closed without contact; a new qualification operation is required"
-            );
-        }
+    if let Some(prior) = state.state_store.qualification_guest_scratch(&placement)?
+        && prior.phase == QualificationGuestScratchPhase::Reserved
+    {
+        ensure!(
+            prior.coordinate == *coordinate
+                && prior.qualification_operation_id == qualification_operation_id
+                && prior.owner_principal == admission.owner_principal()
+                && prior.program_digest == root.program().digest()?,
+            "Q precreation retry changed its original accepted owner"
+        );
+        state
+            .state_store
+            .retire_absent_reserved_qualification_guest_scratch(&prior, &parent)?;
+        anyhow::bail!(
+            "Q prior precreation attempt is closed without contact; a new qualification operation is required"
+        );
     }
     let expected_generation = &root
         .purpose()

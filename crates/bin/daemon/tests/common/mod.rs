@@ -1030,13 +1030,11 @@ impl DaemonHarness {
             FastBundleSelection::PreparedCoreScheduling => {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
-            FastBundleSelection::PreparedStandard => {
-                copy_core_to_temp_prepared(
-                    fast_fixture::FastFixtureProfile::Standard
-                        .exact_bundles()
-                        .expect("Standard profile has an exact bundle inventory"),
-                )?
-            }
+            FastBundleSelection::PreparedStandard => copy_core_to_temp_prepared(
+                fast_fixture::FastFixtureProfile::Standard
+                    .exact_bundles()
+                    .expect("Standard profile has an exact bundle inventory"),
+            )?,
             FastBundleSelection::PreparedFull => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Full
                     .exact_bundles()

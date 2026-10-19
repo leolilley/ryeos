@@ -175,7 +175,7 @@ fn classify_connector_exit(
     if diagnostic.len() > 64 * 1024 {
         return "connector_diagnostic_limit_exceeded";
     }
-    let diagnostic = String::from_utf8_lossy(&diagnostic);
+    let diagnostic = String::from_utf8_lossy(diagnostic);
     if diagnostic.contains("connect protected external candidate controller")
         && diagnostic.contains("No such file or directory")
     {
@@ -200,109 +200,6 @@ fn classify_connector_exit(
         "connector_clean_exit_before_response"
     } else {
         "connector_failed_without_diagnostic"
-    }
-}
-
-#[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-
-    #[test]
-    fn observed_exit_and_private_diagnostics_remain_distinct() {
-        let failed = lillux::SubordinateProcessExit {
-            success: false,
-            code: Some(126),
-        };
-        for (diagnostic, expected) in [
-            (
-                "connect protected external candidate controller",
-                "connector_controller_connect_failed",
-            ),
-            (
-                "connect protected external candidate controller: No such file or directory",
-                "connector_controller_endpoint_missing",
-            ),
-            (
-                "connect protected external candidate controller: Permission denied",
-                "connector_controller_endpoint_refused",
-            ),
-            (
-                "missing RYEOS_EXTERNAL_CONNECTOR_ENDPOINT",
-                "connector_environment_missing",
-            ),
-            (
-                "external connector was not authenticated",
-                "connector_authentication_refused",
-            ),
-            (
-                "external connector controller reported a closed fault",
-                "connector_controller_fault",
-            ),
-            (
-                "other private diagnostic",
-                "connector_failed_with_unclassified_diagnostic",
-            ),
-        ] {
-            assert_eq!(
-                classify_connector_exit(Ok(failed), diagnostic.as_bytes()),
-                expected
-            );
-        }
-        assert_eq!(
-            classify_connector_exit(Ok(failed), &vec![b'x'; 64 * 1024 + 1]),
-            "connector_diagnostic_limit_exceeded"
-        );
-        assert_eq!(
-            classify_connector_exit(
-                Ok(lillux::SubordinateProcessExit {
-                    success: false,
-                    code: None
-                }),
-                b""
-            ),
-            "connector_terminated_by_signal"
-        );
-        assert_eq!(
-            classify_connector_exit(
-                Ok(lillux::SubordinateProcessExit {
-                    success: true,
-                    code: Some(0)
-                }),
-                b""
-            ),
-            "connector_clean_exit_before_response"
-        );
-    }
-
-    #[test]
-    fn private_diagnostic_never_enters_public_category() {
-        for diagnostic in [
-            b"secret-sentinel".as_slice(),
-            b"connect protected external candidate controller: secret-sentinel".as_slice(),
-        ] {
-            let category = classify_connector_exit(
-                Ok(lillux::SubordinateProcessExit {
-                    success: false,
-                    code: Some(126),
-                }),
-                diagnostic,
-            );
-            assert!(!category.contains("secret-sentinel"));
-        }
-        assert_eq!(
-            classify_connector_exit(
-                Ok(lillux::SubordinateProcessExit {
-                    success: false,
-                    code: Some(126)
-                }),
-                b"",
-            ),
-            "connector_failed_without_diagnostic"
-        );
-        assert_eq!(
-            classify_connector_exit(Err("secret-sentinel".into()), b""),
-            "connector_exit_observation_failed"
-        );
     }
 }
 
@@ -412,4 +309,107 @@ fn run() -> Result<()> {
         connector.close()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn observed_exit_and_private_diagnostics_remain_distinct() {
+        let failed = lillux::SubordinateProcessExit {
+            success: false,
+            code: Some(126),
+        };
+        for (diagnostic, expected) in [
+            (
+                "connect protected external candidate controller",
+                "connector_controller_connect_failed",
+            ),
+            (
+                "connect protected external candidate controller: No such file or directory",
+                "connector_controller_endpoint_missing",
+            ),
+            (
+                "connect protected external candidate controller: Permission denied",
+                "connector_controller_endpoint_refused",
+            ),
+            (
+                "missing RYEOS_EXTERNAL_CONNECTOR_ENDPOINT",
+                "connector_environment_missing",
+            ),
+            (
+                "external connector was not authenticated",
+                "connector_authentication_refused",
+            ),
+            (
+                "external connector controller reported a closed fault",
+                "connector_controller_fault",
+            ),
+            (
+                "other private diagnostic",
+                "connector_failed_with_unclassified_diagnostic",
+            ),
+        ] {
+            assert_eq!(
+                classify_connector_exit(Ok(failed), diagnostic.as_bytes()),
+                expected
+            );
+        }
+        assert_eq!(
+            classify_connector_exit(Ok(failed), &vec![b'x'; 64 * 1024 + 1]),
+            "connector_diagnostic_limit_exceeded"
+        );
+        assert_eq!(
+            classify_connector_exit(
+                Ok(lillux::SubordinateProcessExit {
+                    success: false,
+                    code: None
+                }),
+                b""
+            ),
+            "connector_terminated_by_signal"
+        );
+        assert_eq!(
+            classify_connector_exit(
+                Ok(lillux::SubordinateProcessExit {
+                    success: true,
+                    code: Some(0)
+                }),
+                b""
+            ),
+            "connector_clean_exit_before_response"
+        );
+    }
+
+    #[test]
+    fn private_diagnostic_never_enters_public_category() {
+        for diagnostic in [
+            b"secret-sentinel".as_slice(),
+            b"connect protected external candidate controller: secret-sentinel".as_slice(),
+        ] {
+            let category = classify_connector_exit(
+                Ok(lillux::SubordinateProcessExit {
+                    success: false,
+                    code: Some(126),
+                }),
+                diagnostic,
+            );
+            assert!(!category.contains("secret-sentinel"));
+        }
+        assert_eq!(
+            classify_connector_exit(
+                Ok(lillux::SubordinateProcessExit {
+                    success: false,
+                    code: Some(126)
+                }),
+                b"",
+            ),
+            "connector_failed_without_diagnostic"
+        );
+        assert_eq!(
+            classify_connector_exit(Err("secret-sentinel".into()), b""),
+            "connector_exit_observation_failed"
+        );
+    }
 }

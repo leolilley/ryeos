@@ -47,8 +47,13 @@ fn setup_state_store() -> (TempDir, ryeos_app::test_support::TestStateStore) {
 
     let write_barrier = WriteBarrier::new();
 
-    let store = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier, Arc::new(head_trust))
-        .expect("StateStore creation should succeed");
+    let store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
+        signer,
+        write_barrier,
+        Arc::new(head_trust),
+    )
+    .expect("StateStore creation should succeed");
 
     (tmpdir, store)
 }

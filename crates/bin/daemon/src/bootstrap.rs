@@ -9,8 +9,8 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
-use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 
 /// Bootstrap options.
@@ -589,10 +589,19 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// Every optional Cargo feature of this daemon, with whether it is compiled
 /// in. The capability report lists the compiled ones.
 const COMPILED_FEATURES: [(&str, bool); 5] = [
-    ("crash-qualification-test-support", cfg!(feature = "crash-qualification-test-support")),
-    ("handoff-test-support", cfg!(feature = "handoff-test-support")),
+    (
+        "crash-qualification-test-support",
+        cfg!(feature = "crash-qualification-test-support"),
+    ),
+    (
+        "handoff-test-support",
+        cfg!(feature = "handoff-test-support"),
+    ),
     ("latency-profiling", cfg!(feature = "latency-profiling")),
-    ("model-provider-setup", cfg!(feature = "model-provider-setup")),
+    (
+        "model-provider-setup",
+        cfg!(feature = "model-provider-setup"),
+    ),
     ("scheduling", cfg!(feature = "scheduling")),
 ];
 
@@ -801,7 +810,9 @@ fn load_node_config_two_phase_with_socket(
         ) {
         match host_runtime {
             Some(runtime) => {
-                runtime.binding.verify_loaded_node_identity(&node_identity)?;
+                runtime
+                    .binding
+                    .verify_loaded_node_identity(&node_identity)?;
                 Some(runtime.binding.open_process_scope_provider()?)
             }
             // Without a host runtime no scope capability qualifies. Policy
@@ -891,7 +902,11 @@ fn load_node_config_two_phase_with_socket(
             app_root,
             node_fingerprint: node_identity.fingerprint(),
             daemon_digest: format!("sha256:{daemon_digest}"),
-            bundles: generation.records().iter().map(|record| record.name.clone()).collect(),
+            bundles: generation
+                .records()
+                .iter()
+                .map(|record| record.name.clone())
+                .collect(),
             compiled_features: compiled_features(),
             listeners,
             policy_generation: format!("sha256:{}", node_policy.generation_digest()),
@@ -920,7 +935,9 @@ fn load_node_config_two_phase_with_socket(
             .clone()
             .sign(node_identity.signing_key())
             .context("Phase 1: sign node capability report")?;
-        let path = signed.write(app_root).context("Phase 1: record node capability report")?;
+        let path = signed
+            .write(app_root)
+            .context("Phase 1: record node capability report")?;
         tracing::info!(
             report = %path.display(),
             digest = %signed.digest,
@@ -979,8 +996,14 @@ mod tests {
             .collect();
         let reported: std::collections::BTreeSet<&str> =
             COMPILED_FEATURES.iter().map(|(name, _)| *name).collect();
-        assert_eq!(reported, declared, "the report table must list every daemon feature");
-        assert_eq!(compiled_features().contains(&"scheduling".to_owned()), cfg!(feature = "scheduling"));
+        assert_eq!(
+            reported, declared,
+            "the report table must list every daemon feature"
+        );
+        assert_eq!(
+            compiled_features().contains(&"scheduling".to_owned()),
+            cfg!(feature = "scheduling")
+        );
     }
 
     #[test]

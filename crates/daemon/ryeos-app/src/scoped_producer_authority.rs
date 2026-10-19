@@ -394,7 +394,7 @@ impl ScopedProducerLiveAuthority {
     /// view; its projectless scratch path alone is not owner authority.
     pub fn workspace_view(&self) -> Result<lillux::InheritedDescriptorAuthority> {
         self.workspace.ensure_path_binding()?;
-        Ok(self.workspace.inherited_descriptor_authority()?)
+        self.workspace.inherited_descriptor_authority()
     }
 
     pub fn external_realizations_env(&self) -> Option<&str> {

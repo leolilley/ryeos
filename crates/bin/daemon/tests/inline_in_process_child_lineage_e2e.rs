@@ -104,12 +104,17 @@ async fn inline_in_process_service_child_is_a_same_chain_child_of_the_graph_thre
         .to_owned();
 
     // threads.get on the graph thread: it is its own chain root.
-    let graph_view = service_result(&h, "service:threads/get", json!({ "thread_id": graph_thread }))
-        .await;
+    let graph_view = service_result(
+        &h,
+        "service:threads/get",
+        json!({ "thread_id": graph_thread }),
+    )
+    .await;
     let graph_thread_view = graph_view
         .get("thread")
         .unwrap_or_else(|| panic!("threads.get has no thread: {graph_view:#}"));
-    let graph_chain_root = string_field(graph_thread_view, "chain_root_id", "graph thread").to_owned();
+    let graph_chain_root =
+        string_field(graph_thread_view, "chain_root_id", "graph thread").to_owned();
     assert_eq!(
         graph_chain_root, graph_thread,
         "the graph thread is its own chain root"
@@ -150,8 +155,12 @@ async fn inline_in_process_service_child_is_a_same_chain_child_of_the_graph_thre
     );
 
     // threads.get on the child reads the same placement and a settled terminal.
-    let child_view = service_result(&h, "service:threads/get", json!({ "thread_id": child_thread }))
-        .await;
+    let child_view = service_result(
+        &h,
+        "service:threads/get",
+        json!({ "thread_id": child_thread }),
+    )
+    .await;
     let child_thread_view = child_view
         .get("thread")
         .unwrap_or_else(|| panic!("threads.get has no thread: {child_view:#}"));
@@ -170,8 +179,12 @@ async fn inline_in_process_service_child_is_a_same_chain_child_of_the_graph_thre
 
     // threads.chain on the graph thread carries the child as a member and the
     // projected dispatch edge from the graph thread to the child.
-    let chain = service_result(&h, "service:threads/chain", json!({ "thread_id": graph_thread }))
-        .await;
+    let chain = service_result(
+        &h,
+        "service:threads/chain",
+        json!({ "thread_id": graph_thread }),
+    )
+    .await;
     let members = chain
         .get("threads")
         .and_then(Value::as_array)

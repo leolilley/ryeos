@@ -21,9 +21,9 @@ use ryeos_state::objects::AdmittedLaunchCapsule;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
-use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 use crate::thread_lifecycle::SealedRootExecutionRequest;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 /// Capture every present output product from this exact terminal placement.
 /// The root identity comes from retained execution, never a synthetic client.
@@ -299,7 +299,9 @@ pub(super) fn verified_root_producer(
     )?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
-    let limits = state
+    // Refuses an absent or invalid closure policy before this traversal; the
+    // capsule loads below use their fixed protocol ceiling, not these limits.
+    state
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
@@ -316,10 +318,7 @@ pub(super) fn verified_root_producer(
             .as_deref()
             .context("product producer placement has no admitted capsule")?;
         let capsule = AdmittedLaunchCapsule::from_current_value(
-            ryeos_state::object_closure::load_exact_capsule_object_with_cas(
-                &cas,
-                hash,
-            )?,
+            ryeos_state::object_closure::load_exact_capsule_object_with_cas(&cas, hash)?,
         )?;
         capsule.verify_retained_execution_realization(
             &cas,

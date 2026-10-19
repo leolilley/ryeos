@@ -10,16 +10,13 @@ use ryeos_runtime::authorizer::Authorizer;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
-use ryeos_node_runtime::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
-use ryeos_node_runtime::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
-use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -27,6 +24,9 @@ use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
+use ryeos_node_runtime::config::Config;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogHealth {
@@ -335,27 +335,60 @@ pub mod test_support {
     use anyhow::Result;
 
     use super::{AppState, CatalogHealth};
+    use crate::state_store::BundleAdmissionTrust;
     use crate::state_store::test_native::TestStateStore;
 
     pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |_| BundleAdmissionTrust::unbound())
+    }
+
+    /// [`build`] with the Store bound to the Bundle admission trust a node
+    /// binds: the live platform signers plus this node's own identity, which
+    /// is what the composed test Engine admits Bundles with.
+    pub fn build_bound(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |identity| {
+            let mut node_trust = ryeos_engine::test_support::live_trust_store();
+            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+                ryeos_engine::trust::TrustedSigner {
+                    fingerprint: identity.fingerprint().to_owned(),
+                    verifying_key: *identity.verifying_key(),
+                    label: Some("test node identity".into()),
+                },
+            ]));
+            BundleAdmissionTrust::bound(node_trust)
+        })
+    }
+
+    fn build_with_bundle_admission(
+        root: &std::path::Path,
+        admission: impl FnOnce(&ryeos_node_runtime::identity::NodeIdentity) -> BundleAdmissionTrust,
+    ) -> Result<(TestStateStore, AppState)> {
         let (config, identity) = test_identity(root)?;
+        let bundle_admission_trust = admission(&identity);
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = crate::write_barrier::WriteBarrier::new();
-        let store_owner = TestStateStore::open_with_barrier(
+        let store_owner = TestStateStore::open_with_bundle_admission_trust(
             root,
             signer,
             write_barrier.clone(),
             Arc::new(head_trust),
+            bundle_admission_trust,
         )?;
         let state_store = Arc::clone(store_owner.store());
         // The owner already holds this App root's operator lock; a second
         // acquisition would conflict with it.
         let controller_lifetime = store_owner.controller_lifetime();
-        let state = compose(config, identity, state_store, write_barrier, controller_lifetime)?;
+        let state = compose(
+            config,
+            identity,
+            state_store,
+            write_barrier,
+            controller_lifetime,
+        )?;
         Ok((store_owner, state))
     }
 
@@ -479,9 +512,9 @@ pub mod test_support {
             external_candidate_connectors: Arc::new(Default::default()),
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
-            node_policy: Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-                Vec::new(),
-            )),
+            node_policy: Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(Vec::new()),
+            ),
             vault: Arc::new(crate::vault::EmptyVault),
             provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(

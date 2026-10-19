@@ -315,9 +315,11 @@ mod tests {
         .unwrap();
         let path = app_root.join(".ai/node/policies/hosted.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let ttl = admission_enabled
-            .then_some("admission_token_ttl_secs: 600\n")
-            .unwrap_or_default();
+        let ttl = if admission_enabled {
+            "admission_token_ttl_secs: 600\n"
+        } else {
+            Default::default()
+        };
         let body = format!(
             r#"
 schema: 1

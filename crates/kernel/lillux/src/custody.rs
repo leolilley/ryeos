@@ -202,7 +202,12 @@ impl<T: Send + 'static> Held<T> {
     /// Hold `whole` for this process under `kind`; its end drops it only when
     /// `settled` holds. `settled` must not panic.
     pub fn new(kind: &'static str, whole: T, settled: fn(&T) -> bool) -> Self {
-        Self { kind, issuer: std::process::id(), settled, whole: ManuallyDrop::new(whole) }
+        Self {
+            kind,
+            issuer: std::process::id(),
+            settled,
+            whole: ManuallyDrop::new(whole),
+        }
     }
 
     /// Hold `whole` under `kind` until [`Held::take_whole`] hands it on; any
@@ -215,7 +220,12 @@ impl<T: Send + 'static> Held<T> {
     /// in another process.
     #[cfg(test)]
     fn as_issued_by(kind: &'static str, whole: T, settled: fn(&T) -> bool, issuer: u32) -> Self {
-        Self { kind, issuer, settled, whole: ManuallyDrop::new(whole) }
+        Self {
+            kind,
+            issuer,
+            settled,
+            whole: ManuallyDrop::new(whole),
+        }
     }
 
     /// The kind an unsettled end is counted under.
@@ -319,9 +329,8 @@ impl<T: Send + 'static> Drop for Held<T> {
         // A panicking predicate counts as unsettled, so the owner is retained
         // rather than dropped by the unwind.
         let settled = self.settled;
-        let settled =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| settled(&whole)))
-                .unwrap_or(false);
+        let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| settled(&whole)))
+            .unwrap_or(false);
         if settled {
             drop(whole);
         } else {
@@ -418,9 +427,13 @@ mod tests {
         )
         .expect("fork window must be available");
         let child_close_fds = guard.fork_child_close_fds(&BTreeSet::new()).unwrap();
-        let child_barrier = guard.prepare_child_descriptor_barrier(&BTreeSet::new()).unwrap();
+        let child_barrier = guard
+            .prepare_child_descriptor_barrier(&BTreeSet::new())
+            .unwrap();
         let (custody, witness_writer) = guard.witness_creation("custody test child").unwrap();
-        let owner = ExitsIfDroppedInChild { original: unsafe { libc::getpid() } };
+        let owner = ExitsIfDroppedInChild {
+            original: unsafe { libc::getpid() },
+        };
         // The child's copy of this lock stays held: entering it there would
         // hang until the reaper kills the child.
         let held_registry = ABANDONED.lock().unwrap_or_else(PoisonError::into_inner);
@@ -490,7 +503,11 @@ mod tests {
         const KIND: &str = "lillux::custody::test-held-unsettled";
         let dropped = Arc::new(AtomicBool::new(false));
         let before = abandoned_custody().count(KIND);
-        drop(Held::new(KIND, Observed(Arc::clone(&dropped)), never_settled));
+        drop(Held::new(
+            KIND,
+            Observed(Arc::clone(&dropped)),
+            never_settled,
+        ));
         assert_eq!(abandoned_custody().count(KIND), before + 1);
         assert!(!dropped.load(Ordering::Acquire));
         assert_eq!(Arc::strong_count(&dropped), 2);
@@ -536,7 +553,10 @@ mod tests {
         const KIND: &str = "lillux::custody::test-held-settle-refused";
         let dropped = Arc::new(AtomicBool::new(false));
         let before = abandoned_custody().count(KIND);
-        let owner = Closable { closed: false, _observed: Observed(Arc::clone(&dropped)) };
+        let owner = Closable {
+            closed: false,
+            _observed: Observed(Arc::clone(&dropped)),
+        };
         let mut held = match Held::new(KIND, owner, closed).settle() {
             Ok(_) => panic!("an open owner does not settle"),
             Err(held) => held,
@@ -544,7 +564,10 @@ mod tests {
         assert!(!dropped.load(Ordering::Acquire));
         assert!(!held.closed);
         held.get_mut().closed = true;
-        let _settled = held.settle().map_err(|_| ()).expect("a closed owner settles");
+        let _settled = held
+            .settle()
+            .map_err(|_| ())
+            .expect("a closed owner settles");
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(abandoned_custody().count(KIND), before);
     }
@@ -646,7 +669,9 @@ mod tests {
         )
         .expect("fork window must be available");
         let child_close_fds = guard.fork_child_close_fds(&BTreeSet::new()).unwrap();
-        let child_barrier = guard.prepare_child_descriptor_barrier(&BTreeSet::new()).unwrap();
+        let child_barrier = guard
+            .prepare_child_descriptor_barrier(&BTreeSet::new())
+            .unwrap();
         let (custody, witness_writer) = guard.witness_creation("custody held test child").unwrap();
         let original = unsafe { libc::getpid() };
         let settled = Held::new(KIND, ExitsIfDroppedInChild { original }, always_settled);
@@ -682,9 +707,16 @@ mod tests {
         assert_eq!(libc::WEXITSTATUS(status), 0);
         custody.settle().unwrap();
         assert!(!settled.is_foreign());
-        let _settled =
-            settled.settle().map_err(|_| ()).expect("the issuer settles its own owner");
-        drop(unsettled.take_whole().map_err(|_| ()).expect("the issuer takes its own owner"));
+        let _settled = settled
+            .settle()
+            .map_err(|_| ())
+            .expect("the issuer settles its own owner");
+        drop(
+            unsettled
+                .take_whole()
+                .map_err(|_| ())
+                .expect("the issuer takes its own owner"),
+        );
         assert_eq!(abandoned_custody().count(KIND), before);
     }
 }

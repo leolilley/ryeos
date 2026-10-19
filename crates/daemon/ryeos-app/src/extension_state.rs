@@ -18,7 +18,7 @@
 //!     }
 //! }
 //!
-//! let mut ext = ExtensionState::new();
+//! let ext = ExtensionState::new();
 //! ext.insert(Arc::new(MyState::new()));
 //!
 //! let retrieved: Option<Arc<MyState>> = ext.get();
@@ -37,8 +37,13 @@ pub struct ExtensionState {
 
 impl Clone for ExtensionState {
     fn clone(&self) -> Self {
-        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self { entries: RwLock::new(entries.clone()) }
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            entries: RwLock::new(entries.clone()),
+        }
     }
 }
 
@@ -87,7 +92,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut ext = ExtensionState::new();
+        let ext = ExtensionState::new();
         ext.insert(Arc::new(TestExt { value: 42 }));
         let got: Arc<TestExt> = ext.get().expect("should be present");
         assert_eq!(got.value, 42);
@@ -102,7 +107,7 @@ mod tests {
 
     #[test]
     fn overwrite_replaces() {
-        let mut ext = ExtensionState::new();
+        let ext = ExtensionState::new();
         ext.insert(Arc::new(TestExt { value: 1 }));
         ext.insert(Arc::new(TestExt { value: 2 }));
         let got: Arc<TestExt> = ext.get().unwrap();
@@ -111,7 +116,7 @@ mod tests {
 
     #[test]
     fn remove_transfers_the_registered_owner() {
-        let mut ext = ExtensionState::new();
+        let ext = ExtensionState::new();
         ext.insert(Arc::new(TestExt { value: 42 }));
         let ext = Arc::new(ext);
         let alias = Arc::clone(&ext);

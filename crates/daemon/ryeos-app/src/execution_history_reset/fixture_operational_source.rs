@@ -12,7 +12,10 @@ pub(super) fn establish(
     let host = lillux_sqlite::test_host::TestNativeHost::acquire();
     ryeos_state::test_support::seed_node_state(&host, directory.path())?;
     let (issued, recorded) = host.ticket_census();
-    anyhow::ensure!(issued as usize == recorded, "every seeding ticket reaches the census");
+    anyhow::ensure!(
+        issued as usize == recorded,
+        "every seeding ticket reaches the census"
+    );
     drop(host.release());
     Ok(())
 }

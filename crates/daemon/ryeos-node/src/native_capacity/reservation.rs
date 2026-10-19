@@ -18,7 +18,8 @@ use super::{LiveNativeCapacityInputs, account::RetainedCapacityAccount, late::La
 
 /// Upper bound on waiting for a concurrent account check; see
 /// `LiveNativeCapacityReservation::account_for_check`.
-const ACCOUNT_CHECK_CONTENTION_WAIT: lillux::time::Duration = lillux::time::Duration::from_millis(250);
+const ACCOUNT_CHECK_CONTENTION_WAIT: lillux::time::Duration =
+    lillux::time::Duration::from_millis(250);
 
 // Fixed source maxima below mirror the selected normal/failed-start finalizer
 // owner graph. Dynamic State maxima and Runtime/Operational/Scheduler packet
@@ -84,7 +85,9 @@ impl LivePhysicalRegistrationBounds {
         ]
         .into_iter()
         .try_fold(0usize, |total, count| {
-            total.checked_add(count).context("physical source-slot bound overflow")
+            total
+                .checked_add(count)
+                .context("physical source-slot bound overflow")
         })
     }
 
@@ -107,12 +110,17 @@ impl LivePhysicalRegistrationBounds {
         ]
         .into_iter()
         .try_fold(0u64, |total, count| {
-            total.checked_add(count).context("physical registration-attempt bound overflow")
+            total
+                .checked_add(count)
+                .context("physical registration-attempt bound overflow")
         })
     }
 }
 
-fn owner_registration_bound(physical_slots: usize, attempts_per_pass: usize) -> Result<PhysicalRegistrationOwnerBound> {
+fn owner_registration_bound(
+    physical_slots: usize,
+    attempts_per_pass: usize,
+) -> Result<PhysicalRegistrationOwnerBound> {
     Ok(PhysicalRegistrationOwnerBound {
         physical_slots,
         attempts_per_pass: u64::try_from(attempts_per_pass)?,
@@ -121,19 +129,22 @@ fn owner_registration_bound(physical_slots: usize, attempts_per_pass: usize) -> 
 
 fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistrationBounds> {
     ensure!(tickets > 0, "original physical source quote has no tickets");
-    let state_projection = ryeos_state::state_db::maximum_live_projection_physical_sources(tickets)?;
+    let state_projection =
+        ryeos_state::state_db::maximum_live_projection_physical_sources(tickets)?;
     let generated_state_roots = ryeos_state::state_db::maximum_state_destination_leaves(tickets)?;
 
     let runtime_packets = ryeos_app::runtime_db::MAX_LIVE_RUNTIME_NATIVE_PACKET_SOURCES;
     let operational_packets = ryeos_state::operational::MAX_LIVE_OPERATIONAL_PACKET_SOURCES;
     // The Store's direct auxiliary collection: Scheduler and accounting ledger.
     let scheduler_packets = ryeos_app::state_store::MAX_LIVE_AUXILIARY_NATIVE_PACKET_SOURCES;
-    let packet_roots_per_source = 1usize.checked_add(
-        lillux_sqlite::MAX_ORIGINAL_DESTINATION_PHYSICAL_SOURCES,
-    ).context("per-packet physical root bound overflow")?;
-    let runtime_operational_packet_count = runtime_packets.checked_add(operational_packets)
+    let packet_roots_per_source = 1usize
+        .checked_add(lillux_sqlite::MAX_ORIGINAL_DESTINATION_PHYSICAL_SOURCES)
+        .context("per-packet physical root bound overflow")?;
+    let runtime_operational_packet_count = runtime_packets
+        .checked_add(operational_packets)
         .context("Runtime/Operational packet source bound overflow")?;
-    let selected_packet_count = runtime_operational_packet_count.checked_add(scheduler_packets)
+    let selected_packet_count = runtime_operational_packet_count
+        .checked_add(scheduler_packets)
         .context("selected packet source bound overflow")?;
     ensure!(
         selected_packet_count == ryeos_app::state_store::MAX_LIVE_SELECTED_NATIVE_PACKET_SOURCES,
@@ -142,7 +153,8 @@ fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistr
     let runtime_operational_packet_roots = runtime_operational_packet_count
         .checked_mul(packet_roots_per_source)
         .context("Runtime/Operational packet physical root bound overflow")?;
-    let scheduler_packet_roots = scheduler_packets.checked_mul(packet_roots_per_source)
+    let scheduler_packet_roots = scheduler_packets
+        .checked_mul(packet_roots_per_source)
         .context("Scheduler packet physical root bound overflow")?;
     // Each selected packet has at most one inspection/released-inspection
     // owner. Count all three producer classes, including Scheduler, so this
@@ -150,9 +162,9 @@ fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistr
     // registers two copy roots, two namespaces, one SQL root and four finite-
     // scratch roots.
     let inspection_groups = selected_packet_count;
-    let inspection_roots = inspection_groups.checked_mul(
-        ryeos_app::runtime_db::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS,
-    ).context("inspection group physical registration bound overflow")?;
+    let inspection_roots = inspection_groups
+        .checked_mul(ryeos_app::runtime_db::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS)
+        .context("inspection group physical registration bound overflow")?;
 
     // Registration attempts are enumerated independently from slot capacity:
     // each fixed owner array entry, ticket-derived State source, packet bound/
@@ -160,32 +172,66 @@ fn live_physical_registration_bounds(tickets: u32) -> Result<LivePhysicalRegistr
     // Store metadata source has one cached register_* call per finalizer pass.
     // Aliases may coalesce slots, but each owner call remains a billed attempt.
     let state_projection_attempts = usize::try_from(tickets)?
-        .checked_mul(3).context("State projection registration bound overflow")?;
+        .checked_mul(3)
+        .context("State projection registration bound overflow")?;
     let generated_state_root_attempts = usize::try_from(
         ryeos_state::state_db::maximum_state_destination_leaves(tickets)?,
     )?;
 
     Ok(LivePhysicalRegistrationBounds {
-        normal_state: owner_registration_bound(NORMAL_STATE_PHYSICAL_ROOTS, NORMAL_STATE_PHYSICAL_ROOTS)?,
-        live_state_parent: owner_registration_bound(LIVE_STATE_PARENT_PHYSICAL_ROOTS, LIVE_STATE_PARENT_PHYSICAL_ROOTS)?,
-        live_state_recovery: owner_registration_bound(LIVE_STATE_RECOVERY_PHYSICAL_ROOTS, LIVE_STATE_RECOVERY_PHYSICAL_ROOTS)?,
-        live_state_projection: owner_registration_bound(state_projection, state_projection_attempts)?,
-        generated_state_roots: owner_registration_bound(generated_state_roots, generated_state_root_attempts)?,
-        operational: owner_registration_bound(OPERATIONAL_PHYSICAL_ROOTS, OPERATIONAL_PHYSICAL_ROOTS)?,
-        runtime_host: owner_registration_bound(RUNTIME_HOST_PHYSICAL_ROOTS, RUNTIME_HOST_PHYSICAL_ROOTS)?,
-        runtime_finalizer_tail: owner_registration_bound(RUNTIME_FINALIZER_TAIL_PHYSICAL_ROOTS, RUNTIME_FINALIZER_TAIL_PHYSICAL_ROOTS)?,
+        normal_state: owner_registration_bound(
+            NORMAL_STATE_PHYSICAL_ROOTS,
+            NORMAL_STATE_PHYSICAL_ROOTS,
+        )?,
+        live_state_parent: owner_registration_bound(
+            LIVE_STATE_PARENT_PHYSICAL_ROOTS,
+            LIVE_STATE_PARENT_PHYSICAL_ROOTS,
+        )?,
+        live_state_recovery: owner_registration_bound(
+            LIVE_STATE_RECOVERY_PHYSICAL_ROOTS,
+            LIVE_STATE_RECOVERY_PHYSICAL_ROOTS,
+        )?,
+        live_state_projection: owner_registration_bound(
+            state_projection,
+            state_projection_attempts,
+        )?,
+        generated_state_roots: owner_registration_bound(
+            generated_state_roots,
+            generated_state_root_attempts,
+        )?,
+        operational: owner_registration_bound(
+            OPERATIONAL_PHYSICAL_ROOTS,
+            OPERATIONAL_PHYSICAL_ROOTS,
+        )?,
+        runtime_host: owner_registration_bound(
+            RUNTIME_HOST_PHYSICAL_ROOTS,
+            RUNTIME_HOST_PHYSICAL_ROOTS,
+        )?,
+        runtime_finalizer_tail: owner_registration_bound(
+            RUNTIME_FINALIZER_TAIL_PHYSICAL_ROOTS,
+            RUNTIME_FINALIZER_TAIL_PHYSICAL_ROOTS,
+        )?,
         store_parent_and_operator: owner_registration_bound(
-            STORE_PARENT_AND_OPERATOR_PHYSICAL_ROOTS, STORE_PARENT_AND_OPERATOR_PHYSICAL_ROOTS,
+            STORE_PARENT_AND_OPERATOR_PHYSICAL_ROOTS,
+            STORE_PARENT_AND_OPERATOR_PHYSICAL_ROOTS,
         )?,
         runtime_operational_packets: owner_registration_bound(
-            runtime_operational_packet_roots, runtime_operational_packet_roots,
+            runtime_operational_packet_roots,
+            runtime_operational_packet_roots,
         )?,
-        scheduler_packets: owner_registration_bound(scheduler_packet_roots, scheduler_packet_roots)?,
+        scheduler_packets: owner_registration_bound(
+            scheduler_packet_roots,
+            scheduler_packet_roots,
+        )?,
         inspection_groups: owner_registration_bound(inspection_roots, inspection_roots)?,
         capacity_control_tail: owner_registration_bound(
-            RETAINED_CAPACITY_CONTROL_SOURCES, RETAINED_CAPACITY_CONTROL_SOURCES,
+            RETAINED_CAPACITY_CONTROL_SOURCES,
+            RETAINED_CAPACITY_CONTROL_SOURCES,
         )?,
-        store_metadata: owner_registration_bound(RETAINED_STORE_METADATA_SOURCES, RETAINED_STORE_METADATA_SOURCES)?,
+        store_metadata: owner_registration_bound(
+            RETAINED_STORE_METADATA_SOURCES,
+            RETAINED_STORE_METADATA_SOURCES,
+        )?,
     })
 }
 
@@ -242,9 +288,11 @@ fn required_outside_cleanup(
     let (physical_maximum, registry_floor) = minimum_registry_cleanup(tickets)?;
     let attempts = u64::from(super::MAX_FINALIZATION_ATTEMPTS);
     let fixed = |steps: u64| OutsideWork { bytes: 0, steps };
-    let membership = |queries: u64| OriginalPhysicalRegistry::membership_work_quote(physical_maximum, queries);
+    let membership =
+        |queries: u64| OriginalPhysicalRegistry::membership_work_quote(physical_maximum, queries);
     let late_owner = LateNativeControl::maximum_storage_quote(physical_maximum)?;
-    let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(physical_maximum, tickets)?;
+    let retirement_inputs =
+        LateNativeControl::maximum_retirement_inputs_quote(physical_maximum, tickets)?;
     // Settled finalizer stages: account/input transfer, registration,
     // exclusion aliases, receipt joins and settlement, once per pass.
     let finalizer = quote_finalization_control_source_receipt_join()?
@@ -265,23 +313,34 @@ fn required_outside_cleanup(
     // operator target and parent, and the operator observations.
     let descriptors = membership(1)?
         .checked_mul(u64::try_from(physical_maximum)?)?
-        .checked_add(OriginalPhysicalRegistry::operator_target_retirement_quote(1)?)?
+        .checked_add(OriginalPhysicalRegistry::operator_target_retirement_quote(
+            1,
+        )?)?
         .checked_add(membership(1)?)?;
     #[cfg(target_os = "linux")]
-    let descriptors = descriptors
-        .checked_add(OriginalPhysicalRegistry::operator_observation_quote(physical_maximum, 2)?)?;
+    let descriptors = descriptors.checked_add(
+        OriginalPhysicalRegistry::operator_observation_quote(physical_maximum, 2)?,
+    )?;
     // Each close owner is prepared once; a refused pass repeats at most one.
     let descriptor_owners = OriginalPhysicalRegistry::descriptor_owner_quote(physical_maximum)?
-        .checked_add(OriginalPhysicalRegistry::descriptor_owner_quote(1)?
-            .checked_mul(attempts.saturating_sub(1))?)?;
+        .checked_add(
+            OriginalPhysicalRegistry::descriptor_owner_quote(1)?
+                .checked_mul(attempts.saturating_sub(1))?,
+        )?;
     // State pre-seal stages: join, destination-input transfer with one leaf
     // admission per ticket, leaf coalescing, parent transfer and parts, and
     // the host-alias retirement and live-parent completion checks.
     let leaves = ryeos_state::state_db::maximum_state_destination_leaves(tickets)?;
     let state = ryeos_state::state_db::quote_state_destination_join(leaves)?
-        .checked_add(ryeos_state::state_db::quote_maximum_state_destination_input_transfer(tickets)?)?
-        .checked_add(ryeos_state::state_db::quote_state_leaf_admission(tickets, tickets)?)?
-        .checked_add(ryeos_state::state_db::quote_state_source_coalescing(leaves)?)?
+        .checked_add(
+            ryeos_state::state_db::quote_maximum_state_destination_input_transfer(tickets)?,
+        )?
+        .checked_add(ryeos_state::state_db::quote_state_leaf_admission(
+            tickets, tickets,
+        )?)?
+        .checked_add(ryeos_state::state_db::quote_state_source_coalescing(
+            leaves,
+        )?)?
         .checked_add(ryeos_state::state_db::quote_live_state_parent_transfer()?)?
         .checked_add(ryeos_state::state_db::quote_live_state_physical_parent()?)?
         .checked_add(membership(8)?.checked_add(fixed(8))?.checked_mul(2)?)?;
@@ -290,12 +349,17 @@ fn required_outside_cleanup(
     // registered-root validations, recovery registration, six root handoffs
     // and the Operational physical parent.
     let state_tail = ryeos_state::state_db::quote_state_leaf_continuations(leaves)?
-        .checked_add(ryeos_state::state_db::quote_generated_root_registration(physical_maximum, leaves)?)?
+        .checked_add(ryeos_state::state_db::quote_generated_root_registration(
+            physical_maximum,
+            leaves,
+        )?)?
         .checked_add(ryeos_state::state_db::quote_live_state_destination_join())?
         .checked_add(membership(12)?.checked_mul(2)?)?
         .checked_add(membership(8)?)?
         .checked_add(membership(6)?)?
-        .checked_add(ryeos_state::state_db::quote_live_state_root_registration_handoff().checked_mul(6)?)?
+        .checked_add(
+            ryeos_state::state_db::quote_live_state_root_registration_handoff().checked_mul(6)?,
+        )?
         .checked_add(ryeos_state::state_db::quote_live_state_physical_parent()?)?;
     // Store pre-seal charges: join preparation and receiver, parent transfer
     // and physical parent, one transfer per leaf, parent finalization parts,
@@ -312,7 +376,9 @@ fn required_outside_cleanup(
         .checked_add(membership(3)?.checked_add(fixed(8))?)?
         .checked_add(membership(4)?.checked_add(fixed(16))?)?
         .checked_add(membership(4)?.checked_add(fixed(8))?)?
-        .checked_add(ryeos_app::state_store::quote_store_root_registration_handoff().checked_mul(4)?)?
+        .checked_add(
+            ryeos_app::state_store::quote_store_root_registration_handoff().checked_mul(4)?,
+        )?
         .checked_add(ryeos_app::state_store::quote_store_parent_authority_handoff())?
         .checked_add(ryeos_app::state_store::quote_store_parent_alias_retirement())?
         .checked_add(ryeos_app::state_store::quote_store_child_parent_alias_retirement())?
@@ -320,11 +386,18 @@ fn required_outside_cleanup(
         .checked_add(ryeos_app::state_store::quote_store_direct_operational_handoff())?
         .checked_add(ryeos_app::state_store::quote_store_operator_lock_registration())?
         .checked_add(membership(1)?)?
-        .checked_add(ryeos_app::state_store::quote_store_packet_vector_handoff()
-            .checked_mul(u64::try_from(selected_packets)?)?)?
-        .checked_add(ryeos_app::state_store::quote_destination_retries(selected_packets)?)?;
-    let per_pass = finalizer.checked_add(descriptors)?.checked_add(state)?
-        .checked_add(state_tail)?.checked_add(store_tail)?;
+        .checked_add(
+            ryeos_app::state_store::quote_store_packet_vector_handoff()
+                .checked_mul(u64::try_from(selected_packets)?)?,
+        )?
+        .checked_add(ryeos_app::state_store::quote_destination_retries(
+            selected_packets,
+        )?)?;
+    let per_pass = finalizer
+        .checked_add(descriptors)?
+        .checked_add(state)?
+        .checked_add(state_tail)?
+        .checked_add(store_tail)?;
     let total = registry_floor
         .checked_add(late_owner)?
         .checked_add(retirement_inputs)?
@@ -340,8 +413,8 @@ fn required_outside_cleanup(
 /// Each incomplete pass validates the whole retained frame before consuming
 /// any source and charges this per-pass quote; `required_outside_cleanup`
 /// reserves it once per finalizer attempt.
-fn quote_finalization_control_source_receipt_join(
-) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+fn quote_finalization_control_source_receipt_join()
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let maximum_sources = RETAINED_CAPACITY_CONTROL_SOURCES
         .checked_add(1)
         .context("finalizer control-source receipt bound overflow")?;
@@ -349,42 +422,54 @@ fn quote_finalization_control_source_receipt_join(
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer control-source receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
+        bytes: 0,
+        steps: per_pass,
+    })
 }
 
 /// Quote the retained State/thread metadata membership receipts after the
 /// exact Store inventory has closed, for one finalizer pass.
-fn quote_finalization_store_metadata_receipts(
-) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+fn quote_finalization_store_metadata_receipts()
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let per_pass = u64::try_from(RETAINED_STORE_METADATA_SOURCES)?
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store metadata receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
+        bytes: 0,
+        steps: per_pass,
+    })
 }
 
-fn quote_finalization_store_parent_receipts(
-) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+fn quote_finalization_store_parent_receipts()
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let per_pass = u64::try_from(RETAINED_STORE_PARENT_SOURCES)?
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store parent receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
+        bytes: 0,
+        steps: per_pass,
+    })
 }
 
-fn quote_finalization_store_scheduler_receipts(
-) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+fn quote_finalization_store_scheduler_receipts()
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     let per_pass = u64::try_from(RETAINED_STORE_SCHEDULER_SOURCES)?
         .checked_mul(FINALIZER_CONTROL_SOURCE_RECEIPT_STEPS)
         .and_then(|steps| steps.checked_add(FINALIZER_CONTROL_SOURCE_PHASE_STEPS))
         .context("finalizer Store Scheduler receipt work quote overflow")?;
-    Ok(lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: per_pass })
+    Ok(lillux_sqlite::original_physical_custody::OutsideWork {
+        bytes: 0,
+        steps: per_pass,
+    })
 }
 
 /// Fixed census pass over the remaining outside-graph slots; per-frame
 /// receipt checks charge their own quotes through the same late owner.
-fn quote_finalization_store_exhaustion(
-) -> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
+fn quote_finalization_store_exhaustion()
+-> Result<lillux_sqlite::original_physical_custody::OutsideWork> {
     Ok(lillux_sqlite::original_physical_custody::OutsideWork {
         bytes: 0,
         steps: FINALIZER_CONTROL_SOURCE_PHASE_STEPS,
@@ -396,12 +481,21 @@ fn require_finalizer_directory_receipt(
     retired_registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
 ) -> Result<()> {
     let source = source.context("settled finalizer directory source absent")?;
-    ensure!(source.owner.is_none(), "registered finalizer directory retains its open owner");
-    let registration = source.registration.as_ref()
+    ensure!(
+        source.owner.is_none(),
+        "registered finalizer directory retains its open owner"
+    );
+    let registration = source
+        .registration
+        .as_ref()
         .context("settled finalizer directory membership absent")?;
-    ensure!(matches!(registration.observed_source_identity()?,
-        lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
-        "settled finalizer directory source role changed");
+    ensure!(
+        matches!(
+            registration.observed_source_identity()?,
+            lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }
+        ),
+        "settled finalizer directory source role changed"
+    );
     drop(registration.receipt_in(retired_registry)?);
     Ok(())
 }
@@ -411,9 +505,13 @@ fn require_finalizer_control_receipt(
     retired_registry: &lillux_sqlite::original_physical_custody::RetiredOriginalPhysicalRegistry,
 ) -> Result<()> {
     let source = source.context("settled finalizer control source absent")?;
-    ensure!(source.pinned_file.is_none() && source.duplicate.is_none() && source.owner.is_none(),
-        "registered finalizer control source retains an open owner");
-    let registration = source.registration.as_ref()
+    ensure!(
+        source.pinned_file.is_none() && source.duplicate.is_none() && source.owner.is_none(),
+        "registered finalizer control source retains an open owner"
+    );
+    let registration = source
+        .registration
+        .as_ref()
         .context("settled finalizer control membership absent")?;
     ensure!(matches!(registration.observed_source_identity()?,
         lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::ControlRecord { .. }),
@@ -431,7 +529,8 @@ fn require_finalizer_control_receipt(
 /// publisher stop. Steps with no bound of their own add nothing: the scheduler
 /// close and the in-process reservation audit.
 pub fn required_rollover_drain_margin() -> std::time::Duration {
-    let grace = std::time::Duration::from_secs(ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+    let grace =
+        std::time::Duration::from_secs(ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
     ryeos_app::process::LISTENER_SHUTDOWN_BOUND * 2
         + grace * 4
         + ryeos_app::process::ACCOUNTING_PUBLISHER_STOP_BOUND
@@ -533,7 +632,13 @@ fn require_reservation_floors(
         units.allocator_steps >= host_work,
         "allocator work cannot cover bounded host preparation"
     );
-    Ok(ReservationFloors { tickets, host_layout, outside_control_limit, physical_maximum, host_work })
+    Ok(ReservationFloors {
+        tickets,
+        host_layout,
+        outside_control_limit,
+        physical_maximum,
+        host_work,
+    })
 }
 
 /// Every slot of one reservation. The slots are listed in the order a settled
@@ -586,7 +691,9 @@ pub struct LiveNativeCapacityReservation {
 impl LiveNativeCapacityReservation {
     fn held(parts: ReservationParts) -> Self {
         const KIND: &str = "ryeos-node::native-capacity-reservation";
-        Self { held: Held::new(KIND, parts, |parts| parts.require_settled_holders().is_ok()) }
+        Self {
+            held: Held::new(KIND, parts, |parts| parts.require_settled_holders().is_ok()),
+        }
     }
 }
 impl std::ops::Deref for LiveNativeCapacityReservation {
@@ -630,11 +737,15 @@ impl RetainedReservationOwner {
     const KIND: &'static str = "ryeos-node::native-capacity-reservation-failure";
 
     fn bootstrap(original: LiveNativeCapacityReservation) -> Self {
-        Self { held: Held::until_taken(Self::KIND, RetainedReservation::Bootstrap(original)) }
+        Self {
+            held: Held::until_taken(Self::KIND, RetainedReservation::Bootstrap(original)),
+        }
     }
 
     fn published(original: Arc<LiveNativeCapacityReservation>) -> Self {
-        Self { held: Held::until_taken(Self::KIND, RetainedReservation::Published(original)) }
+        Self {
+            held: Held::until_taken(Self::KIND, RetainedReservation::Published(original)),
+        }
     }
 
     fn original(&self) -> &LiveNativeCapacityReservation {
@@ -676,7 +787,8 @@ pub struct SettledParts {
     // Present on the no-Store acquisition-failure route, where this original
     // reservation owns the pre-mapping registry and must also own the exact
     // operator-lock membership used by its exclusion alias.
-    operator_registration: Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
+    operator_registration:
+        Option<lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration>,
     original: LiveNativeCapacityReservation,
     destination_phase: FinalizationDestinationPhase,
     control_sources_consumed: bool,
@@ -701,7 +813,11 @@ pub struct SettledLiveNative {
 impl SettledLiveNative {
     fn held(parts: SettledParts) -> Self {
         const KIND: &str = "ryeos-node::native-capacity-settled";
-        Self { held: Held::new(KIND, parts, |parts| parts.require_finalized_holders().is_ok()) }
+        Self {
+            held: Held::new(KIND, parts, |parts| {
+                parts.require_finalized_holders().is_ok()
+            }),
+        }
     }
 
     /// A settled phase that has finalized nothing yet.
@@ -773,7 +889,9 @@ impl OperatorLockCustody {
     const KIND: &'static str = "ryeos-node::native-operator-lock";
 
     pub fn new(owner: Arc<lillux::ExactExclusiveFileLock>) -> Self {
-        Self { held: Held::until_taken(Self::KIND, owner) }
+        Self {
+            held: Held::until_taken(Self::KIND, owner),
+        }
     }
 
     /// Move the lock out. A copy in another process is refused and comes back
@@ -948,11 +1066,15 @@ fn register_finalizer_directory_source(
         .take_owner()
         .context("settled directory source absent")?;
     match registry.register_directory(owner, prepay) {
-        Ok(registration) => source.set_registration(registration)
-            .map_err(|_| anyhow::anyhow!("settled directory source gained a membership during registration")),
+        Ok(registration) => source.set_registration(registration).map_err(|_| {
+            anyhow::anyhow!("settled directory source gained a membership during registration")
+        }),
         Err((owner, error)) => {
-            source.restore_owner(owner)
-                .map_err(|_| anyhow::anyhow!("settled directory source gained an owner during a refused registration"))?;
+            source.restore_owner(owner).map_err(|_| {
+                anyhow::anyhow!(
+                    "settled directory source gained an owner during a refused registration"
+                )
+            })?;
             Err(error)
         }
     }
@@ -990,22 +1112,30 @@ fn register_finalizer_control_source(
         // SAFETY: this private frame is built only from the exact settled
         // account/input source pins and genuine captured duplicates. Their
         // durable use is complete, and no inode/path replacement is involved.
-        source.set_owner(unsafe {
-            lillux_sqlite::RetainedOriginalFinalizerFile::issued(
-                file,
-                lillux_sqlite::OriginalFinalizerFileKind::ControlRecord,
-            )
-        }).map_err(|_| anyhow::anyhow!("settled control source gained a close owner during issuance"))?;
+        source
+            .set_owner(unsafe {
+                lillux_sqlite::RetainedOriginalFinalizerFile::issued(
+                    file,
+                    lillux_sqlite::OriginalFinalizerFileKind::ControlRecord,
+                )
+            })
+            .map_err(|_| {
+                anyhow::anyhow!("settled control source gained a close owner during issuance")
+            })?;
     }
     let owner = source
         .take_owner()
         .context("settled control close owner absent")?;
     match registry.register_control_record(owner, prepay) {
-        Ok(registration) => source.set_registration(registration)
-            .map_err(|_| anyhow::anyhow!("settled control source gained a membership during registration")),
+        Ok(registration) => source.set_registration(registration).map_err(|_| {
+            anyhow::anyhow!("settled control source gained a membership during registration")
+        }),
         Err((owner, error)) => {
-            source.set_owner(owner)
-                .map_err(|_| anyhow::anyhow!("settled control source gained an owner during a refused registration"))?;
+            source.set_owner(owner).map_err(|_| {
+                anyhow::anyhow!(
+                    "settled control source gained an owner during a refused registration"
+                )
+            })?;
             Err(error)
         }
     }
@@ -1183,10 +1313,9 @@ impl SettledParts {
         // The input slot is taken exactly once. The exact Arc is restored on
         // uniqueness or prepay refusal; success moves every actual source
         // into the retained finalizer frame and leaves the slot empty.
-        let input_owner = original
-            .inputs
-            .take()
-            .context("original native admission inputs already moved into settled finalizer custody")?;
+        let input_owner = original.inputs.take().context(
+            "original native admission inputs already moved into settled finalizer custody",
+        )?;
         let inputs = match Arc::try_unwrap(input_owner) {
             Ok(inputs) => inputs,
             Err(input_owner) => {
@@ -1308,14 +1437,18 @@ impl SettledParts {
         let issue_inputs =
             |registration: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistration,
                 owner: Arc<lillux_sqlite::RetainedOriginalFinalizerFile>| late.outside_retirement_inputs(registration, owner);
-        let admission_alias = self.input_sources.as_ref()
+        let admission_alias = self
+            .input_sources
+            .as_ref()
             .and_then(|sources| sources.exclusion_alias.as_ref());
         if admission_alias.is_none() {
             // A prior pass validated and retired the admission alias as its
             // final step. Its completed receipts make this stage a no-op
             // apart from the Store's own alias, which may still remain.
-            anyhow::ensure!(outside.finalizer_non_account_descriptors_retired()?,
-                "settled admission exclusion alias absent before Store target retirement");
+            anyhow::ensure!(
+                outside.finalizer_non_account_descriptors_retired()?,
+                "settled admission exclusion alias absent before Store target retirement"
+            );
             // SAFETY: the same sealed registry reports every non-operator
             // receipt; the original outside owner pays.
             return unsafe { outside.retire_settled_store_exclusion_alias(None, &prepay) };
@@ -1331,9 +1464,12 @@ impl SettledParts {
             // against its live registry membership before ending either alias.
             outside.retire_settled_store_exclusion_alias(admission_alias, &prepay)?;
         }
-        let sources = self.input_sources.as_mut()
+        let sources = self
+            .input_sources
+            .as_mut()
             .context("settled admission exclusion source frame absent")?;
-        let alias = sources.take_exclusion_alias()
+        let alias = sources
+            .take_exclusion_alias()
             .context("settled admission exclusion alias disappeared after validation")?;
         drop(alias);
         Ok(())
@@ -1348,29 +1484,48 @@ impl SettledParts {
         lock_owner: &mut Option<OperatorLockCustody>,
     ) -> Result<()> {
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase, FinalizationDestinationPhase::Pending),
-            "no-Store operator registration follows registry retirement");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::Pending
+            ),
+            "no-Store operator registration follows registry retirement"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let prepay = |bytes, steps| late.prepay(bytes, steps);
 
         if let Some(registration) = self.operator_registration.as_ref() {
-            ensure!(lock_owner.is_none(),
-                "registered no-Store operator lock still has a caller owner");
+            ensure!(
+                lock_owner.is_none(),
+                "registered no-Store operator lock still has a caller owner"
+            );
             let original = &mut *self.original;
-            let registry = original.physical_registry.get_mut()
+            let registry = original
+                .physical_registry
+                .get_mut()
                 .map_err(|_| anyhow::anyhow!("original settled physical registry poisoned"))?
-                .as_mut().context("original settled physical registry absent")?;
+                .as_mut()
+                .context("original settled physical registry absent")?;
             let quote = registry.membership_work_bound(1, 0)?;
             registry.prepay_transfer(&prepay, quote.bytes, quote.steps)?;
             lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::require_membership(
-                registry, registration)?;
-            ensure!(registration.is_operator_lock()?,
-                "no-Store operator registration has a foreign source role");
+                registry,
+                registration,
+            )?;
+            ensure!(
+                registration.is_operator_lock()?,
+                "no-Store operator registration has a foreign source role"
+            );
             return Ok(());
         }
 
-        let retained = lock_owner.take()
+        let retained = lock_owner
+            .take()
             .context("actual no-Store operator lock owner absent")?;
         let owner = match retained.into_taken() {
             Ok(owner) => owner,
@@ -1449,9 +1604,12 @@ impl SettledParts {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            ensure!(self.input_sources.as_ref()
-                .is_some_and(|sources| sources.exclusion_alias.is_none()),
-                "settled admission exclusion retirement is unsupported on this host");
+            ensure!(
+                self.input_sources
+                    .as_ref()
+                    .is_some_and(|sources| sources.exclusion_alias.is_none()),
+                "settled admission exclusion retirement is unsupported on this host"
+            );
             Ok(())
         }
     }
@@ -1459,29 +1617,47 @@ impl SettledParts {
     #[cfg(target_os = "linux")]
     fn retire_input_exclusion_alias_in_reservation(&mut self) -> Result<()> {
         self.require_finalization_cleanup()?;
-        let sources = self.input_sources.as_mut()
+        let sources = self
+            .input_sources
+            .as_mut()
             .context("settled input source frame absent before exclusion retirement")?;
         let Some(alias) = sources.exclusion_alias.as_ref() else {
             return Ok(());
         };
-        let registration = self.operator_registration.as_ref()
+        let registration = self
+            .operator_registration
+            .as_ref()
             .context("no-Store operator membership absent before exclusion retirement")?;
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let original = &mut *self.original;
-        let registry = original.physical_registry.get_mut()
+        let registry = original
+            .physical_registry
+            .get_mut()
             .map_err(|_| anyhow::anyhow!("original settled physical registry poisoned"))?
-            .as_ref().context("original settled physical registry absent")?;
-        ensure!(registry.non_account_descriptors_retired(),
-            "input exclusion retirement precedes non-operator descriptor receipts");
+            .as_ref()
+            .context("original settled physical registry absent")?;
+        ensure!(
+            registry.non_account_descriptors_retired(),
+            "input exclusion retirement precedes non-operator descriptor receipts"
+        );
         let quote = registry.membership_work_bound(1, 0)?.checked_add(
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 8 },
         )?;
-        registry.prepay_transfer(&|bytes, steps| late.prepay(bytes, steps), quote.bytes, quote.steps)?;
+        registry.prepay_transfer(
+            &|bytes, steps| late.prepay(bytes, steps),
+            quote.bytes,
+            quote.steps,
+        )?;
         let lock = (**alias).original_owner_alias()?;
         registry.require_operator_lock_alias(registration, &lock)?;
         drop(lock);
-        let alias = sources.take_exclusion_alias()
+        let alias = sources
+            .take_exclusion_alias()
             .expect("validated settled input exclusion alias");
         drop(alias);
         Ok(())
@@ -1551,7 +1727,10 @@ impl SettledParts {
         outside: &mut ryeos_app::state_store::LiveStateStoreOutsideCustody,
     ) -> Result<()> {
         ensure!(
-            !matches!(self.destination_phase, FinalizationDestinationPhase::NoStoreRegistryRetired),
+            !matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::NoStoreRegistryRetired
+            ),
             "Store destination retirement conflicts with the completed no-Store path"
         );
         let late = Arc::clone(
@@ -1560,7 +1739,10 @@ impl SettledParts {
                 .as_ref()
                 .context("settled outside cleanup owner absent")?,
         );
-        if matches!(self.destination_phase, FinalizationDestinationPhase::Pending) {
+        if matches!(
+            self.destination_phase,
+            FinalizationDestinationPhase::Pending
+        ) {
             ensure!(
                 !late.registry_retired(),
                 "original registry retired before the Store phase was recorded"
@@ -1572,9 +1754,11 @@ impl SettledParts {
             self.destination_phase = FinalizationDestinationPhase::StoreRegistryRetired;
         }
         ensure!(
-            matches!(self.destination_phase,
+            matches!(
+                self.destination_phase,
                 FinalizationDestinationPhase::StoreRegistryRetired
-                    | FinalizationDestinationPhase::StoreDestinationsRetired),
+                    | FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
             "Store destination retirement phase is incomplete"
         );
         Ok(())
@@ -1585,11 +1769,17 @@ impl SettledParts {
         outside: &mut ryeos_app::state_store::LiveStateStoreOutsideCustody,
     ) -> Result<()> {
         self.require_original_process()?;
-        if matches!(self.destination_phase, FinalizationDestinationPhase::StoreDestinationsRetired) {
+        if matches!(
+            self.destination_phase,
+            FinalizationDestinationPhase::StoreDestinationsRetired
+        ) {
             return Ok(());
         }
         ensure!(
-            matches!(self.destination_phase, FinalizationDestinationPhase::StoreRegistryRetired),
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreRegistryRetired
+            ),
             "Store packet destinations cannot retire before the exact Store registry"
         );
         self.require_finalization_cleanup()?;
@@ -1619,15 +1809,22 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "packet bound roots cannot be consumed before destination retirement");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        outside.consume_retired_packet_bound_roots(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "packet bound roots cannot be consumed before destination retirement"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        outside.consume_retired_packet_bound_roots(late.retired_registry()?, &|bytes, steps| {
+            late.prepay(bytes, steps)
+        })?;
         self.store_packet_bound_roots_consumed = true;
         Ok(())
     }
@@ -1644,17 +1841,27 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "packet metadata pins cannot be consumed before Store destination retirement");
-        ensure!(self.store_packet_bound_roots_consumed,
-            "packet metadata pins cannot be consumed before bound-root receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        outside.consume_retired_packet_metadata_pins(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "packet metadata pins cannot be consumed before Store destination retirement"
+        );
+        ensure!(
+            self.store_packet_bound_roots_consumed,
+            "packet metadata pins cannot be consumed before bound-root receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        outside
+            .consume_retired_packet_metadata_pins(late.retired_registry()?, &|bytes, steps| {
+                late.prepay(bytes, steps)
+            })?;
         self.store_packet_metadata_pins_consumed = true;
         Ok(())
     }
@@ -1669,22 +1876,31 @@ impl SettledParts {
     ) -> Result<()> {
         self.require_original_process()?;
         if self.store_packet_source_parts_consumed {
-            ensure!(self.store_packet_acquisition_failure_count.is_some(),
-                "consumed Store packet sources lost their failure-fact disposition");
+            ensure!(
+                self.store_packet_acquisition_failure_count.is_some(),
+                "consumed Store packet sources lost their failure-fact disposition"
+            );
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired)
-            && self.store_packet_bound_roots_consumed
-            && self.store_packet_metadata_pins_consumed,
-            "Store packet sources cannot be consumed before all exact retired-registry receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        let failures = outside.consume_retired_packet_source_parts(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ) && self.store_packet_bound_roots_consumed
+                && self.store_packet_metadata_pins_consumed,
+            "Store packet sources cannot be consumed before all exact retired-registry receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        let failures = outside
+            .consume_retired_packet_source_parts(late.retired_registry()?, &|bytes, steps| {
+                late.prepay(bytes, steps)
+            })?;
         self.store_packet_acquisition_failure_count = Some(failures);
         self.store_packet_source_parts_consumed = true;
         Ok(())
@@ -1702,11 +1918,19 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "Store metadata sources cannot be consumed before destination retirement");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "Store metadata sources cannot be consumed before destination retirement"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let quote = quote_finalization_store_metadata_receipts()?;
         late.prepay(quote.bytes, quote.steps)?;
         outside.consume_retired_auxiliary_physical_sources(late.retired_registry()?)?;
@@ -1725,13 +1949,23 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "Store parent sources cannot be consumed before destination retirement");
-        ensure!(self.store_metadata_sources_consumed,
-            "Store parent sources cannot be consumed before Store metadata receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "Store parent sources cannot be consumed before destination retirement"
+        );
+        ensure!(
+            self.store_metadata_sources_consumed,
+            "Store parent sources cannot be consumed before Store metadata receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let quote = quote_finalization_store_parent_receipts()?;
         late.prepay(quote.bytes, quote.steps)?;
         outside.consume_retired_parent_finalization_parts(late.retired_registry()?)?;
@@ -1750,13 +1984,23 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "State projection sources cannot be consumed before Store destination retirement");
-        ensure!(self.store_metadata_sources_consumed && self.store_parent_sources_consumed,
-            "State projection sources cannot be consumed before Store metadata and parent receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "State projection sources cannot be consumed before Store destination retirement"
+        );
+        ensure!(
+            self.store_metadata_sources_consumed && self.store_parent_sources_consumed,
+            "State projection sources cannot be consumed before Store metadata and parent receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         outside.consume_retired_state_projection_sources(
             late.retired_registry()?,
             &|bytes, steps| late.prepay(bytes, steps),
@@ -1776,23 +2020,35 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "State root sources cannot be consumed before Store destination retirement");
-        ensure!(self.store_metadata_sources_consumed && self.store_parent_sources_consumed
-            && self.store_state_projection_sources_consumed,
-            "State root sources cannot be consumed before Store metadata, parent, and projection receipts");
-        ensure!(self.store_packet_bound_roots_consumed
-            && self.store_packet_metadata_pins_consumed
-            && self.store_packet_source_parts_consumed
-            && self.store_packet_acquisition_failure_count.is_some(),
-            "State and Operational metadata cannot retire before all Store packet source receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        outside.consume_retired_state_root_sources(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "State root sources cannot be consumed before Store destination retirement"
+        );
+        ensure!(
+            self.store_metadata_sources_consumed
+                && self.store_parent_sources_consumed
+                && self.store_state_projection_sources_consumed,
+            "State root sources cannot be consumed before Store metadata, parent, and projection receipts"
+        );
+        ensure!(
+            self.store_packet_bound_roots_consumed
+                && self.store_packet_metadata_pins_consumed
+                && self.store_packet_source_parts_consumed
+                && self.store_packet_acquisition_failure_count.is_some(),
+            "State and Operational metadata cannot retire before all Store packet source receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        outside.consume_retired_state_root_sources(late.retired_registry()?, &|bytes, steps| {
+            late.prepay(bytes, steps)
+        })?;
         self.store_state_root_sources_consumed = true;
         Ok(())
     }
@@ -1808,19 +2064,30 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "Runtime shared roots cannot be consumed before Store destination retirement");
-        ensure!(self.store_metadata_sources_consumed && self.store_parent_sources_consumed
-            && self.store_state_projection_sources_consumed
-            && self.store_state_root_sources_consumed,
-            "Runtime shared roots cannot be consumed before Store metadata, parent, State and root receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        outside.consume_retired_runtime_shared_roots(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "Runtime shared roots cannot be consumed before Store destination retirement"
+        );
+        ensure!(
+            self.store_metadata_sources_consumed
+                && self.store_parent_sources_consumed
+                && self.store_state_projection_sources_consumed
+                && self.store_state_root_sources_consumed,
+            "Runtime shared roots cannot be consumed before Store metadata, parent, State and root receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        outside
+            .consume_retired_runtime_shared_roots(late.retired_registry()?, &|bytes, steps| {
+                late.prepay(bytes, steps)
+            })?;
         self.store_runtime_shared_roots_consumed = true;
         Ok(())
     }
@@ -1836,13 +2103,23 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired),
-            "Scheduler sources cannot be consumed before Store destination retirement");
-        ensure!(self.store_runtime_shared_roots_consumed,
-            "Scheduler sources cannot be consumed before the Runtime shared-root receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+            ),
+            "Scheduler sources cannot be consumed before Store destination retirement"
+        );
+        ensure!(
+            self.store_runtime_shared_roots_consumed,
+            "Scheduler sources cannot be consumed before the Runtime shared-root receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let quote = quote_finalization_store_scheduler_receipts()?;
         late.prepay(quote.bytes, quote.steps)?;
         outside.consume_retired_scheduler_sources(late.retired_registry()?)?;
@@ -1861,14 +2138,19 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(self.store_scheduler_sources_consumed,
-            "Store owner frames cannot be consumed before the Scheduler receipts");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
-        outside.consume_retired_owner_frames(
-            late.retired_registry()?,
-            &|bytes, steps| late.prepay(bytes, steps),
-        )?;
+        ensure!(
+            self.store_scheduler_sources_consumed,
+            "Store owner frames cannot be consumed before the Scheduler receipts"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
+        outside.consume_retired_owner_frames(late.retired_registry()?, &|bytes, steps| {
+            late.prepay(bytes, steps)
+        })?;
         self.store_owner_frames_consumed = true;
         Ok(())
     }
@@ -1881,18 +2163,29 @@ impl SettledParts {
     ) -> Result<()> {
         self.require_original_process()?;
         if self.store_outside_exhausted {
-            ensure!(outside.is_none(), "exhausted Store outside graph reappeared");
+            ensure!(
+                outside.is_none(),
+                "exhausted Store outside graph reappeared"
+            );
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(self.store_owner_frames_consumed,
-            "Store outside graph cannot be exhausted before its owner frames");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            self.store_owner_frames_consumed,
+            "Store outside graph cannot be exhausted before its owner frames"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let quote = quote_finalization_store_exhaustion()?;
         late.prepay(quote.bytes, quote.steps)?;
         let registry = late.retired_registry()?;
-        let graph = outside.take().context("Store outside graph absent before exhaustion")?;
+        let graph = outside
+            .take()
+            .context("Store outside graph absent before exhaustion")?;
         match graph.into_exhausted(registry) {
             Ok(exhausted) => {
                 // Non-owning record of the checked registry identity only.
@@ -1912,10 +2205,15 @@ impl SettledParts {
     /// graph stays retained until after its phase is recorded.
     pub fn resume_finalization_registry_phase(&mut self, store_graph: bool) -> Result<()> {
         self.require_original_process()?;
-        if !matches!(self.destination_phase, FinalizationDestinationPhase::Pending) {
+        if !matches!(
+            self.destination_phase,
+            FinalizationDestinationPhase::Pending
+        ) {
             return Ok(());
         }
-        let Some(late) = self.original.late.as_ref() else { return Ok(()) };
+        let Some(late) = self.original.late.as_ref() else {
+            return Ok(());
+        };
         if !late.registry_retired() {
             return Ok(());
         }
@@ -1940,12 +2238,17 @@ impl SettledParts {
     /// instead of losing its owners or issuing a replacement.
     pub fn retire_finalization_registry_in_reservation(&mut self) -> Result<()> {
         ensure!(
-            matches!(self.destination_phase,
+            matches!(
+                self.destination_phase,
                 FinalizationDestinationPhase::Pending
-                    | FinalizationDestinationPhase::NoStoreRegistryRetired),
+                    | FinalizationDestinationPhase::NoStoreRegistryRetired
+            ),
             "no-Store registry retirement conflicts with the Store destination path"
         );
-        if matches!(self.destination_phase, FinalizationDestinationPhase::NoStoreRegistryRetired) {
+        if matches!(
+            self.destination_phase,
+            FinalizationDestinationPhase::NoStoreRegistryRetired
+        ) {
             return Ok(());
         }
         let late = Arc::clone(
@@ -1954,8 +2257,10 @@ impl SettledParts {
                 .as_ref()
                 .context("settled outside cleanup owner absent")?,
         );
-        ensure!(!late.registry_retired(),
-            "original registry retired before the no-Store phase was recorded");
+        ensure!(
+            !late.registry_retired(),
+            "original registry retired before the no-Store phase was recorded"
+        );
         self.require_finalization_cleanup()?;
         let original = &mut *self.original;
         let slot = original
@@ -1990,97 +2295,171 @@ impl SettledParts {
             return Ok(());
         }
         self.require_finalization_cleanup()?;
-        ensure!(matches!(self.destination_phase,
-            FinalizationDestinationPhase::StoreDestinationsRetired
-                | FinalizationDestinationPhase::NoStoreRegistryRetired),
-            "settled control sources cannot be consumed before destination retirement");
+        ensure!(
+            matches!(
+                self.destination_phase,
+                FinalizationDestinationPhase::StoreDestinationsRetired
+                    | FinalizationDestinationPhase::NoStoreRegistryRetired
+            ),
+            "settled control sources cannot be consumed before destination retirement"
+        );
 
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         let quote = quote_finalization_control_source_receipt_join()?;
         late.prepay(quote.bytes, quote.steps)?;
         let retired_registry = late.retired_registry()?;
 
-        let account_sources = self.account_sources.as_ref()
+        let account_sources = self
+            .account_sources
+            .as_ref()
             .context("settled account source frame absent after registry retirement")?;
-        require_finalizer_directory_receipt(account_sources.account_parent.as_ref(), retired_registry)?;
+        require_finalizer_directory_receipt(
+            account_sources.account_parent.as_ref(),
+            retired_registry,
+        )?;
         require_finalizer_control_receipt(account_sources.account_file.as_ref(), retired_registry)?;
-        require_finalizer_directory_receipt(account_sources.anchor_parent.as_ref(), retired_registry)?;
+        require_finalizer_directory_receipt(
+            account_sources.anchor_parent.as_ref(),
+            retired_registry,
+        )?;
         require_finalizer_control_receipt(account_sources.anchor_file.as_ref(), retired_registry)?;
 
-        let input_sources = self.input_sources.as_ref()
+        let input_sources = self
+            .input_sources
+            .as_ref()
             .context("settled admission-input source frame absent after registry retirement")?;
         require_finalizer_directory_receipt(input_sources.root.as_ref(), retired_registry)?;
         require_finalizer_directory_receipt(input_sources.runtime.as_ref(), retired_registry)?;
-        require_finalizer_directory_receipt(input_sources.completion_parent.as_ref(), retired_registry)?;
-        require_finalizer_control_receipt(input_sources.completion_file.as_ref(), retired_registry)?;
-        require_finalizer_control_receipt(input_sources.completion_duplicate.as_ref(), retired_registry)?;
-        require_finalizer_directory_receipt(input_sources.policy_parent.as_ref(), retired_registry)?;
+        require_finalizer_directory_receipt(
+            input_sources.completion_parent.as_ref(),
+            retired_registry,
+        )?;
+        require_finalizer_control_receipt(
+            input_sources.completion_file.as_ref(),
+            retired_registry,
+        )?;
+        require_finalizer_control_receipt(
+            input_sources.completion_duplicate.as_ref(),
+            retired_registry,
+        )?;
+        require_finalizer_directory_receipt(
+            input_sources.policy_parent.as_ref(),
+            retired_registry,
+        )?;
         require_finalizer_control_receipt(input_sources.policy_file.as_ref(), retired_registry)?;
-        require_finalizer_control_receipt(input_sources.policy_duplicate.as_ref(), retired_registry)?;
-        ensure!(input_sources.exclusion_alias.is_none(),
-            "settled admission exclusion alias remains after operator retirement");
-        ensure!(input_sources.clock_alias.is_some(),
-            "settled admission clock alias is absent before its late-owner join");
+        require_finalizer_control_receipt(
+            input_sources.policy_duplicate.as_ref(),
+            retired_registry,
+        )?;
+        ensure!(
+            input_sources.exclusion_alias.is_none(),
+            "settled admission exclusion alias remains after operator retirement"
+        );
+        ensure!(
+            input_sources.clock_alias.is_some(),
+            "settled admission clock alias is absent before its late-owner join"
+        );
 
         match self.destination_phase {
             FinalizationDestinationPhase::NoStoreRegistryRetired => {
                 #[cfg(target_os = "linux")]
                 {
-                    let registration = self.operator_registration.as_ref()
+                    let registration = self
+                        .operator_registration
+                        .as_ref()
                         .context("no-Store operator membership absent after registry retirement")?;
-                    ensure!(registration.is_operator_lock()?
-                        && registration.operator_target_retired()?,
-                        "no-Store operator target lacks its exact retirement evidence");
+                    ensure!(
+                        registration.is_operator_lock()?
+                            && registration.operator_target_retired()?,
+                        "no-Store operator target lacks its exact retirement evidence"
+                    );
                     drop(registration.receipt_in(retired_registry)?);
                 }
                 #[cfg(not(target_os = "linux"))]
-                ensure!(self.operator_registration.is_none(),
-                    "unsupported no-Store operator registration remains");
+                ensure!(
+                    self.operator_registration.is_none(),
+                    "unsupported no-Store operator registration remains"
+                );
             }
             FinalizationDestinationPhase::StoreDestinationsRetired => {
-                ensure!(self.operator_registration.is_none(),
-                    "Store finalization retained a competing reservation operator member");
-                ensure!(self.store_metadata_sources_consumed,
-                    "Store metadata registrations remain after physical registry retirement");
-                ensure!(self.store_parent_sources_consumed,
-                    "Store parent registrations remain after physical registry retirement");
-                ensure!(self.store_state_projection_sources_consumed,
-                    "State projection registrations remain after physical registry retirement");
-                ensure!(self.store_state_root_sources_consumed,
-                    "State and Operational root registrations remain after physical registry retirement");
-                ensure!(self.store_runtime_shared_roots_consumed,
-                    "Runtime shared-root registrations remain after physical registry retirement");
-                ensure!(self.store_packet_bound_roots_consumed,
-                    "packet bound-root registrations remain after physical registry retirement");
-                ensure!(self.store_packet_metadata_pins_consumed,
-                    "packet metadata-pin receipts remain after physical registry retirement");
-                ensure!(self.store_packet_source_parts_consumed
-                    && self.store_packet_acquisition_failure_count.is_some(),
-                    "Store packet source evidence remains after physical registry retirement");
-                ensure!(self.store_scheduler_sources_consumed && self.store_owner_frames_consumed
-                    && self.store_outside_exhausted,
-                    "Store outside graph is not exhausted after physical registry retirement");
+                ensure!(
+                    self.operator_registration.is_none(),
+                    "Store finalization retained a competing reservation operator member"
+                );
+                ensure!(
+                    self.store_metadata_sources_consumed,
+                    "Store metadata registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_parent_sources_consumed,
+                    "Store parent registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_state_projection_sources_consumed,
+                    "State projection registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_state_root_sources_consumed,
+                    "State and Operational root registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_runtime_shared_roots_consumed,
+                    "Runtime shared-root registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_packet_bound_roots_consumed,
+                    "packet bound-root registrations remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_packet_metadata_pins_consumed,
+                    "packet metadata-pin receipts remain after physical registry retirement"
+                );
+                ensure!(
+                    self.store_packet_source_parts_consumed
+                        && self.store_packet_acquisition_failure_count.is_some(),
+                    "Store packet source evidence remains after physical registry retirement"
+                );
+                ensure!(
+                    self.store_scheduler_sources_consumed
+                        && self.store_owner_frames_consumed
+                        && self.store_outside_exhausted,
+                    "Store outside graph is not exhausted after physical registry retirement"
+                );
             }
             _ => anyhow::bail!("settled control-source retirement phase changed"),
         }
 
         let alias = {
-            let input_sources = self.input_sources.as_mut()
+            let input_sources = self
+                .input_sources
+                .as_mut()
                 .context("settled admission-input source frame disappeared")?;
-            input_sources.take_clock_alias()
+            input_sources
+                .take_clock_alias()
                 .context("settled admission clock alias disappeared after validation")?
         };
         if let Err((alias, error)) = late.join_clock_input_alias(alias, retired_registry) {
-            self.input_sources.as_mut()
+            self.input_sources
+                .as_mut()
                 .expect("validated settled admission-input frame remains present")
                 .restore_clock_alias(alias)
-                .map_err(|_| anyhow::anyhow!("settled admission clock alias slot refilled during a refused join"))?;
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "settled admission clock alias slot refilled during a refused join"
+                    )
+                })?;
             return Err(error);
         }
 
         self.account_sources = None;
-        let input_sources = self.input_sources.as_mut()
+        let input_sources = self
+            .input_sources
+            .as_mut()
             .expect("validated settled admission-input frame remains present");
         input_sources.end_validated_sources();
         self.operator_registration = None;
@@ -2093,10 +2472,16 @@ impl SettledParts {
     /// input alias, and no later stage may prepay from the late owner.
     pub fn retire_finalization_clock(&mut self) -> Result<()> {
         self.require_original_process()?;
-        ensure!(self.control_sources_consumed,
-            "late cleanup clock cannot retire before the settled control sources");
-        let late = Arc::clone(self.original.late.as_ref()
-            .context("settled outside cleanup owner absent")?);
+        ensure!(
+            self.control_sources_consumed,
+            "late cleanup clock cannot retire before the settled control sources"
+        );
+        let late = Arc::clone(
+            self.original
+                .late
+                .as_ref()
+                .context("settled outside cleanup owner absent")?,
+        );
         if late.clock_retired()? {
             return Ok(());
         }
@@ -2108,7 +2493,10 @@ impl SettledParts {
     /// consumption may follow, so a retry needs no further cleanup window.
     pub fn finalization_clock_retired(&self) -> bool {
         self.require_original_process().is_ok()
-            && self.original.late.as_ref()
+            && self
+                .original
+                .late
+                .as_ref()
                 .is_some_and(|late| late.clock_retired().unwrap_or(false))
     }
 
@@ -2119,17 +2507,25 @@ impl SettledParts {
     /// these checks.
     fn require_finalized_holders(&self) -> Result<()> {
         self.require_original_process()?;
-        ensure!(self.control_sources_consumed && self.account_sources.is_none()
-            && self.operator_registration.is_none(),
-            "settled control sources remain before final consumption");
-        let inputs = self.input_sources.as_ref()
+        ensure!(
+            self.control_sources_consumed
+                && self.account_sources.is_none()
+                && self.operator_registration.is_none(),
+            "settled control sources remain before final consumption"
+        );
+        let inputs = self
+            .input_sources
+            .as_ref()
             .context("settled admission-input frame absent before final consumption")?;
-        ensure!(inputs.consumed(),
-            "settled admission-input sources remain before final consumption");
+        ensure!(
+            inputs.consumed(),
+            "settled admission-input sources remain before final consumption"
+        );
         match self.destination_phase {
             FinalizationDestinationPhase::NoStoreRegistryRetired => {}
             FinalizationDestinationPhase::StoreDestinationsRetired => ensure!(
-                self.store_metadata_sources_consumed && self.store_parent_sources_consumed
+                self.store_metadata_sources_consumed
+                    && self.store_parent_sources_consumed
                     && self.store_state_projection_sources_consumed
                     && self.store_state_root_sources_consumed
                     && self.store_runtime_shared_roots_consumed
@@ -2140,13 +2536,19 @@ impl SettledParts {
                     && self.store_scheduler_sources_consumed
                     && self.store_owner_frames_consumed
                     && self.store_outside_exhausted,
-                "settled Store receipts remain before final consumption"),
+                "settled Store receipts remain before final consumption"
+            ),
             _ => anyhow::bail!("settled destination phase is incomplete before final consumption"),
         }
-        let late = self.original.late.as_ref()
+        let late = self
+            .original
+            .late
+            .as_ref()
             .context("settled outside cleanup owner absent before final consumption")?;
-        ensure!(late.registry_retired() && late.clock_retired()?,
-            "late cleanup registry or clock is not retired before final consumption");
+        ensure!(
+            late.registry_retired() && late.clock_retired()?,
+            "late cleanup registry or clock is not retired before final consumption"
+        );
         self.original.require_settled_holders()
     }
 }
@@ -2162,7 +2564,10 @@ impl SettledLiveNative {
         let mut settled = match self.held.take_whole() {
             Ok(settled) => settled,
             Err(held) => {
-                return Err((Self { held }, anyhow::anyhow!("foreign settled live native owner")));
+                return Err((
+                    Self { held },
+                    anyhow::anyhow!("foreign settled live native owner"),
+                ));
             }
         };
         let mut original = match settled.original.held.take_whole() {
@@ -2183,12 +2588,36 @@ impl SettledLiveNative {
         // The input Arc moved into the finalizer frame consumed above; the
         // slot is already empty.
         drop(original.inputs.take());
-        drop(original.account.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(
+            original
+                .account
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
         drop(original.budget.take());
-        drop(original.raw_budget.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
-        drop(original.region.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(
+            original
+                .raw_budget
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        drop(
+            original
+                .region
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
         drop(original.seal_failure.take());
-        drop(original.physical_registry.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(
+            original
+                .physical_registry
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
         // Disposed exclusion, released mapping and spent credit are plain
         // post-release records; none closes or unmaps anything on drop.
         drop(original.release_exclusion.take());
@@ -2197,8 +2626,14 @@ impl SettledLiveNative {
         drop(original.late.take());
         // The settled claim is a plain copied observation; nothing to settle.
         drop(original.rollover_claim.take());
-        let released = original.released.take().expect("checked settled release receipt");
-        Ok(FinalizedLiveNative { process: std::process::id(), _released: released })
+        let released = original
+            .released
+            .take()
+            .expect("checked settled release receipt");
+        Ok(FinalizedLiveNative {
+            process: std::process::id(),
+            _released: released,
+        })
     }
 }
 
@@ -2210,8 +2645,10 @@ pub struct FinalizedLiveNative {
 }
 impl FinalizedLiveNative {
     pub fn require_original_process(&self) -> Result<()> {
-        ensure!(!lillux::exec::in_forked_child() && self.process == std::process::id(),
-            "foreign finalized live native record");
+        ensure!(
+            !lillux::exec::in_forked_child() && self.process == std::process::id(),
+            "foreign finalized live native record"
+        );
         Ok(())
     }
 }
@@ -2220,14 +2657,14 @@ impl LiveNativeCapacityReservationFailure {
     /// Recover the SAME retained reservation for supervised recovery. This
     /// does not renew authority, debit again, or certify a resource terminal.
     /// A forked copy must keep its refusal and cannot extract original custody.
-    pub fn into_original(
-        self,
-    ) -> std::result::Result<Arc<LiveNativeCapacityReservation>, Self> {
+    pub fn into_original(self) -> std::result::Result<Arc<LiveNativeCapacityReservation>, Self> {
         if self.original().require_original_process().is_err() {
             return Err(self);
         }
         let Self { original, error } = self;
-        original.into_taken().map_err(|original| Self { original, error })
+        original
+            .into_taken()
+            .map_err(|original| Self { original, error })
     }
 
     pub fn original(&self) -> &LiveNativeCapacityReservation {
@@ -2277,20 +2714,36 @@ impl ReservationParts {
     /// or registry owner remains. A dropped reservation settles on exactly
     /// these checks.
     pub(super) fn require_settled_holders(&self) -> Result<()> {
-        ensure!(self.inputs.is_none(),
-            "settled reservation retains its original admission inputs");
-        ensure!(self.released.is_some() && self.seal_failure.is_none()
-            && self.budget.get().is_none(),
-            "settled reservation lacks its release receipt or retains a native owner");
-        ensure!(self.account.try_read()
-                .map_err(|_| anyhow::anyhow!("settled account owner busy or poisoned"))?.is_none()
-            && self.raw_budget.try_lock()
-                .map_err(|_| anyhow::anyhow!("settled raw budget busy or poisoned"))?.is_none()
-            && self.region.try_lock()
-                .map_err(|_| anyhow::anyhow!("settled region owner busy or poisoned"))?.is_none()
-            && self.physical_registry.try_lock()
-                .map_err(|_| anyhow::anyhow!("settled physical registry busy or poisoned"))?.is_none(),
-            "settled reservation retains an account, budget, region or registry owner");
+        ensure!(
+            self.inputs.is_none(),
+            "settled reservation retains its original admission inputs"
+        );
+        ensure!(
+            self.released.is_some() && self.seal_failure.is_none() && self.budget.get().is_none(),
+            "settled reservation lacks its release receipt or retains a native owner"
+        );
+        ensure!(
+            self.account
+                .try_read()
+                .map_err(|_| anyhow::anyhow!("settled account owner busy or poisoned"))?
+                .is_none()
+                && self
+                    .raw_budget
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("settled raw budget busy or poisoned"))?
+                    .is_none()
+                && self
+                    .region
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("settled region owner busy or poisoned"))?
+                    .is_none()
+                && self
+                    .physical_registry
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("settled physical registry busy or poisoned"))?
+                    .is_none(),
+            "settled reservation retains an account, budget, region or registry owner"
+        );
         Ok(())
     }
 
@@ -2331,7 +2784,10 @@ impl ReservationParts {
         pins: &[Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 2],
     ) -> Result<Arc<lillux_sqlite::OriginalMetadataPinRetirementInputs>> {
         self.require_original(true)?;
-        let late = self.late.as_ref().context("original late cleanup partition absent")?;
+        let late = self
+            .late
+            .as_ref()
+            .context("original late cleanup partition absent")?;
         late.packet_metadata_pin_retirement_inputs(factory, terminal, leaf, pins)
     }
 
@@ -2356,7 +2812,9 @@ impl ReservationParts {
     /// The proof that keeps the resident region in memory, once residency
     /// completed.
     pub fn residency_proof(&self) -> Option<lillux::process_control::ResidencyProof> {
-        self.host_storage.get().and_then(|storage| storage.residency_proof().cloned())
+        self.host_storage
+            .get()
+            .and_then(|storage| storage.residency_proof().cloned())
     }
 
     /// This incarnation's own process digest and the digest of the settled
@@ -2387,14 +2845,17 @@ impl ReservationParts {
     /// service SQL. A bounded wait absorbs a momentary writer; past the bound
     /// the check reports contention, which refuses this call without latching
     /// service refusal. A poisoned lock is a fact refusal.
-    fn account_for_check(&self) -> Result<std::sync::RwLockReadGuard<'_, Option<RetainedCapacityAccount>>> {
+    fn account_for_check(
+        &self,
+    ) -> Result<std::sync::RwLockReadGuard<'_, Option<RetainedCapacityAccount>>> {
         let mut deadline = None;
         loop {
             match self.account.try_read() {
                 Ok(guard) => return Ok(guard),
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    let deadline = *deadline.get_or_insert_with(||
-                        lillux::time::MonotonicDeadline::after(ACCOUNT_CHECK_CONTENTION_WAIT));
+                    let deadline = *deadline.get_or_insert_with(|| {
+                        lillux::time::MonotonicDeadline::after(ACCOUNT_CHECK_CONTENTION_WAIT)
+                    });
                     if deadline.has_elapsed() {
                         return Err(anyhow::Error::new(lillux_sqlite::NativeCheckContended)
                             .context("original capacity account busy"));
@@ -2567,8 +3028,13 @@ impl LiveNativeCapacityReservation {
     pub fn reserve(inputs: Arc<LiveNativeCapacityInputs>) -> Result<Arc<Self>> {
         inputs.require_original(false)?;
         let units = inputs.policy.incarnation.units;
-        let ReservationFloors { tickets, host_layout, outside_control_limit, physical_maximum, host_work } =
-            require_reservation_floors(&inputs.policy.incarnation)?;
+        let ReservationFloors {
+            tickets,
+            host_layout,
+            outside_control_limit,
+            physical_maximum,
+            host_work,
+        } = require_reservation_floors(&inputs.policy.incarnation)?;
         let outside_cleanup_steps = inputs.policy.incarnation.outside_cleanup_steps;
         let account = RetainedCapacityAccount::open(&inputs)?;
         // Retain the real account and every partial publication by value.
@@ -2994,7 +3460,10 @@ mod custody_drop_tests {
         assert!(reservation.inputs().is_err());
         let before = lillux::custody::abandoned_custody().count(RESERVATION);
         drop(reservation);
-        assert_eq!(lillux::custody::abandoned_custody().count(RESERVATION), before);
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(RESERVATION),
+            before
+        );
     }
 
     #[test]
@@ -3004,7 +3473,10 @@ mod custody_drop_tests {
         assert!(reservation.require_settled_holders().is_err());
         let before = lillux::custody::abandoned_custody().count(RESERVATION);
         drop(reservation);
-        assert_eq!(lillux::custody::abandoned_custody().count(RESERVATION), before + 1);
+        assert_eq!(
+            lillux::custody::abandoned_custody().count(RESERVATION),
+            before + 1
+        );
     }
 
     #[test]
@@ -3013,7 +3485,10 @@ mod custody_drop_tests {
         let settled = settled_phase(empty_reservation(true));
         assert!(settled.require_finalized_holders().is_err());
         // A refused final consumption hands the same owner back unchanged.
-        let (settled, _error) = settled.into_finalized().err().expect("unconsumed frames refuse");
+        let (settled, _error) = settled
+            .into_finalized()
+            .err()
+            .expect("unconsumed frames refuse");
         let before = lillux::custody::abandoned_custody();
         drop(settled);
         let after = lillux::custody::abandoned_custody();
@@ -3064,11 +3539,17 @@ mod tests {
             lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry::storage_quote(412)
                 .unwrap();
         let late_owner = LateNativeControl::maximum_storage_quote(412).unwrap();
-        let retirement_inputs = LateNativeControl::maximum_retirement_inputs_quote(412, 64).unwrap();
-        let packet_pins = LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
-        let state_pins = LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap();
-        assert!(state_pins.steps > 0 && state_pins.bytes > 0
-            && retirement_inputs.steps >= state_pins.steps + packet_pins.steps);
+        let retirement_inputs =
+            LateNativeControl::maximum_retirement_inputs_quote(412, 64).unwrap();
+        let packet_pins =
+            LateNativeControl::maximum_packet_metadata_pin_retirement_quote().unwrap();
+        let state_pins =
+            LateNativeControl::maximum_state_metadata_pin_retirement_quote(64).unwrap();
+        assert!(
+            state_pins.steps > 0
+                && state_pins.bytes > 0
+                && retirement_inputs.steps >= state_pins.steps + packet_pins.steps
+        );
         assert_eq!(registration.bytes, 843_776);
         assert_eq!(registration.steps, 692_160);
         assert_eq!(floor, allocation.checked_add(registration).unwrap());
@@ -3089,16 +3570,41 @@ mod tests {
             quote_prepared_physical_registry_handoff(),
             lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 2 }
         );
-        assert_eq!(quote_finalization_control_source_receipt_join().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 120 });
-        assert_eq!(quote_finalization_store_metadata_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 72 });
-        assert_eq!(quote_finalization_store_parent_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 48 });
-        assert_eq!(quote_finalization_store_scheduler_receipts().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 32 });
-        assert_eq!(quote_finalization_store_exhaustion().unwrap(),
-            lillux_sqlite::original_physical_custody::OutsideWork { bytes: 0, steps: 16 });
+        assert_eq!(
+            quote_finalization_control_source_receipt_join().unwrap(),
+            lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 120
+            }
+        );
+        assert_eq!(
+            quote_finalization_store_metadata_receipts().unwrap(),
+            lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 72
+            }
+        );
+        assert_eq!(
+            quote_finalization_store_parent_receipts().unwrap(),
+            lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 48
+            }
+        );
+        assert_eq!(
+            quote_finalization_store_scheduler_receipts().unwrap(),
+            lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 32
+            }
+        );
+        assert_eq!(
+            quote_finalization_store_exhaustion().unwrap(),
+            lillux_sqlite::original_physical_custody::OutsideWork {
+                bytes: 0,
+                steps: 16
+            }
+        );
         let (maximum, required) = required_outside_cleanup(64).unwrap();
         assert_eq!(maximum, 412);
         assert!(required.steps > floor.steps + late_owner.steps + retirement_inputs.steps);
@@ -3114,7 +3620,10 @@ mod tests {
         let mut entries = std::fs::read_dir(&profiles)
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "yaml"))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "yaml")
+            })
             .collect::<Vec<_>>();
         entries.sort();
         assert!(entries.iter().any(|path| path.ends_with("core.yaml")));
@@ -3122,23 +3631,36 @@ mod tests {
         for path in entries {
             let document: serde_yaml::Value =
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            let Some(section) = document.get("policies").and_then(|p| p.get("native_capacity")) else {
+            let Some(section) = document
+                .get("policies")
+                .and_then(|p| p.get("native_capacity"))
+            else {
                 continue;
             };
             let policy: NodeNativeCapacityPolicy = serde_yaml::from_value(section.clone())
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            policy.validate().unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            policy
+                .validate()
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             let tickets = u32::try_from(policy.incarnation.units.connection_tickets).unwrap();
             let (_, required) = required_outside_cleanup(tickets).unwrap();
-            assert!(policy.incarnation.outside_cleanup_steps >= required.steps,
+            assert!(
+                policy.incarnation.outside_cleanup_steps >= required.steps,
                 "{}: outside_cleanup_steps {} below floor {}",
-                path.display(), policy.incarnation.outside_cleanup_steps, required.steps);
+                path.display(),
+                policy.incarnation.outside_cleanup_steps,
+                required.steps
+            );
             require_reservation_floors(&policy.incarnation)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
-            eprintln!("{}: rollover_drain_margin_ms {} (floor {:?}), cleanup_occupancy_ms {} (floor {:?})",
-                path.display(), policy.incarnation.rollover_drain_margin_ms,
-                required_rollover_drain_margin(), policy.incarnation.cleanup_occupancy_ms,
-                required_cleanup_occupancy());
+            eprintln!(
+                "{}: rollover_drain_margin_ms {} (floor {:?}), cleanup_occupancy_ms {} (floor {:?})",
+                path.display(),
+                policy.incarnation.rollover_drain_margin_ms,
+                required_rollover_drain_margin(),
+                policy.incarnation.cleanup_occupancy_ms,
+                required_cleanup_occupancy()
+            );
             checked += 1;
         }
         assert!(checked > 0, "no shipped profile declares native capacity");

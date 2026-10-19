@@ -279,10 +279,7 @@ impl IsolationPolicy {
     /// two in step, so neither alone ever means it. This is permission, not
     /// evidence that a particular launch has a scope.
     pub fn nested_sandbox(&self) -> bool {
-        nested_sandbox_from(
-            &self.requires_capabilities,
-            self.filesystem.proc_filesystem,
-        )
+        nested_sandbox_from(&self.requires_capabilities, self.filesystem.proc_filesystem)
     }
 
     /// Explicit policy-free authoring/test boundary. Running nodes compile
@@ -349,9 +346,7 @@ pub enum IsolationProcessScopePolicy {
     // Keep this an empty struct variant: serde's internally-tagged unit
     // variant accepts unknown fields even with deny_unknown_fields.
     Unconfigured {},
-    Required {
-        control_timeout_ms: u64,
-    },
+    Required { control_timeout_ms: u64 },
 }
 
 /// Whether `floor` requires `name` outright: as the only name of an entry,
@@ -507,22 +502,24 @@ mod tests {
         assert!(!policy.nested_sandbox());
         policy.requires_capabilities = Vec::new();
         assert!(!policy.nested_sandbox());
-        assert!(!floor_requires_outright(&policy.requires_capabilities, ISOLATION_NAMESPACES));
+        assert!(!floor_requires_outright(
+            &policy.requires_capabilities,
+            ISOLATION_NAMESPACES
+        ));
     }
 
     fn two_class_document() -> IsolationPolicyDocument {
-        let mut document =
-            IsolationPolicyDocument::from_selected_policy(IsolationPolicy::disabled_for_authoring());
+        let mut document = IsolationPolicyDocument::from_selected_policy(
+            IsolationPolicy::disabled_for_authoring(),
+        );
         let mut local = document.host_classes.remove(AUTHORING_HOST_CLASS).unwrap();
         local.requires_capabilities = vec!["accounting".into(), "time".into()];
         let mut hosted = local.clone();
-        hosted.requires_capabilities =
-            vec![any_of(&["accounting", "residency:swap_absent"]), "time".into()];
-        document.host_classes = [
-            ("hosted".to_owned(), hosted),
-            ("local".to_owned(), local),
-        ]
-        .into();
+        hosted.requires_capabilities = vec![
+            any_of(&["accounting", "residency:swap_absent"]),
+            "time".into(),
+        ];
+        document.host_classes = [("hosted".to_owned(), hosted), ("local".to_owned(), local)].into();
         document
     }
 
@@ -541,10 +538,21 @@ mod tests {
         let document = two_class_document();
         let error = document.clone().into_selected_policy().unwrap_err();
         assert!(error.contains("declares hosted, local"), "{error}");
-        let hosted = document.narrowed("hosted").unwrap().into_selected_policy().unwrap();
+        let hosted = document
+            .narrowed("hosted")
+            .unwrap()
+            .into_selected_policy()
+            .unwrap();
         assert_eq!(hosted.host_class, "hosted");
-        assert_eq!(hosted.requires_capabilities[0].names(), ["accounting", "residency:swap_absent"]);
-        let local = document.narrowed("local").unwrap().into_selected_policy().unwrap();
+        assert_eq!(
+            hosted.requires_capabilities[0].names(),
+            ["accounting", "residency:swap_absent"]
+        );
+        let local = document
+            .narrowed("local")
+            .unwrap()
+            .into_selected_policy()
+            .unwrap();
         assert_eq!(local.host_class, "local");
         assert_eq!(local.requires_capabilities.len(), 2);
         let refused = document.narrowed("edge").unwrap_err();
@@ -554,7 +562,12 @@ mod tests {
         );
         let mut empty = document;
         empty.host_classes.clear();
-        assert!(empty.into_selected_policy().unwrap_err().contains("declares none"));
+        assert!(
+            empty
+                .into_selected_policy()
+                .unwrap_err()
+                .contains("declares none")
+        );
     }
 
     #[test]
@@ -562,10 +575,20 @@ mod tests {
         for good in ["hosted", "local", "edge2"] {
             assert!(valid_host_class_name(good), "{good}");
         }
-        for bad in ["", "Hosted", "local-enforced", "_hosted", "hosted_", "a__b", "2edge"] {
+        for bad in [
+            "",
+            "Hosted",
+            "local-enforced",
+            "_hosted",
+            "hosted_",
+            "a__b",
+            "2edge",
+        ] {
             assert!(!valid_host_class_name(bad), "{bad}");
         }
-        assert!(!valid_host_class_name(&"a".repeat(MAX_HOST_CLASS_NAME_BYTES + 1)));
+        assert!(!valid_host_class_name(
+            &"a".repeat(MAX_HOST_CLASS_NAME_BYTES + 1)
+        ));
     }
 
     #[test]

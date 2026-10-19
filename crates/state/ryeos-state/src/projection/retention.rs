@@ -127,12 +127,15 @@ pub(crate) fn refresh_chain_retention(
         };
 
         let policy_json = policy_json.ok_or_else(|| {
-            anyhow::anyhow!("projected chain root {chain_root_id} is missing captured_history_policy")
+            anyhow::anyhow!(
+                "projected chain root {chain_root_id} is missing captured_history_policy"
+            )
         })?;
-        let captured_policy: CapturedThreadHistoryPolicy =
-            serde_json::from_str(&policy_json).context("decode projected captured history policy")?;
-        let mut statement = connection
-            .prepare("SELECT status, finished_at, updated_at FROM threads WHERE chain_root_id=?1")?;
+        let captured_policy: CapturedThreadHistoryPolicy = serde_json::from_str(&policy_json)
+            .context("decode projected captured history policy")?;
+        let mut statement = connection.prepare(
+            "SELECT status, finished_at, updated_at FROM threads WHERE chain_root_id=?1",
+        )?;
         let members = statement
             .query_map([chain_root_id], |row| {
                 let status: String = row.get(0)?;
@@ -263,7 +266,6 @@ mod tests {
 
     #[test]
     fn deadline_uses_whole_chain_terminal_time() {
-        let temp = tempfile::tempdir().unwrap();
         let db = crate::test_support::TestProjection::open();
         let root = ThreadSnapshotBuilder::new(
             "T-root",

@@ -51,6 +51,50 @@ pub(super) fn facet_backed_response(
     (!resolved.is_null()).then_some(resolved)
 }
 
+/// Map a thread/chain status to a tone (the same status→tone vocabulary the
+/// list/detail tone blocks declare, in code here for the summary header). Matches
+/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
+/// not a silently-neutral string.
+pub(super) fn status_tone(status: &str) -> RyeOsTone {
+    use super::super::dto::ThreadStatus;
+    match ThreadStatus::from_wire(status) {
+        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
+        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
+        ThreadStatus::Cancelled => RyeOsTone::Warn,
+        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
+        ThreadStatus::Unknown => RyeOsTone::Neutral,
+    }
+}
+
+/// The timeline entry under the point in the focused feed lens, if the focused
+/// view is a timeline with a point on an entry. The single home for reading the
+/// focused feed entry — both the Enter intent and command-overlay secondary
+/// intents derive from it.
+pub(super) fn focused_timeline_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
+    let tile_id = core.view_sets[core.active_view_set].focused_tile;
+    let view = core.view_sets[core.active_view_set].focused_view()?;
+    if let RyeOsViewVm::Timeline {
+        entries, selected, ..
+    } = bound_view_vm(core, tile_id, &view.view_ref)
+    {
+        return selected.and_then(|i| entries.into_iter().nth(i));
+    }
+    None
+}
+
+/// The focused feed entry's secondary affordance — the retry a recoverable
+/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
+/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
+/// so Enter stays inspect.
+pub(super) fn retry_intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
+    match focused_timeline_entry(core)? {
+        RyeOsTimelineEntryVm::Line {
+            secondary_intent, ..
+        } => secondary_intent,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod facet_scope_tests {
     use super::*;
@@ -98,49 +142,5 @@ mod facet_scope_tests {
             facet_backed_response(&core, &second, "selection.summary"),
             Some(json!("second"))
         );
-    }
-}
-
-/// Map a thread/chain status to a tone (the same status→tone vocabulary the
-/// list/detail tone blocks declare, in code here for the summary header). Matches
-/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
-/// not a silently-neutral string.
-pub(super) fn status_tone(status: &str) -> RyeOsTone {
-    use super::super::dto::ThreadStatus;
-    match ThreadStatus::from_wire(status) {
-        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
-        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
-        ThreadStatus::Cancelled => RyeOsTone::Warn,
-        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
-        ThreadStatus::Unknown => RyeOsTone::Neutral,
-    }
-}
-
-/// The timeline entry under the point in the focused feed lens, if the focused
-/// view is a timeline with a point on an entry. The single home for reading the
-/// focused feed entry — both the Enter intent and command-overlay secondary
-/// intents derive from it.
-pub(super) fn focused_timeline_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let tile_id = core.view_sets[core.active_view_set].focused_tile;
-    let view = core.view_sets[core.active_view_set].focused_view()?;
-    if let RyeOsViewVm::Timeline {
-        entries, selected, ..
-    } = bound_view_vm(core, tile_id, &view.view_ref)
-    {
-        return selected.and_then(|i| entries.into_iter().nth(i));
-    }
-    None
-}
-
-/// The focused feed entry's secondary affordance — the retry a recoverable
-/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
-/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
-/// so Enter stays inspect.
-pub(super) fn retry_intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
-    match focused_timeline_entry(core)? {
-        RyeOsTimelineEntryVm::Line {
-            secondary_intent, ..
-        } => secondary_intent,
-        _ => None,
     }
 }

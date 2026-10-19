@@ -835,20 +835,20 @@ pub(crate) async fn execute_protected_qualification(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1800);
     loop {
-        if let Some(thread) = state.threads.get_thread(&thread_id)? {
-            if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status).is_some_and(
+        if let Some(thread) = state.threads.get_thread(&thread_id)?
+            && ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status).is_some_and(
                 |status| {
                     status.is_terminal() && status != ryeos_state::objects::ThreadStatus::Continued
                 },
-            ) {
-                let envelope = json!({"thread":{"thread_id": thread_id}});
-                return normalize_retained_dispatch_terminal(envelope, Some(&thread_id), |id| {
-                    Ok(state
-                        .threads
-                        .build_execute_result(id)?
-                        .map(|terminal| (thread.status.clone(), terminal)))
-                });
-            }
+            )
+        {
+            let envelope = json!({"thread":{"thread_id": thread_id}});
+            return normalize_retained_dispatch_terminal(envelope, Some(&thread_id), |id| {
+                Ok(state
+                    .threads
+                    .build_execute_result(id)?
+                    .map(|terminal| (thread.status.clone(), terminal)))
+            });
         }
         anyhow::ensure!(
             tokio::time::Instant::now() < deadline,
@@ -1111,7 +1111,9 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+        use ryeos_node_runtime::identity::{
+            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
+        };
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
@@ -1229,10 +1231,10 @@ mod tests {
                 .state_store
                 .launch_planning_status(&launch_id, &context.fingerprint)
                 .unwrap()
+                && status.status == "failed"
+                && !staged_contains_snapshot()
             {
-                if status.status == "failed" && !staged_contains_snapshot() {
-                    break status;
-                }
+                break status;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,

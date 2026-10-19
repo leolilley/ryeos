@@ -25,11 +25,11 @@ use crate::facade::{
     StageObservation, UploadObservation,
 };
 use crate::provider_spec::{
-    RUN_STDIN_BYTES, STAGE_CHUNK_BYTES, STAGE_SLOT_BYTES, LAUNCHER_UPLOAD_BYTES, valid_sandbox_id,
+    LAUNCHER_UPLOAD_BYTES, RUN_STDIN_BYTES, STAGE_CHUNK_BYTES, STAGE_SLOT_BYTES, valid_sandbox_id,
 };
 
 /// Slot names are opaque to the facade; these are the adapter's fixed choice.
-pub const SLOT_SUPERVISOR: &str = "supervisor";
+pub const SLOT_RUNTIME: &str = "runtime";
 pub const SLOT_SIGNED_IMPORT: &str = "signed-import";
 pub const SLOT_PACKAGE: &str = "package";
 
@@ -148,7 +148,10 @@ impl SealedInput for DescriptorInput<'_> {
             self.required_mode
                 .is_none_or(|mode| observation.full_permission_mode().is_ok_and(|m| m == mode))
                 && observation.size() == self.bytes
-                && self.authority.digest_regular_file_stable_exact(&observation)? == self.sha256,
+                && self
+                    .authority
+                    .digest_regular_file_stable_exact(&observation)?
+                    == self.sha256,
             "inherited activation input changed its declared identity"
         );
         Ok(())
@@ -182,7 +185,7 @@ impl SealedInput for DescriptorInput<'_> {
 
 /// Everything the sequence delivers.
 pub(crate) struct ActivationInputs<'a> {
-    pub supervisor: &'a dyn SealedInput,
+    pub runtime: &'a dyn SealedInput,
     pub signed_import: &'a dyn SealedInput,
     pub package: &'a dyn SealedInput,
     pub launcher: &'a dyn SealedInput,
@@ -203,7 +206,7 @@ pub(crate) enum Stopped {
 
 fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
     for (name, input) in [
-        ("supervisor", inputs.supervisor),
+        ("guest runtime", inputs.runtime),
         ("signed import", inputs.signed_import),
         ("package", inputs.package),
     ] {
@@ -211,7 +214,9 @@ fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
             (1..=STAGE_SLOT_BYTES).contains(&input.bytes()),
             "{name} is outside the facade's slot bound"
         );
-        input.verify().with_context(|| format!("{name} failed preflight"))?;
+        input
+            .verify()
+            .with_context(|| format!("{name} failed preflight"))?;
     }
     ensure!(
         (1..=LAUNCHER_UPLOAD_BYTES).contains(&inputs.launcher.bytes())
@@ -222,7 +227,10 @@ fn preflight(inputs: &ActivationInputs<'_>) -> Result<Vec<u8>> {
         (1..=RUN_STDIN_BYTES).contains(&(inputs.assignment.len() as u64)),
         "signed assignment is outside the facade's stdin bound"
     );
-    inputs.launcher.verify().context("launcher failed preflight")?;
+    inputs
+        .launcher
+        .verify()
+        .context("launcher failed preflight")?;
     let launcher = inputs.launcher.read_all().context("launcher read failed")?;
     ensure!(
         lillux::sha256_hex(&launcher) == inputs.launcher_sha256,
@@ -306,7 +314,7 @@ fn contact<T: FacadeTransport>(
     chunk_bytes: u64,
 ) -> Result<()> {
     for (slot, input) in [
-        (SLOT_SUPERVISOR, inputs.supervisor),
+        (SLOT_RUNTIME, inputs.runtime),
         (SLOT_SIGNED_IMPORT, inputs.signed_import),
         (SLOT_PACKAGE, inputs.package),
     ] {
@@ -338,9 +346,9 @@ pub struct PreparedActivation {
     package: InheritedDescriptorAuthority,
     package_bytes: u64,
     package_sha256: String,
-    supervisor: InheritedDescriptorAuthority,
-    supervisor_bytes: u64,
-    supervisor_sha256: String,
+    runtime: InheritedDescriptorAuthority,
+    runtime_bytes: u64,
+    runtime_sha256: String,
     launcher: InheritedDescriptorAuthority,
     launcher_bytes: u64,
     launcher_sha256: String,
@@ -353,8 +361,12 @@ pub struct PreparedActivation {
 /// The trusted lifecycle runner must have installed the named descriptor once
 /// for this process and no other owner may hold it.
 unsafe fn adopt_env_descriptor(name: &str) -> Result<InheritedDescriptorAuthority> {
-    let value = std::env::var(name).with_context(|| format!("missing inherited descriptor {name}"))?;
-    ensure!(value.len() <= 32, "inherited descriptor {name} exceeds its bound");
+    let value =
+        std::env::var(name).with_context(|| format!("missing inherited descriptor {name}"))?;
+    ensure!(
+        value.len() <= 32,
+        "inherited descriptor {name} exceeds its bound"
+    );
     let descriptor: u32 = value
         .parse()
         .with_context(|| format!("inherited descriptor {name} is invalid"))?;
@@ -371,8 +383,9 @@ impl PreparedActivation {
     /// descriptor exactly once for this process.
     pub unsafe fn from_environment(request: &LifecycleAdapterRequest) -> Result<Self> {
         use ryeos_external_execution_contract::{
-            LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-            LIFECYCLE_SIGNED_IMPORT_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
+            LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_LAUNCHER_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SUPERVISOR_FD_ENV,
         };
         let LifecycleAdapterRequest::ActivateSupervisor {
             common: _,
@@ -405,13 +418,24 @@ impl PreparedActivation {
         // SAFETY: upheld by this function's caller.
         let supervisor = unsafe { adopt_env_descriptor(LIFECYCLE_SUPERVISOR_FD_ENV) }?;
         // SAFETY: upheld by this function's caller.
+        let runtime = unsafe { adopt_env_descriptor(LIFECYCLE_GUEST_RUNTIME_FD_ENV) }?;
+        // SAFETY: upheld by this function's caller.
         let launcher = unsafe { adopt_env_descriptor(LIFECYCLE_LAUNCHER_FD_ENV) }?;
-        let (supervisor_bytes, supervisor_sha256) = measure(&supervisor)?;
+        // The package carries the supervisor; its descriptor is measured
+        // only to bind the signed import ticket and is never staged.
+        let (_, supervisor_sha256) = measure(&supervisor)?;
+        let (runtime_bytes, runtime_sha256) = measure(&runtime)?;
         let (launcher_bytes, launcher_sha256) = measure(&launcher)?;
         ensure!(
             launcher_sha256 == activation.launcher_artifact_hash,
             "launcher descriptor differs from the activation intent"
         );
+        require_runtime_matches_intent(
+            runtime_bytes,
+            &runtime_sha256,
+            activation.guest_runtime_artifact_bytes,
+            activation.guest_runtime_artifact_hash.as_deref(),
+        )?;
         require_supervisor_matches_ticket(&supervisor_sha256, &import_ticket.supervisor_sha256)?;
         let prepared = Self {
             signed_import,
@@ -419,9 +443,9 @@ impl PreparedActivation {
             package,
             package_bytes: guest_package.framed_bytes,
             package_sha256: guest_package.payload_sha256.clone(),
-            supervisor,
-            supervisor_bytes,
-            supervisor_sha256,
+            runtime,
+            runtime_bytes,
+            runtime_sha256,
             launcher,
             launcher_bytes,
             launcher_sha256,
@@ -445,10 +469,10 @@ impl PreparedActivation {
         client: &FacadeClient<'_, T>,
         sandbox_id: &str,
     ) -> std::result::Result<(), Stopped> {
-        let supervisor = DescriptorInput::new(
-            &self.supervisor,
-            self.supervisor_bytes,
-            self.supervisor_sha256.clone(),
+        let runtime = DescriptorInput::new(
+            &self.runtime,
+            self.runtime_bytes,
+            self.runtime_sha256.clone(),
             None,
         );
         let launcher = DescriptorInput::new(
@@ -460,7 +484,7 @@ impl PreparedActivation {
         let signed_import = MemoryInput::new(&self.signed_import);
         let package = self.package_input();
         let inputs = ActivationInputs {
-            supervisor: &supervisor,
+            runtime: &runtime,
             signed_import: &signed_import,
             package: &package,
             launcher: &launcher,
@@ -474,16 +498,30 @@ impl PreparedActivation {
 /// Decide what a contact sequence means for the response. A stop before any
 /// contact is an adapter refusal; any sequence that may have reached the
 /// facade, complete or not, leaves the activation pending.
-pub(crate) fn pending_unless_refused(
-    outcome: std::result::Result<(), Stopped>,
-) -> Result<()> {
+pub(crate) fn pending_unless_refused(outcome: std::result::Result<(), Stopped>) -> Result<()> {
     match outcome {
         Err(Stopped::BeforeContact(error)) => Err(error),
         Ok(()) | Err(Stopped::AfterContact(_)) => Ok(()),
     }
 }
 
-/// The staged supervisor is the artifact the signed import ticket names.
+/// The staged runtime archive is the artifact the activation intent names:
+/// the launcher re-observes the extracted tree, but nothing unexpected is
+/// streamed to the provider.
+fn require_runtime_matches_intent(
+    measured_bytes: u64,
+    measured_sha256: &str,
+    intent_bytes: Option<u64>,
+    intent_sha256: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        intent_bytes == Some(measured_bytes) && intent_sha256 == Some(measured_sha256),
+        "guest runtime descriptor differs from the activation intent"
+    );
+    Ok(())
+}
+
+/// The supervisor descriptor is the artifact the signed import ticket names.
 fn require_supervisor_matches_ticket(measured: &str, ticket: &str) -> Result<()> {
     ensure!(
         measured == ticket,
@@ -643,7 +681,7 @@ mod tests {
         )
     }
 
-    const SUPERVISOR: &[u8] = b"supervisor-bytes";
+    const RUNTIME: &[u8] = b"runtime-archive";
     const IMPORT: &[u8] = b"signed-import";
     const PACKAGE: &[u8] = b"0123456789";
     const LAUNCHER: &[u8] = b"launcher";
@@ -699,7 +737,7 @@ mod tests {
     }
 
     struct Set {
-        supervisor: Fake,
+        runtime: Fake,
         import: Fake,
         package: Fake,
         launcher: Fake,
@@ -707,22 +745,18 @@ mod tests {
 
     fn set() -> Set {
         Set {
-            supervisor: Fake::new(SUPERVISOR),
+            runtime: Fake::new(RUNTIME),
             import: Fake::new(IMPORT),
             package: Fake::new(PACKAGE),
             launcher: Fake::new(LAUNCHER),
         }
     }
 
-    fn run(
-        set: &Set,
-        fake: &Scripted,
-        chunk: u64,
-    ) -> std::result::Result<(), Stopped> {
+    fn run(set: &Set, fake: &Scripted, chunk: u64) -> std::result::Result<(), Stopped> {
         let pin = pin();
         let launcher_sha = sha(LAUNCHER);
         let inputs = ActivationInputs {
-            supervisor: &set.supervisor,
+            runtime: &set.runtime,
             signed_import: &set.import,
             package: &set.package,
             launcher: &set.launcher,
@@ -735,7 +769,7 @@ mod tests {
     fn full_script(chunk: usize) -> Vec<Step> {
         let mut steps = Vec::new();
         for (slot, content) in [
-            (SLOT_SUPERVISOR, SUPERVISOR),
+            (SLOT_RUNTIME, RUNTIME),
             (SLOT_SIGNED_IMPORT, IMPORT),
             (SLOT_PACKAGE, PACKAGE),
         ] {
@@ -775,7 +809,7 @@ mod tests {
             .iter()
             .map(|index| requests[*index].1["slot"].as_str().unwrap())
             .collect();
-        assert_eq!(slots, [SLOT_SUPERVISOR, SLOT_SIGNED_IMPORT, SLOT_PACKAGE]);
+        assert_eq!(slots, [SLOT_RUNTIME, SLOT_SIGNED_IMPORT, SLOT_PACKAGE]);
         assert_eq!(requests[6].1["sandbox_id"], SANDBOX);
         use base64::Engine as _;
         assert_eq!(
@@ -798,9 +832,10 @@ mod tests {
             .map(|(_, body)| {
                 (
                     body["offset"].as_u64().unwrap(),
-                    PACKAGE.len().min(
-                        usize::try_from(body["offset"].as_u64().unwrap()).unwrap() + 4,
-                    ) - usize::try_from(body["offset"].as_u64().unwrap()).unwrap(),
+                    PACKAGE
+                        .len()
+                        .min(usize::try_from(body["offset"].as_u64().unwrap()).unwrap() + 4)
+                        - usize::try_from(body["offset"].as_u64().unwrap()).unwrap(),
                 )
             })
             .collect();
@@ -820,14 +855,23 @@ mod tests {
         let mut set = set();
         set.package.verify_fails = true;
         let fake = Scripted::new(vec![]);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         assert!(fake.requests.borrow().is_empty());
         let mut set = self::set();
-        set.supervisor.verify_fails = true;
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        set.runtime.verify_fails = true;
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         let mut set = self::set();
         set.launcher.declared = sha(b"other");
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::BeforeContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::BeforeContact(_))
+        ));
         assert!(fake.requests.borrow().is_empty());
     }
 
@@ -835,10 +879,13 @@ mod tests {
     fn a_lost_reply_stops_the_sequence_without_a_retry() {
         let set = set();
         let fake = Scripted::new(vec![
-            stage_ok(SLOT_SUPERVISOR, 0, SUPERVISOR),
+            stage_ok(SLOT_RUNTIME, 0, RUNTIME),
             Step::Fail(crate::facade::TransportFailure::MayHaveBeenSent),
         ]);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::AfterContact(_))
+        ));
         assert_eq!(fake.requests.borrow().len(), 2);
         assert!(fake.exhausted());
     }
@@ -847,16 +894,19 @@ mod tests {
     fn a_refusal_or_a_mismatched_acknowledgement_stops_the_sequence() {
         for steps in [
             vec![refusal("stage", "offset_mismatch")],
-            vec![stage_ok(SLOT_SUPERVISOR, 0, b"different")],
+            vec![stage_ok(SLOT_RUNTIME, 0, b"different")],
             vec![
-                stage_ok(SLOT_SUPERVISOR, 0, SUPERVISOR),
+                stage_ok(SLOT_RUNTIME, 0, RUNTIME),
                 refusal("stage_seal", "seal_digest_mismatch"),
             ],
         ] {
             let count = steps.len();
             let set = set();
             let fake = Scripted::new(steps);
-            assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+            assert!(matches!(
+                run(&set, &fake, 1024),
+                Err(Stopped::AfterContact(_))
+            ));
             assert_eq!(fake.requests.borrow().len(), count);
         }
     }
@@ -868,7 +918,10 @@ mod tests {
         steps.pop();
         steps.push(refusal("run_once", "slot_not_sealed"));
         let fake = Scripted::new(steps);
-        assert!(matches!(run(&set, &fake, 1024), Err(Stopped::AfterContact(_))));
+        assert!(matches!(
+            run(&set, &fake, 1024),
+            Err(Stopped::AfterContact(_))
+        ));
         assert_eq!(fake.requests.borrow().len(), 8);
     }
 
@@ -879,7 +932,7 @@ mod tests {
         let pin = pin();
         let launcher_sha = sha(LAUNCHER);
         let inputs = ActivationInputs {
-            supervisor: &set.supervisor,
+            runtime: &set.runtime,
             signed_import: &set.import,
             package: &set.package,
             launcher: &set.launcher,
@@ -911,7 +964,7 @@ mod tests {
         let pin = pin();
         let launcher_sha = sha(&oversized);
         let inputs = ActivationInputs {
-            supervisor: &set.supervisor,
+            runtime: &set.runtime,
             signed_import: &set.import,
             package: &set.package,
             launcher: &set.launcher,
@@ -938,15 +991,35 @@ mod tests {
             .unwrap();
         assert_eq!(
             seen,
-            [(0, b"abc".to_vec()), (3, b"def".to_vec()), (6, b"g".to_vec())]
+            [
+                (0, b"abc".to_vec()),
+                (3, b"def".to_vec()),
+                (6, b"g".to_vec())
+            ]
         );
         assert_eq!(input.read_all().unwrap(), b"abcdefg");
         input.verify().unwrap();
     }
 
     #[test]
+    fn a_runtime_other_than_the_intent_is_refused_before_contact() {
+        let digest = sha(RUNTIME);
+        let bytes = RUNTIME.len() as u64;
+        assert!(require_runtime_matches_intent(bytes, &digest, Some(bytes), Some(&digest)).is_ok());
+        assert!(
+            require_runtime_matches_intent(bytes, &sha(b"other"), Some(bytes), Some(&digest))
+                .is_err()
+        );
+        assert!(
+            require_runtime_matches_intent(bytes + 1, &digest, Some(bytes), Some(&digest)).is_err()
+        );
+        assert!(require_runtime_matches_intent(bytes, &digest, None, None).is_err());
+    }
+
+    #[test]
     fn a_supervisor_digest_other_than_the_ticket_is_refused_before_contact() {
-        let ticket = sha(SUPERVISOR);
+        let supervisor = b"supervisor-bytes";
+        let ticket = sha(supervisor);
         assert!(require_supervisor_matches_ticket(&ticket, &ticket).is_ok());
         assert!(require_supervisor_matches_ticket(&sha(b"other"), &ticket).is_err());
     }

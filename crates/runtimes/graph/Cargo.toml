@@ -37,3 +37,6 @@ libc = { workspace = true }
 tempfile = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
+
+[lints]
+workspace = true

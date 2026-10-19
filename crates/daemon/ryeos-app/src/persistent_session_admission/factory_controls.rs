@@ -1,8 +1,8 @@
 //! Actual signed protocol/CAS/node-attestation/descriptor fixture for the
 //! production read-only J1 factory. No raw proof constructor or native launch.
 use super::*;
-use ryeos_node_runtime::node_policy::sections::execution::*;
 use ryeos_engine::{contracts::*, resolution::*};
+use ryeos_node_runtime::node_policy::sections::execution::*;
 use ryeos_state::objects::*;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
@@ -12,13 +12,23 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 /// the directory is removed.
 type StoreOwner = crate::state_store::test_native::TestStateStore;
 
-fn fixture() -> (tempfile::TempDir, StoreOwner, crate::state::AppState, String) {
+fn fixture() -> (
+    tempfile::TempDir,
+    StoreOwner,
+    crate::state::AppState,
+    String,
+) {
     fixture_with_startup(None)
 }
 
 fn fixture_with_startup(
     startup: Option<ryeos_engine::protocols::descriptor::PersistentSessionStartupContractSelection>,
-) -> (tempfile::TempDir, StoreOwner, crate::state::AppState, String) {
+) -> (
+    tempfile::TempDir,
+    StoreOwner,
+    crate::state::AppState,
+    String,
+) {
     let root = tempfile::tempdir().unwrap();
     let (store_owner, mut state) = crate::state::test_support::build(root.path()).unwrap();
     let hash = populate_fixture(&mut state, startup);
@@ -130,9 +140,11 @@ pub(crate) fn populate_fixture(
         external_lease_budget: None,
     };
     policy.validate().unwrap();
-    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-        vec![Arc::new(policy)],
-    ));
+    state.node_policy = Arc::new(
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            policy,
+        )]),
+    );
     state.execution_resources = Arc::new(
         crate::execution_resources::ExecutionResourcePool::observe(Some(&resources)).unwrap(),
     );
@@ -330,7 +342,7 @@ session:
         &crate::build_info::get(),
     )
     .unwrap();
-    let mut extensions = (*state.extensions).clone();
+    let extensions = (*state.extensions).clone();
     extensions.insert(Arc::clone(&node));
     state.extensions = Arc::new(extensions);
     let selected = state.execution_resources.select(Some(&target)).unwrap();
@@ -346,10 +358,9 @@ session:
         execution_closure_digest: authority.execution_closure_digest().unwrap(),
         contract_ref: "protocol:test/factory_session".into(),
         contract_digest: protocol_hash,
-        components: crate::execution_realization::execution_components(state, &resolution)
-            .unwrap(),
+        components: crate::execution_realization::execution_components(state, &resolution).unwrap(),
         properties: crate::execution_realization::execution_properties(
-            &state,
+            state,
             plan.filesystem_authority_ceiling,
             plan.network_authority_ceiling,
             plan.target_requirement.as_ref(),
@@ -360,8 +371,8 @@ session:
     };
     capsule.execution_realization_hash =
         cas.store_object(&realization.to_value().unwrap()).unwrap();
-    let hash = cas.store_object(&capsule.to_value().unwrap()).unwrap();
-    hash
+
+    cas.store_object(&capsule.to_value().unwrap()).unwrap()
 }
 
 #[test]
@@ -401,9 +412,11 @@ fn genuine_j1_factory_refuses_revoked_protocol_signer_and_changed_node_agreement
         .as_mut()
         .unwrap()
         .trusted_cleanup_contract_digest = Some(lillux::sha256_hex(b"changed cleanup"));
-    state.node_policy = Arc::new(ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(
-        vec![Arc::new(policy)],
-    ));
+    state.node_policy = Arc::new(
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            policy,
+        )]),
+    );
     assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_err());
     state.node_policy = original_policy;
     assert!(VerifiedTrustedPooledSessionInputs::verify(&state, &hash).is_ok());

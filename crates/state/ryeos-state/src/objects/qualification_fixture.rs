@@ -316,7 +316,6 @@ impl QFixtureCaptureContent {
 mod tests {
     use super::*;
     use crate::external_execution::{EXECUTION_CHANNEL_BINDING_SCHEMA, ExternalExecutionMode};
-    use base64::Engine as _;
 
     fn fixture() -> (
         QFixtureContract,

@@ -8,8 +8,8 @@ use anyhow::{Result, bail};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 
@@ -101,9 +101,12 @@ fn load_authorized_key(
     auth_dir: &Path,
     node_identity: &NodeIdentity,
 ) -> Result<AuthorizedKey> {
-    let grant =
-        ryeos_node_runtime::identity::load_verified_authorized_key(fingerprint, auth_dir, node_identity)?
-            .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        fingerprint,
+        auth_dir,
+        node_identity,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
     Ok(AuthorizedKey {
         public_key: grant.public_key,
         scopes: grant.scopes,
@@ -373,11 +376,9 @@ pub(crate) fn verify_request(
                     "forwarding proof must be signed by an admitted remote_node".to_string()
                 );
             }
-            if !forwarding_key
-                .scopes
-                .iter()
-                .any(|scope| scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE)
-            {
+            if !forwarding_key.scopes.iter().any(|scope| {
+                scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE
+            }) {
                 return Err(
                     "forwarding-node grant lacks forwarded-operator attestation authority"
                         .to_string(),
@@ -852,10 +853,9 @@ mod tests {
         use std::sync::Arc;
 
         let tmpdir = TempDir::new().unwrap();
-        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(
-            tmpdir.path(),
-        )
-        .join("runtime.sqlite3");
+        let runtime_db_path =
+            ryeos_app::test_support::TestStateStore::runtime_state_dir(tmpdir.path())
+                .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -876,7 +876,13 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), Arc::new(head_trust)).unwrap();
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            tmpdir.path(),
+            signer,
+            write_barrier.clone(),
+            Arc::new(head_trust),
+        )
+        .unwrap();
         let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
@@ -960,9 +966,12 @@ mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-                )]),
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    Arc::new(
+                        ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
+                        ),
+                    ),
+                ]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),

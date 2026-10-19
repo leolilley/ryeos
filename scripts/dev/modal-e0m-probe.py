@@ -9,6 +9,7 @@ created and then lists sandboxes by the run tag to assert none remain.
 """
 import argparse
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -67,6 +68,18 @@ class Ctx:
         sb.set_tags({TAG_KEY: self.run_id})
         return sb
 
+    @contextlib.contextmanager
+    def scratch(self, *args, **kwargs):
+        """A tagged sandbox that is terminated when the block ends, however it ends."""
+        sb = self.sandbox(*args, **kwargs)
+        try:
+            yield sb
+        finally:
+            try:
+                sb.terminate()
+            except Exception:
+                pass
+
 
 def write_file(sb, path, text):
     """Write a file through exec stdin; every Sandbox file API is refused server-side."""
@@ -124,9 +137,15 @@ def cert_summary(tls):
 STEPS = []
 
 
-def step(name, desc, gpu=False):
+GROUPS = ("e0m", "launcher")
+
+
+def step(name, desc, gpu=False, group="e0m"):
+    if group not in GROUPS:
+        raise ValueError(f"unknown group {group}")
+
     def deco(fn):
-        STEPS.append({"name": name, "description": desc, "gpu": gpu, "fn": fn})
+        STEPS.append({"name": name, "description": desc, "gpu": gpu, "group": group, "fn": fn})
         return fn
     return deco
 
@@ -490,11 +509,297 @@ def gpu_t4(ctx):
     return {"devices": p.stdout.read().strip(), "exit": p.wait()}
 
 
+# ------------------------------------------------------- launcher group
+
+MIB = 1024 * 1024
+STAGE_DIR = "/ryeos/stage"
+STAGE_SLOT = "/ryeos/stage/slot"
+APPEND_SCRIPT = 'mkdir -p /ryeos/stage && cat >> "$1"'
+APPEND_B64_SCRIPT = 'mkdir -p /ryeos/stage && base64 -d >> "$1"'
+STDIN_PIECE = MIB
+LARGE_TOTAL = 1024 * MIB
+LARGE_CHUNK = 32 * MIB
+LARGE_DEADLINE = 600.0
+LONG_STREAM_TICKS = 15
+LONG_STREAM_PERIOD = 10
+TLS_HOST = "example.com"
+OFF_LIST_ADDRS = ("1.1.1.1", "8.8.8.8")
+
+
+def chunk_plan(total, chunk):
+    """(offset, size) pairs covering total bytes in chunk-sized pieces."""
+    if total < 0 or chunk <= 0:
+        raise ValueError("total must be >= 0 and chunk > 0")
+    return [(off, min(chunk, total - off)) for off in range(0, total, chunk)]
+
+
+def sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def mb_per_s(nbytes, seconds):
+    return round(nbytes / MIB / seconds, 2) if seconds > 0 else None
+
+
+class Deadline:
+    """A hard client-side time bound; the clock is injectable for tests."""
+
+    def __init__(self, seconds, clock=time.monotonic):
+        self.clock = clock
+        self.end = clock() + seconds
+
+    def remaining(self):
+        return self.end - self.clock()
+
+    def expired(self):
+        return self.remaining() <= 0
+
+
+def exec_run(sb, *argv, stdin=None, timeout=60):
+    """Run a fixed argv in the sandbox; return (exit, stdout, stderr)."""
+    p = sb.exec(*argv, timeout=timeout)
+    if stdin is not None:
+        for off in range(0, len(stdin), STDIN_PIECE):
+            p.stdin.write(stdin[off:off + STDIN_PIECE])
+            p.stdin.drain()
+        p.stdin.write_eof()
+        p.stdin.drain()
+    out = p.stdout.read()
+    err = p.stderr.read()
+    return p.wait(), out, err
+
+
+def attempt(sb, *argv, timeout=60):
+    """Record one command outcome verbatim; an SDK error is recorded, not raised."""
+    rec = {"argv": list(argv)}
+    try:
+        code, out, err = exec_run(sb, *argv, timeout=timeout)
+        rec.update({"exit": code, "stdout": out.strip()[-400:], "stderr": err.strip()[-400:]})
+    except Exception as e:
+        rec["error"] = f"{type(e).__module__}.{type(e).__name__}: {str(e)[:200]}"
+    return rec
+
+
+def guest_size(sb, path):
+    code, out, err = exec_run(sb, "stat", "-c", "%s", path)
+    if code != 0:
+        raise RuntimeError(f"stat {path} exit {code}: {err.strip()[-200:]}")
+    return int(out.strip())
+
+
+def guest_sha256(sb, path):
+    code, out, err = exec_run(sb, "sha256sum", path, timeout=300)
+    if code != 0:
+        raise RuntimeError(f"sha256sum {path} exit {code}: {err.strip()[-200:]}")
+    return out.split()[0]
+
+
+def append_chunk(sb, data, encoding="raw", timeout=300):
+    """Append bytes to the stage slot through one exec process."""
+    if encoding == "raw":
+        script, payload = APPEND_SCRIPT, data
+    else:
+        script, payload = APPEND_B64_SCRIPT, base64.b64encode(data)
+    code, _, err = exec_run(sb, "sh", "-c", script, "sh", STAGE_SLOT, stdin=payload, timeout=timeout)
+    if code != 0:
+        raise RuntimeError(f"append exit {code}: {err.strip()[-200:]}")
+
+
+@step("exec_append_binary", "append 32 MiB of random bytes through one exec stdin process, hash inside the sandbox, compare", group="launcher")
+def exec_append_binary(ctx):
+    data = os.urandom(32 * MIB)
+    want = sha256_hex(data)
+    ev = {"bytes": len(data), "client_sha256": want, "attempts": []}
+    with ctx.scratch(timeout=600) as sb:
+        for encoding in ("raw", "base64"):
+            exec_run(sb, "rm", "-f", STAGE_SLOT)
+            t0 = time.monotonic()
+            rec = {"encoding": encoding}
+            try:
+                append_chunk(sb, data, encoding)
+                rec["seconds"] = round(time.monotonic() - t0, 2)
+                rec["mb_per_s"] = mb_per_s(len(data), time.monotonic() - t0)
+                rec["guest_size"] = guest_size(sb, STAGE_SLOT)
+                rec["guest_sha256"] = guest_sha256(sb, STAGE_SLOT)
+                rec["match"] = rec["guest_sha256"] == want and rec["guest_size"] == len(data)
+            except Exception as e:
+                rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                rec["match"] = False
+            ev["attempts"].append(rec)
+            if rec["match"]:
+                ev["working_encoding"] = encoding
+                break
+    if "working_encoding" not in ev:
+        raise RuntimeError(f"no encoding delivered the bytes intact: {json.dumps(ev)[:400]}")
+    return ev
+
+
+@step("staged_large_write", "append 1 GiB in 32 MiB chunks through separate exec processes, size-checked before each chunk, under a hard deadline", group="launcher")
+def staged_large_write(ctx):
+    block = os.urandom(LARGE_CHUNK)
+    deadline = Deadline(LARGE_DEADLINE)
+    ev = {"total_bytes": LARGE_TOTAL, "chunk_bytes": LARGE_CHUNK, "deadline_seconds": LARGE_DEADLINE,
+          "chunks_done": 0, "bytes_done": 0, "completed": False}
+    t0 = time.monotonic()
+    with ctx.scratch(timeout=int(LARGE_DEADLINE) + 300) as sb:
+        try:
+            exec_run(sb, "rm", "-f", STAGE_SLOT)
+            for off, size in chunk_plan(LARGE_TOTAL, LARGE_CHUNK):
+                if deadline.expired():
+                    ev["deadline_hit"] = True
+                    break
+                have = guest_size(sb, STAGE_SLOT) if off else 0
+                if have != off:
+                    raise RuntimeError(f"offset mismatch before chunk at {off}: guest has {have}")
+                append_chunk(sb, block[:size], timeout=max(1, int(deadline.remaining())))
+                ev["chunks_done"] += 1
+                ev["bytes_done"] = off + size
+            else:
+                ev["completed"] = guest_size(sb, STAGE_SLOT) == LARGE_TOTAL
+        except Exception as e:
+            ev["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+            ev["completed"] = False
+        ev["seconds"] = round(time.monotonic() - t0, 2)
+        ev["mb_per_s"] = mb_per_s(ev["bytes_done"], time.monotonic() - t0)
+        try:
+            ev["final_size"] = guest_size(sb, STAGE_SLOT)
+        except Exception as e:
+            ev["final_size_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        try:
+            ev["df_after"] = exec_run(sb, "df", "-P", STAGE_DIR)[1].strip()
+        except Exception as e:
+            ev["df_after_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    return ev
+
+
+@step("tag_limits", "set tags of growing value length and count; record which the server accepts", group="launcher")
+def tag_limits(ctx):
+    ev = {"value_lengths": [], "counts": []}
+    base = {TAG_KEY: ctx.run_id}
+    with ctx.scratch() as sb:
+        def try_tags(extra):
+            try:
+                sb.set_tags({**base, **extra})
+                return {"accepted": True}
+            except Exception as e:
+                return {"accepted": False, "error_type": f"{type(e).__module__}.{type(e).__name__}",
+                        "error": str(e)[:200]}
+        try:
+            for n in (64, 256, 1024):
+                ev["value_lengths"].append({"length": n, **try_tags({"ryeos_stage": "v" * n})})
+            for n in (1, 2, 4, 8):
+                ev["counts"].append({"count": n, **try_tags({f"ryeos_stage_{i}": "x" for i in range(n)})})
+        finally:
+            sb.set_tags(base)
+    return ev
+
+
+@step("account_switch", "as root in debian_slim: user creation tools, create uid 10000, drop to it with setpriv or a fallback", group="launcher")
+def account_switch(ctx):
+    ev = {}
+    with ctx.scratch() as sb:
+        ev["id"] = attempt(sb, "id")
+        ev["tools"] = attempt(sb, "sh", "-c", "command -v useradd adduser setpriv runuser su")
+        ev["useradd"] = attempt(sb, "useradd", "--uid", "10000", "--create-home", "--shell", "/bin/sh", "ryeos")
+        ev["ryeos_entry"] = attempt(sb, "getent", "passwd", "ryeos")
+        ev["setpriv"] = attempt(sb, "setpriv", "--reuid=10000", "--regid=10000", "--clear-groups", "--no-new-privs", "id")
+        if ev["setpriv"].get("exit") != 0:
+            ev["runuser"] = attempt(sb, "runuser", "-u", "ryeos", "--", "id")
+            if ev["runuser"].get("exit") != 0:
+                ev["su"] = attempt(sb, "su", "ryeos", "-s", "/bin/sh", "-c", "id")
+    return ev
+
+
+@step("glibc_and_namespaces", "glibc version, kernel release, and whether unshare and tmpfs mounts work under the sandbox runtime", group="launcher")
+def glibc_and_namespaces(ctx):
+    ev = {}
+    with ctx.scratch() as sb:
+        ldd = attempt(sb, "ldd", "--version")
+        ldd["first_line"] = ldd.get("stdout", "").split("\n")[0]
+        ev["ldd"] = ldd
+        ev["kernel"] = attempt(sb, "uname", "-r")
+        ev["unshare_user_mount"] = attempt(sb, "unshare", "-Urm", "true")
+        ev["unshare_mount"] = attempt(sb, "unshare", "-m", "true")
+        ev["unshare_pid"] = attempt(sb, "unshare", "-p", "-f", "true")
+        ev["mount_tmpfs"] = attempt(sb, "mount", "-t", "tmpfs", "none", "/mnt")
+    return ev
+
+
+TLS_DIAL_CODE = r"""
+import json, socket, ssl, sys
+ip, host, other = sys.argv[1:4]
+out = {}
+ctx = ssl.create_default_context()
+raw = socket.create_connection((ip, 443), timeout=15)
+tls = ctx.wrap_socket(raw, server_hostname=host)
+cert = tls.getpeercert()
+flat = lambda rdn: {k: v for p in rdn for k, v in p}
+out["dial"] = {"verified": True, "subject": flat(cert["subject"]), "issuer": flat(cert["issuer"]),
+               "san": [v for _, v in cert.get("subjectAltName", ())][:4], "tls_version": tls.version()}
+tls.close()
+try:
+    socket.create_connection((other, 443), timeout=8).close()
+    out["other"] = {"connected": True}
+except Exception as e:
+    out["other"] = {"connected": False, "error": type(e).__name__}
+print(json.dumps(out))
+"""
+
+
+def pick_off_list(ip):
+    """A well-known address that is not the allowed one."""
+    return next(a for a in OFF_LIST_ADDRS if a != ip)
+
+
+@step("tls_dial_by_ip", "cidr_allowlist of one /32: TLS to that IP with SNI set to the hostname verifies; a different IP times out", group="launcher")
+def tls_dial_by_ip(ctx):
+    ip = socket.getaddrinfo(TLS_HOST, 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    other = pick_off_list(ip)
+    ev = {"host": TLS_HOST, "allowed_ip": ip, "other_ip": other}
+    ctx.ensure_app()
+    with ctx.scratch(cidr_allowlist=[f"{ip}/32"]) as sb:
+        p = sb.exec("python3", "-c", TLS_DIAL_CODE, ip, TLS_HOST, other, timeout=90)
+        out, err = p.stdout.read(), p.stderr.read()
+        ev.update(json_from_guest(p.wait(), out, err))
+    return ev
+
+
+LONG_STREAM_CODE = ("import time\nfor i in range(%d):\n print('tick', i, flush=True)\n time.sleep(%d)\n"
+                    % (LONG_STREAM_TICKS, LONG_STREAM_PERIOD))
+
+
+@step("long_exec_stream", "one exec printing every 10 s for 150 s: does the stdout stream survive past 120 s", group="launcher")
+def long_exec_stream(ctx):
+    expected = LONG_STREAM_TICKS
+    ev = {"expected_lines": expected, "arrivals": []}
+    with ctx.scratch(timeout=400) as sb:
+        p = sb.exec("python3", "-u", "-c", LONG_STREAM_CODE, timeout=300)
+        t0 = time.monotonic()
+        try:
+            for line in p.stdout:
+                ev["arrivals"].append({"line": line.strip(), "at": round(time.monotonic() - t0, 1)})
+        except Exception as e:
+            ev["stream_error"] = f"{type(e).__module__}.{type(e).__name__}: {str(e)[:200]}"
+        ev["exit"] = p.wait()
+    last = ev["arrivals"][-1]["at"] if ev["arrivals"] else 0
+    ev["last_arrival"] = last
+    ev["survived_past_120s"] = last > 120 and "stream_error" not in ev
+    ev["complete"] = len(ev["arrivals"]) == expected and ev["exit"] == 0
+    return ev
+
+
 # ------------------------------------------------------------------- core
 
-def plan_for(gpu, only):
-    """Ordered step descriptors the run will execute (cleanup is added by the runner)."""
+def plan_for(gpu, only, group="e0m"):
+    """Ordered step descriptors the run will execute (cleanup is added by the runner).
+
+    `group` is one of GROUPS or "all"; naming steps with `only` selects from every group.
+    """
+    if group != "all" and group not in GROUPS:
+        raise SystemExit(f"unknown group: {group}")
     chosen = [s for s in STEPS if gpu or not s["gpu"]]
+    if group != "all" and not only:
+        chosen = [s for s in chosen if s["group"] == group]
     if only:
         known = {s["name"] for s in STEPS}
         unknown = sorted(set(only) - known)
@@ -555,10 +860,11 @@ def build_evidence(run_id, args, modal_version, plan, records, dry_run):
         "run_id": run_id,
         "app": args.app,
         "gpu": bool(args.gpu),
+        "group": args.group,
         "keep": bool(args.keep),
         "dry_run": dry_run,
         "modal_version": modal_version,
-        "plan": [{"name": s["name"], "description": s["description"], "gpu": s["gpu"]} for s in plan],
+        "plan": [{"name": s["name"], "description": s["description"], "gpu": s["gpu"], "group": s["group"]} for s in plan],
         "steps": records,
         "ok": (not dry_run) and exit_code(records) == 0,
     }
@@ -579,6 +885,8 @@ def parse_args(argv):
     ap.add_argument("--gpu", action="store_true", help="also run the T4 step")
     ap.add_argument("--keep", action="store_true", help="skip cleanup")
     ap.add_argument("--dry-run", action="store_true", help="write the plan without contacting Modal")
+    ap.add_argument("--group", default="e0m", choices=list(GROUPS) + ["all"],
+                    help="step group: e0m (default), launcher, or all")
     ap.add_argument("--only", action="append", default=[], metavar="STEP", help="run only this step (repeatable)")
     return ap.parse_args(argv)
 
@@ -586,7 +894,7 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     run_id = uuid.uuid4().hex[:12]
-    plan = plan_for(args.gpu, args.only)
+    plan = plan_for(args.gpu, args.only, args.group)
     if args.dry_run:
         path = write_evidence(args.out, build_evidence(run_id, args, None, plan, [], True))
         for s in plan:

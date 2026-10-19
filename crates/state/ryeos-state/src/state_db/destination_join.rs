@@ -2,22 +2,30 @@
 //! State parent; neither an outer Arc count nor an inode comparison identifies
 //! that parent. This receiver does not acknowledge physical disposal.
 use super::*;
-use lillux_sqlite::{
-    OriginalNativeFactory, OriginalNativeOutsideLeafEvidence, OriginalNativeTerminal,
-};
+use lillux::custody::Held;
 use lillux_sqlite::original_physical_custody::{
     OriginalPhysicalRegistry, OriginalPhysicalRegistryIdentity, OutsideWork,
     RetiredOriginalPhysicalRegistry,
 };
-use lillux::custody::Held;
+use lillux_sqlite::{
+    OriginalNativeFactory, OriginalNativeOutsideLeafEvidence, OriginalNativeTerminal,
+};
 
 pub fn quote_state_destination_join(maximum: usize) -> anyhow::Result<OutsideWork> {
     anyhow::ensure!(maximum > 0, "empty original State leaf bound");
-    let bytes = maximum.checked_mul(std::mem::size_of::<RetainedLeaf>())
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<OriginalStateDestinationJoin>()
-            + 2 * std::mem::size_of::<usize>()))
+    let bytes = maximum
+        .checked_mul(std::mem::size_of::<RetainedLeaf>())
+        .and_then(|bytes| {
+            bytes.checked_add(
+                std::mem::size_of::<OriginalStateDestinationJoin>()
+                    + 2 * std::mem::size_of::<usize>(),
+            )
+        })
         .context("original State join storage quote overflow")?;
-    Ok(OutsideWork { bytes: u64::try_from(bytes)?, steps: u64::try_from(maximum)? })
+    Ok(OutsideWork {
+        bytes: u64::try_from(bytes)?,
+        steps: u64::try_from(maximum)?,
+    })
 }
 
 pub fn quote_live_state_parent_transfer() -> anyhow::Result<OutsideWork> {
@@ -39,19 +47,30 @@ pub fn maximum_state_destination_leaves(resource_tickets: u32) -> anyhow::Result
 
 pub fn quote_state_source_coalescing(leaves: usize) -> anyhow::Result<OutsideWork> {
     let leaves = u64::try_from(leaves)?;
-    let steps = leaves.checked_mul(leaves)
+    let steps = leaves
+        .checked_mul(leaves)
         .and_then(|work| work.checked_add(leaves.checked_add(1)?))
         .context("original State source coalescing work quote overflow")?;
     Ok(OutsideWork { bytes: 0, steps })
 }
 
-pub fn quote_state_leaf_admission(maximum_tickets: u32, attempts: u32) -> anyhow::Result<OutsideWork> {
-    anyhow::ensure!(maximum_tickets > 0 && attempts <= maximum_tickets,
-        "State leaf admission quote exceeds ticket bound");
-    let per_attempt = u64::from(maximum_tickets).checked_add(1)
+pub fn quote_state_leaf_admission(
+    maximum_tickets: u32,
+    attempts: u32,
+) -> anyhow::Result<OutsideWork> {
+    anyhow::ensure!(
+        maximum_tickets > 0 && attempts <= maximum_tickets,
+        "State leaf admission quote exceeds ticket bound"
+    );
+    let per_attempt = u64::from(maximum_tickets)
+        .checked_add(1)
         .context("original State leaf admission work quote overflow")?;
-    Ok(OutsideWork { bytes: 0, steps: per_attempt.checked_mul(u64::from(attempts))
-        .context("original State leaf admission work quote overflow")? })
+    Ok(OutsideWork {
+        bytes: 0,
+        steps: per_attempt
+            .checked_mul(u64::from(attempts))
+            .context("original State leaf admission work quote overflow")?,
+    })
 }
 
 pub fn quote_state_leaf_continuations(leaves: usize) -> anyhow::Result<OutsideWork> {
@@ -66,10 +85,15 @@ pub fn quote_generated_root_registration(
     maximum_slots: usize,
     leaves: usize,
 ) -> anyhow::Result<OutsideWork> {
-    let queries = u64::try_from(leaves)?.checked_mul(2)
+    let queries = u64::try_from(leaves)?
+        .checked_mul(2)
         .context("State generated membership count overflow")?;
-    OriginalPhysicalRegistry::membership_work_quote(maximum_slots, queries)?
-        .checked_add(OutsideWork { bytes: 0, steps: queries })
+    OriginalPhysicalRegistry::membership_work_quote(maximum_slots, queries)?.checked_add(
+        OutsideWork {
+            bytes: 0,
+            steps: queries,
+        },
+    )
 }
 
 /// Quote the bounded post-disposal validation of generated-root registrations.
@@ -79,8 +103,10 @@ pub fn quote_retired_generated_root_receipts(
     leaves: usize,
     generated_roots: usize,
 ) -> anyhow::Result<OutsideWork> {
-    anyhow::ensure!(generated_roots <= leaves,
-        "retired State generated roots exceed the retained leaf bound");
+    anyhow::ensure!(
+        generated_roots <= leaves,
+        "retired State generated roots exceed the retained leaf bound"
+    );
     let leaf_steps = u64::try_from(leaves)?
         .checked_mul(4)
         .context("retired State generated leaf census quote overflow")?;
@@ -89,7 +115,8 @@ pub fn quote_retired_generated_root_receipts(
         .context("retired State generated-root receipt quote overflow")?;
     Ok(OutsideWork {
         bytes: 0,
-        steps: leaf_steps.checked_add(receipt_steps)
+        steps: leaf_steps
+            .checked_add(receipt_steps)
             .and_then(|steps| steps.checked_add(4))
             .context("retired State generated-root quote overflow")?,
     })
@@ -100,10 +127,15 @@ fn quote_generated_root_registration_at(
     leaves: usize,
     additional_sources: usize,
 ) -> anyhow::Result<OutsideWork> {
-    let queries = u64::try_from(leaves)?.checked_mul(2)
+    let queries = u64::try_from(leaves)?
+        .checked_mul(2)
         .context("State generated membership count overflow")?;
-    registry.membership_work_bound(queries, additional_sources)?
-        .checked_add(OutsideWork { bytes: 0, steps: queries })
+    registry
+        .membership_work_bound(queries, additional_sources)?
+        .checked_add(OutsideWork {
+            bytes: 0,
+            steps: queries,
+        })
 }
 
 pub(crate) struct OriginalStateDestinationJoin {
@@ -141,9 +173,10 @@ fn join_state_owns_nothing(state: &JoinState) -> bool {
         && state.live_parent.is_none()
         && state.leaves.iter().all(|leaf| {
             leaf.source.is_none()
-                && leaf.generated.as_ref().is_none_or(|owner| {
-                    owner.root.is_none() && owner.registration.is_none()
-                })
+                && leaf
+                    .generated
+                    .as_ref()
+                    .is_none_or(|owner| owner.root.is_none() && owner.registration.is_none())
         })
 }
 struct RetainedLeaf {
@@ -258,15 +291,19 @@ impl OriginalProjectionStateOwner {
             process: std::process::id(),
             factory: Arc::downgrade(factory),
             maximum,
-            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
-                parent: Some(self.clone()),
-                leaves: Vec::with_capacity(maximum),
-                census_closed: false,
-                live_parent: None,
-                live_parent_outside_pending: false,
-                generated_root_registry: None,
-                generated_roots_retired: false,
-            }, join_state_owns_nothing)),
+            state: Mutex::new(Held::new(
+                JOIN_STATE_KIND,
+                JoinState {
+                    parent: Some(self.clone()),
+                    leaves: Vec::with_capacity(maximum),
+                    census_closed: false,
+                    live_parent: None,
+                    live_parent_outside_pending: false,
+                    generated_root_registry: None,
+                    generated_roots_retired: false,
+                },
+                join_state_owns_nothing,
+            )),
         });
         let mut link = match self.join_link().try_lock() {
             Ok(link) => link,
@@ -326,7 +363,9 @@ impl OriginalStateDestinationJoin {
                             && if state.generated_roots_retired {
                                 owner.registration.is_none()
                             } else {
-                                owner.registration.as_ref()
+                                owner
+                                    .registration
+                                    .as_ref()
                                     .is_some_and(|binding| binding.retired())
                             }
                     })
@@ -341,7 +380,9 @@ impl OriginalStateDestinationJoin {
         registry: &RetiredOriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
         self.require_exhausted_holders()?;
-        let state = self.state.try_lock()
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
         if let Some(identity) = state.generated_root_registry.as_ref() {
             registry.require_same_registry(identity)?;
@@ -352,13 +393,21 @@ impl OriginalStateDestinationJoin {
     /// no generated-root registration left unconsumed. A dropped frame that
     /// cached this join settles on exactly these checks.
     pub(crate) fn require_exhausted_holders(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.holders_retired()?,
-            "State destination join retains a holder at final exhaustion");
-        let state = self.state.try_lock()
+        anyhow::ensure!(
+            self.holders_retired()?,
+            "State destination join retains a holder at final exhaustion"
+        );
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
-        anyhow::ensure!(state.leaves.iter().all(|leaf| leaf.generated.as_ref()
+        anyhow::ensure!(
+            state.leaves.iter().all(|leaf| leaf
+                .generated
+                .as_ref()
                 .is_none_or(|owner| owner.registration.is_none())),
-            "State destination join retains an unconsumed generated-root registration");
+            "State destination join retains an unconsumed generated-root registration"
+        );
         Ok(())
     }
     /// A join in the shape a completed outside transfer leaves behind: census
@@ -369,15 +418,19 @@ impl OriginalStateDestinationJoin {
             process: std::process::id(),
             factory: std::sync::Weak::new(),
             maximum: 1,
-            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
-                parent: None,
-                leaves: Vec::new(),
-                census_closed: true,
-                live_parent: None,
-                live_parent_outside_pending: false,
-                generated_root_registry: None,
-                generated_roots_retired: false,
-            }, join_state_owns_nothing)),
+            state: Mutex::new(Held::new(
+                JOIN_STATE_KIND,
+                JoinState {
+                    parent: None,
+                    leaves: Vec::new(),
+                    census_closed: true,
+                    live_parent: None,
+                    live_parent_outside_pending: false,
+                    generated_root_registry: None,
+                    generated_roots_retired: false,
+                },
+                join_state_owns_nothing,
+            )),
         })
     }
     // Only ordinary wrapper aliases are retired here. The full canonical
@@ -401,8 +454,9 @@ impl OriginalStateDestinationJoin {
             state.leaves.len()
         };
         let quote = quote_state_source_coalescing(count)?;
-        lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-            prepay(quote.bytes, quote.steps))?;
+        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+            prepay(quote.bytes, quote.steps)
+        })?;
         let mut state = self
             .state
             .try_lock()
@@ -438,7 +492,8 @@ impl OriginalStateDestinationJoin {
                 StateDestinationLeaf::State(owner) => match Arc::try_unwrap(owner) {
                     Ok(parent_alias) => drop(parent_alias),
                     Err(owner) => {
-                        state.get_mut().leaves[index].source = Some(StateDestinationLeaf::State(owner));
+                        state.get_mut().leaves[index].source =
+                            Some(StateDestinationLeaf::State(owner));
                         anyhow::bail!("actual State wrapper still has an external alias");
                     }
                 },
@@ -466,7 +521,8 @@ impl OriginalStateDestinationJoin {
                         drop(preparation);
                     }
                     Err(owner) => {
-                        state.get_mut().leaves[index].source = Some(StateDestinationLeaf::Generated(owner));
+                        state.get_mut().leaves[index].source =
+                            Some(StateDestinationLeaf::Generated(owner));
                         anyhow::bail!("actual generated State wrapper still has an external alias");
                     }
                 },
@@ -539,26 +595,41 @@ impl OriginalStateDestinationJoin {
     /// The caller retains this receiver and destination slot under the original
     /// outside supervisor, and uses this slot only for this actual receiver.
     pub(crate) unsafe fn transfer_live_parent(
-        &self, factory: &Arc<OriginalNativeFactory>, aggregate: &OriginalNativeTerminal,
+        &self,
+        factory: &Arc<OriginalNativeFactory>,
+        aggregate: &OriginalNativeTerminal,
         destination: &mut Option<live_native::LiveStateNativeOwner>,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         self.require_original(factory, aggregate)?;
-        anyhow::ensure!(destination.is_none(), "live State parent destination already occupied");
+        anyhow::ensure!(
+            destination.is_none(),
+            "live State parent destination already occupied"
+        );
         // Original work/storage debit precedes the bookkeeping gate. Callback
         // refusal leaves the actual parent in its original receiver.
         let quote = quote_live_state_parent_transfer()?;
-        lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-            prepay(quote.bytes, quote.steps))?;
+        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+            prepay(quote.bytes, quote.steps)
+        })?;
         // Funding is an external callback. Revalidate the original process and
         // aggregate before acquiring the gate or checking out the actual body.
         self.require_original(factory, aggregate)?;
-        let mut state = self.state.try_lock()
+        let mut state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("live State parent transfer busy or poisoned"))?;
-        anyhow::ensure!(state.census_closed && state.parent.is_none()
-            && state.leaves.iter().all(|leaf| leaf.source.is_none()),
-            "live State parent transfer lacks complete original source census");
-        let original = state.get_mut().live_parent.take().context("actual live State parent body absent")?;
+        anyhow::ensure!(
+            state.census_closed
+                && state.parent.is_none()
+                && state.leaves.iter().all(|leaf| leaf.source.is_none()),
+            "live State parent transfer lacks complete original source census"
+        );
+        let original = state
+            .get_mut()
+            .live_parent
+            .take()
+            .context("actual live State parent body absent")?;
         state.get_mut().live_parent_outside_pending = true;
         *destination = Some(original);
         Ok(())
@@ -579,20 +650,33 @@ impl OriginalStateDestinationJoin {
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
         self.require_original(factory, aggregate)?;
         parts.require_completed_outside_parent(self, registry)?;
-        let mut state = self.state.try_lock()
+        let mut state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("live State parent completion busy or poisoned"))?;
-        anyhow::ensure!(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
-            && state.leaves.iter().all(|leaf| leaf.source.is_none()),
-            "live State parent completion lacks its closed source census");
+        anyhow::ensure!(
+            state.census_closed
+                && state.parent.is_none()
+                && state.live_parent.is_none()
+                && state.leaves.iter().all(|leaf| leaf.source.is_none()),
+            "live State parent completion lacks its closed source census"
+        );
         state.get_mut().live_parent_outside_pending = false;
         Ok(())
     }
     /// Cached completion of the live parent handoff; reads no factory.
     pub(crate) fn live_parent_completed(&self) -> anyhow::Result<bool> {
-        anyhow::ensure!(!crate::foreign_process(self.process), "foreign original State join observation");
-        let state = self.state.try_lock()
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign original State join observation"
+        );
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("original State join busy or poisoned"))?;
-        Ok(state.census_closed && state.parent.is_none() && state.live_parent.is_none()
+        Ok(state.census_closed
+            && state.parent.is_none()
+            && state.live_parent.is_none()
             && !state.live_parent_outside_pending)
     }
     pub(crate) unsafe fn register_generated_roots(
@@ -610,8 +694,10 @@ impl OriginalStateDestinationJoin {
                 .state
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("original State root inventory busy or poisoned"))?;
-            anyhow::ensure!(!state.generated_roots_retired,
-                "retired State generated-root receipts cannot be registered again");
+            anyhow::ensure!(
+                !state.generated_roots_retired,
+                "retired State generated-root receipts cannot be registered again"
+            );
             if let Some(expected) = state.generated_root_registry.as_ref() {
                 expected.require_same_registry(&registry_identity)?;
             } else {
@@ -624,39 +710,60 @@ impl OriginalStateDestinationJoin {
                     && state.leaves.iter().all(|leaf| leaf.source.is_none()),
                 "actual State parent/source census retirement incomplete"
             );
-            anyhow::ensure!(state.leaves.len() <= self.maximum,
-                "State generated-root census exceeds its owner-derived leaf bound");
+            anyhow::ensure!(
+                state.leaves.len() <= self.maximum,
+                "State generated-root census exceeds its owner-derived leaf bound"
+            );
             for leaf in state.leaves.iter() {
                 if let Some(owner) = &leaf.generated {
-                    anyhow::ensure!(!owner.registering, "actual generated root registration already in flight");
-                    anyhow::ensure!(owner.registration.is_none() || owner.root.is_none(),
-                        "generated root retains both its source and registry binding");
-                    anyhow::ensure!(owner.registration.is_some() || owner.root.is_some(),
-                        "actual generated root absent without original registration");
+                    anyhow::ensure!(
+                        !owner.registering,
+                        "actual generated root registration already in flight"
+                    );
+                    anyhow::ensure!(
+                        owner.registration.is_none() || owner.root.is_none(),
+                        "generated root retains both its source and registry binding"
+                    );
+                    anyhow::ensure!(
+                        owner.registration.is_some() || owner.root.is_some(),
+                        "actual generated root absent without original registration"
+                    );
                 }
             }
-            let additional_sources = state.leaves.iter()
+            let additional_sources = state
+                .leaves
+                .iter()
                 .filter_map(|leaf| leaf.generated.as_ref())
                 .filter(|owner| owner.registration.is_none())
                 .count();
-            anyhow::ensure!(additional_sources <= self.maximum,
-                "State generated-root sources exceed their owner-derived bound");
-            let complete = state.leaves.iter().all(|leaf| leaf.generated.as_ref()
-                .is_none_or(|owner| owner.root.is_none() && owner.registration.is_some()));
+            anyhow::ensure!(
+                additional_sources <= self.maximum,
+                "State generated-root sources exceed their owner-derived bound"
+            );
+            let complete = state.leaves.iter().all(|leaf| {
+                leaf.generated
+                    .as_ref()
+                    .is_none_or(|owner| owner.root.is_none() && owner.registration.is_some())
+            });
             (state.leaves.len(), additional_sources, complete)
         };
         if complete {
             let quote = quote_generated_root_registration_at(registry, count, 0)?;
             registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-            anyhow::ensure!(!crate::foreign_process(self.process),
-                "foreign State roots after completed-stage validation debit");
+            anyhow::ensure!(
+                !crate::foreign_process(self.process),
+                "foreign State roots after completed-stage validation debit"
+            );
             return self.require_generated_roots_registered(registry);
         }
         let quote = quote_generated_root_registration_at(registry, count, additional_sources)?;
         // Counted aliases and membership checks are funded before any
         // source checkout; the original callback runs outside State's gate.
         registry.prepay_transfer(prepay, quote.bytes, quote.steps)?;
-        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State roots after original prepay");
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign State roots after original prepay"
+        );
         for index in 0..count {
             let source = {
                 let mut state = self
@@ -714,26 +821,48 @@ impl OriginalStateDestinationJoin {
         &self,
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign State generated registry census"
+        );
         let registry_identity = registry.identity()?;
-        let state = self.state.try_lock()
+        let state = self
+            .state
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("State generated registry census busy or poisoned"))?;
-        anyhow::ensure!(!state.generated_roots_retired,
-            "retired State generated-root frame reentered the live registry census");
-        state.generated_root_registry.as_ref()
+        anyhow::ensure!(
+            !state.generated_roots_retired,
+            "retired State generated-root frame reentered the live registry census"
+        );
+        state
+            .generated_root_registry
+            .as_ref()
             .context("State generated-root registry identity was not retained")?
             .require_same_registry(&registry_identity)?;
-        anyhow::ensure!(state.leaves.len() <= self.maximum,
-            "State generated registry census exceeds its owner-derived leaf bound");
-        anyhow::ensure!(state.census_closed && state.parent.is_none() && state.live_parent.is_none(),
-            "State original parent or source census remains open");
+        anyhow::ensure!(
+            state.leaves.len() <= self.maximum,
+            "State generated registry census exceeds its owner-derived leaf bound"
+        );
+        anyhow::ensure!(
+            state.census_closed && state.parent.is_none() && state.live_parent.is_none(),
+            "State original parent or source census remains open"
+        );
         for leaf in state.leaves.iter() {
-            anyhow::ensure!(leaf.source.is_none(), "State original leaf source remains untransferred");
+            anyhow::ensure!(
+                leaf.source.is_none(),
+                "State original leaf source remains untransferred"
+            );
             if let Some(generated) = &leaf.generated {
-                anyhow::ensure!(!generated.registering && generated.root.is_none(),
-                    "State generated original root registration remains pending");
-                registry.require_membership(generated.registration.as_ref()
-                    .context("State generated original root membership absent")?)?;
+                anyhow::ensure!(
+                    !generated.registering && generated.root.is_none(),
+                    "State generated original root registration remains pending"
+                );
+                registry.require_membership(
+                    generated
+                        .registration
+                        .as_ref()
+                        .context("State generated original root membership absent")?,
+                )?;
             }
         }
         Ok(())
@@ -747,39 +876,63 @@ impl OriginalStateDestinationJoin {
         registry: &RetiredOriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(!crate::foreign_process(self.process),
-            "foreign retired State generated-root receipt frame");
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign retired State generated-root receipt frame"
+        );
         let (leaves, generated_roots, identity) = {
-            let state = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("State generated-root receipt frame busy or poisoned"))?;
-            let identity = state.generated_root_registry.as_ref()
+            let state = self.state.try_lock().map_err(|_| {
+                anyhow::anyhow!("State generated-root receipt frame busy or poisoned")
+            })?;
+            let identity = state
+                .generated_root_registry
+                .as_ref()
                 .context("State generated-root frame lacks its original registry identity")?;
             registry.require_same_registry(identity)?;
             if state.generated_roots_retired {
-                anyhow::ensure!(state.leaves.iter().all(|leaf| leaf.generated.as_ref()
-                    .is_none_or(|owner| owner.root.is_none() && !owner.registering
-                        && owner.registration.is_none())),
-                    "consumed State generated-root frame regained registration state");
+                anyhow::ensure!(
+                    state
+                        .leaves
+                        .iter()
+                        .all(|leaf| leaf.generated.as_ref().is_none_or(|owner| owner
+                            .root
+                            .is_none()
+                            && !owner.registering
+                            && owner.registration.is_none())),
+                    "consumed State generated-root frame regained registration state"
+                );
                 return Ok(());
             }
-            anyhow::ensure!(state.census_closed && state.parent.is_none()
-                && state.live_parent.is_none() && !state.live_parent_outside_pending,
-                "State generated roots cannot retire before the parent/source census closes");
-            anyhow::ensure!(state.leaves.len() <= self.maximum,
-                "State generated-root receipt census exceeds its retained leaf bound");
+            anyhow::ensure!(
+                state.census_closed
+                    && state.parent.is_none()
+                    && state.live_parent.is_none()
+                    && !state.live_parent_outside_pending,
+                "State generated roots cannot retire before the parent/source census closes"
+            );
+            anyhow::ensure!(
+                state.leaves.len() <= self.maximum,
+                "State generated-root receipt census exceeds its retained leaf bound"
+            );
             let mut generated_roots = 0usize;
             for leaf in state.leaves.iter() {
-                anyhow::ensure!(leaf.source.is_none(),
-                    "State generated-root receipt census retains an untransferred leaf");
+                anyhow::ensure!(
+                    leaf.source.is_none(),
+                    "State generated-root receipt census retains an untransferred leaf"
+                );
                 if let Some(owner) = leaf.generated.as_ref() {
-                    anyhow::ensure!(owner.root.is_none() && !owner.registering,
-                        "State generated-root receipt census retains a source or registration attempt");
-                    let binding = owner.registration.as_ref()
-                        .context("State generated-root registration absent before retired receipt")?;
+                    anyhow::ensure!(
+                        owner.root.is_none() && !owner.registering,
+                        "State generated-root receipt census retains a source or registration attempt"
+                    );
+                    let binding = owner.registration.as_ref().context(
+                        "State generated-root registration absent before retired receipt",
+                    )?;
                     anyhow::ensure!(matches!(binding.observed_source_identity()?,
                         lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
                         "State generated-root registration changed its Directory role");
-                    generated_roots = generated_roots.checked_add(1)
+                    generated_roots = generated_roots
+                        .checked_add(1)
                         .context("State generated-root receipt count overflow")?;
                 }
             }
@@ -787,35 +940,63 @@ impl OriginalStateDestinationJoin {
         };
 
         let quote = quote_retired_generated_root_receipts(leaves, generated_roots)?;
-        lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-            prepay(quote.bytes, quote.steps))?;
-        anyhow::ensure!(!crate::foreign_process(self.process),
-            "foreign State generated-root frame after retirement debit");
+        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+            prepay(quote.bytes, quote.steps)
+        })?;
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign State generated-root frame after retirement debit"
+        );
 
-        let mut state = self.state.try_lock()
-            .map_err(|_| anyhow::anyhow!("State generated-root receipt frame busy after funding"))?;
+        let mut state = self.state.try_lock().map_err(|_| {
+            anyhow::anyhow!("State generated-root receipt frame busy after funding")
+        })?;
         registry.require_same_registry(&identity)?;
         if state.generated_roots_retired {
-            anyhow::ensure!(state.leaves.iter().all(|leaf| leaf.generated.as_ref()
-                .is_none_or(|owner| owner.root.is_none() && !owner.registering
-                    && owner.registration.is_none())),
-                "consumed State generated-root frame regained registration state");
+            anyhow::ensure!(
+                state
+                    .leaves
+                    .iter()
+                    .all(|leaf| leaf
+                        .generated
+                        .as_ref()
+                        .is_none_or(|owner| owner.root.is_none()
+                            && !owner.registering
+                            && owner.registration.is_none())),
+                "consumed State generated-root frame regained registration state"
+            );
             return Ok(());
         }
-        anyhow::ensure!(state.census_closed && state.parent.is_none()
-            && state.live_parent.is_none() && !state.live_parent_outside_pending
-            && state.leaves.len() == leaves,
-            "State generated-root census changed after retirement funding");
-        let current_roots = state.leaves.iter().filter(|leaf| leaf.generated.is_some()).count();
-        anyhow::ensure!(current_roots == generated_roots,
-            "State generated-root owner count changed after retirement funding");
+        anyhow::ensure!(
+            state.census_closed
+                && state.parent.is_none()
+                && state.live_parent.is_none()
+                && !state.live_parent_outside_pending
+                && state.leaves.len() == leaves,
+            "State generated-root census changed after retirement funding"
+        );
+        let current_roots = state
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.generated.is_some())
+            .count();
+        anyhow::ensure!(
+            current_roots == generated_roots,
+            "State generated-root owner count changed after retirement funding"
+        );
         for leaf in state.leaves.iter() {
-            anyhow::ensure!(leaf.source.is_none(),
-                "State generated-root source appeared after retirement funding");
+            anyhow::ensure!(
+                leaf.source.is_none(),
+                "State generated-root source appeared after retirement funding"
+            );
             if let Some(owner) = leaf.generated.as_ref() {
-                anyhow::ensure!(owner.root.is_none() && !owner.registering,
-                    "State generated-root source changed after retirement funding");
-                let binding = owner.registration.as_ref()
+                anyhow::ensure!(
+                    owner.root.is_none() && !owner.registering,
+                    "State generated-root source changed after retirement funding"
+                );
+                let binding = owner
+                    .registration
+                    .as_ref()
                     .context("State generated-root registration disappeared after funding")?;
                 anyhow::ensure!(matches!(binding.observed_source_identity()?,
                     lillux_sqlite::original_physical_custody::OriginalPhysicalSourceIdentity::Directory { .. }),
@@ -836,16 +1017,30 @@ impl OriginalStateDestinationJoin {
         registry: &lillux_sqlite::original_physical_custody::OriginalPhysicalRegistry,
         prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(!crate::foreign_process(self.process), "foreign State generated registry census");
+        anyhow::ensure!(
+            !crate::foreign_process(self.process),
+            "foreign State generated registry census"
+        );
         let queries = {
-            let state = self.state.try_lock()
-                .map_err(|_| anyhow::anyhow!("original State generated membership census busy or poisoned"))?;
-            anyhow::ensure!(state.leaves.len() <= self.maximum,
-                "State generated membership census exceeds its owner-derived leaf bound");
-            u64::try_from(state.leaves.iter().filter(|leaf| leaf.generated.is_some()).count())?
+            let state = self.state.try_lock().map_err(|_| {
+                anyhow::anyhow!("original State generated membership census busy or poisoned")
+            })?;
+            anyhow::ensure!(
+                state.leaves.len() <= self.maximum,
+                "State generated membership census exceeds its owner-derived leaf bound"
+            );
+            u64::try_from(
+                state
+                    .leaves
+                    .iter()
+                    .filter(|leaf| leaf.generated.is_some())
+                    .count(),
+            )?
         };
         let quote = registry.membership_work_bound(queries, 0)?;
-        let work = quote.steps.checked_add(8)
+        let work = quote
+            .steps
+            .checked_add(8)
             .context("State generated-root census work overflow")?;
         // Do not call the original payer while holding the State retention gate.
         registry.prepay_transfer(prepay, quote.bytes, work)?;
@@ -871,8 +1066,10 @@ impl OriginalStateDestinationJoin {
             evidence.require_original_authority(&source.authority(), factory, aggregate)?;
             // Storage is prepaid; the scan still uses the original work debit.
             let maximum = maximum_state_destination_leaves(factory.maximum_resource_tickets()?)?;
-            anyhow::ensure!(maximum == self.maximum,
-                "State destination owner bound changed after construction");
+            anyhow::ensure!(
+                maximum == self.maximum,
+                "State destination owner bound changed after construction"
+            );
             let quote = quote_state_leaf_admission(u32::try_from(maximum)?, 1)?;
             lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
                 prepay(quote.bytes, quote.steps)
@@ -966,8 +1163,9 @@ pub(super) fn transfer_leaf(
         };
         join.require_original(factory, aggregate)?;
         let quote = quote_state_leaf_continuations(1)?;
-        lillux_sqlite::original_physical_custody::retain_callback_refusal(&||
-            prepay(quote.bytes, quote.steps))?;
+        lillux_sqlite::original_physical_custody::retain_callback_refusal(&|| {
+            prepay(quote.bytes, quote.steps)
+        })?;
         let continuation = Box::new(StateLeafContinuation {
             join: join.clone(),
             evidence: evidence.clone(),
@@ -1072,31 +1270,44 @@ mod drop_tests {
 
     struct NoLease;
     impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for NoLease {
-        fn require_original(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
-            -> anyhow::Result<()> {
+        fn require_original(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> anyhow::Result<()> {
             anyhow::bail!("drop test admits no projection lease")
         }
-        fn fork_deadline(&self, _factory: &Arc<OriginalNativeFactory>, _cleanup: bool)
-            -> anyhow::Result<lillux::time::MonotonicDeadline> {
+        fn fork_deadline(
+            &self,
+            _factory: &Arc<OriginalNativeFactory>,
+            _cleanup: bool,
+        ) -> anyhow::Result<lillux::time::MonotonicDeadline> {
             anyhow::bail!("drop test admits no projection lease")
         }
     }
 
-    fn join(parent: Option<OriginalProjectionStateOwner>, census_closed: bool,
-        live_parent_outside_pending: bool) -> OriginalStateDestinationJoin {
+    fn join(
+        parent: Option<OriginalProjectionStateOwner>,
+        census_closed: bool,
+        live_parent_outside_pending: bool,
+    ) -> OriginalStateDestinationJoin {
         OriginalStateDestinationJoin {
             process: std::process::id(),
             factory: std::sync::Weak::new(),
             maximum: 1,
-            state: Mutex::new(Held::new(JOIN_STATE_KIND, JoinState {
-                parent: parent,
-                leaves: Vec::with_capacity(1),
-                census_closed,
-                live_parent: None,
-                live_parent_outside_pending,
-                generated_root_registry: None,
-                generated_roots_retired: false,
-            }, join_state_owns_nothing)),
+            state: Mutex::new(Held::new(
+                JOIN_STATE_KIND,
+                JoinState {
+                    parent: parent,
+                    leaves: Vec::with_capacity(1),
+                    census_closed,
+                    live_parent: None,
+                    live_parent_outside_pending,
+                    generated_root_registry: None,
+                    generated_roots_retired: false,
+                },
+                join_state_owns_nothing,
+            )),
         }
     }
 
@@ -1120,7 +1331,11 @@ mod drop_tests {
             lease_authority: lease,
         });
         let observer = Arc::downgrade(&owner);
-        let published = join(Some(OriginalProjectionStateOwner::Offline(owner)), false, false);
+        let published = join(
+            Some(OriginalProjectionStateOwner::Offline(owner)),
+            false,
+            false,
+        );
         let before = lillux::custody::abandoned_custody().count(KIND);
         drop(published);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
@@ -1134,8 +1349,7 @@ mod quote_tests {
         OriginalStateDestinationJoin, RetainedLeaf, StateLeafContinuation,
         maximum_state_destination_leaves, quote_generated_root_registration,
         quote_live_state_parent_transfer, quote_retired_generated_root_receipts,
-        quote_state_destination_join,
-        quote_state_leaf_admission, quote_state_leaf_continuations,
+        quote_state_destination_join, quote_state_leaf_admission, quote_state_leaf_continuations,
         quote_state_source_coalescing,
     };
     use lillux_sqlite::original_physical_custody::OutsideWork;
@@ -1146,28 +1360,54 @@ mod quote_tests {
         assert_eq!(maximum_state_destination_leaves(64).unwrap(), 64);
         assert!(maximum_state_destination_leaves(0).is_err());
         let join = quote_state_destination_join(2).unwrap();
-        assert_eq!(join.bytes, (2 * size_of::<RetainedLeaf>()
-            + size_of::<OriginalStateDestinationJoin>() + 2 * size_of::<usize>()) as u64);
+        assert_eq!(
+            join.bytes,
+            (2 * size_of::<RetainedLeaf>()
+                + size_of::<OriginalStateDestinationJoin>()
+                + 2 * size_of::<usize>()) as u64
+        );
         assert_eq!(join.steps, 2);
         assert!(quote_state_destination_join(usize::MAX).is_err());
-        assert_eq!(quote_live_state_parent_transfer().unwrap(), OutsideWork {
-            bytes: size_of::<super::live_native::LiveStateNativeOwner>() as u64,
-            steps: 8,
-        });
+        assert_eq!(
+            quote_live_state_parent_transfer().unwrap(),
+            OutsideWork {
+                bytes: size_of::<super::live_native::LiveStateNativeOwner>() as u64,
+                steps: 8,
+            }
+        );
 
-        assert_eq!(quote_state_source_coalescing(3).unwrap(), OutsideWork { bytes: 0, steps: 13 });
+        assert_eq!(
+            quote_state_source_coalescing(3).unwrap(),
+            OutsideWork {
+                bytes: 0,
+                steps: 13
+            }
+        );
         assert!(quote_state_source_coalescing(usize::MAX).is_err());
         assert_eq!(quote_state_leaf_admission(4, 3).unwrap().steps, 15);
         assert!(quote_state_leaf_admission(4, 5).is_err());
-        assert_eq!(quote_state_leaf_continuations(2).unwrap(), OutsideWork {
-            bytes: (2 * size_of::<StateLeafContinuation>()) as u64,
-            steps: 8,
-        });
-        assert_eq!(quote_generated_root_registration(6, 2).unwrap(),
-            OutsideWork { bytes: 0, steps: 24 });
+        assert_eq!(
+            quote_state_leaf_continuations(2).unwrap(),
+            OutsideWork {
+                bytes: (2 * size_of::<StateLeafContinuation>()) as u64,
+                steps: 8,
+            }
+        );
+        assert_eq!(
+            quote_generated_root_registration(6, 2).unwrap(),
+            OutsideWork {
+                bytes: 0,
+                steps: 24
+            }
+        );
         assert!(quote_generated_root_registration(6, usize::MAX).is_err());
-        assert_eq!(quote_retired_generated_root_receipts(2, 2).unwrap(),
-            OutsideWork { bytes: 0, steps: 36 });
+        assert_eq!(
+            quote_retired_generated_root_receipts(2, 2).unwrap(),
+            OutsideWork {
+                bytes: 0,
+                steps: 36
+            }
+        );
         assert!(quote_retired_generated_root_receipts(1, 2).is_err());
         assert!(quote_retired_generated_root_receipts(usize::MAX, usize::MAX).is_err());
     }

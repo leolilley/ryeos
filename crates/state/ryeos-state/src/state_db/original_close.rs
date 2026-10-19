@@ -234,10 +234,10 @@ impl ClosedOriginalState {
         for lease in leases {
             // SAFETY: consuming State retirement ended its actual SQL users;
             // the original exclusive CAS frame excludes new generation work.
-            if let Some(receipt) = unsafe { lease.close_after_consumers(&self.factory) }? {
-                if !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt)) {
-                    receipts.push(receipt);
-                }
+            if let Some(receipt) = unsafe { lease.close_after_consumers(&self.factory) }?
+                && !receipts.iter().any(|actual| Arc::ptr_eq(actual, &receipt))
+            {
+                receipts.push(receipt);
             }
         }
         Ok(receipts)
@@ -568,7 +568,10 @@ impl StateDb {
                 .context("original State namespace absent")?
                 .ensure_protects(&self._runtime_state_directory)?;
             anyhow::ensure!(
-                self.recovery.thread_history_discard_operation_scoped(&factory)?.as_ref() == operation,
+                self.recovery
+                    .thread_history_discard_operation_scoped(&factory)?
+                    .as_ref()
+                    == operation,
                 "original State retirement operation differs from active marker"
             );
             Ok(())

@@ -116,7 +116,10 @@ impl ResourceTariffDocument {
         if self.billing_quantum_milliseconds == 0 {
             return Err("resource tariff billing quantum must be positive".to_string());
         }
-        if self.minimum_billable_milliseconds % self.billing_quantum_milliseconds != 0 {
+        if !self
+            .minimum_billable_milliseconds
+            .is_multiple_of(self.billing_quantum_milliseconds)
+        {
             return Err(
                 "resource tariff minimum must be a multiple of its billing quantum".to_string(),
             );

@@ -4,8 +4,8 @@
 //! filesystem allowance, or signature payload. Signing does not admit execution:
 //! the normal resolver and product lifecycle must still admit the returned item.
 
-use ryeos_bundle_publication_contract::{PORTABLE_QUALIFIER, SUBSTRATE_QUALIFIER};
 use anyhow::Context as _;
+use ryeos_bundle_publication_contract::{PORTABLE_QUALIFIER, SUBSTRATE_QUALIFIER};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -952,7 +952,8 @@ mod tests {
         let request = request();
         let temp = tempfile::tempdir().unwrap();
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
+                .unwrap();
         let body = request.config_body().unwrap();
         let signed = lillux::signature::sign_content(&body, identity.signing_key(), "#", None);
         let response = json!({"schema":"ryeos.bundle_build_recipe_authorization.v1",

@@ -57,7 +57,10 @@ impl RuntimeDb {
                 };
                 live.with_deadline(deadline, |_| operation(self))
             }
-            RuntimeConnection::OriginalMutation { owner, schema_reference: _ } => {
+            RuntimeConnection::OriginalMutation {
+                owner,
+                schema_reference: _,
+            } => {
                 owner.require_original_process()?;
                 self.original_deadline_active.set(true);
                 let _notification = NativeDeadlineNotification {
@@ -72,7 +75,11 @@ impl RuntimeDb {
             }
             // A read-only inspection owner serves no mutation, so it owns no
             // original deadline scope.
-            RuntimeConnection::OriginalInspection { owner: _, factory: _, schema_reference: _ } => {
+            RuntimeConnection::OriginalInspection {
+                owner: _,
+                factory: _,
+                schema_reference: _,
+            } => {
                 bail!("inspection RuntimeDb owns no original deadline scope")
             }
         }
@@ -142,7 +149,9 @@ mod tests {
         // A current store, created and closed by the live owner first.
         retire(&host, open_live(&host, &path));
         let root = std::sync::Arc::new(
-            lillux::PinnedDirectory::open(directory.path()).unwrap().unwrap(),
+            lillux::PinnedDirectory::open(directory.path())
+                .unwrap()
+                .unwrap(),
         );
         let namespace = root.lock_exclusive().unwrap();
         let db = open_original_mutation(&host, &root, &namespace, &path);
@@ -206,9 +215,11 @@ mod tests {
         // The unwound scope restored the connection's own hooks: ordinary SQL
         // runs again under the connection's live deadline.
         assert_eq!(
-            db.conn.with_sql(|connection| {
-                Ok(connection.query_row("SELECT 3", [], |row| row.get::<_, i64>(0))?)
-            }).unwrap(),
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.query_row("SELECT 3", [], |row| row.get::<_, i64>(0))?)
+                })
+                .unwrap(),
             3
         );
         assert!(admission.load(Ordering::Acquire));

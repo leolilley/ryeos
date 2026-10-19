@@ -36,7 +36,9 @@ pub struct PushedHead {
 }
 
 fn object_hash(value: &Value) -> Result<String> {
-    Ok(lillux::sha256_hex(lillux::canonical_json(value)?.as_bytes()))
+    Ok(lillux::sha256_hex(
+        lillux::canonical_json(value)?.as_bytes(),
+    ))
 }
 
 /// Capture every regular file below `source_root` as one AI-only snapshot
@@ -228,12 +230,7 @@ pub async fn apply_snapshot(
 /// The node's deployed snapshot for `live_project`, or `None` when the
 /// project has never been deployed.
 pub async fn deployed_snapshot(h: &DaemonHarness, live_project: &str) -> Result<Option<String>> {
-    let status = post_ok(
-        h,
-        "/project/status",
-        json!({"project_path": live_project}),
-    )
-    .await?;
+    let status = post_ok(h, "/project/status", json!({"project_path": live_project})).await?;
     match status.get("deployed_snapshot_hash") {
         Some(Value::String(hash)) => Ok(Some(hash.clone())),
         Some(Value::Null) => Ok(None),

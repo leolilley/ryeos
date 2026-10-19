@@ -68,6 +68,7 @@ impl NodePolicySection for HostedNodePolicySection {
         Ok(Arc::new(record))
     }
 }
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
@@ -156,4 +157,3 @@ mod tests {
         assert!(format!("{err:#}").contains("unknown field"));
     }
 }
-use std::sync::Arc;

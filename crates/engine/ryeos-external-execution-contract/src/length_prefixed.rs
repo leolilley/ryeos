@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn encode_is_a_big_endian_u32_length_then_the_exact_bytes() {
-        assert_eq!(
-            encode(b"abc", 16).unwrap(),
-            [0, 0, 0, 3, b'a', b'b', b'c']
-        );
+        assert_eq!(encode(b"abc", 16).unwrap(), [0, 0, 0, 3, b'a', b'b', b'c']);
         let long = vec![7_u8; 0x0102];
         assert_eq!(&encode(&long, 0x0102).unwrap()[..4], &[0, 0, 1, 2]);
     }

@@ -329,7 +329,7 @@ pub fn run_production_probe(encoded_challenge: &str) -> Result<()> {
         0o400,
         crate::VERIFIER_TEMP_PURPOSE,
     )?
-        .context("consumer native observation already exists")?;
+    .context("consumer native observation already exists")?;
     Ok(())
 }
 
@@ -488,7 +488,7 @@ fn run_in_directory(
     active: MonotonicDeadline,
     cleanup: MonotonicDeadline,
 ) -> Result<()> {
-    let request_bytes = read_fixed(&root, "guest-request.json", 64 * 1024)?;
+    let request_bytes = read_fixed(root, "guest-request.json", 64 * 1024)?;
     let request: Request = serde_json::from_slice(&request_bytes)?;
     ensure!(
         request.schema == "test.routed_guest.v1"
@@ -538,9 +538,9 @@ fn run_in_directory(
     let tools = scratch.create_child(OsStr::new("tools"), 0o700)?;
     let runtime_views = scratch.create_child(OsStr::new("runtime-views"), 0o700)?;
     let tmpdir = runtime_views.create_child(OsStr::new("TMPDIR"), 0o700)?;
-    stage(&child(&root, "runtime")?, &runtime, &request.runtime)?;
-    stage(&child(&root, "tools")?, &tools, &request.tools)?;
-    let candidate = child(&root, "candidate")?;
+    stage(&child(root, "runtime")?, &runtime, &request.runtime)?;
+    stage(&child(root, "tools")?, &tools, &request.tools)?;
+    let candidate = child(root, "candidate")?;
     let state_root = scratch.create_child(OsStr::new("cas-state"), 0o700)?;
     let authority = ryeos_state::private_cas::open_private_scratch_cas(&state_root)
         .context("initialize private verifier CAS")?;
@@ -706,19 +706,18 @@ pub(crate) fn run_prepared_protocol(
         let mut output_offset = 0;
         loop {
             ensure!(!active.has_elapsed(), "guest scenario expired");
-            if applied_launch.is_none() {
-                if let Some(receipt) = held
+            if applied_launch.is_none()
+                && let Some(receipt) = held
                     .try_observe_applied_launch()
                     .map_err(anyhow::Error::msg)?
-                {
-                    ensure!(
-                        receipt
-                            .matches_request(&expected_native)
-                            .map_err(anyhow::Error::msg)?,
-                        "native guest applied launch differs from signed request"
-                    );
-                    applied_launch = Some(receipt);
-                }
+            {
+                ensure!(
+                    receipt
+                        .matches_request(&expected_native)
+                        .map_err(anyhow::Error::msg)?,
+                    "native guest applied launch differs from signed request"
+                );
+                applied_launch = Some(receipt);
             }
             if pending.is_empty() {
                 let mut bytes = [0; CHUNK];
@@ -732,10 +731,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        ()
-                    }
+                        ) => {}
                     Err(e) => return Err(e).context("read controller protocol"),
                 }
             }
@@ -760,10 +756,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        ()
-                    }
+                        ) => {}
                     Err(e) => return Err(e.into()),
                 }
                 if offset == pending.len() {
@@ -783,10 +776,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        ()
-                    }
+                        ) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -806,10 +796,7 @@ pub(crate) fn run_prepared_protocol(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        ()
-                    }
+                        ) => {}
                     Err(e) => return Err(e).context("write controller protocol"),
                 }
             }
@@ -819,10 +806,7 @@ pub(crate) fn run_prepared_protocol(
                     if matches!(
                         e.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    ()
-                }
+                    ) => {}
                 Err(e) => return Err(e.into()),
             }
             ensure!(
@@ -890,8 +874,8 @@ mod tests {
             0o400,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap()
-            .unwrap();
+        .unwrap()
+        .unwrap();
         assert!(capture_requested(&root).unwrap());
 
         let other = tempfile::tempdir().unwrap();
@@ -1031,8 +1015,8 @@ mod tests {
             0o755,
             crate::VERIFIER_TEMP_PURPOSE,
         )
-            .unwrap()
-            .unwrap();
+        .unwrap()
+        .unwrap();
         let members = BTreeMap::from([(
             "bin/fixture".to_owned(),
             Member {

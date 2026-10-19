@@ -236,7 +236,7 @@ pub fn verify_admitted_source_tree(
                                 anyhow::anyhow!("admitted source file {path} disappeared")
                             })?;
                     let (digest, metadata) =
-                        lillux::digest_open_regular_file_stable_exact(&mut file, entry.size)?;
+                        lillux::digest_open_regular_file_stable_exact(&file, entry.size)?;
                     let expected_mode = match entry.mode {
                         SourceFileMode::ReadOnly => 0o644,
                         SourceFileMode::Executable => 0o755,

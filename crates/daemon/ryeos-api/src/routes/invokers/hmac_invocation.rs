@@ -1272,10 +1272,9 @@ mod tests {
         ryeos_app::state::AppState,
     ) {
         let tmpdir = tempfile::TempDir::new().unwrap();
-        let runtime_db_path = ryeos_app::test_support::TestStateStore::runtime_state_dir(
-            tmpdir.path(),
-        )
-        .join("runtime.sqlite3");
+        let runtime_db_path =
+            ryeos_app::test_support::TestStateStore::runtime_state_dir(tmpdir.path())
+                .join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
@@ -1296,7 +1295,13 @@ mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(tmpdir.path(), signer, write_barrier.clone(), std::sync::Arc::new(head_trust)).unwrap();
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            tmpdir.path(),
+            signer,
+            write_barrier.clone(),
+            std::sync::Arc::new(head_trust),
+        )
+        .unwrap();
         let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = std::sync::Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),

@@ -17,3 +17,6 @@ ryeos-app = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

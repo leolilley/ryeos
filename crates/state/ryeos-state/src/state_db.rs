@@ -41,35 +41,42 @@ use crate::signer::Signer;
 pub(crate) mod live_native;
 pub use live_native::require_exhausted_refusals;
 pub use live_native::{AbandonedLiveOpenings, abandoned_live_openings};
-pub use live_native::{LiveStateDatabaseOpenFailure, LiveStateStartupRecoveryFailure,
-    ReleasedLiveStateStartup, ReleasedLiveStatePhysicalCustody,
+pub use live_native::{
+    LiveStateDatabaseOpenFailure, LiveStateStartupRecoveryFailure,
+    ReleasedLiveStatePhysicalCustody, ReleasedLiveStateStartup,
     maximum_live_projection_physical_sources, quote_live_projection_physical,
-    quote_live_projection_validation, quote_live_projection_retired_sources,
-    quote_live_projection_retry,
-    quote_live_state_destination_join, quote_live_state_host_alias_retirement,
+    quote_live_projection_retired_sources, quote_live_projection_retry,
+    quote_live_projection_validation, quote_live_state_destination_join,
+    quote_live_state_finalization_root_receipts, quote_live_state_host_alias_retirement,
     quote_live_state_parent_root_membership, quote_live_state_physical_parent,
-    quote_live_state_finalization_root_receipts,
     quote_live_state_recovery_registration, quote_live_state_registered_root_validation,
-    quote_live_state_root_registration_handoff, quote_released_live_state_physical_custody,
-    quote_startup_closed_schema_sources, quote_startup_released_schema_source,
-    quote_maximum_state_destination_input_transfer, quote_state_destination_input_transfer};
+    quote_live_state_root_registration_handoff, quote_maximum_state_destination_input_transfer,
+    quote_released_live_state_physical_custody, quote_startup_closed_schema_sources,
+    quote_startup_released_schema_source, quote_state_destination_input_transfer,
+};
 mod live_close;
-pub use live_close::{ClosedLiveState, ClosedLiveStatePhysicalCustody, GenerationLeaseRetirement, LiveStateCensus, LiveStateCloseFailure,
-    quote_closed_live_state_physical_custody, quote_live_projection_source_transfer,
-    quote_live_schema_source_retirement, quote_normal_state_root_membership};
-mod original_close;
+pub use live_close::{
+    ClosedLiveState, ClosedLiveStatePhysicalCustody, GenerationLeaseRetirement, LiveStateCensus,
+    LiveStateCloseFailure, quote_closed_live_state_physical_custody,
+    quote_live_projection_source_transfer, quote_live_schema_source_retirement,
+    quote_normal_state_root_membership,
+};
 mod destination_join;
+mod original_close;
 #[cfg(test)]
 mod rebuild_recovery_tests;
+pub(crate) use destination_join::OriginalStateDestinationJoin;
 pub use destination_join::{
     maximum_state_destination_leaves, quote_generated_root_registration,
     quote_live_state_parent_transfer, quote_retired_generated_root_receipts,
-    quote_state_destination_join,
-    quote_state_leaf_admission, quote_state_leaf_continuations,
+    quote_state_destination_join, quote_state_leaf_admission, quote_state_leaf_continuations,
     quote_state_source_coalescing,
 };
-pub(crate) use destination_join::OriginalStateDestinationJoin;
-pub use original_close::{STATE_ACK_EFFECT_PREPAY, STATE_ACK_REPLAY_PREPAY, ClosedOriginalState, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority, OriginalStateRetirementFailure, ReleasedOriginalStateRetirement};
+pub use original_close::{
+    ClosedOriginalState, OriginalStateAcknowledgement, OriginalStateFinalAckAuthority,
+    OriginalStateRetirementFailure, ReleasedOriginalStateRetirement, STATE_ACK_EFFECT_PREPAY,
+    STATE_ACK_REPLAY_PREPAY,
+};
 
 /// State of the rebuildable projection after an authoritative CAS write.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,24 +198,44 @@ fn open_recovered_projection(
         let projection_path = runtime_state_dir.join(&generation.projection_file);
         // A refused native acquisition may still own partial effects. The
         // error retains it; recovery must settle that owner before replacement.
-        let db = original.open_selected(recovery.runtime_directory(), std::ffi::OsStr::new(&generation.projection_file))?;
+        let db = original.open_selected(
+            recovery.runtime_directory(),
+            std::ffi::OsStr::new(&generation.projection_file),
+        )?;
         let matches = match db.projection_instance_id() {
             Ok(instance) => instance.as_deref() == Some(generation.projection_instance_id.as_str()),
             Err(error) => return Err(db.retain_operation_failure(error)),
         };
         if matches {
             let selected_work = (|| -> anyhow::Result<()> {
-                replay_pending_into(&db, cas_root, refs_root, recovery, trust_store,
-                    runtime_liveness, true, observer)?;
-                let deleted = cleanup_superseded_projection_instances(recovery,
-                    Some(&*native_factory), &projection_path)?;
-                if deleted != 0 { tracing::info!(deleted, "removed superseded projection instances"); }
+                replay_pending_into(
+                    &db,
+                    cas_root,
+                    refs_root,
+                    recovery,
+                    trust_store,
+                    runtime_liveness,
+                    true,
+                    observer,
+                )?;
+                let deleted = cleanup_superseded_projection_instances(
+                    recovery,
+                    Some(&*native_factory),
+                    &projection_path,
+                )?;
+                if deleted != 0 {
+                    tracing::info!(deleted, "removed superseded projection instances");
+                }
                 Ok(())
             })();
-            if let Err(error) = selected_work { return Err(db.retain_operation_failure(error)); }
+            if let Err(error) = selected_work {
+                return Err(db.retain_operation_failure(error));
+            }
             return Ok(db);
         }
-        let closed = db.close_original(&original.factory).map_err(anyhow::Error::new)?;
+        let closed = db
+            .close_original(&original.factory)
+            .map_err(anyhow::Error::new)?;
         // Cache the actual SQL terminal AND lease custody before validating
         // or choosing a replacement generation.
         let closed = Arc::new(closed);
@@ -273,7 +300,11 @@ fn rebuild_and_install_projection(
     let projection_file = format!("projection.{instance_id}.sqlite3");
     let instance_path = runtime_state_dir.join(&projection_file);
     let runtime_directory = recovery.runtime_directory();
-    let staged = original.open(runtime_directory, std::ffi::OsStr::new(&projection_file), None)?;
+    let staged = original.open(
+        runtime_directory,
+        std::ffi::OsStr::new(&projection_file),
+        None,
+    )?;
     let staged_work = (|| -> anyhow::Result<_> {
         staged.set_projection_instance_id(&instance_id)?;
         let refs_directory = runtime_directory
@@ -345,11 +376,18 @@ fn rebuild_and_install_projection(
         // generation.json is the sole selected-instance pointer and is published
         // only after this generation instance has closed and been fsynced.
         staged_native.require_original(&original.factory)?;
-        staged_native.require_coordinate(runtime_directory, std::ffi::OsStr::new(&generation.projection_file))?;
+        staged_native.require_coordinate(
+            runtime_directory,
+            std::ffi::OsStr::new(&generation.projection_file),
+        )?;
         recovery.write_generation(&generation)?;
 
         let projection = original
-            .open(runtime_directory, std::ffi::OsStr::new(&generation.projection_file), Some(&staged_native))
+            .open(
+                runtime_directory,
+                std::ffi::OsStr::new(&generation.projection_file),
+                Some(&staged_native),
+            )
             .context("open selected projection instance")?;
         let selected_work = (|| -> anyhow::Result<()> {
             if projection.projection_instance_id()?.as_deref() != Some(instance_id.as_str()) {
@@ -399,11 +437,13 @@ fn rebuild_and_install_projection(
     match publication {
         Ok(result) => Ok(result),
         Err(error) => Err(anyhow::Error::new(GeneratedProjectionPublicationFailure {
-            error, _staged: staged_native, _recovery: recovery.clone(),
-            _instance_id: instance_id, _projection_file: retained_projection_file,
+            error,
+            _staged: staged_native,
+            _recovery: recovery.clone(),
+            _instance_id: instance_id,
+            _projection_file: retained_projection_file,
         })),
     }
-
 }
 
 const SUPERSEDED_PROJECTION_INSTANCES_TO_KEEP: usize = 2;
@@ -437,7 +477,16 @@ fn cleanup_all_superseded_projection_instances(
     native_factory: Option<&lillux_sqlite::OriginalNativeFactory>,
     selected_path: &Path,
 ) -> anyhow::Result<usize> {
-    cleanup_projection_instances(recovery, native_factory, selected_path, 0, None, None, None, true)
+    cleanup_projection_instances(
+        recovery,
+        native_factory,
+        selected_path,
+        0,
+        None,
+        None,
+        None,
+        true,
+    )
 }
 
 fn ensure_existing_projection_cleanup_lease_available(
@@ -802,8 +851,13 @@ fn open_projection_cleanup_metadata(
     directory: &lillux::PinnedDirectory,
     name: &std::ffi::OsStr,
 ) -> anyhow::Result<Option<fs::File>> {
-    let Some(file) = directory.open_mount_entry(name)? else { return Ok(None); };
-    anyhow::ensure!(file.metadata()?.is_file(), "projection cleanup entry is not regular");
+    let Some(file) = directory.open_mount_entry(name)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "projection cleanup entry is not regular"
+    );
     directory.ensure_open_regular_same_mount(&file)?;
     Ok(Some(file))
 }
@@ -2016,8 +2070,14 @@ impl PreparedOfflineProjection {
         factory.require_original_process()?;
         lease_authority.require_original(&factory, false)?;
         self.require_custody()?;
-        anyhow::ensure!(self.namespace_lock.is_some(), "original projection needs retained namespace exclusion");
-        anyhow::ensure!(guard.is_exclusive(), "original projection needs the actual exclusive CAS guard");
+        anyhow::ensure!(
+            self.namespace_lock.is_some(),
+            "original projection needs retained namespace exclusion"
+        );
+        anyhow::ensure!(
+            guard.is_exclusive(),
+            "original projection needs the actual exclusive CAS guard"
+        );
         guard.ensure_protects_pinned_runtime(&self.runtime_state_directory)?;
         factory.require_runtime_binding(&self.runtime_state_directory)?;
         // Do every fallible descriptor clone BEFORE the first native open.
@@ -2041,11 +2101,22 @@ impl PreparedOfflineProjection {
             )?
         };
         let projection = ProjectionDb::open_original_transient(Arc::clone(&factory), inputs)?;
-        let issued_destinations = OriginalProjectionBuildContext::issued_destination_slots(&factory)?;
-        Ok(state_owner.into_state(projection, Some(OriginalProjectionBuildContext {
-            factory, authority: OriginalProjectionStateOwner::Offline(native_owner), terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
-            issued_destinations,
-        })))
+        let issued_destinations =
+            OriginalProjectionBuildContext::issued_destination_slots(&factory)?;
+        Ok(state_owner.into_state(
+            projection,
+            Some(OriginalProjectionBuildContext {
+                factory,
+                authority: OriginalProjectionStateOwner::Offline(native_owner),
+                terminals: Vec::new(),
+                durable: Vec::new(),
+                retired_selected: Vec::new(),
+                schema_references: Mutex::new(Vec::new()),
+                generation_leases: Mutex::new(Vec::new()),
+                generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+                issued_destinations,
+            }),
+        ))
     }
 
     /// Open exactly the selected current projection generation for fail-only
@@ -2067,7 +2138,10 @@ impl PreparedOfflineProjection {
         factory.require_original_process()?;
         lease_authority.require_original(&factory, false)?;
         self.require_custody()?;
-        anyhow::ensure!(self.namespace_lock.is_some(), "projection verification needs retained namespace exclusion");
+        anyhow::ensure!(
+            self.namespace_lock.is_some(),
+            "projection verification needs retained namespace exclusion"
+        );
         factory.require_runtime_binding(&self.runtime_state_directory)?;
         let generation = self
             .recovery
@@ -2089,42 +2163,65 @@ impl PreparedOfflineProjection {
             outside_join: Mutex::new(std::sync::Weak::new()),
         });
         native_owner.require_binding(&factory)?;
-        let issued_destinations = OriginalProjectionBuildContext::issued_destination_slots(&factory)?;
+        let issued_destinations =
+            OriginalProjectionBuildContext::issued_destination_slots(&factory)?;
         let context = OriginalProjectionBuildContext {
-            factory, authority: OriginalProjectionStateOwner::Offline(native_owner), terminals: Vec::new(),
-            durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()),
-            generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+            factory,
+            authority: OriginalProjectionStateOwner::Offline(native_owner),
+            terminals: Vec::new(),
+            durable: Vec::new(),
+            retired_selected: Vec::new(),
+            schema_references: Mutex::new(Vec::new()),
+            generation_leases: Mutex::new(Vec::new()),
+            generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
             issued_destinations,
         };
-        let projection = match context.open_selected(&runtime, std::ffi::OsStr::new(&generation.projection_file)) {
+        let projection = match context
+            .open_selected(&runtime, std::ffi::OsStr::new(&generation.projection_file))
+        {
             Ok(projection) => projection,
             // The schema reference and any generation lease stay with the
             // context, which the refusal carries.
-            Err(error) => return Err(crate::operational::CarriedOwners::carry(
-                error.context("open selected projection for verification"), (context, lease_authority))),
+            Err(error) => {
+                return Err(crate::operational::CarriedOwners::carry(
+                    error.context("open selected projection for verification"),
+                    (context, lease_authority),
+                ));
+            }
         };
         // Verification is fail-only: the connection refuses every write from
         // here on, at the SQLite level.
         let read_only = projection.with_sql(|connection| {
-            connection.pragma_update(None, "query_only", "ON").context("set verification projection query_only")?;
+            connection
+                .pragma_update(None, "query_only", "ON")
+                .context("set verification projection query_only")?;
             let enforced: bool = connection.query_row("PRAGMA query_only", [], |row| row.get(0))?;
             anyhow::ensure!(enforced, "verification projection did not enter query_only");
             Ok(())
         });
         if let Err(error) = read_only {
             return Err(crate::operational::CarriedOwners::carry(
-                projection.retain_operation_failure(error), (context, lease_authority)));
+                projection.retain_operation_failure(error),
+                (context, lease_authority),
+            ));
         }
         let identity = projection.projection_instance_id();
         let matches = match identity {
             Ok(instance) => instance.as_deref() == Some(generation.projection_instance_id.as_str()),
-            Err(error) => return Err(crate::operational::CarriedOwners::carry(
-                projection.retain_operation_failure(error), (context, lease_authority))),
+            Err(error) => {
+                return Err(crate::operational::CarriedOwners::carry(
+                    projection.retain_operation_failure(error),
+                    (context, lease_authority),
+                ));
+            }
         };
         if !matches {
-            let error = anyhow::anyhow!("selected projection instance identity does not match generation");
+            let error =
+                anyhow::anyhow!("selected projection instance identity does not match generation");
             return Err(crate::operational::CarriedOwners::carry(
-                projection.retain_operation_failure(error), (context, lease_authority)));
+                projection.retain_operation_failure(error),
+                (context, lease_authority),
+            ));
         }
         // The context retains the lease authority by a weak edge; the caller's
         // host keeps the strong owner for the life of the store.
@@ -2134,7 +2231,11 @@ impl PreparedOfflineProjection {
 
     // The projection must already be owned by the selected opening path.
     // This private transfer neither opens SQL nor admits native allocation.
-    fn into_state(self, projection: ProjectionDb, original_projection_context: Option<OriginalProjectionBuildContext>) -> StateDb {
+    fn into_state(
+        self,
+        projection: ProjectionDb,
+        original_projection_context: Option<OriginalProjectionBuildContext>,
+    ) -> StateDb {
         StateDb {
             _runtime_state_directory: self.runtime_state_directory,
             _cas_directory: self.cas_directory,
@@ -2165,18 +2266,28 @@ enum OriginalProjectionStateOwner {
     Live(Arc<live_native::LiveStateNativeOwner>),
 }
 impl OriginalProjectionStateOwner {
-    fn require_binding(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_binding(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         match self {
             Self::Offline(owner) => owner.require_binding(factory),
-            Self::Live(owner) => lillux_sqlite::OriginalNativeDestinationAuthority::require_original(owner.as_ref(), factory),
+            Self::Live(owner) => {
+                lillux_sqlite::OriginalNativeDestinationAuthority::require_original(
+                    owner.as_ref(),
+                    factory,
+                )
+            }
         }
     }
     fn require_selected_runtime(&self, directory: &lillux::PinnedDirectory) -> anyhow::Result<()> {
         match self {
             Self::Offline(owner) => owner.require_selected_runtime(directory),
             Self::Live(owner) => {
-                anyhow::ensure!(directory.is_same_directory(owner.runtime())?,
-                    "live generated projection has foreign runtime");
+                anyhow::ensure!(
+                    directory.is_same_directory(owner.runtime())?,
+                    "live generated projection has foreign runtime"
+                );
                 owner.namespace().ensure_protects(directory)
             }
         }
@@ -2184,13 +2295,28 @@ impl OriginalProjectionStateOwner {
 }
 
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalProjectionStateOwner {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal, leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>)
-        -> Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
-        destination_join::transfer_leaf(destination_join::StateDestinationLeaf::State(self), factory, aggregate, leaf, prepay)
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
+        destination_join::transfer_leaf(
+            destination_join::StateDestinationLeaf::State(self),
+            factory,
+            aggregate,
+            leaf,
+            prepay,
+        )
     }
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         self.require_binding(factory)
     }
 }
@@ -2204,14 +2330,20 @@ struct OriginalProjectionSchemaAdmissionFailure {
 }
 impl std::fmt::Debug for OriginalProjectionSchemaAdmissionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalProjectionSchemaAdmissionFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OriginalProjectionSchemaAdmissionFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalProjectionSchemaAdmissionFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "projection schema admission retained: {}", self.error) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "projection schema admission retained: {}", self.error)
+    }
 }
 impl std::error::Error for OriginalProjectionSchemaAdmissionFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 pub(crate) struct OriginalProjectionBuildContext {
@@ -2233,11 +2365,18 @@ pub(crate) struct OriginalProjectionBuildContext {
 pub(crate) struct TestProjectionLeaseAuthority;
 #[cfg(all(test, feature = "test-support"))]
 impl lillux_sqlite::OriginalNativeProjectionLeaseAuthority for TestProjectionLeaseAuthority {
-    fn require_original(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool) -> anyhow::Result<()> {
+    fn require_original(
+        &self,
+        _factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _cleanup: bool,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("test State context admits no projection lease")
     }
-    fn fork_deadline(&self, _factory: &Arc<lillux_sqlite::OriginalNativeFactory>, _cleanup: bool)
-        -> anyhow::Result<lillux::time::MonotonicDeadline> {
+    fn fork_deadline(
+        &self,
+        _factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _cleanup: bool,
+    ) -> anyhow::Result<lillux::time::MonotonicDeadline> {
         anyhow::bail!("test State context admits no projection lease")
     }
 }
@@ -2253,7 +2392,10 @@ impl OriginalProjectionBuildContext {
         let factory = Arc::clone(host.factory());
         factory.require_original_process()?;
         preparation.require_custody()?;
-        anyhow::ensure!(preparation.namespace_lock.is_some(), "test State context needs retained namespace exclusion");
+        anyhow::ensure!(
+            preparation.namespace_lock.is_some(),
+            "test State context needs retained namespace exclusion"
+        );
         factory.require_runtime_binding(&preparation.runtime_state_directory)?;
         let native_owner = Arc::new(OriginalPreparedProjectionAuthority {
             preparation: Mutex::new(Some(preparation)),
@@ -2264,27 +2406,64 @@ impl OriginalProjectionBuildContext {
         native_owner.require_binding(&factory)?;
         let issued_destinations = Self::issued_destination_slots(&factory)?;
         Ok(Self {
-            factory, authority: OriginalProjectionStateOwner::Offline(native_owner), terminals: Vec::new(),
-            durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()),
-            generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+            factory,
+            authority: OriginalProjectionStateOwner::Offline(native_owner),
+            terminals: Vec::new(),
+            durable: Vec::new(),
+            retired_selected: Vec::new(),
+            schema_references: Mutex::new(Vec::new()),
+            generation_leases: Mutex::new(Vec::new()),
+            generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
             issued_destinations,
         })
     }
     /// Closed terminals for the test host's census. Refuses, returning the
     /// context, while it holds any bound, selected, schema or lease custody.
-    pub(crate) fn into_test_terminals(self)
-        -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, Self> {
-        let transient_only = self.durable.is_empty() && self.retired_selected.is_empty()
-            && self.schema_references.try_lock().is_ok_and(|references| references.is_empty())
-            && self.generation_leases.try_lock().is_ok_and(|leases| leases.is_empty());
-        if !transient_only { return Err(self); }
-        let Self { factory, authority, terminals, durable, retired_selected, schema_references,
-            generation_leases, generation_lease_attempts, issued_destinations } = self;
-        drop((factory, authority, durable, retired_selected, schema_references, generation_leases,
-            generation_lease_attempts, issued_destinations));
-        Ok(terminals.into_iter().map(lillux_sqlite::OriginalNativeConnectionTerminal::Closed).collect())
+    pub(crate) fn into_test_terminals(
+        self,
+    ) -> Result<Vec<lillux_sqlite::OriginalNativeConnectionTerminal>, Self> {
+        let transient_only = self.durable.is_empty()
+            && self.retired_selected.is_empty()
+            && self
+                .schema_references
+                .try_lock()
+                .is_ok_and(|references| references.is_empty())
+            && self
+                .generation_leases
+                .try_lock()
+                .is_ok_and(|leases| leases.is_empty());
+        if !transient_only {
+            return Err(self);
+        }
+        let Self {
+            factory,
+            authority,
+            terminals,
+            durable,
+            retired_selected,
+            schema_references,
+            generation_leases,
+            generation_lease_attempts,
+            issued_destinations,
+        } = self;
+        drop((
+            factory,
+            authority,
+            durable,
+            retired_selected,
+            schema_references,
+            generation_leases,
+            generation_lease_attempts,
+            issued_destinations,
+        ));
+        Ok(terminals
+            .into_iter()
+            .map(lillux_sqlite::OriginalNativeConnectionTerminal::Closed)
+            .collect())
     }
-    pub(crate) fn test_terminal_count(&self) -> usize { self.terminals.len() }
+    pub(crate) fn test_terminal_count(&self) -> usize {
+        self.terminals.len()
+    }
 }
 /// Non-owning record of one destination authority issued by a State context.
 enum StateIssuedDestination {
@@ -2301,9 +2480,12 @@ impl StateIssuedDestination {
 }
 impl OriginalProjectionBuildContext {
     /// One slot per destination leaf the original ticket bound admits.
-    fn issued_destination_slots(factory: &Arc<lillux_sqlite::OriginalNativeFactory>)
-        -> anyhow::Result<Mutex<Vec<StateIssuedDestination>>> {
-        let maximum = destination_join::maximum_state_destination_leaves(factory.maximum_resource_tickets()?)?;
+    fn issued_destination_slots(
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<Mutex<Vec<StateIssuedDestination>>> {
+        let maximum = destination_join::maximum_state_destination_leaves(
+            factory.maximum_resource_tickets()?,
+        )?;
         let mut slots = Vec::new();
         slots.try_reserve_exact(maximum)?;
         Ok(Mutex::new(slots))
@@ -2311,48 +2493,72 @@ impl OriginalProjectionBuildContext {
     /// Record an issued authority before any native effect. Dead entries are
     /// pruned first; a full list refuses, since each input owns one ticket.
     fn record_issued_destination(&self, issued: StateIssuedDestination) -> anyhow::Result<()> {
-        let maximum = destination_join::maximum_state_destination_leaves(self.factory.maximum_resource_tickets()?)?;
-        let mut slots = self.issued_destinations.try_lock()
+        let maximum = destination_join::maximum_state_destination_leaves(
+            self.factory.maximum_resource_tickets()?,
+        )?;
+        let mut slots = self
+            .issued_destinations
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
         // Fund the prune scan (one step per record) and the push before
         // touching the record.
-        let prune_steps = u64::try_from(slots.len())?.checked_add(1)
+        let prune_steps = u64::try_from(slots.len())?
+            .checked_add(1)
             .context("State destination issuance prune work overflow")?;
         self.factory.debit_issuance_steps(prune_steps)?;
         slots.retain(StateIssuedDestination::is_live);
-        anyhow::ensure!(slots.len() < maximum && slots.len() < slots.capacity(),
-            "State destination issuance exceeds its original ticket bound");
+        anyhow::ensure!(
+            slots.len() < maximum && slots.len() < slots.capacity(),
+            "State destination issuance exceeds its original ticket bound"
+        );
         slots.push(issued);
         Ok(())
     }
     /// Concrete Generated authority issued here for this `dyn` allocation.
-    fn issued_generated(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
-        -> anyhow::Result<Option<Arc<OriginalGeneratedProjectionAuthority>>> {
+    fn issued_generated(
+        &self,
+        authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    ) -> anyhow::Result<Option<Arc<OriginalGeneratedProjectionAuthority>>> {
         let address = Arc::as_ptr(authority).cast::<()>();
-        let slots = self.issued_destinations.try_lock()
+        let slots = self
+            .issued_destinations
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
         Ok(slots.iter().find_map(|issued| match issued {
-            StateIssuedDestination::Generated(weak) if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
-                weak.upgrade(),
+            StateIssuedDestination::Generated(weak)
+                if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
+            {
+                weak.upgrade()
+            }
             _ => None,
         }))
     }
     /// Concrete schema-reference authority issued here for this allocation.
-    fn issued_schema(&self, authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>)
-        -> anyhow::Result<Option<Arc<OriginalProjectionStateOwner>>> {
+    fn issued_schema(
+        &self,
+        authority: &Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
+    ) -> anyhow::Result<Option<Arc<OriginalProjectionStateOwner>>> {
         let address = Arc::as_ptr(authority).cast::<()>();
-        let slots = self.issued_destinations.try_lock()
+        let slots = self
+            .issued_destinations
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?;
         Ok(slots.iter().find_map(|issued| match issued {
-            StateIssuedDestination::Schema(weak) if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
-                weak.upgrade(),
+            StateIssuedDestination::Schema(weak)
+                if std::ptr::eq(weak.as_ptr().cast::<()>(), address) =>
+            {
+                weak.upgrade()
+            }
             _ => None,
         }))
     }
     /// Number of issuance records, bounding the identity scan of one take.
     pub(super) fn issued_destination_count(&self) -> anyhow::Result<usize> {
-        Ok(self.issued_destinations.try_lock()
-            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?.len())
+        Ok(self
+            .issued_destinations
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("State destination issuance record busy or poisoned"))?
+            .len())
     }
     /// Open the transient expected projection that verification rederives,
     /// on a fresh State ticket under this context's State owner. The issued
@@ -2365,15 +2571,23 @@ impl OriginalProjectionBuildContext {
         // SAFETY: the actual prepared State owner retains all roots, recovery,
         // trust and namespace; this purpose admits only a transient in-memory
         // projection that never reaches State storage.
-        let inputs = unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
-            lillux_sqlite::OriginalNativeDomain::StateTransient, authority,
-        )? };
+        let inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::StateTransient,
+                authority,
+            )?
+        };
         ProjectionDb::open_original_transient(Arc::clone(&self.factory), inputs)
     }
     /// Close the expected projection and retain its genuine terminal here.
     /// A refused close keeps the actual connection in the returned error.
-    pub(crate) fn retain_closed_expected_projection(&mut self, expected: ProjectionDb) -> anyhow::Result<()> {
-        let closed = expected.close_original(&self.factory).map_err(anyhow::Error::new)?;
+    pub(crate) fn retain_closed_expected_projection(
+        &mut self,
+        expected: ProjectionDb,
+    ) -> anyhow::Result<()> {
+        let closed = expected
+            .close_original(&self.factory)
+            .map_err(anyhow::Error::new)?;
         self.terminals.push(closed.native_proof());
         closed.require_original(&self.factory)
     }
@@ -2385,7 +2599,11 @@ impl OriginalProjectionBuildContext {
     ) -> anyhow::Result<ProjectionDb> {
         self.open_bound(directory, name, durable, false)
     }
-    fn open_selected(&self, directory: &lillux::PinnedDirectory, name: &std::ffi::OsStr) -> anyhow::Result<ProjectionDb> {
+    fn open_selected(
+        &self,
+        directory: &lillux::PinnedDirectory,
+        name: &std::ffi::OsStr,
+    ) -> anyhow::Result<ProjectionDb> {
         self.open_bound(directory, name, None, true)
     }
     fn open_bound(
@@ -2402,27 +2620,42 @@ impl OriginalProjectionBuildContext {
         let expected_identity = if selected {
             // Observe the selected inode through metadata only; never open a
             // second SQLite data descriptor beside the native Bound owner.
-            let file = directory.open_mount_entry(name)?.context("selected projection absent")?;
-            anyhow::ensure!(file.metadata()?.is_file(), "selected projection is not regular");
+            let file = directory
+                .open_mount_entry(name)?
+                .context("selected projection absent")?;
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "selected projection is not regular"
+            );
             directory.ensure_open_regular_same_mount(&file)?;
-            #[cfg(unix)] {
+            #[cfg(unix)]
+            {
                 use std::os::unix::fs::MetadataExt;
                 let metadata = file.metadata()?;
                 Some((metadata.dev(), metadata.ino()))
             }
             #[cfg(not(unix))]
             anyhow::bail!("selected projection inode identity unavailable");
-        } else { durable.map(|proof| proof.main_identity()) };
+        } else {
+            durable.map(|proof| proof.main_identity())
+        };
         let schema_owner = Arc::new(self.authority.clone());
-        self.record_issued_destination(StateIssuedDestination::Schema(Arc::downgrade(&schema_owner)))?;
-        let schema_authority: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> = schema_owner;
+        self.record_issued_destination(StateIssuedDestination::Schema(Arc::downgrade(
+            &schema_owner,
+        )))?;
+        let schema_authority: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority> =
+            schema_owner;
         // SAFETY: the actual prepared State owner retains all roots, recovery,
         // trust and namespace; this purpose admits only a transient reference.
-        let schema_inputs = unsafe { lillux_sqlite::OriginalNativeTransientInputs::issued(
-            lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference, schema_authority,
-        )? };
+        let schema_inputs = unsafe {
+            lillux_sqlite::OriginalNativeTransientInputs::issued(
+                lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference,
+                schema_authority,
+            )?
+        };
         let reference = Arc::new(crate::sqlite_schema::prepare_native_schema_sql_reference(
-            Arc::clone(&self.factory), schema_inputs,
+            Arc::clone(&self.factory),
+            schema_inputs,
             lillux_sqlite::OriginalNativeDomain::NodeProjectionSchemaReference,
             crate::projection::projection_schema_sql(),
         )?);
@@ -2430,96 +2663,146 @@ impl OriginalProjectionBuildContext {
         // effect. Native close cannot discard a receipt needed by its census.
         match self.schema_references.try_lock() {
             Ok(mut references) => references.push(Arc::clone(&reference)),
-            Err(_) => return Err(anyhow::Error::new(OriginalProjectionSchemaAdmissionFailure {
-                error: anyhow::anyhow!("actual projection schema receipt custody busy"),
-                _reference: reference, _owner: self.authority.clone(),
-            })),
+            Err(_) => {
+                return Err(anyhow::Error::new(
+                    OriginalProjectionSchemaAdmissionFailure {
+                        error: anyhow::anyhow!("actual projection schema receipt custody busy"),
+                        _reference: reference,
+                        _owner: self.authority.clone(),
+                    },
+                ));
+            }
         }
         let opened = (|| -> anyhow::Result<ProjectionDb> {
-        reference.terminal().require_original(&self.factory)?;
-        let destination = Arc::new(OriginalGeneratedProjectionAuthority {
-            preparation: self.authority.clone(), schema_reference: Arc::downgrade(&reference), root: Arc::clone(&root),
-            name: name.to_os_string(), expected_identity,
-        });
-        destination.require_binding(&self.factory)?;
-        self.record_issued_destination(StateIssuedDestination::Generated(Arc::downgrade(&destination)))?;
-        // SAFETY: this private State caller retains the actual original roots,
-        // trust/recovery/namespace and same factory. Existing reopen also
-        // retains the real durable source and checks its exact inode before
-        // admission and after native open. The outer builder holds CAS guard.
-        let creation_root = Arc::clone(&root);
-        let inputs = unsafe {
-            lillux_sqlite::OriginalNativeBoundInputs::issued(
-                root, name,
-                if selected || durable.is_some() { lillux_sqlite::OriginalNativeBoundMode::Existing }
-                else { lillux_sqlite::OriginalNativeBoundMode::CreateExclusive },
-                if selected { lillux_sqlite::OriginalNativeDomain::NodeProjection }
-                else { lillux_sqlite::OriginalNativeDomain::StateGeneratedProjection },
-                destination, None,
-            )?
-        };
-        let lease = if let Some(proof) = durable {
-            proof.require_original(&self.factory)?;
-            proof.require_coordinate(directory, name)?;
-            proof.clone_lease()?
-        } else {
-            // Bound every original generation preparation BEFORE creating a
-            // sidecar or allocating its retained inputs. This is the actual
-            // original resident budget's signed maximum, not a fresh allowance.
-            // Refusals stay charged as attempts; no retry remints this slot.
-            let maximum = self.factory.maximum_resource_tickets()?;
-            self.generation_lease_attempts.fetch_update(
-                std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire,
-                |current| current.checked_add(1).filter(|next| *next <= maximum),
-            ).map_err(|_| anyhow::anyhow!("original generation preparation envelope exhausted"))?;
-            let mut lease_name = name.to_os_string();
-            lease_name.push(".lease");
-            // An existing sidecar is observed through O_PATH only. A data
-            // open followed by close could release SQLite's POSIX locks if a
-            // hostile/stale sidecar aliases a live main/WAL/SHM inode, before
-            // native alias refusal gets a chance to run. Only genuine O_EXCL
-            // creation may acquire a fresh data descriptor at this boundary.
-            let lease = if selected {
-                match creation_root.open_mount_entry(&lease_name)? {
-                    Some(metadata) => {
-                        creation_root.ensure_open_regular_same_mount(&metadata)?;
-                        metadata
+            reference.terminal().require_original(&self.factory)?;
+            let destination = Arc::new(OriginalGeneratedProjectionAuthority {
+                preparation: self.authority.clone(),
+                schema_reference: Arc::downgrade(&reference),
+                root: Arc::clone(&root),
+                name: name.to_os_string(),
+                expected_identity,
+            });
+            destination.require_binding(&self.factory)?;
+            self.record_issued_destination(StateIssuedDestination::Generated(Arc::downgrade(
+                &destination,
+            )))?;
+            // SAFETY: this private State caller retains the actual original roots,
+            // trust/recovery/namespace and same factory. Existing reopen also
+            // retains the real durable source and checks its exact inode before
+            // admission and after native open. The outer builder holds CAS guard.
+            let creation_root = Arc::clone(&root);
+            let inputs = unsafe {
+                lillux_sqlite::OriginalNativeBoundInputs::issued(
+                    root,
+                    name,
+                    if selected || durable.is_some() {
+                        lillux_sqlite::OriginalNativeBoundMode::Existing
+                    } else {
+                        lillux_sqlite::OriginalNativeBoundMode::CreateExclusive
+                    },
+                    if selected {
+                        lillux_sqlite::OriginalNativeDomain::NodeProjection
+                    } else {
+                        lillux_sqlite::OriginalNativeDomain::StateGeneratedProjection
+                    },
+                    destination,
+                    None,
+                )?
+            };
+            let lease = if let Some(proof) = durable {
+                proof.require_original(&self.factory)?;
+                proof.require_coordinate(directory, name)?;
+                proof.clone_lease()?
+            } else {
+                // Bound every original generation preparation BEFORE creating a
+                // sidecar or allocating its retained inputs. This is the actual
+                // original resident budget's signed maximum, not a fresh allowance.
+                // Refusals stay charged as attempts; no retry remints this slot.
+                let maximum = self.factory.maximum_resource_tickets()?;
+                self.generation_lease_attempts
+                    .fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |current| current.checked_add(1).filter(|next| *next <= maximum),
+                    )
+                    .map_err(|_| {
+                        anyhow::anyhow!("original generation preparation envelope exhausted")
+                    })?;
+                let mut lease_name = name.to_os_string();
+                lease_name.push(".lease");
+                // An existing sidecar is observed through O_PATH only. A data
+                // open followed by close could release SQLite's POSIX locks if a
+                // hostile/stale sidecar aliases a live main/WAL/SHM inode, before
+                // native alias refusal gets a chance to run. Only genuine O_EXCL
+                // creation may acquire a fresh data descriptor at this boundary.
+                let lease = if selected {
+                    match creation_root.open_mount_entry(&lease_name)? {
+                        Some(metadata) => {
+                            creation_root.ensure_open_regular_same_mount(&metadata)?;
+                            metadata
+                        }
+                        None => creation_root.create_regular_exclusive(&lease_name, 0o600)?,
                     }
-                    None => creation_root.create_regular_exclusive(&lease_name, 0o600)?,
-                }
-            } else { creation_root.create_regular_exclusive(&lease_name, 0o600)? };
-            if let Err(error) = directory.sync() {
-                return Err(anyhow::Error::new(OriginalProjectionLeaseSetupFailure {
-                    error, _lease: lease, _directory: retained_directory,
-                    _name: lease_name, _factory: Arc::clone(&self.factory),
-                }));
-            }
-            // Neither producer acquires an unaccounted raw-file flock. The
-            // creation descriptor gives way to the exact metadata coordinate;
-            // the shared native mechanism owns the paid lock and its terminal.
-            drop(lease);
-            let authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
-                match &self.authority {
-                    OriginalProjectionStateOwner::Offline(owner) => owner.lease_authority.upgrade()
-                        .context("original offline lease authority retired")?,
-                    OriginalProjectionStateOwner::Live(owner) => owner.clone(),
+                } else {
+                    creation_root.create_regular_exclusive(&lease_name, 0o600)?
                 };
-            authority.require_original(&self.factory, false)?;
-            // SAFETY: each trusted construction boundary retains the actual
-            // original issuer, funding, clocks and namespace through settlement.
-            let native = unsafe { crate::projection::OriginalGenerationLease::prepare(
-                Arc::clone(&self.factory), directory.try_clone()?, lease_name, authority) }?;
-            self.generation_leases.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(Arc::clone(&native));
-            native.acquire()?;
-            native
-        };
-        ProjectionDb::open_original_generated(Arc::clone(&self.factory), inputs,
-            retained_directory, name.to_os_string(), lease, !selected && durable.is_none(), expected_identity, reference.definition())
+                if let Err(error) = directory.sync() {
+                    return Err(anyhow::Error::new(OriginalProjectionLeaseSetupFailure {
+                        error,
+                        _lease: lease,
+                        _directory: retained_directory,
+                        _name: lease_name,
+                        _factory: Arc::clone(&self.factory),
+                    }));
+                }
+                // Neither producer acquires an unaccounted raw-file flock. The
+                // creation descriptor gives way to the exact metadata coordinate;
+                // the shared native mechanism owns the paid lock and its terminal.
+                drop(lease);
+                let authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority> =
+                    match &self.authority {
+                        OriginalProjectionStateOwner::Offline(owner) => owner
+                            .lease_authority
+                            .upgrade()
+                            .context("original offline lease authority retired")?,
+                        OriginalProjectionStateOwner::Live(owner) => owner.clone(),
+                    };
+                authority.require_original(&self.factory, false)?;
+                // SAFETY: each trusted construction boundary retains the actual
+                // original issuer, funding, clocks and namespace through settlement.
+                let native = unsafe {
+                    crate::projection::OriginalGenerationLease::prepare(
+                        Arc::clone(&self.factory),
+                        directory.try_clone()?,
+                        lease_name,
+                        authority,
+                    )
+                }?;
+                self.generation_leases
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Arc::clone(&native));
+                native.acquire()?;
+                native
+            };
+            ProjectionDb::open_original_generated(
+                Arc::clone(&self.factory),
+                inputs,
+                retained_directory,
+                name.to_os_string(),
+                lease,
+                !selected && durable.is_none(),
+                expected_identity,
+                reference.definition(),
+            )
         })();
-        opened.map_err(|error| anyhow::Error::new(OriginalProjectionSchemaAdmissionFailure {
-            error, _reference: reference, _owner: self.authority.clone(),
-        }))
+        opened.map_err(|error| {
+            anyhow::Error::new(OriginalProjectionSchemaAdmissionFailure {
+                error,
+                _reference: reference,
+                _owner: self.authority.clone(),
+            })
+        })
     }
 }
 // A real exclusive file effect before SQLite admission, retained on every
@@ -2533,14 +2816,20 @@ struct OriginalProjectionLeaseSetupFailure {
 }
 impl std::fmt::Debug for OriginalProjectionLeaseSetupFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OriginalProjectionLeaseSetupFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("OriginalProjectionLeaseSetupFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for OriginalProjectionLeaseSetupFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.error.fmt(f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 impl std::error::Error for OriginalProjectionLeaseSetupFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 struct OriginalGeneratedProjectionAuthority {
@@ -2551,20 +2840,31 @@ struct OriginalGeneratedProjectionAuthority {
     expected_identity: Option<(u64, u64)>,
 }
 impl OriginalGeneratedProjectionAuthority {
-    fn require_binding(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_binding(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         self.preparation.require_binding(factory)?;
-        self.schema_reference.upgrade().context("original generated schema reference retired")?
-            .terminal().require_original(factory)?;
+        self.schema_reference
+            .upgrade()
+            .context("original generated schema reference retired")?
+            .terminal()
+            .require_original(factory)?;
         self.root.ensure_path_binding()?;
         self.preparation.require_selected_runtime(&self.root)?;
         if let Some(expected) = self.expected_identity {
-            let file = self.root.open_mount_entry(&self.name)?
+            let file = self
+                .root
+                .open_mount_entry(&self.name)?
                 .context("original selected projection coordinate absent")?;
-            #[cfg(unix)] {
+            #[cfg(unix)]
+            {
                 use std::os::unix::fs::MetadataExt;
                 let metadata = file.metadata()?;
-                anyhow::ensure!(metadata.file_type().is_file() && (metadata.dev(), metadata.ino()) == expected,
-                    "original selected projection coordinate changed");
+                anyhow::ensure!(
+                    metadata.file_type().is_file() && (metadata.dev(), metadata.ino()) == expected,
+                    "original selected projection coordinate changed"
+                );
             }
             #[cfg(not(unix))]
             anyhow::bail!("original selected inode identity unavailable");
@@ -2573,13 +2873,28 @@ impl OriginalGeneratedProjectionAuthority {
     }
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalGeneratedProjectionAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal, leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>)
-        -> Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
-        destination_join::transfer_leaf(destination_join::StateDestinationLeaf::Generated(self), factory, aggregate, leaf, prepay)
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
+        destination_join::transfer_leaf(
+            destination_join::StateDestinationLeaf::Generated(self),
+            factory,
+            aggregate,
+            leaf,
+            prepay,
+        )
     }
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         self.require_binding(factory)
     }
 }
@@ -2596,14 +2911,20 @@ struct GeneratedProjectionPublicationFailure {
 }
 impl std::fmt::Debug for GeneratedProjectionPublicationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GeneratedProjectionPublicationFailure").field("error", &self.error).finish_non_exhaustive()
+        f.debug_struct("GeneratedProjectionPublicationFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for GeneratedProjectionPublicationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.error.fmt(f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 impl std::error::Error for GeneratedProjectionPublicationFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.error.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 // Native allocation authority remains distinct from CAS mutation authority.
@@ -2619,39 +2940,80 @@ struct OriginalPreparedProjectionAuthority {
     lease_authority: std::sync::Weak<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
 }
 impl OriginalPreparedProjectionAuthority {
-    fn require_binding(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_binding(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         let preparation = self.preparation.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => anyhow::Error::new(lillux_sqlite::NativeCheckContended)
-                .context("original State preparation owner busy"),
-            std::sync::TryLockError::Poisoned(_) => anyhow::anyhow!("original State preparation owner poisoned"),
+            std::sync::TryLockError::WouldBlock => {
+                anyhow::Error::new(lillux_sqlite::NativeCheckContended)
+                    .context("original State preparation owner busy")
+            }
+            std::sync::TryLockError::Poisoned(_) => {
+                anyhow::anyhow!("original State preparation owner poisoned")
+            }
         })?;
-        let preparation = preparation.as_ref().context("original State preparation transferred to finalizer")?;
+        let preparation = preparation
+            .as_ref()
+            .context("original State preparation transferred to finalizer")?;
         preparation.require_custody()?;
-        anyhow::ensure!(preparation.namespace_lock.is_some(), "original State namespace exclusion absent");
-        let original = self.factory.upgrade().context("original State factory owner absent")?;
-        anyhow::ensure!(original.same_original(factory), "original State factory identity changed");
+        anyhow::ensure!(
+            preparation.namespace_lock.is_some(),
+            "original State namespace exclusion absent"
+        );
+        let original = self
+            .factory
+            .upgrade()
+            .context("original State factory owner absent")?;
+        anyhow::ensure!(
+            original.same_original(factory),
+            "original State factory identity changed"
+        );
         factory.require_runtime_binding(&preparation.runtime_state_directory)
     }
     fn require_selected_runtime(&self, directory: &lillux::PinnedDirectory) -> anyhow::Result<()> {
         let preparation = self.preparation.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => anyhow::Error::new(lillux_sqlite::NativeCheckContended)
-                .context("original State preparation owner busy"),
-            std::sync::TryLockError::Poisoned(_) => anyhow::anyhow!("original State preparation owner poisoned"),
+            std::sync::TryLockError::WouldBlock => {
+                anyhow::Error::new(lillux_sqlite::NativeCheckContended)
+                    .context("original State preparation owner busy")
+            }
+            std::sync::TryLockError::Poisoned(_) => {
+                anyhow::anyhow!("original State preparation owner poisoned")
+            }
         })?;
-        let preparation = preparation.as_ref().context("original State preparation transferred to finalizer")?;
-        anyhow::ensure!(directory.is_same_directory(&preparation.runtime_state_directory)?,
-            "original generated projection has foreign runtime");
+        let preparation = preparation
+            .as_ref()
+            .context("original State preparation transferred to finalizer")?;
+        anyhow::ensure!(
+            directory.is_same_directory(&preparation.runtime_state_directory)?,
+            "original generated projection has foreign runtime"
+        );
         Ok(())
     }
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OriginalPreparedProjectionAuthority {
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        aggregate: &lillux_sqlite::OriginalNativeTerminal, leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>)
-        -> Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
-        destination_join::transfer_leaf(destination_join::StateDestinationLeaf::Prepared(self), factory, aggregate, leaf, prepay)
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
+        destination_join::transfer_leaf(
+            destination_join::StateDestinationLeaf::Prepared(self),
+            factory,
+            aggregate,
+            leaf,
+            prepay,
+        )
     }
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         self.require_binding(factory)
     }
 }
@@ -2665,22 +3027,36 @@ struct OfflineNativeStateDestination {
     host: Arc<dyn lillux_sqlite::OriginalNativeDestinationAuthority>,
 }
 impl lillux_sqlite::OriginalNativeDestinationAuthority for OfflineNativeStateDestination {
-    fn require_original(&self, factory: &Arc<lillux_sqlite::OriginalNativeFactory>) -> anyhow::Result<()> {
+    fn require_original(
+        &self,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+    ) -> anyhow::Result<()> {
         self.preparation.require_custody()?;
-        anyhow::ensure!(self.preparation.namespace_lock.is_some(), "offline State namespace exclusion absent");
+        anyhow::ensure!(
+            self.preparation.namespace_lock.is_some(),
+            "offline State namespace exclusion absent"
+        );
         // Close and cleanup pass here after admission closes, so the factory's
         // admission-window runtime binding is checked once at open; the
         // host's destination enforces its own windows.
         self.host.require_original(factory)
     }
-    fn into_outside_custody(self: Arc<Self>, factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
-        _aggregate: &lillux_sqlite::OriginalNativeTerminal, _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
-        _prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>)
-        -> Result<lillux_sqlite::OriginalDestinationOutsideCustody, lillux_sqlite::OriginalDestinationCustodyFailure> {
+    fn into_outside_custody(
+        self: Arc<Self>,
+        factory: &Arc<lillux_sqlite::OriginalNativeFactory>,
+        _aggregate: &lillux_sqlite::OriginalNativeTerminal,
+        _leaf: &lillux_sqlite::OriginalNativeOutsideLeafEvidence,
+        _prepay: &dyn Fn(u64, u64) -> anyhow::Result<()>,
+    ) -> Result<
+        lillux_sqlite::OriginalDestinationOutsideCustody,
+        lillux_sqlite::OriginalDestinationCustodyFailure,
+    > {
         Err(lillux_sqlite::OriginalDestinationCustodyFailure::retain(
             factory.clone(),
             self,
-            anyhow::anyhow!("offline native State projection finishes in-process; no outside custody receiver"),
+            anyhow::anyhow!(
+                "offline native State projection finishes in-process; no outside custody receiver"
+            ),
         ))
     }
 }
@@ -3032,7 +3408,12 @@ impl StateDb {
     /// The live State parent of an open store, for frames built directly in
     /// tests.
     pub(crate) fn live_native_owner_for_test(&self) -> Arc<live_native::LiveStateNativeOwner> {
-        match &self.original_projection_context.as_ref().expect("live State context").authority {
+        match &self
+            .original_projection_context
+            .as_ref()
+            .expect("live State context")
+            .authority
+        {
             OriginalProjectionStateOwner::Live(owner) => Arc::clone(owner),
             OriginalProjectionStateOwner::Offline(_) => panic!("a live State has a live parent"),
         }
@@ -3061,12 +3442,16 @@ impl StateDb {
     ) -> anyhow::Result<Self> {
         factory.require_original_process()?;
         factory.require_runtime_binding(&runtime_state_directory)?;
-        let prepared = PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
+        let prepared =
+            PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
         let state_destination = Arc::new(OfflineNativeStateDestination {
             preparation: prepared.try_clone_preparation()?,
             host: destination,
         });
-        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(state_destination.as_ref(), factory)?;
+        lillux_sqlite::OriginalNativeDestinationAuthority::require_original(
+            state_destination.as_ref(),
+            factory,
+        )?;
         // SAFETY: StateTransient requires the actual prepared State custody.
         // `state_destination` retains a clone of the same captured roots,
         // recovery, trust and namespace exclusion this store keeps, and
@@ -3108,7 +3493,8 @@ impl StateDb {
         factory.require_original_process()?;
         factory.require_runtime_binding(&runtime_state_directory)?;
         lease_authority.require_original(factory, false)?;
-        let prepared = PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
+        let prepared =
+            PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
         let state_owner = prepared.try_clone_preparation()?;
         let native_owner = Arc::new(OriginalPreparedProjectionAuthority {
             preparation: Mutex::new(Some(prepared)),
@@ -3118,7 +3504,8 @@ impl StateDb {
         });
         native_owner.require_binding(factory)?;
         // Reserve the issuance record before the first native owner exists.
-        let issued_destinations = OriginalProjectionBuildContext::issued_destination_slots(factory)?;
+        let issued_destinations =
+            OriginalProjectionBuildContext::issued_destination_slots(factory)?;
         // SAFETY: the prepared State owner retains the captured roots, trust,
         // recovery and namespace exclusion and revalidates them on every
         // native boundary; the factory's runtime binding was checked above and
@@ -3130,12 +3517,20 @@ impl StateDb {
             )?
         };
         let projection = ProjectionDb::open_original_transient(Arc::clone(factory), inputs)?;
-        Ok(state_owner.into_state(projection, Some(OriginalProjectionBuildContext {
-            factory: Arc::clone(factory), authority: OriginalProjectionStateOwner::Offline(native_owner),
-            terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(),
-            schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()),
-            generation_lease_attempts: std::sync::atomic::AtomicU32::new(0), issued_destinations,
-        })))
+        Ok(state_owner.into_state(
+            projection,
+            Some(OriginalProjectionBuildContext {
+                factory: Arc::clone(factory),
+                authority: OriginalProjectionStateOwner::Offline(native_owner),
+                terminals: Vec::new(),
+                durable: Vec::new(),
+                retired_selected: Vec::new(),
+                schema_references: Mutex::new(Vec::new()),
+                generation_leases: Mutex::new(Vec::new()),
+                generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+                issued_destinations,
+            }),
+        ))
     }
 
     /// Close a store opened by [`Self::open_offline_native`] or
@@ -3156,13 +3551,17 @@ impl StateDb {
     ) -> std::result::Result<LiveStateCensus, (Option<Self>, anyhow::Error)> {
         let checked = (|| -> anyhow::Result<()> {
             factory.require_original_process()?;
-            anyhow::ensure!(matches!(self.operational, OperationalAccess::ProjectionMaintenance)
-                && self._offline_namespace_lock.is_some(),
-                "offline native close refused: State was not opened offline under retained namespace exclusion");
+            anyhow::ensure!(
+                matches!(self.operational, OperationalAccess::ProjectionMaintenance)
+                    && self._offline_namespace_lock.is_some(),
+                "offline native close refused: State was not opened offline under retained namespace exclusion"
+            );
             if let Some(context) = &self.original_projection_context {
-                anyhow::ensure!(context.factory.same_original(factory)
-                    && matches!(&context.authority, OriginalProjectionStateOwner::Offline(_)),
-                    "offline native close refused: foreign or live projection build context");
+                anyhow::ensure!(
+                    context.factory.same_original(factory)
+                        && matches!(&context.authority, OriginalProjectionStateOwner::Offline(_)),
+                    "offline native close refused: foreign or live projection build context"
+                );
             }
             for retired in &self.original_projection_terminals {
                 retired.require_original(factory)?;
@@ -3195,10 +3594,19 @@ impl StateDb {
             Ok(closed) => closed,
             Err(failure) => {
                 let error = anyhow::anyhow!("close offline native State projection: {failure}");
-                return Err((None, crate::operational::CarriedOwners::carry(
-                    crate::operational::CarriedOwners::carry(error, failure),
-                    (original_projection_context, original_projection_terminals, recovery,
-                        _offline_namespace_lock, _runtime_state_directory))));
+                return Err((
+                    None,
+                    crate::operational::CarriedOwners::carry(
+                        crate::operational::CarriedOwners::carry(error, failure),
+                        (
+                            original_projection_context,
+                            original_projection_terminals,
+                            recovery,
+                            _offline_namespace_lock,
+                            _runtime_state_directory,
+                        ),
+                    ),
+                ));
             }
         };
         let (outside, proof) = closed.into_outside_custody();
@@ -3238,9 +3646,8 @@ impl StateDb {
                     // SAFETY: every generation consumer, the current, staged
                     // and retired projections, closed above or earlier; an
                     // offline store published no service consumer.
-                    if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }? {
-                        if !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
-                    }
+                    if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }?
+                        && !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
                 }
             }
             let mut census: Vec<_> = closed_connections.into_iter()
@@ -3257,15 +3664,35 @@ impl StateDb {
                 drop(outside);
                 drop(original_projection_context);
                 drop(original_projection_terminals);
-                drop((recovery, _cas_directory, _refs_directory, _locators_directory, _recovery_directory));
+                drop((
+                    recovery,
+                    _cas_directory,
+                    _refs_directory,
+                    _locators_directory,
+                    _recovery_directory,
+                ));
                 drop((_runtime_state_directory, _offline_namespace_lock));
-                Ok(LiveStateCensus { terminals, leases,
-                    lease_retirement: GenerationLeaseRetirement::new(owners), prior_refusal: None })
+                Ok(LiveStateCensus {
+                    terminals,
+                    leases,
+                    lease_retirement: GenerationLeaseRetirement::new(owners),
+                    prior_refusal: None,
+                })
             }
-            Err(error) => Err((None, crate::operational::CarriedOwners::carry(
-                error.context("offline native State census refused"),
-                (outside, original_projection_context, original_projection_terminals, recovery,
-                    _offline_namespace_lock, _runtime_state_directory)))),
+            Err(error) => Err((
+                None,
+                crate::operational::CarriedOwners::carry(
+                    error.context("offline native State census refused"),
+                    (
+                        outside,
+                        original_projection_context,
+                        original_projection_terminals,
+                        recovery,
+                        _offline_namespace_lock,
+                        _runtime_state_directory,
+                    ),
+                ),
+            )),
         }
     }
 
@@ -3287,7 +3714,8 @@ impl StateDb {
     ) -> anyhow::Result<Self> {
         factory.require_original_process()?;
         factory.require_runtime_binding(&runtime_state_directory)?;
-        let prepared = PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
+        let prepared =
+            PreparedOfflineProjection::capture(runtime_state_directory, trust_store, namespace)?;
         // SAFETY: forwarded from this function's contract.
         unsafe { prepared.open_selected_for_verification(Arc::clone(factory), lease_authority) }
     }
@@ -3304,18 +3732,28 @@ impl StateDb {
     ) -> std::result::Result<LiveStateCensus, (Option<Self>, anyhow::Error)> {
         let checked = (|| -> anyhow::Result<()> {
             factory.require_original_process()?;
-            anyhow::ensure!(matches!(self.operational, OperationalAccess::ProjectionMaintenance)
-                && self._offline_namespace_lock.is_some(),
-                "verification close refused: State was not opened offline under retained namespace exclusion");
-            anyhow::ensure!(self.original_projection_terminals.is_empty(),
-                "verification close refused: State retired a projection");
-            let context = self.original_projection_context.as_ref()
+            anyhow::ensure!(
+                matches!(self.operational, OperationalAccess::ProjectionMaintenance)
+                    && self._offline_namespace_lock.is_some(),
+                "verification close refused: State was not opened offline under retained namespace exclusion"
+            );
+            anyhow::ensure!(
+                self.original_projection_terminals.is_empty(),
+                "verification close refused: State retired a projection"
+            );
+            let context = self
+                .original_projection_context
+                .as_ref()
                 .context("verification close refused: State lacks its native projection context")?;
-            anyhow::ensure!(context.factory.same_original(factory)
-                && matches!(&context.authority, OriginalProjectionStateOwner::Offline(_)),
-                "verification close refused: foreign or live projection context");
-            anyhow::ensure!(context.durable.is_empty() && context.retired_selected.is_empty(),
-                "verification close refused: State built or retired a projection generation");
+            anyhow::ensure!(
+                context.factory.same_original(factory)
+                    && matches!(&context.authority, OriginalProjectionStateOwner::Offline(_)),
+                "verification close refused: foreign or live projection context"
+            );
+            anyhow::ensure!(
+                context.durable.is_empty() && context.retired_selected.is_empty(),
+                "verification close refused: State built or retired a projection generation"
+            );
             Ok(())
         })();
         if let Err(error) = checked {
@@ -3345,9 +3783,18 @@ impl StateDb {
             Ok(closed) => closed,
             Err(failure) => {
                 let error = anyhow::anyhow!("close verification projection: {failure}");
-                return Err((None, crate::operational::CarriedOwners::carry(
-                    crate::operational::CarriedOwners::carry(error, failure),
-                    (context, recovery, _offline_namespace_lock, _runtime_state_directory))));
+                return Err((
+                    None,
+                    crate::operational::CarriedOwners::carry(
+                        crate::operational::CarriedOwners::carry(error, failure),
+                        (
+                            context,
+                            recovery,
+                            _offline_namespace_lock,
+                            _runtime_state_directory,
+                        ),
+                    ),
+                ));
             }
         };
         let (outside, proof) = closed.into_outside_custody();
@@ -3370,9 +3817,8 @@ impl StateDb {
             for lease in generation_leases.iter() {
                 // SAFETY: the only generation consumer, the selected
                 // projection, closed above; this store published nothing.
-                if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }? {
-                    if !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
-                }
+                if let Some(terminal) = unsafe { lease.close_after_consumers(factory) }?
+                    && !leases.iter().any(|prior| Arc::ptr_eq(prior, &terminal)) { leases.push(terminal); }
             }
             Ok((terminals, leases, generation_leases))
         })();
@@ -3382,14 +3828,34 @@ impl StateDb {
                 // custody, the context and the roots end here.
                 drop(outside);
                 drop(context);
-                drop((recovery, _cas_directory, _refs_directory, _locators_directory, _recovery_directory));
+                drop((
+                    recovery,
+                    _cas_directory,
+                    _refs_directory,
+                    _locators_directory,
+                    _recovery_directory,
+                ));
                 drop((_offline_namespace_lock, _runtime_state_directory));
-                Ok(LiveStateCensus { terminals, leases,
-                    lease_retirement: GenerationLeaseRetirement::new(owners), prior_refusal: None })
+                Ok(LiveStateCensus {
+                    terminals,
+                    leases,
+                    lease_retirement: GenerationLeaseRetirement::new(owners),
+                    prior_refusal: None,
+                })
             }
-            Err(error) => Err((None, crate::operational::CarriedOwners::carry(
-                error.context("verification projection census refused"),
-                (outside, context, recovery, _offline_namespace_lock, _runtime_state_directory)))),
+            Err(error) => Err((
+                None,
+                crate::operational::CarriedOwners::carry(
+                    error.context("verification projection census refused"),
+                    (
+                        outside,
+                        context,
+                        recovery,
+                        _offline_namespace_lock,
+                        _runtime_state_directory,
+                    ),
+                ),
+            )),
         }
     }
 
@@ -3414,9 +3880,23 @@ impl StateDb {
         lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> anyhow::Result<Self> {
-        Self::open_with_options(runtime_state_dir, projection_repair_sink, trust_store, observer,
-            runtime_liveness, RuntimeStateNamespaceAuthority { directory: runtime_state_directory, lock: runtime_state_lock },
-            live_native::LiveStateNativeHost { factory, authority: host, lease_authority, deadline })
+        Self::open_with_options(
+            runtime_state_dir,
+            projection_repair_sink,
+            trust_store,
+            observer,
+            runtime_liveness,
+            RuntimeStateNamespaceAuthority {
+                directory: runtime_state_directory,
+                lock: runtime_state_lock,
+            },
+            live_native::LiveStateNativeHost {
+                factory,
+                authority: host,
+                lease_authority,
+                deadline,
+            },
+        )
     }
 
     fn open_with_options(
@@ -3428,8 +3908,10 @@ impl StateDb {
         namespace_authority: RuntimeStateNamespaceAuthority,
         native_host: live_native::LiveStateNativeHost,
     ) -> anyhow::Result<Self> {
-        let RuntimeStateNamespaceAuthority { directory: runtime_state_directory, lock: runtime_state_lock } =
-            namespace_authority;
+        let RuntimeStateNamespaceAuthority {
+            directory: runtime_state_directory,
+            lock: runtime_state_lock,
+        } = namespace_authority;
         if runtime_state_directory.path() != runtime_state_dir {
             anyhow::bail!(
                 "runtime-state namespace authority path mismatch: selected={}, requested={}",
@@ -3479,19 +3961,36 @@ impl StateDb {
         // Operational rows are source-of-truth state and live in a fixed store
         // that is independent of replaceable projection generations.
         // Reserve the issuance record before any native owner exists.
-        let issued_destinations = OriginalProjectionBuildContext::issued_destination_slots(&native_host.factory)?;
-        let native_owner = live_native::LiveStateNativeOwner::capture(native_host, &runtime_state_directory,
-            &runtime_state_lock, &cas_directory, &refs_directory, &locators_directory, &recovery_directory,
-            &recovery, Arc::clone(&trust_store))?;
+        let issued_destinations =
+            OriginalProjectionBuildContext::issued_destination_slots(&native_host.factory)?;
+        let native_owner = live_native::LiveStateNativeOwner::capture(
+            native_host,
+            &runtime_state_directory,
+            &runtime_state_lock,
+            &cas_directory,
+            &refs_directory,
+            &locators_directory,
+            &recovery_directory,
+            &recovery,
+            Arc::clone(&trust_store),
+        )?;
         let operational = OperationalDb::open_live_from_state_owner(Arc::clone(&native_owner))
             .context("open stable operational state")?;
         let projection_context = OriginalProjectionBuildContext {
-            factory: Arc::clone(native_owner.factory()), authority: OriginalProjectionStateOwner::Live(Arc::clone(&native_owner)),
-            terminals: Vec::new(), durable: Vec::new(), retired_selected: Vec::new(), schema_references: Mutex::new(Vec::new()), generation_leases: Mutex::new(Vec::new()), generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
+            factory: Arc::clone(native_owner.factory()),
+            authority: OriginalProjectionStateOwner::Live(Arc::clone(&native_owner)),
+            terminals: Vec::new(),
+            durable: Vec::new(),
+            retired_selected: Vec::new(),
+            schema_references: Mutex::new(Vec::new()),
+            generation_leases: Mutex::new(Vec::new()),
+            generation_lease_attempts: std::sync::atomic::AtomicU32::new(0),
             issued_destinations,
         };
         let mut custody = live_native::LiveStateOpenCustody {
-            original: native_owner, operational: Some(operational), projection_context: Some(projection_context),
+            original: native_owner,
+            operational: Some(operational),
+            projection_context: Some(projection_context),
         };
 
         let context = custody
@@ -3508,8 +4007,14 @@ impl StateDb {
             observer.as_deref(),
             context,
         );
-        let projection = match projection { Ok(projection) => projection, Err(error) => return Err(custody.fail(error)) };
-        let operational = custody.operational.take().expect("completed Operational owner");
+        let projection = match projection {
+            Ok(projection) => projection,
+            Err(error) => return Err(custody.fail(error)),
+        };
+        let operational = custody
+            .operational
+            .take()
+            .expect("completed Operational owner");
         let original_projection_context = custody.projection_context.take();
         Ok(Self {
             _runtime_state_directory: runtime_state_directory,
@@ -3915,9 +4420,7 @@ impl StateDb {
     ) -> anyhow::Result<crate::rebuild::ProjectionVerificationReport> {
         let generation = self
             .recovery
-            .read_generation_in(
-                self.guarded_read_factory(),
-            )?
+            .read_generation_in(self.guarded_read_factory())?
             .ok_or_else(|| anyhow::anyhow!("projection recovery generation is absent"))?;
         if generation.projection_schema_epoch != ProjectionDb::current_schema_epoch() {
             anyhow::bail!(
@@ -4002,7 +4505,8 @@ impl StateDb {
         )?;
         let old_projection = std::mem::replace(&mut self.projection, new_projection);
         let factory = old_projection.original_factory();
-        let closed = old_projection.close_original(&factory)
+        let closed = old_projection
+            .close_original(&factory)
             .map_err(anyhow::Error::new)?;
         let closed = Arc::new(closed);
         self.original_projection_terminals.push(Arc::clone(&closed));
@@ -4038,7 +4542,8 @@ impl StateDb {
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<Option<crate::recovery::ThreadHistoryDiscardOperationRef>> {
         self.ensure_cas_mutation_guard(cas_mutation_guard)?;
-        self.recovery.thread_history_discard_operation_in(self.guarded_read_factory())
+        self.recovery
+            .thread_history_discard_operation_in(self.guarded_read_factory())
     }
 
     /// Retire the complete authoritative thread-head namespace and publish an
@@ -7233,7 +7738,8 @@ impl StateDb {
     /// The Operational store of a live test State.
     #[cfg(test)]
     pub(crate) fn test_operational(&self) -> &OperationalDb {
-        self.operational().expect("test State carries Operational access")
+        self.operational()
+            .expect("test State carries Operational access")
     }
 
     fn operational(&self) -> anyhow::Result<&OperationalDb> {
@@ -7420,7 +7926,6 @@ fn verify_chain_writer_transition_adoption(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{TestOfflineState, TestState};
     use super::*;
     use crate::objects::thread_snapshot::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
@@ -7428,6 +7933,7 @@ mod tests {
     };
     use crate::operational::{OPERATIONAL_DB_FILENAME, OPERATIONAL_INITIALIZED_FILENAME};
     use crate::signer::TestSigner;
+    use crate::test_support::{TestOfflineState, TestState};
 
     fn test_trust_store() -> Arc<TrustStore> {
         let signer = TestSigner::default();
@@ -7450,7 +7956,12 @@ mod tests {
         );
         let name = path.file_name().expect("projection file name");
         let host = crate::test_support::shared_test_host();
-        let result = host.with_existing(root, name, lillux_sqlite::OriginalNativeDomain::NodeProjection, work);
+        let result = host.with_existing(
+            root,
+            name,
+            lillux_sqlite::OriginalNativeDomain::NodeProjection,
+            work,
+        );
         crate::test_support::release_shared_test_host(host);
         result
     }
@@ -7468,8 +7979,8 @@ mod tests {
         let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let namespace = root.lock_exclusive().unwrap();
         let trust = test_trust_store();
-        let prepared = PreparedOfflineProjection::capture(root, Arc::clone(&trust), &namespace)
-            .unwrap();
+        let prepared =
+            PreparedOfflineProjection::capture(root, Arc::clone(&trust), &namespace).unwrap();
         drop(namespace);
         let authority = prepared.authority().unwrap();
         let cloned_authority = authority.try_clone().unwrap();
@@ -7485,7 +7996,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         entries.sort();
-        assert_eq!(entries, ["locators", "objects", "recovery", "refs"].map(std::ffi::OsString::from));
+        assert_eq!(
+            entries,
+            ["locators", "objects", "recovery", "refs"].map(std::ffi::OsString::from)
+        );
     }
 
     #[test]
@@ -7495,13 +8009,29 @@ mod tests {
         let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let namespace = root.lock_exclusive().unwrap();
         std::fs::remove_dir(dir.path().join("locators")).unwrap();
-        assert!(PreparedOfflineProjection::capture(root.try_clone().unwrap(), test_trust_store(), &namespace).is_err());
+        assert!(
+            PreparedOfflineProjection::capture(
+                root.try_clone().unwrap(),
+                test_trust_store(),
+                &namespace
+            )
+            .is_err()
+        );
         std::fs::create_dir(dir.path().join("locators")).unwrap();
         std::fs::remove_dir(dir.path().join("recovery/thread-projection")).unwrap();
-        assert!(PreparedOfflineProjection::capture(root.try_clone().unwrap(), test_trust_store(), &namespace).is_err());
+        assert!(
+            PreparedOfflineProjection::capture(
+                root.try_clone().unwrap(),
+                test_trust_store(),
+                &namespace
+            )
+            .is_err()
+        );
         std::fs::create_dir(dir.path().join("recovery/thread-projection")).unwrap();
         let other = tempfile::tempdir().unwrap();
-        let other_root = lillux::PinnedDirectory::open(other.path()).unwrap().unwrap();
+        let other_root = lillux::PinnedDirectory::open(other.path())
+            .unwrap()
+            .unwrap();
         let other_lock = other_root.lock_exclusive().unwrap();
         assert!(PreparedOfflineProjection::capture(root, test_trust_store(), &other_lock).is_err());
     }
@@ -7512,11 +8042,15 @@ mod tests {
         offline_preparation_roots(dir.path());
         let root = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let namespace = root.lock_exclusive().unwrap();
-        let prepared = PreparedOfflineProjection::capture(root, test_trust_store(), &namespace).unwrap();
+        let prepared =
+            PreparedOfflineProjection::capture(root, test_trust_store(), &namespace).unwrap();
         prepared.authority().unwrap();
         std::fs::rename(dir.path().join("locators"), dir.path().join("old-locators")).unwrap();
         std::fs::create_dir(dir.path().join("locators")).unwrap();
-        assert!(prepared.authority().is_err(), "a replacement cannot rebind captured authority");
+        assert!(
+            prepared.authority().is_err(),
+            "a replacement cannot rebind captured authority"
+        );
     }
 
     fn open_temp() -> (tempfile::TempDir, TestState) {
@@ -7670,7 +8204,8 @@ mod tests {
             let directory = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
             let namespace = directory.lock_exclusive().unwrap();
             let mut db =
-                TestOfflineState::open_for_rebuild(dir.path(), &namespace, test_trust_store()).unwrap();
+                TestOfflineState::open_for_rebuild(dir.path(), &namespace, test_trust_store())
+                    .unwrap();
             let authority = db.pinned_authority().unwrap();
             let guard = authority.acquire_exclusive_guard(true).unwrap();
             let preview = db
@@ -7707,7 +8242,8 @@ mod tests {
             let directory = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
             let namespace = directory.lock_exclusive().unwrap();
             let mut db =
-                TestOfflineState::open_for_rebuild(dir.path(), &namespace, test_trust_store()).unwrap();
+                TestOfflineState::open_for_rebuild(dir.path(), &namespace, test_trust_store())
+                    .unwrap();
             let authority = db.pinned_authority().unwrap();
             let guard = authority.acquire_exclusive_guard(true).unwrap();
             let report = db
@@ -7917,7 +8453,11 @@ mod tests {
             let (old_path, old_generation) = {
                 let db = TestState::open(&root, test_trust_store()).unwrap();
                 create_test_root_chain(&db);
-                db.projection().with_sql(|connection| Ok(connection.execute("DELETE FROM threads WHERE thread_id = 'T-root'", [])?))
+                db.projection()
+                    .with_sql(|connection| {
+                        Ok(connection
+                            .execute("DELETE FROM threads WHERE thread_id = 'T-root'", [])?)
+                    })
                     .unwrap();
                 let old_path = db.selected_projection_path().to_path_buf();
                 // The generation file is read once no live SQLite alias of
@@ -7966,7 +8506,10 @@ mod tests {
         let old_path = {
             let db = TestState::open(&root, test_trust_store()).unwrap();
             create_test_root_chain(&db);
-            db.projection().with_sql(|connection| Ok(connection.execute("DELETE FROM threads WHERE thread_id = 'T-root'", [])?))
+            db.projection()
+                .with_sql(|connection| {
+                    Ok(connection.execute("DELETE FROM threads WHERE thread_id = 'T-root'", [])?)
+                })
                 .unwrap();
             db.selected_projection_path().to_path_buf()
         };
@@ -8712,7 +9255,10 @@ mod tests {
             })
             .unwrap();
         let before: i64 = db
-            .projection().with_sql(|connection| Ok(connection.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?))
+            .projection()
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?)
+            })
             .unwrap();
         let event =
             crate::objects::thread_event::NewEvent::new("T-root", "T-root", "cursor_conflict_test")
@@ -8727,7 +9273,10 @@ mod tests {
             ProjectionStatus::RepairRequired(_)
         ));
         let after: i64 = db
-            .projection().with_sql(|connection| Ok(connection.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?))
+            .projection()
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT count(*) FROM events", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(after, before);
         assert_eq!(
@@ -8746,13 +9295,16 @@ mod tests {
         let signer = TestSigner::default();
         let snapshot = test_root_snapshot("directive:system/test");
         let initial = db.create_chain("T-root", snapshot, &signer).unwrap();
-        db.projection().with_sql(|connection| Ok(connection.execute_batch(
-                "CREATE TRIGGER reject_test_event_projection
+        db.projection()
+            .with_sql(|connection| {
+                Ok(connection.execute_batch(
+                    "CREATE TRIGGER reject_test_event_projection
                  BEFORE INSERT ON events
                  BEGIN
                      SELECT RAISE(FAIL, 'injected event projection failure');
                  END;",
-            )?))
+                )?)
+            })
             .unwrap();
 
         let event = crate::objects::thread_event::NewEvent::new(
@@ -8786,7 +9338,10 @@ mod tests {
             "failed row projection must roll back the cursor advance"
         );
 
-        db.projection().with_sql(|connection| Ok(connection.execute_batch("DROP TRIGGER reject_test_event_projection")?))
+        db.projection()
+            .with_sql(|connection| {
+                Ok(connection.execute_batch("DROP TRIGGER reject_test_event_projection")?)
+            })
             .unwrap();
         drop(db);
         let reopened = TestState::open(dir.path(), test_trust_store()).unwrap();
@@ -8804,7 +9359,10 @@ mod tests {
         let projection = dir.path().join("recovery/thread-projection");
         std::fs::create_dir_all(projection.join("pending")).unwrap();
         let own = format!(".secure.tmp.{}.4242.1", crate::STATE_TEMP_PURPOSE.as_str());
-        let owned = [dir.path().join("recovery").join(&own), projection.join("pending").join(&own)];
+        let owned = [
+            dir.path().join("recovery").join(&own),
+            projection.join("pending").join(&own),
+        ];
         let foreign = projection.join(".secure.tmp.reset.4242.2");
         for path in owned.iter().chain([&foreign]) {
             std::fs::write(path, b"interrupted").unwrap();
@@ -8823,7 +9381,10 @@ mod tests {
         let error = TestState::open(dir.path(), test_trust_store())
             .err()
             .expect("an unattributed secure temporary refuses State startup");
-        assert!(error.to_string().contains("without an exact owner token"), "{error:#}");
+        assert!(
+            error.to_string().contains("without an exact owner token"),
+            "{error:#}"
+        );
         assert!(retired_format.is_file());
         assert!(foreign.is_file());
     }
@@ -8839,8 +9400,8 @@ mod tests {
     /// observable whether or not this host admits the later database opens.
     fn locked_open_error(root_path: &Path) -> Option<String> {
         TestState::open(root_path, test_trust_store())
-        .err()
-        .map(|error| format!("{error:#}"))
+            .err()
+            .map(|error| format!("{error:#}"))
     }
 
     #[test]
@@ -8856,7 +9417,10 @@ mod tests {
         drop(guard);
         let active = locked_open_error(dir.path())
             .expect("ordinary startup must refuse an Active discard marker");
-        assert!(active.contains("offline execution-history reset is incomplete"), "{active}");
+        assert!(
+            active.contains("offline execution-history reset is incomplete"),
+            "{active}"
+        );
 
         let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
         store
@@ -8950,7 +9514,10 @@ mod tests {
         // The rename never happened: the marker is the exact Active record,
         // and the only other entry is the child's State-owned temporary.
         assert_eq!(std::fs::read(&marker).unwrap(), active);
-        assert_eq!(store.thread_history_discard_operation().unwrap(), Some(operation.clone()));
+        assert_eq!(
+            store.thread_history_discard_operation().unwrap(),
+            Some(operation.clone())
+        );
         let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(store.root())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -8959,7 +9526,11 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         let debris = names.pop().unwrap();
         match lillux::parse_secure_temp_name(&debris) {
-            lillux::SecureTempClass::Temp { purpose, pid: owner, seq: _ } => {
+            lillux::SecureTempClass::Temp {
+                purpose,
+                pid: owner,
+                seq: _,
+            } => {
                 assert_eq!(purpose, crate::STATE_TEMP_PURPOSE.as_str());
                 assert_eq!(owner, pid);
             }
@@ -9052,7 +9623,10 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, vec![std::ffi::OsString::from("thread-history-discard.json")]);
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("thread-history-discard.json")]
+        );
 
         // A retry of the same acknowledgement only syncs; the bytes stay.
         let guard = crate::recovery::CasMutationGuard::acquire_exclusive(dir.path()).unwrap();
@@ -9088,12 +9662,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(RecordingRepairSink::default());
         let db =
-            TestState::open_with_repair_sink(dir.path(), test_trust_store(), sink.clone())
-                .unwrap();
+            TestState::open_with_repair_sink(dir.path(), test_trust_store(), sink.clone()).unwrap();
         let signer = TestSigner::default();
         let snapshot = test_root_snapshot("directive:system/test");
         db.create_chain("T-root", snapshot, &signer).unwrap();
-        db.projection().with_sql(|connection| Ok(connection.execute_batch("DROP TABLE events")?))
+        db.projection()
+            .with_sql(|connection| Ok(connection.execute_batch("DROP TABLE events")?))
             .unwrap();
         let event = crate::objects::thread_event::NewEvent::new(
             "T-root",
@@ -9219,23 +9793,29 @@ mod tests {
         let db = TestState::open(&root, test_trust_store()).unwrap();
         assert_ne!(db.selected_projection_path(), projection_path);
         let usage_rows: i64 = db
-            .projection().with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM thread_usage_latest WHERE thread_id = 'T-root' \
+            .projection()
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM thread_usage_latest WHERE thread_id = 'T-root' \
                  AND input_tokens = 100 AND output_tokens = 50",
-                [],
-                |row| row.get(0),
-            )?))
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(usage_rows, 1);
 
         let subject_rows: i64 = db
-            .projection().with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM thread_usage_subjects WHERE chain_root_id = 'T-root' \
+            .projection()
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM thread_usage_subjects WHERE chain_root_id = 'T-root' \
                  AND namespace = 'example-app' AND subject = 'csm01' \
                  AND asserted_by = 'fp:backend'",
-                [],
-                |row| row.get(0),
-            )?))
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(subject_rows, 1);
     }
@@ -9355,11 +9935,15 @@ mod tests {
 
         assert_eq!(result.value.event_count, 1);
 
-        let count: i64 = db.projection().with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM events WHERE thread_id = 'T-root'",
-                [],
-                |row| row.get(0),
-            )?))
+        let count: i64 = db
+            .projection()
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM events WHERE thread_id = 'T-root'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -9556,25 +10140,38 @@ mod tests {
         };
         let export = || {
             let source = TestState::open(source_dir.path(), trust()).unwrap();
-            let exported = crate::sync::export_chain(source.cas_root().parent().unwrap(), "T-root", source.head_trust_store())
-                .unwrap();
+            let exported = crate::sync::export_chain(
+                source.cas_root().parent().unwrap(),
+                "T-root",
+                source.head_trust_store(),
+            )
+            .unwrap();
             source.close().unwrap();
             exported
         };
         let import = |exported: &_| {
             let target = TestState::open(target_dir.path(), trust()).unwrap();
-            let staged = crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), exported).unwrap();
+            let staged =
+                crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), exported)
+                    .unwrap();
             let guard = crate::CasMutationGuard::shared_from_cas_root(target.cas_root()).unwrap();
             crate::sync::finalize_import(&target, staged, &signer, &guard).unwrap();
             drop(guard);
-            let imported = target.read_generic_head_ref("chains", "T-root").unwrap().unwrap();
+            let imported = target
+                .read_generic_head_ref("chains", "T-root")
+                .unwrap()
+                .unwrap();
             target.close().unwrap();
             imported.target_hash
         };
 
         let source = TestState::open(source_dir.path(), trust()).unwrap();
         source
-            .create_chain("T-root", test_root_snapshot("directive:system/test"), &signer)
+            .create_chain(
+                "T-root",
+                test_root_snapshot("directive:system/test"),
+                &signer,
+            )
             .unwrap();
         source.close().unwrap();
         let first = export();
@@ -9645,21 +10242,33 @@ mod offline_native_tests {
             Ok(_) => panic!("a store without retained namespace exclusion must be refused"),
             Err(refused) => refused,
         };
-        assert!(format!("{error:#}").contains("not opened offline"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("not opened offline"),
+            "{error:#}"
+        );
         let mut state = returned.expect("the refused store is handed back whole");
         state._offline_namespace_lock = lock;
         let census = match state.close_offline_native(host.factory()) {
             Ok(census) => census,
             Err((_, error)) => panic!("offline store close refused: {error:#}"),
         };
-        let LiveStateCensus { terminals, leases, lease_retirement, prior_refusal } = census;
+        let LiveStateCensus {
+            terminals,
+            leases,
+            lease_retirement,
+            prior_refusal,
+        } = census;
         assert!(leases.is_empty() && prior_refusal.is_none());
         assert_eq!(lease_retirement.unretired().unwrap(), 0);
         for terminal in terminals {
             host.retain_terminal(terminal);
         }
         let (issued, recorded) = host.ticket_census();
-        assert_eq!((issued, recorded), (1, 1), "the projection's terminal reaches the census");
+        assert_eq!(
+            (issued, recorded),
+            (1, 1),
+            "the projection's terminal reaches the census"
+        );
     }
 
     #[test]
@@ -9668,16 +10277,26 @@ mod offline_native_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = runtime(dir.path());
         let namespace = root.lock_exclusive().unwrap();
-        let preparation =
-            PreparedOfflineProjection::capture(root.try_clone().unwrap(), Arc::new(TrustStore::new()), &namespace)
-                .unwrap();
-        let destination = OfflineNativeStateDestination { preparation, host: host.destination() };
-        destination.require_original(host.factory()).expect("captured State roots admitted");
+        let preparation = PreparedOfflineProjection::capture(
+            root.try_clone().unwrap(),
+            Arc::new(TrustStore::new()),
+            &namespace,
+        )
+        .unwrap();
+        let destination = OfflineNativeStateDestination {
+            preparation,
+            host: host.destination(),
+        };
+        destination
+            .require_original(host.factory())
+            .expect("captured State roots admitted");
         std::fs::rename(dir.path().join("refs"), dir.path().join("refs.moved")).unwrap();
         destination
             .require_original(host.factory())
             .expect_err("a replaced State root is refused");
         std::fs::rename(dir.path().join("refs.moved"), dir.path().join("refs")).unwrap();
-        destination.require_original(host.factory()).expect("restored State roots admitted again");
+        destination
+            .require_original(host.factory())
+            .expect("restored State roots admitted again");
     }
 }

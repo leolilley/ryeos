@@ -25,8 +25,10 @@ use super::stale_recovery::{INSPECTIONS_DIRECTORY, LEDGER_DIRECTORY, RETIRED_REC
 /// Bound on the names one repair or inspection reads from one directory.
 const SCAN_BOUND: usize = 4096;
 /// Bound on the contents of one inspection directory removed as a tree.
-const TREE_BUDGET: lillux::DirectoryTraversalBudget =
-    lillux::DirectoryTraversalBudget { max_entries: 4096, max_depth: 16 };
+const TREE_BUDGET: lillux::DirectoryTraversalBudget = lillux::DirectoryTraversalBudget {
+    max_entries: 4096,
+    max_depth: 16,
+};
 /// Wall-clock bound on one tree removal.
 const TREE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Bound on the doctor's read of one directory.
@@ -98,16 +100,21 @@ pub fn execution_history_scratch_repair_command() -> &'static str {
 }
 
 fn is_operation(text: &str) -> bool {
-    text.len() == 32 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    text.len() == 32
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A reset temporary, or a temporary in the retired unattributed spelling,
 /// which only the reset ever wrote in its own directories.
 fn is_own_temporary(name: &OsStr) -> bool {
     match lillux::parse_secure_temp_name(name) {
-        lillux::SecureTempClass::Temp { purpose, pid: _, seq: _ } => {
-            purpose == crate::execution_history_reset::RESET_TEMP_PURPOSE.as_str()
-        }
+        lillux::SecureTempClass::Temp {
+            purpose,
+            pid: _,
+            seq: _,
+        } => purpose == crate::execution_history_reset::RESET_TEMP_PURPOSE.as_str(),
         lillux::SecureTempClass::Malformed => true,
         lillux::SecureTempClass::NotTemp => false,
     }
@@ -117,7 +124,9 @@ fn is_ledger_name(name: &OsStr) -> bool {
     if is_own_temporary(name) {
         return true;
     }
-    let Some(text) = name.to_str() else { return false };
+    let Some(text) = name.to_str() else {
+        return false;
+    };
     let public = text.strip_prefix("cleanup.").unwrap_or(text);
     ["reserved.", "disposed.", "released."]
         .iter()
@@ -128,7 +137,9 @@ fn is_ledger_name(name: &OsStr) -> bool {
 fn is_inspection_directory(text: &str) -> bool {
     text.strip_prefix("inspection.")
         .and_then(|tail| tail.split_once('.'))
-        .is_some_and(|(operation, purpose)| is_operation(operation) && matches!(purpose, "runtime" | "scheduler"))
+        .is_some_and(|(operation, purpose)| {
+            is_operation(operation) && matches!(purpose, "runtime" | "scheduler")
+        })
 }
 
 fn is_inspections_file(name: &OsStr) -> bool {
@@ -145,14 +156,20 @@ fn is_inspections_file(name: &OsStr) -> bool {
 /// The app-root-relative path of a ledger name outside the reset's own
 /// grammar: a name this repair leaves in place.
 pub(super) fn foreign_ledger_path(name: &OsStr) -> Option<String> {
-    (!is_ledger_name(name)).then(|| format!(".ai/node/{LEDGER_DIRECTORY}/{}", name.to_string_lossy()))
+    (!is_ledger_name(name))
+        .then(|| format!(".ai/node/{LEDGER_DIRECTORY}/{}", name.to_string_lossy()))
 }
 
 /// The app-root-relative path of an inspections-parent name outside the
 /// reset's own grammar: a name this repair leaves in place.
 pub(super) fn foreign_inspections_path(name: &OsStr) -> Option<String> {
     let own = name.to_str().is_some_and(is_inspection_directory) || is_inspections_file(name);
-    (!own).then(|| format!(".ai/node/{INSPECTIONS_DIRECTORY}/{}", name.to_string_lossy()))
+    (!own).then(|| {
+        format!(
+            ".ai/node/{INSPECTIONS_DIRECTORY}/{}",
+            name.to_string_lossy()
+        )
+    })
 }
 
 /// The operation a staged operation file or its quarantine names.
@@ -173,7 +190,10 @@ fn is_reset_temporary(name: &OsStr) -> bool {
 
 fn names(directory: &lillux::PinnedDirectory, place: &str) -> Result<Vec<std::ffi::OsString>> {
     let names = directory.entry_names_bounded(SCAN_BOUND + 1)?;
-    anyhow::ensure!(names.len() <= SCAN_BOUND, "{place} holds more than {SCAN_BOUND} names");
+    anyhow::ensure!(
+        names.len() <= SCAN_BOUND,
+        "{place} holds more than {SCAN_BOUND} names"
+    );
     Ok(names)
 }
 
@@ -208,19 +228,32 @@ enum Removal {
 
 /// Remove one regular file or one directory tree at `name`, while it is
 /// the entry observed. A dry run only observes the entry's kind.
-fn remove_entry(directory: &lillux::PinnedDirectory, name: &OsStr, tree: bool, dry_run: bool) -> Result<Removal> {
+fn remove_entry(
+    directory: &lillux::PinnedDirectory,
+    name: &OsStr,
+    tree: bool,
+    dry_run: bool,
+) -> Result<Removal> {
     let Some(entry) = directory.entry_no_follow(name)? else {
         return Ok(Removal::Absent);
     };
     match entry.entry_type {
         lillux::PinnedEntryType::Regular if !tree && dry_run => Ok(Removal::Removed),
         lillux::PinnedEntryType::Regular if !tree => {
-            let pin = directory.open_mount_entry(name)?.context("scratch entry disappeared")?;
-            Ok(if directory.unlink_regular_if_same(name, &pin)? { Removal::Removed } else { Removal::Absent })
+            let pin = directory
+                .open_mount_entry(name)?
+                .context("scratch entry disappeared")?;
+            Ok(if directory.unlink_regular_if_same(name, &pin)? {
+                Removal::Removed
+            } else {
+                Removal::Absent
+            })
         }
         lillux::PinnedEntryType::Directory if tree && dry_run => Ok(Removal::Removed),
         lillux::PinnedEntryType::Directory if tree => {
-            let child = directory.open_child_directory(name)?.context("scratch directory disappeared")?;
+            let child = directory
+                .open_child_directory(name)?
+                .context("scratch directory disappeared")?;
             child.remove_contents_recursive_bounded_until(
                 TREE_BUDGET,
                 lillux::time::MonotonicDeadline::after(TREE_INTERVAL),
@@ -252,7 +285,10 @@ pub fn repair_execution_history_scratch(
         StateLock::acquire(&lock_path)
     }
     .map_err(|error| {
-        if error.chain().any(|cause| cause.downcast_ref::<lillux::ExactLockHeld>().is_some()) {
+        if error
+            .chain()
+            .any(|cause| cause.downcast_ref::<lillux::ExactLockHeld>().is_some())
+        {
             error.context("execution-history scratch repair requires the daemon to be stopped")
         } else {
             error.context(format!(
@@ -265,23 +301,35 @@ pub fn repair_execution_history_scratch(
     let runtime_state_dir = config.runtime_state_dir();
     let runtime = lillux::PinnedDirectory::open(&runtime_state_dir)?
         .with_context(|| format!("runtime state is absent: {}", runtime_state_dir.display()))?;
-    let runtime_lock = runtime.lock_exclusive().context("lock offline runtime-state namespace")?;
+    let runtime_lock = runtime
+        .lock_exclusive()
+        .context("lock offline runtime-state namespace")?;
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(&config.node_signing_key_path)
         .context("load node identity for the execution-history scratch repair")?;
     let mut trust = ryeos_state::refs::TrustStore::new();
-    trust.insert(identity.fingerprint().to_string(), *identity.verifying_key());
-    let prepared = ryeos_state::PreparedOfflineProjection::capture(runtime.try_clone()?, Arc::new(trust), &runtime_lock)
-        .context("capture State authority for the execution-history scratch repair")?;
+    trust.insert(
+        identity.fingerprint().to_string(),
+        *identity.verifying_key(),
+    );
+    let prepared = ryeos_state::PreparedOfflineProjection::capture(
+        runtime.try_clone()?,
+        Arc::new(trust),
+        &runtime_lock,
+    )
+    .context("capture State authority for the execution-history scratch repair")?;
     let state = prepared.authority()?;
-    let guard = state
-        .acquire_exclusive_guard(!options.dry_run)
-        .context("acquire exclusive head mutation guard for the execution-history scratch repair")?;
+    let guard = state.acquire_exclusive_guard(!options.dry_run).context(
+        "acquire exclusive head mutation guard for the execution-history scratch repair",
+    )?;
     let recovery = state.require_recovery()?;
-    let retired_marker_schema = recovery.clear_retired_thread_history_discard_marker(&guard, options.dry_run)?;
+    let retired_marker_schema =
+        recovery.clear_retired_thread_history_discard_marker(&guard, options.dry_run)?;
     // A retired marker names no operation this build can resume.
     let active_operation = match retired_marker_schema {
         Some(_) => None,
-        None => recovery.thread_history_discard_operation()?.map(|operation| operation.operation_id),
+        None => recovery
+            .thread_history_discard_operation()?
+            .map(|operation| operation.operation_id),
     };
 
     let mut report = ExecutionHistoryScratchRepairReport {
@@ -293,8 +341,16 @@ pub fn repair_execution_history_scratch(
         active_operation,
     };
     let active_operation = report.active_operation.clone();
-    let mut act = |directory: &lillux::PinnedDirectory, location, name: &OsStr, own: bool, tree: bool| -> Result<()> {
-        let entry = ScratchEntry { location, name: name.to_string_lossy().into_owned() };
+    let mut act = |directory: &lillux::PinnedDirectory,
+                   location,
+                   name: &OsStr,
+                   own: bool,
+                   tree: bool|
+     -> Result<()> {
+        let entry = ScratchEntry {
+            location,
+            name: name.to_string_lossy().into_owned(),
+        };
         if !own {
             report.left.push(entry);
             return Ok(());
@@ -324,7 +380,8 @@ pub fn repair_execution_history_scratch(
     // Same order as the reset: ledger, then inspections parent.
     let ledger_lock = match &ledger {
         Some(ledger) => {
-            let held = ledger.lock_exclusive_with_timeout(std::time::Duration::from_millis(1000))?;
+            let held =
+                ledger.lock_exclusive_with_timeout(std::time::Duration::from_millis(1000))?;
             held.ensure_protects(ledger)?;
             Some(held)
         }
@@ -350,7 +407,13 @@ pub fn repair_execution_history_scratch(
         for name in names(inspections, "offline reset inspections parent")? {
             let directory = name.to_str().is_some_and(is_inspection_directory);
             let own = foreign_inspections_path(&name).is_none();
-            act(inspections, ScratchLocation::Inspections, &name, own, directory)?;
+            act(
+                inspections,
+                ScratchLocation::Inspections,
+                &name,
+                own,
+                directory,
+            )?;
         }
     }
     for name in runtime_names(&runtime)? {
@@ -363,7 +426,13 @@ pub fn repair_execution_history_scratch(
         // Other owners' names in the shared namespace are neither removed
         // nor reported.
         if own {
-            act(&runtime, ScratchLocation::RuntimeNamespace, &name, true, false)?;
+            act(
+                &runtime,
+                ScratchLocation::RuntimeNamespace,
+                &name,
+                true,
+                false,
+            )?;
         }
     }
     // The locks end in reverse order of acquisition as this frame returns.
@@ -374,7 +443,9 @@ pub fn repair_execution_history_scratch(
 
 /// Read, without locks, the reset scratch a node holds. A reset running at
 /// the same moment shows its own live scratch here.
-pub fn inspect_execution_history_scratch(app_root: &Path) -> Result<ExecutionHistoryScratchInspection> {
+pub fn inspect_execution_history_scratch(
+    app_root: &Path,
+) -> Result<ExecutionHistoryScratchInspection> {
     let config = Config::load(&ConfigSources {
         app_root: Some(app_root.to_owned()),
         ..ConfigSources::default()
@@ -401,7 +472,9 @@ pub fn inspect_execution_history_scratch(app_root: &Path) -> Result<ExecutionHis
         inspection.runtime = runtime
             .entry_names_bounded(SCAN_BOUND)?
             .into_iter()
-            .filter(|name| name.to_str().and_then(staged_operation).is_some() || is_reset_temporary(name))
+            .filter(|name| {
+                name.to_str().and_then(staged_operation).is_some() || is_reset_temporary(name)
+            })
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
     }
@@ -420,14 +493,29 @@ mod tests {
 
     fn node() -> Node {
         let tmp = tempfile::TempDir::new().unwrap();
-        let config = Config::load(&ConfigSources { app_root: Some(tmp.path().to_owned()), ..Default::default() }).unwrap();
+        let config = Config::load(&ConfigSources {
+            app_root: Some(tmp.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
         ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path).unwrap();
         let runtime = config.runtime_state_dir();
         for directory in ["objects", "refs", "locators", "recovery/thread-projection"] {
             std::fs::create_dir_all(runtime.join(directory)).unwrap();
         }
-        for directory in ["", "objects", "refs", "locators", "recovery", "recovery/thread-projection"] {
-            std::fs::set_permissions(runtime.join(directory), std::fs::Permissions::from_mode(0o700)).unwrap();
+        for directory in [
+            "",
+            "objects",
+            "refs",
+            "locators",
+            "recovery",
+            "recovery/thread-projection",
+        ] {
+            std::fs::set_permissions(
+                runtime.join(directory),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
         }
         for directory in [LEDGER_DIRECTORY, INSPECTIONS_DIRECTORY] {
             let path = config.app_root.join(".ai/node").join(directory);
@@ -448,7 +536,11 @@ mod tests {
     }
 
     fn removed(report: &ExecutionHistoryScratchRepairReport) -> Vec<(ScratchLocation, String)> {
-        let mut removed: Vec<_> = report.removed.iter().map(|entry| (entry.location, entry.name.clone())).collect();
+        let mut removed: Vec<_> = report
+            .removed
+            .iter()
+            .map(|entry| (entry.location, entry.name.clone()))
+            .collect();
         removed.sort_by(|left, right| (left.0 as u8, &left.1).cmp(&(right.0 as u8, &right.1)));
         removed
     }
@@ -459,7 +551,11 @@ mod tests {
         let operation = "a".repeat(32);
         let active = "b".repeat(32);
         let ledger = node.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY);
-        let inspections = node.config.app_root.join(".ai/node").join(INSPECTIONS_DIRECTORY);
+        let inspections = node
+            .config
+            .app_root
+            .join(".ai/node")
+            .join(INSPECTIONS_DIRECTORY);
         let runtime = node.config.runtime_state_dir();
         let own_ledger = [
             format!("reserved.{operation}"),
@@ -476,11 +572,25 @@ mod tests {
         let tree = inspections.join(format!("inspection.{operation}.runtime"));
         std::fs::create_dir_all(tree.join("nested")).unwrap();
         std::fs::write(tree.join("nested/copy"), b"copied").unwrap();
-        std::fs::write(inspections.join(format!("created.inspection.{operation}.runtime")), b"witness").unwrap();
-        std::fs::write(inspections.join(format!("cleanup.created.inspection.{operation}.scheduler")), b"witness").unwrap();
+        std::fs::write(
+            inspections.join(format!("created.inspection.{operation}.runtime")),
+            b"witness",
+        )
+        .unwrap();
+        std::fs::write(
+            inspections.join(format!("cleanup.created.inspection.{operation}.scheduler")),
+            b"witness",
+        )
+        .unwrap();
         std::fs::write(inspections.join("unclassified"), b"foreign").unwrap();
-        let inert = runtime.join(format!("{}{operation}", super::super::original_operation::PREFIX));
-        let resumed = runtime.join(format!("{}{active}", super::super::original_operation::PREFIX));
+        let inert = runtime.join(format!(
+            "{}{operation}",
+            super::super::original_operation::PREFIX
+        ));
+        let resumed = runtime.join(format!(
+            "{}{active}",
+            super::super::original_operation::PREFIX
+        ));
         std::fs::write(&inert, b"inert").unwrap();
         std::fs::write(&resumed, b"active").unwrap();
         std::fs::write(runtime.join(".secure.tmp.reset.2.2"), b"debris").unwrap();
@@ -495,23 +605,39 @@ mod tests {
         .unwrap();
 
         let preview = repair(&node, true);
-        assert_eq!(preview.removed.len(), own_ledger.len() + 3 + 2, "{preview:?}");
+        assert_eq!(
+            preview.removed.len(),
+            own_ledger.len() + 3 + 2,
+            "{preview:?}"
+        );
         assert_eq!(preview.active_operation.as_deref(), Some(active.as_str()));
-        assert!(inert.exists() && tree.exists() && ledger.join(&own_ledger[0]).exists(), "a dry run removes nothing");
+        assert!(
+            inert.exists() && tree.exists() && ledger.join(&own_ledger[0]).exists(),
+            "a dry run removes nothing"
+        );
 
         let report = repair(&node, false);
         assert_eq!(removed(&report), removed(&preview));
         let mut left: Vec<_> = report.left.iter().map(|entry| entry.name.clone()).collect();
         left.sort();
         assert_eq!(left, [".secure.tmp.state.1.1", "notes", "unclassified"]);
-        assert!(!inert.exists() && !tree.exists() && !runtime.join(".secure.tmp.reset.2.2").exists());
-        assert!(resumed.exists(), "the active operation's staged file is kept");
+        assert!(
+            !inert.exists() && !tree.exists() && !runtime.join(".secure.tmp.reset.2.2").exists()
+        );
+        assert!(
+            resumed.exists(),
+            "the active operation's staged file is kept"
+        );
         assert!(runtime.join(".secure.tmp.state.2.2").exists());
         assert!(ledger.join("notes").exists() && inspections.join("unclassified").exists());
 
         let again = repair(&node, false);
         assert!(again.removed.is_empty(), "{again:?}");
-        assert!(!inspect_execution_history_scratch(&node.config.app_root).unwrap().is_empty());
+        assert!(
+            !inspect_execution_history_scratch(&node.config.app_root)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// An entry of the reset's grammar that is not of the kind its name
@@ -522,19 +648,30 @@ mod tests {
         let node = node();
         let operation = "e".repeat(32);
         let ledger = node.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY);
-        let inspections = node.config.app_root.join(".ai/node").join(INSPECTIONS_DIRECTORY);
+        let inspections = node
+            .config
+            .app_root
+            .join(".ai/node")
+            .join(INSPECTIONS_DIRECTORY);
         let link = inspections.join(format!("inspection.{operation}.runtime"));
         // The link names `.ai`, two levels above the inspections parent.
         lillux::PinnedDirectory::open(&inspections)
             .unwrap()
             .unwrap()
-            .create_symlink(OsStr::new(&format!("inspection.{operation}.runtime")), b"../..")
+            .create_symlink(
+                OsStr::new(&format!("inspection.{operation}.runtime")),
+                b"../..",
+            )
             .unwrap();
         let file = inspections.join(format!("inspection.{operation}.scheduler"));
         std::fs::write(&file, b"not a tree").unwrap();
         std::fs::create_dir(ledger.join(format!("reserved.{operation}"))).unwrap();
         std::fs::write(ledger.join(format!("disposed.{operation}")), b"scratch").unwrap();
-        std::fs::write(inspections.join(format!("created.inspection.{operation}.runtime")), b"witness").unwrap();
+        std::fs::write(
+            inspections.join(format!("created.inspection.{operation}.runtime")),
+            b"witness",
+        )
+        .unwrap();
         for dry_run in [true, false] {
             let report = repair(&node, dry_run);
             let mut left: Vec<_> = report.left.iter().map(|entry| entry.name.clone()).collect();
@@ -549,9 +686,21 @@ mod tests {
             );
             assert_eq!(report.removed.len(), 2, "{report:?}");
         }
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert!(node.config.app_root.join(".ai").is_dir(), "the link's target is untouched");
-        assert_eq!(std::fs::read(&file).unwrap(), b"not a tree", "the regular file is left in place");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            node.config.app_root.join(".ai").is_dir(),
+            "the link's target is untouched"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"not a tree",
+            "the regular file is left in place"
+        );
         assert!(!ledger.join(format!("disposed.{operation}")).exists());
     }
 
@@ -570,8 +719,16 @@ mod tests {
         })
         .unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains(&format!("runtime namespace holds more than {SCAN_BOUND} names")), "{message}");
-        assert!(message.contains("the namespace itself needs attention"), "{message}");
+        assert!(
+            message.contains(&format!(
+                "runtime namespace holds more than {SCAN_BOUND} names"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("the namespace itself needs attention"),
+            "{message}"
+        );
         assert!(runtime.join("other.0").exists());
     }
 
@@ -582,15 +739,24 @@ mod tests {
         let node = node();
         let lock_path = default_lock_path(&node.config.app_root);
         let held = StateLock::acquire(&lock_path).unwrap();
-        let options = ExecutionHistoryScratchRepairOptions { app_root: Some(node.config.app_root.clone()), dry_run: true };
+        let options = ExecutionHistoryScratchRepairOptions {
+            app_root: Some(node.config.app_root.clone()),
+            dry_run: true,
+        };
         let error = repair_execution_history_scratch(&options).unwrap_err();
-        assert!(format!("{error:#}").contains("requires the daemon to be stopped"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("requires the daemon to be stopped"),
+            "{error:#}"
+        );
         drop(held);
         std::fs::remove_file(&lock_path).unwrap();
         let error = repair_execution_history_scratch(&options).unwrap_err();
         let message = format!("{error:#}");
         assert!(!message.contains("daemon"), "{message}");
-        assert!(message.contains("cannot take the node's StateLock"), "{message}");
+        assert!(
+            message.contains("cannot take the node's StateLock"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -604,9 +770,16 @@ mod tests {
             format!("{{\"kind\":\"thread_history_discard\",\"operation\":{{\"operation_id\":\"{operation}\",\"sha256\":\"{}\"}},\"schema\":2}}", "d".repeat(64)),
         )
         .unwrap();
-        let staged = runtime.join(format!("{}{operation}", super::super::original_operation::PREFIX));
+        let staged = runtime.join(format!(
+            "{}{operation}",
+            super::super::original_operation::PREFIX
+        ));
         std::fs::write(&staged, b"retired").unwrap();
-        assert!(!inspect_execution_history_scratch(&node.config.app_root).unwrap().is_empty());
+        assert!(
+            !inspect_execution_history_scratch(&node.config.app_root)
+                .unwrap()
+                .is_empty()
+        );
         let preview = repair(&node, true);
         assert_eq!(preview.retired_marker_schema, Some(2));
         assert!(marker.exists() && staged.exists());
@@ -614,7 +787,11 @@ mod tests {
         assert_eq!(report.retired_marker_schema, Some(2));
         assert_eq!(report.active_operation, None);
         assert!(!marker.exists() && !staged.exists());
-        assert!(inspect_execution_history_scratch(&node.config.app_root).unwrap().is_empty());
+        assert!(
+            inspect_execution_history_scratch(&node.config.app_root)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(repair(&node, false).retired_marker_schema, None);
     }
 }

@@ -38,20 +38,20 @@ use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
 };
 use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
-    AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
-    LIFECYCLE_HOSTS_FD_ENV,
+    AllocationReservation, BoundOccurrence, LEASE_ADMISSION_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL,
+    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV,
+    LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LEASE_ADMISSION_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
     LifecycleOperationCommon, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
     LifecycleRuntimeProbeSource, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
-    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
+    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent,
+    TerminationIntent, from_json_slice_strict,
 };
 use ryeos_state::objects::RetainedLifecycleExecutableRole;
 
@@ -180,12 +180,14 @@ pub(crate) fn refuse_credential_home_upload(
             "upload refused: its source is {}{}, under the node's credential-profile homes; \
              a credential home never leaves this node",
             opened.path.display(),
-            if opened.unlinked { " (since unlinked)" } else { "" }
+            if opened.unlinked {
+                " (since unlinked)"
+            } else {
+                ""
+            }
         );
     }
-    if let Some(found) =
-        find_home_credential_file(&root, (identity.device(), identity.inode()))?
-    {
+    if let Some(found) = find_home_credential_file(&root, (identity.device(), identity.inode()))? {
         anyhow::bail!(
             "upload refused: its source is {}, a file of the node's credential-profile homes; \
              a credential home never leaves this node",
@@ -303,6 +305,9 @@ pub(crate) struct ExecutableExternalPlacementBackend {
     restoration_verifier: Option<lillux::InheritedDescriptorAuthority>,
     restoration_verifier_hash: Option<String>,
     provider_spec: CapturedLifecycleProviderSpec,
+    /// Whether the captured provider spec declares an activation that uploads
+    /// the guest runtime itself. Read once from the exact captured bytes.
+    stages_guest_runtime_upload: bool,
     snapshot_production_spec: Option<CapturedLifecycleProviderSpec>,
     inspection: LifecycleAdapterInspectionResponse,
     source_evidence: CapturedLifecycleSourceEvidence,
@@ -429,6 +434,8 @@ impl ExecutableExternalPlacementBackend {
             )),
         )?;
         let inspection = decode_inspection_response(&response.bytes, &request)?;
+        let stages_guest_runtime_upload =
+            provider_spec_stages_guest_runtime(&artifacts.provider_spec)?;
 
         Ok(Self {
             credential_home_root,
@@ -453,6 +460,7 @@ impl ExecutableExternalPlacementBackend {
                 .as_ref()
                 .map(|item| item.handle.clone()),
             provider_spec: artifacts.provider_spec,
+            stages_guest_runtime_upload,
             snapshot_production_spec: artifacts.snapshot_production_spec,
             inspection,
             source_evidence: CapturedLifecycleSourceEvidence {
@@ -475,6 +483,7 @@ impl ExecutableExternalPlacementBackend {
         bootstrap: Option<&ryeos_state::external_execution::transport::ExternalSupervisorBootstrap>,
         guest_inputs: Option<&ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
         guest_package: Option<&lillux::InheritedDescriptorAuthority>,
+        guest_runtime: Option<&lillux::InheritedDescriptorAuthority>,
         signed_import: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization>,
         signed_assignment: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment>,
         admitted_adapter_request: Option<&[u8]>,
@@ -640,6 +649,15 @@ impl ExecutableExternalPlacementBackend {
                     == matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
             "signed guest import and exact package must cross one activation contact together"
         );
+        if let Some((name, descriptor, runtime)) = guest_runtime_delivery(
+            &self.credential_home_root,
+            self.stages_guest_runtime_upload,
+            guest_package.is_some(),
+            guest_runtime,
+        )? {
+            envs.push((name, descriptor));
+            inherited.push(runtime.clone());
+        }
         if let Some(signed) = signed_import {
             signed.validate_shape()?;
             let bytes = ryeos_external_execution_contract::canonical_json(signed)?;
@@ -1084,6 +1102,10 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
     }
     fn backend_id(&self) -> &str {
         &self.declaration.id
+    }
+
+    fn stages_guest_runtime_upload(&self) -> bool {
+        self.stages_guest_runtime_upload
     }
 
     fn admit_lease(
@@ -2245,7 +2267,10 @@ impl ExecutableExternalPlacementBackend {
             ),
             (
                 LIFECYCLE_GUEST_FRAMES_FD_ENV.into(),
-                child.inherited_descriptor().map_err(anyhow::Error::msg)?.to_string(),
+                child
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
             ),
         ];
         // The child's copy travels in `inherited`; dropping the parent's copy
@@ -2343,6 +2368,7 @@ impl ExecutableExternalPlacementBackend {
             None,
             None,
             None,
+            None,
             admitted_adapter_request.as_deref(),
             deadline,
         )?;
@@ -2388,10 +2414,16 @@ impl ExecutableExternalPlacementBackend {
             request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
         };
+        let guest_runtime = contact_guest_runtime(
+            activation_authority.and_then(ExternalSupervisorActivation::guest_runtime_upload),
+            reconcile,
+        );
         let activation = SupervisorActivationIntent {
             activation_request_digest: intent.activation_request_digest.clone(),
             supervisor_runtime_hash: intent.supervisor_runtime_hash.clone(),
             launcher_artifact_hash: contract.launcher_artifact_hash.clone(),
+            guest_runtime_artifact_hash: guest_runtime.map(|upload| upload.sha256().to_owned()),
+            guest_runtime_artifact_bytes: guest_runtime.map(|upload| upload.bytes()),
             attachment_deadline_ms: intent.attachment_deadline_ms,
             execution_timeout_seconds: intent.execution_timeout_seconds,
             post_execution_timeout_seconds: intent.post_execution_timeout_seconds,
@@ -2500,6 +2532,7 @@ impl ExecutableExternalPlacementBackend {
             bootstrap,
             guest_inputs,
             package_authority.as_ref(),
+            guest_runtime.map(|upload| upload.descriptor()),
             activation_authority
                 .map(ExternalSupervisorActivation::signed_import_authorization)
                 .transpose()?,
@@ -2582,6 +2615,7 @@ impl ExecutableExternalPlacementBackend {
                 None,
                 None,
                 None,
+                None,
                 admitted_adapter_request.as_deref(),
                 deadline,
             )?
@@ -2599,6 +2633,66 @@ impl ExecutableExternalPlacementBackend {
             _ => anyhow::bail!("lifecycle adapter returned a non-termination response"),
         }
     }
+}
+
+/// Provider spec operation kind under which activation uploads the guest
+/// runtime itself. The daemon keys on this string alone and reads no other
+/// meaning from the spec.
+const STAGE_THEN_UPLOAD_ACTIVATION_KIND: &str = "stage_then_upload_then_run_once";
+
+fn provider_spec_stages_guest_runtime(spec: &CapturedLifecycleProviderSpec) -> Result<bool> {
+    let bytes = spec
+        .authority
+        .read_regular_file_stable_bounded(spec.bytes)?
+        .0;
+    Ok(spec_declares_staged_activation(&bytes))
+}
+
+/// An unparsable spec declares nothing; the adapter refuses it itself.
+fn spec_declares_staged_activation(spec_bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(spec_bytes)
+        .ok()
+        .is_some_and(|spec| {
+            spec.pointer("/operations/activate_supervisor/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some(STAGE_THEN_UPLOAD_ACTIVATION_KIND)
+        })
+}
+
+/// Only a first activation uploads a runtime; reconciliation carries none,
+/// even if the authority it was handed still holds one.
+fn contact_guest_runtime<T>(held: Option<T>, reconcile: bool) -> Option<T> {
+    held.filter(|_| !reconcile)
+}
+
+/// The runtime descriptor crosses exactly when the provider declares a staged
+/// activation and the guest package crosses with it. Any other descriptor is
+/// refused rather than ignored, and a delivered one takes the same
+/// credential-home identity check as the package.
+fn guest_runtime_delivery<'a>(
+    credential_home_root: &std::path::Path,
+    declared: bool,
+    activating: bool,
+    runtime: Option<&'a lillux::InheritedDescriptorAuthority>,
+) -> Result<Option<(String, String, &'a lillux::InheritedDescriptorAuthority)>> {
+    ensure!(
+        runtime.is_some() == (declared && activating),
+        "guest runtime upload must cross one activation contact exactly when the provider \
+         declares a staged activation"
+    );
+    let Some(runtime) = runtime else {
+        return Ok(None);
+    };
+    refuse_credential_home_upload(credential_home_root, runtime)?;
+    let descriptor = runtime
+        .inherited_descriptor()
+        .map_err(anyhow::Error::msg)?
+        .to_string();
+    Ok(Some((
+        LIFECYCLE_GUEST_RUNTIME_FD_ENV.into(),
+        descriptor,
+        runtime,
+    )))
 }
 
 /// Seal the admitted adapter request a placement retains for one `operate`
@@ -2711,7 +2805,11 @@ mod tests {
             )
             .unwrap();
         std::fs::hard_link(&credential, outside.join("hard.json")).unwrap();
-        for path in [credential.clone(), outside.join("link.json"), outside.join("hard.json")] {
+        for path in [
+            credential.clone(),
+            outside.join("link.json"),
+            outside.join("hard.json"),
+        ] {
             let error = refuse_credential_home_upload(&root, &opened(&path)).unwrap_err();
             let text = format!("{error:#}");
             assert!(text.starts_with("upload refused: its source is "), "{text}");
@@ -2733,14 +2831,23 @@ mod tests {
         let error =
             refuse_credential_home_upload(&root, &opened(&sessions.join("rollout-0.jsonl")))
                 .unwrap_err();
-        assert!(format!("{error:#}").contains("rollout-0.jsonl"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("rollout-0.jsonl"),
+            "{error:#}"
+        );
         let error = refuse_credential_home_upload(&root, &opened(&credential)).unwrap_err();
-        assert!(format!("{error:#}").contains("credential-fixture/auth.json"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("credential-fixture/auth.json"),
+            "{error:#}"
+        );
         // A hard link outside the homes to a file below a home's top level
         // is named by neither the pathname nor the inode comparison; its
         // extra link refuses it.
-        std::fs::hard_link(sessions.join("rollout-1.jsonl"), outside.join("rollout.jsonl"))
-            .unwrap();
+        std::fs::hard_link(
+            sessions.join("rollout-1.jsonl"),
+            outside.join("rollout.jsonl"),
+        )
+        .unwrap();
         let error = refuse_credential_home_upload(&root, &opened(&outside.join("rollout.jsonl")))
             .unwrap_err();
         assert!(
@@ -2748,8 +2855,11 @@ mod tests {
             "{error:#}"
         );
         // So is any other multiply linked file, wherever its links are.
-        std::fs::hard_link(outside.join("workload.json"), outside.join("workload-2.json"))
-            .unwrap();
+        std::fs::hard_link(
+            outside.join("workload.json"),
+            outside.join("workload-2.json"),
+        )
+        .unwrap();
         let error = refuse_credential_home_upload(&root, &opened(&outside.join("workload.json")))
             .unwrap_err();
         assert!(format!("{error:#}").contains("2 hard links"), "{error:#}");
@@ -2779,7 +2889,10 @@ mod tests {
         let error = refuse_credential_home_upload(&root, &replaced).unwrap_err();
         let text = format!("{error:#}");
         assert!(text.starts_with("upload refused: its source is "), "{text}");
-        assert!(text.contains("credential-fixture/auth.json (since unlinked)"), "{text}");
+        assert!(
+            text.contains("credential-fixture/auth.json (since unlinked)"),
+            "{text}"
+        );
 
         // Opened, then renamed below the home's top level, where the inode
         // comparison does not read.
@@ -2787,7 +2900,10 @@ mod tests {
         std::fs::create_dir(home.join("archive")).unwrap();
         std::fs::rename(&credential, home.join("archive").join("auth.json")).unwrap();
         let error = refuse_credential_home_upload(&root, &moved).unwrap_err();
-        assert!(format!("{error:#}").contains("archive/auth.json"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("archive/auth.json"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -2796,7 +2912,9 @@ mod tests {
         for name in ["a", "b"] {
             std::fs::write(state.path().join(name), b"x").unwrap();
         }
-        let directory = lillux::PinnedDirectory::open(state.path()).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(state.path())
+            .unwrap()
+            .unwrap();
         let entries = credential_home_entries(&directory, 2).unwrap();
         assert_eq!(entries.len(), 2);
         std::fs::write(state.path().join("c"), b"x").unwrap();
@@ -2820,6 +2938,94 @@ mod tests {
             error.chain().count(),
             2,
             "decoder source must not escape closed boundary"
+        );
+    }
+
+    #[test]
+    fn only_the_staged_activation_kind_declares_a_runtime_upload() {
+        let spec = |kind: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "operations": { "activate_supervisor": { "kind": kind } }
+            }))
+            .unwrap()
+        };
+        assert!(spec_declares_staged_activation(&spec(
+            "stage_then_upload_then_run_once"
+        )));
+        assert!(!spec_declares_staged_activation(&spec(
+            "unsupported_pending"
+        )));
+        assert!(!spec_declares_staged_activation(b"{}"));
+        assert!(!spec_declares_staged_activation(
+            br#"{"operations":{"activate_supervisor":"stage_then_upload_then_run_once"}}"#
+        ));
+        assert!(!spec_declares_staged_activation(b"not json"));
+    }
+
+    #[test]
+    fn reconciliation_declares_no_guest_runtime_even_if_one_is_held() {
+        let scratch = tempfile::tempdir().unwrap();
+        let upload = crate::guest_runtime_upload::test_upload(scratch.path());
+        assert!(contact_guest_runtime(Some(&upload), true).is_none());
+        let first = contact_guest_runtime(Some(&upload), false).unwrap();
+        assert_eq!(first.sha256(), upload.sha256());
+        assert!(
+            contact_guest_runtime::<&lillux::InheritedDescriptorAuthority>(None, false).is_none()
+        );
+    }
+
+    #[test]
+    fn the_runtime_descriptor_crosses_only_when_declared_and_activating() {
+        let root = tempfile::tempdir().unwrap();
+        let tar = lillux::sealed_memfd(c"ryeos-test-guest-runtime", b"runtime tar").unwrap();
+
+        let (name, descriptor, runtime) =
+            guest_runtime_delivery(root.path(), true, true, Some(&tar))
+                .unwrap()
+                .expect("declared activation delivers the runtime");
+        assert_eq!(name, LIFECYCLE_GUEST_RUNTIME_FD_ENV);
+        assert_eq!(descriptor, tar.inherited_descriptor().unwrap().to_string());
+        let read =
+            lillux::read_sealed_inherited_descriptor(descriptor.parse().unwrap(), 64).unwrap();
+        assert_eq!(read, b"runtime tar");
+        assert_eq!(
+            runtime.inherited_descriptor().unwrap().to_string(),
+            descriptor
+        );
+
+        // Not declared: nothing crosses, and a descriptor is refused.
+        assert!(
+            guest_runtime_delivery(root.path(), false, true, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(guest_runtime_delivery(root.path(), false, true, Some(&tar)).is_err());
+        // Declared but not activating (every other operation), or absent
+        // from an activation: refused.
+        assert!(guest_runtime_delivery(root.path(), true, false, Some(&tar)).is_err());
+        assert!(guest_runtime_delivery(root.path(), true, true, None).is_err());
+        assert!(
+            guest_runtime_delivery(root.path(), true, false, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_runtime_upload_from_a_credential_home_is_refused_at_delivery() {
+        let state = tempfile::tempdir().unwrap();
+        let home = crate::private_artifact_home::create(
+            state.path(),
+            "credential-fixture",
+            &BTreeMap::from([("auth.json".to_owned(), b"credential".to_vec())]),
+        )
+        .unwrap();
+        let root = crate::private_artifact_home::root(state.path());
+        let credential = opened(&home.join("auth.json"));
+        let error = guest_runtime_delivery(&root, true, true, Some(&credential)).unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("upload refused: its source is "),
+            "{error:#}"
         );
     }
 

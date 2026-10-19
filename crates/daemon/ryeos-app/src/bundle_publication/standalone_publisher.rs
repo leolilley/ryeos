@@ -86,14 +86,14 @@ pub fn observe_current_publisher_tool() -> anyhow::Result<ObservedPublisherToolI
             metadata.len() == after.len(),
             "running publisher executable changed while it was measured"
         );
-        return Ok(ObservedPublisherToolIdentity {
+        Ok(ObservedPublisherToolIdentity {
             schema: "ryeos.observed_bundle_publisher_tool.v1".to_owned(),
             effective_definition_digest: format!(
                 "{:x}",
                 Sha256::digest(PUBLISHER_TOOL_DEFINITION_V1)
             ),
             artifact_identity_hash,
-        });
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -109,7 +109,8 @@ pub struct StandalonePublisherPolicy {
     pub catalog_publisher_fingerprint: String,
     pub bundle_publication_policy_section_digest: String,
     pub trust_epoch: u64,
-    pub calibration_execution_environment: ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence,
+    pub calibration_execution_environment:
+        ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence,
     pub qualification_signer_public_key: [u8; 32],
     pub qualification_signer_fingerprint: String,
     pub portable_qualification_policy: ProductQualificationPolicySource,
@@ -283,9 +284,13 @@ impl StandalonePublisherPolicy {
                     .subject_declaration_id
                     == "subject"
                 && self.core_seed_qualification_policy.policy.allowed_claims
-                    == [ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()]
+                    == [
+                        ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()
+                    ]
                 && self.required_core_seed_qualification_claims
-                    == vec![ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()],
+                    == vec![
+                        ryeos_bundle_publication_contract::CORE_SEED_QUALIFICATION_CLAIM.to_owned()
+                    ],
             "invalid Core seed qualification policy pins"
         );
         require_closed_bundle_qualification(
@@ -394,10 +399,12 @@ mod policy_invariant_tests {
         expected_non_core_selections, require_distinct_qualification_verifiers,
         require_non_core_release_input, require_non_core_selections,
     };
-    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection, CalibrationProductSelection};
     use ryeos_bundle_publication_contract::{
-        BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration,
-        BundlePayloadOwnership, BundleTarget,
+        BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration, BundlePayloadOwnership,
+        BundleTarget,
+    };
+    use ryeos_node_runtime::calibration_policy::{
+        CalibrationEnvironmentSelection, CalibrationProductSelection,
     };
     use serde_json::{Value, json};
 
@@ -534,11 +541,18 @@ mod policy_invariant_tests {
         let native_owner = ownership(true, &[]);
         let portable_input = release_input(false, &[]);
         let native_input = release_input(true, &[]);
-        let portable_generation = generation(portable_input["target"].clone(), portable_owner.content_hash().unwrap());
-        let native_generation = generation(native_input["target"].clone(), native_owner.content_hash().unwrap());
-        let check = |generation: &BundleGeneration, input: &Value, owner: &BundlePayloadOwnership| {
-            require_non_core_release_input(generation, input, owner)
-        };
+        let portable_generation = generation(
+            portable_input["target"].clone(),
+            portable_owner.content_hash().unwrap(),
+        );
+        let native_generation = generation(
+            native_input["target"].clone(),
+            native_owner.content_hash().unwrap(),
+        );
+        let check =
+            |generation: &BundleGeneration, input: &Value, owner: &BundlePayloadOwnership| {
+                require_non_core_release_input(generation, input, owner)
+            };
         assert!(check(&portable_generation, &portable_input, &portable_owner).is_ok());
         assert!(check(&native_generation, &native_input, &native_owner).is_ok());
         assert!(check(&portable_generation, &native_input, &portable_owner).is_err());
@@ -583,7 +597,10 @@ mod policy_invariant_tests {
     #[test]
     fn proof_admits_granted_features_and_refuses_forged_ones() {
         let owner = ownership(true, &["granted"]);
-        let generation = generation(release_input(true, &["granted"])["target"].clone(), owner.content_hash().unwrap());
+        let generation = generation(
+            release_input(true, &["granted"])["target"].clone(),
+            owner.content_hash().unwrap(),
+        );
         let granted = release_input(true, &["granted"]);
         assert!(require_non_core_release_input(&generation, &granted, &owner).is_ok());
         let forged = release_input(true, &["forged"]);
@@ -735,7 +752,10 @@ pub fn resolve_committed_ownership(
         .get("payload_ownership_content_hash")
         .and_then(serde_json::Value::as_str)
         .context("release input names no payload ownership hash")?;
-    anyhow::ensure!(lillux::cas::valid_hash(hash), "invalid payload ownership hash");
+    anyhow::ensure!(
+        lillux::cas::valid_hash(hash),
+        "invalid payload ownership hash"
+    );
     let value = cas
         .get_object(hash)?
         .context("payload ownership item is absent from the fetched CAS")?;
@@ -1389,7 +1409,8 @@ fn expected_non_core_selections(
     };
     environment.validate()?;
     let environment_selection =
-        |declaration_id: &str, selected: &ryeos_node_runtime::calibration_policy::CalibrationProductSelection| {
+        |declaration_id: &str,
+         selected: &ryeos_node_runtime::calibration_policy::CalibrationProductSelection| {
             ProductSelectionInput {
                 target: ProductSelectionTarget::Root {},
                 selection: ProductSelection {
@@ -1461,8 +1482,10 @@ fn require_non_core_release_input(
     ownership: &ryeos_bundle_publication_contract::BundlePayloadOwnership,
 ) -> anyhow::Result<()> {
     require_generation_ownership(generation, ownership)?;
-    let input =
-        super::admitted_build::AdmittedReleaseInput::from_value_with_ownership(release_value, ownership)?;
+    let input = super::admitted_build::AdmittedReleaseInput::from_value_with_ownership(
+        release_value,
+        ownership,
+    )?;
     anyhow::ensure!(
         generation.bundle_name == input.bundle_name
             && generation.authored_version == input.authored_manifest.version

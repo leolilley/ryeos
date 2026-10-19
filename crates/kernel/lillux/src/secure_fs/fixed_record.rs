@@ -15,26 +15,50 @@ impl PinnedRegularFile {
     /// The parent remains a separate namespace authority.
     pub fn require_effective_user_owned(&self) -> Result<()> {
         let owner = super::require_effective_user_owned_regular(&self.file)?;
-        self.require_owner_fixed(owner.owner()).map_err(anyhow::Error::msg)
+        self.require_owner_fixed(owner.owner())
+            .map_err(anyhow::Error::msg)
     }
 
     /// Read a fixed record without changing a shared descriptor cursor. The
     /// caller supplies all payload storage and the original absolute deadline.
-    pub fn read_exact_stable_into(&self, bytes: &mut [u8], original: MonotonicDeadline) -> Result<()> {
+    pub fn read_exact_stable_into(
+        &self,
+        bytes: &mut [u8],
+        original: MonotonicDeadline,
+    ) -> Result<()> {
         ensure!(!bytes.is_empty(), "fixed record buffer is empty");
-        ensure!(!original.has_elapsed(), "fixed record read interval exhausted");
+        ensure!(
+            !original.has_elapsed(),
+            "fixed record read interval exhausted"
+        );
         let before = self.observation()?;
-        ensure!(before.size() == u64::try_from(bytes.len())?, "fixed record size changed");
+        ensure!(
+            before.size() == u64::try_from(bytes.len())?,
+            "fixed record size changed"
+        );
         let mut offset = 0;
         while offset < bytes.len() {
-            ensure!(!original.has_elapsed(), "fixed record read interval exhausted");
+            ensure!(
+                !original.has_elapsed(),
+                "fixed record read interval exhausted"
+            );
             #[cfg(unix)]
-            let read = std::os::unix::fs::FileExt::read_at(&self.file, &mut bytes[offset..], u64::try_from(offset)?);
+            let read = std::os::unix::fs::FileExt::read_at(
+                &self.file,
+                &mut bytes[offset..],
+                u64::try_from(offset)?,
+            );
             #[cfg(windows)]
-            let read = std::os::windows::fs::FileExt::seek_read(&self.file, &mut bytes[offset..], u64::try_from(offset)?);
+            let read = std::os::windows::fs::FileExt::seek_read(
+                &self.file,
+                &mut bytes[offset..],
+                u64::try_from(offset)?,
+            );
             #[cfg(not(any(unix, windows)))]
             let read: std::io::Result<usize> = Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported, "positional fixed record reads are unavailable"));
+                std::io::ErrorKind::Unsupported,
+                "positional fixed record reads are unavailable",
+            ));
             match read {
                 Ok(0) => anyhow::bail!("fixed record ended before its retained length"),
                 Ok(count) => offset += count,
@@ -43,7 +67,10 @@ impl PinnedRegularFile {
             }
         }
         super::ensure_open_regular_file_unchanged(&self.file, &before)?;
-        ensure!(!original.has_elapsed(), "fixed record read finished after its interval");
+        ensure!(
+            !original.has_elapsed(),
+            "fixed record read finished after its interval"
+        );
         Ok(())
     }
 
@@ -53,11 +80,16 @@ impl PinnedRegularFile {
     /// rollback or schema interpretation. Error retains the same borrowed
     /// inode; a partial write or uncertain sync needs the caller's exact redo.
     pub fn overwrite_fixed_if_matches(
-        &self, expected: &[u8], target: &[u8], scratch: &mut [u8],
+        &self,
+        expected: &[u8],
+        target: &[u8],
+        scratch: &mut [u8],
         original: MonotonicDeadline,
     ) -> Result<()> {
-        ensure!(!target.is_empty() && expected.len() == target.len() && scratch.len() == target.len(),
-            "fixed record write lengths differ or are empty");
+        ensure!(
+            !target.is_empty() && expected.len() == target.len() && scratch.len() == target.len(),
+            "fixed record write lengths differ or are empty"
+        );
         self.read_exact_stable_into(scratch, original)?;
         ensure!(scratch == expected, "fixed record predecessor changed");
         #[cfg(unix)]
@@ -65,8 +97,14 @@ impl PinnedRegularFile {
             use std::os::unix::fs::FileExt as _;
             let mut offset = 0;
             while offset < target.len() {
-                ensure!(!original.has_elapsed(), "fixed record write interval exhausted");
-                match self.file.write_at(&target[offset..], u64::try_from(offset)?) {
+                ensure!(
+                    !original.has_elapsed(),
+                    "fixed record write interval exhausted"
+                );
+                match self
+                    .file
+                    .write_at(&target[offset..], u64::try_from(offset)?)
+                {
                     Ok(0) => anyhow::bail!("fixed record write made no progress"),
                     Ok(count) => offset += count,
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -85,9 +123,15 @@ impl PinnedRegularFile {
     /// Durability barrier on this actual owned inode. A late/error result
     /// does not imply that earlier writes or publication were undone.
     pub fn sync_exact(&self, original: MonotonicDeadline) -> Result<()> {
-        ensure!(!original.has_elapsed(), "retained record sync interval exhausted");
+        ensure!(
+            !original.has_elapsed(),
+            "retained record sync interval exhausted"
+        );
         self.file.sync_all().context("sync retained record")?;
-        ensure!(!original.has_elapsed(), "retained record sync completed after its interval");
+        ensure!(
+            !original.has_elapsed(),
+            "retained record sync completed after its interval"
+        );
         Ok(())
     }
 }
@@ -95,8 +139,10 @@ impl PinnedRegularFile {
 impl PinnedDirectory {
     /// Typed counterpart to the fixed descriptor comparison; no descriptor
     /// escapes and the child's retained coordinate cannot be substituted.
-    pub fn require_pinned_regular_entry_fixed(&self, expected: &PinnedRegularFile)
-        -> std::result::Result<(), &'static str> {
+    pub fn require_pinned_regular_entry_fixed(
+        &self,
+        expected: &PinnedRegularFile,
+    ) -> std::result::Result<(), &'static str> {
         self.require_regular_entry_descriptor_fixed(expected.name(), &expected.file)
     }
 }
@@ -111,24 +157,44 @@ mod controls {
         let fixture = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(fixture.path()).unwrap().unwrap();
         let initial = [0x31; 64];
-        directory.atomic_create_regular(
-            OsStr::new("record"),
-            &initial,
-            0o600,
-            crate::secure_fs::TEST_TEMP_PURPOSE,
-        ).unwrap().unwrap();
-        let pin = directory.open_pinned_regular(OsStr::new("record"), true).unwrap().unwrap();
+        directory
+            .atomic_create_regular(
+                OsStr::new("record"),
+                &initial,
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
+            .unwrap()
+            .unwrap();
+        let pin = directory
+            .open_pinned_regular(OsStr::new("record"), true)
+            .unwrap()
+            .unwrap();
         let identity = pin.identity().unwrap();
         let deadline = MonotonicDeadline::after(crate::time::Duration::from_secs(5));
         let mut scratch = [0; 64];
         let target = [0x42; 64];
-        pin.overwrite_fixed_if_matches(&initial, &target, &mut scratch, deadline).unwrap();
+        pin.overwrite_fixed_if_matches(&initial, &target, &mut scratch, deadline)
+            .unwrap();
         assert_eq!(pin.identity().unwrap(), identity);
         directory.require_pinned_regular_entry_fixed(&pin).unwrap();
-        assert!(pin.overwrite_fixed_if_matches(&initial, &initial, &mut scratch, deadline).is_err());
-        assert!(pin.overwrite_fixed_if_matches(&target, &[1; 63], &mut scratch, deadline).is_err());
-        assert!(pin.overwrite_fixed_if_matches(&target, &initial, &mut scratch,
-            MonotonicDeadline::after(crate::time::Duration::ZERO)).is_err());
+        assert!(
+            pin.overwrite_fixed_if_matches(&initial, &initial, &mut scratch, deadline)
+                .is_err()
+        );
+        assert!(
+            pin.overwrite_fixed_if_matches(&target, &[1; 63], &mut scratch, deadline)
+                .is_err()
+        );
+        assert!(
+            pin.overwrite_fixed_if_matches(
+                &target,
+                &initial,
+                &mut scratch,
+                MonotonicDeadline::after(crate::time::Duration::ZERO)
+            )
+            .is_err()
+        );
         pin.read_exact_stable_into(&mut scratch, deadline).unwrap();
         assert_eq!(scratch, target);
     }

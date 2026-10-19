@@ -451,32 +451,29 @@ pub(super) fn handle_provider_attempt_prepare(
     }
 
     if coordinate.admitted_effect_class.is_some() {
-        match lookup_provider_call(state, &coordinate_key)? {
-            Some((record_hash, record)) => {
-                ensure_provider_call_publication_proof(state, &record_hash, &record)?;
-                publish_provider_call_observation(
-                    state,
-                    &cap.thread_id,
-                    request.turn,
-                    request.attempt_number,
-                    &coordinate_key,
-                    &record.answer_digest,
-                    &record_hash,
-                    ryeos_state::ProviderCallObservationSource::Replay,
-                    ryeos_state::ProviderCallObservationPublication::NotApplicable,
-                    Some(ryeos_state::ProviderCallReplaySource {
-                        produced_by_thread: record.first_observation.produced_by_thread.clone(),
-                        attempt_id: record.first_observation.attempt_id.clone(),
-                    }),
-                )?;
-                return Ok(serde_json::to_value(
-                    ProviderAttemptPrepareResponse::Replay {
-                        record_hash,
-                        answer: record.answer,
-                    },
-                )?);
-            }
-            None => {}
+        if let Some((record_hash, record)) = lookup_provider_call(state, &coordinate_key)? {
+            ensure_provider_call_publication_proof(state, &record_hash, &record)?;
+            publish_provider_call_observation(
+                state,
+                &cap.thread_id,
+                request.turn,
+                request.attempt_number,
+                &coordinate_key,
+                &record.answer_digest,
+                &record_hash,
+                ryeos_state::ProviderCallObservationSource::Replay,
+                ryeos_state::ProviderCallObservationPublication::NotApplicable,
+                Some(ryeos_state::ProviderCallReplaySource {
+                    produced_by_thread: record.first_observation.produced_by_thread.clone(),
+                    attempt_id: record.first_observation.attempt_id.clone(),
+                }),
+            )?;
+            return Ok(serde_json::to_value(
+                ProviderAttemptPrepareResponse::Replay {
+                    record_hash,
+                    answer: record.answer,
+                },
+            )?);
         }
     }
 
@@ -1675,8 +1672,10 @@ mod tests {
     #[test]
     fn indexed_provider_record_repairs_missing_accounting_publication_proof() {
         let (tmp, _state_owner, mut state) = super::super::tests::setup_app_state();
-        let ledger_owner =
-            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("accounting-proof-repair")).unwrap();
+        let ledger_owner = ryeos_app::test_support::TestAccountingDb::open(
+            &tmp.path().join("accounting-proof-repair"),
+        )
+        .unwrap();
         let ledger = ledger_owner.shared();
         state.accounting = Some(Arc::clone(&ledger));
 
@@ -1884,7 +1883,9 @@ mod tests {
     /// A node shaped like the hosted-workflow profile: the workflow key is
     /// taken from the node's environment and delivered to holders of one
     /// receive capability.
-    fn hosted_workflow_environment(receive_capability: &str) -> ryeos_app::vault::ProviderEnvironment {
+    fn hosted_workflow_environment(
+        receive_capability: &str,
+    ) -> ryeos_app::vault::ProviderEnvironment {
         use ryeos_node_runtime::node_policy::sections::provider_environment::{
             ProviderEnvironmentName, ProviderEnvironmentRecipients,
         };
@@ -2003,7 +2004,10 @@ mod tests {
             .unwrap_or_else(|| panic!("issue refusal is untyped: {error:#}"));
         assert_eq!(typed.code(), "capability_rejected");
         assert!(!typed.retryable());
-        assert!(typed.to_string().contains("provider-attempt issue refused"), "{typed}");
+        assert!(
+            typed.to_string().contains("provider-attempt issue refused"),
+            "{typed}"
+        );
     }
 
     fn assert_refused_by_name(outcome: &Result<()>) {
@@ -2027,7 +2031,10 @@ mod tests {
         let root = admit_hosted_workflow(
             &environment,
             &project,
-            &["ryeos.execute.*".to_owned(), RECEIVE_WORKFLOW_KEY.to_owned()],
+            &[
+                "ryeos.execute.*".to_owned(),
+                RECEIVE_WORKFLOW_KEY.to_owned(),
+            ],
         )
         .unwrap();
         for outcome in deliver_root_child_and_callback(&environment, &root) {
@@ -2035,9 +2042,8 @@ mod tests {
         }
 
         // The principal does not hold it: admission is refused by name.
-        let error =
-            admit_hosted_workflow(&environment, &project, &["ryeos.execute.*".to_owned()])
-                .unwrap_err();
+        let error = admit_hosted_workflow(&environment, &project, &["ryeos.execute.*".to_owned()])
+            .unwrap_err();
         assert_refused_by_name(&Err(error));
 
         // An authority whose sealed scopes lack the capability is refused at
@@ -2109,8 +2115,7 @@ mod tests {
         let cache_key = local_coordinate(&authority).cache_key().unwrap();
         let request_hash =
             ryeos_accounting::rpc::provider_attempt_request_hash(thread_id, 1, 1, &cache_key);
-        let SpendBoundAuthority::ExplicitlyFree { contract_digest } = &authority.spend_bound
-        else {
+        let SpendBoundAuthority::ExplicitlyFree { contract_digest } = &authority.spend_bound else {
             panic!("the free fixture authority has an explicitly-free bound");
         };
         let bound = VerifiedPreparedSpendBound {
@@ -2157,9 +2162,10 @@ mod tests {
     #[test]
     fn refused_issue_releases_its_reservation_and_answers_the_refusal() {
         let tmp = tempfile::tempdir().unwrap();
-        let ledger_owner =
-            ryeos_app::test_support::TestAccountingDb::open(&tmp.path().join("accounting-issue-refusal"))
-                .unwrap();
+        let ledger_owner = ryeos_app::test_support::TestAccountingDb::open(
+            &tmp.path().join("accounting-issue-refusal"),
+        )
+        .unwrap();
         let ledger = ledger_owner.shared();
         let generation = "launch-1";
         let attempt_state = |request: &ProviderAttemptMarkIssuedParams| {

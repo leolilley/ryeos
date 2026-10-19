@@ -1,12 +1,14 @@
 //! Closed release-attestation policy for native bundle publication.
 
-use ryeos_bundle_publication_contract::{BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM, BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY};
+use ryeos_bundle_publication_contract::{
+    BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY,
+    BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM,
+};
 use ryeos_state::objects::Attestation;
 use ryeos_state::signer::Signer;
 
 use super::VerifiedBundleGeneration;
 use ryeos_bundle_publication_contract::SubstrateRelease;
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseSubjectKind {

@@ -18,7 +18,10 @@ const ACTIVATION_ATTEMPTS: usize = 3;
 pub fn prepare_operational_schema_reference(
     factory: Arc<OriginalNativeFactory>,
     inputs: OriginalNativeTransientInputs,
-) -> std::result::Result<sqlite_schema::ClosedNativeSchemaSqlReference, sqlite_schema::NativeSchemaSqlReferenceFailure> {
+) -> std::result::Result<
+    sqlite_schema::ClosedNativeSchemaSqlReference,
+    sqlite_schema::NativeSchemaSqlReferenceFailure,
+> {
     sqlite_schema::prepare_native_schema_sql_reference(
         factory,
         inputs,
@@ -28,8 +31,10 @@ pub fn prepare_operational_schema_reference(
 }
 
 /// Hands a terminal to the caller's census; a refusal returns it.
-pub type RetainTerminal<'a> = &'a dyn Fn(OriginalNativeConnectionTerminal)
-    -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)>;
+pub type RetainTerminal<'a> =
+    &'a dyn Fn(
+        OriginalNativeConnectionTerminal,
+    ) -> std::result::Result<(), (OriginalNativeConnectionTerminal, anyhow::Error)>;
 
 /// One owner kept alive by a refusal. [`CarriedOwners`] keeps each one with
 /// the name of its type.
@@ -54,7 +59,10 @@ impl CarriedOwners {
     /// by adding context through the carrier, never around it.
     pub fn carry<T: std::any::Any + Send>(error: anyhow::Error, owner: T) -> anyhow::Error {
         let (error, mut owners) = Self::split(error);
-        owners.push((std::any::type_name::<T>(), std::sync::Mutex::new(Box::new(owner))));
+        owners.push((
+            std::any::type_name::<T>(),
+            std::sync::Mutex::new(Box::new(owner)),
+        ));
         Self::join(error, owners)
     }
     /// The refusal and every carried owner, in the order they were refused.
@@ -63,7 +71,11 @@ impl CarriedOwners {
         let owners = self
             .owners
             .into_iter()
-            .map(|(_, owner)| owner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .map(|(_, owner)| {
+                owner
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            })
             .collect();
         (self.error, owners)
     }
@@ -77,8 +89,16 @@ impl CarriedOwners {
     /// context chain would drop every context layer above the carrier, and a
     /// context may itself own something, so a carrier under a context is
     /// returned untouched with `error` instead.
-    fn split(error: anyhow::Error) -> (anyhow::Error, Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>) {
-        let top_level = error.chain().next().is_some_and(|top| top.is::<CarriedOwners>());
+    fn split(
+        error: anyhow::Error,
+    ) -> (
+        anyhow::Error,
+        Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>,
+    ) {
+        let top_level = error
+            .chain()
+            .next()
+            .is_some_and(|top| top.is::<CarriedOwners>());
         if !top_level {
             return (error, Vec::new());
         }
@@ -87,7 +107,10 @@ impl CarriedOwners {
             Err(error) => (error, Vec::new()),
         }
     }
-    fn join(error: anyhow::Error, owners: Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>) -> anyhow::Error {
+    fn join(
+        error: anyhow::Error,
+        owners: Vec<(&'static str, std::sync::Mutex<CarriedOwner>)>,
+    ) -> anyhow::Error {
         if owners.is_empty() {
             return error;
         }
@@ -96,12 +119,21 @@ impl CarriedOwners {
 }
 impl std::fmt::Debug for CarriedOwners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CarriedOwners").field("error", &self.error).field("owners", &self.owner_names()).finish()
+        f.debug_struct("CarriedOwners")
+            .field("error", &self.error)
+            .field("owners", &self.owner_names())
+            .finish()
     }
 }
 impl std::fmt::Display for CarriedOwners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#} ({} refused owner(s) retained: {})", self.error, self.owners.len(), self.owner_names().join(", "))
+        write!(
+            f,
+            "{:#} ({} refused owner(s) retained: {})",
+            self.error,
+            self.owners.len(),
+            self.owner_names().join(", ")
+        )
     }
 }
 impl std::error::Error for CarriedOwners {}
@@ -113,7 +145,10 @@ fn carry_error(error: anyhow::Error, carried: anyhow::Error) -> anyhow::Error {
     let (error, mut owners) = CarriedOwners::split(error);
     let (residual, carried) = CarriedOwners::split(carried);
     owners.extend(carried);
-    owners.push((std::any::type_name::<anyhow::Error>(), std::sync::Mutex::new(Box::new(residual))));
+    owners.push((
+        std::any::type_name::<anyhow::Error>(),
+        std::sync::Mutex::new(Box::new(residual)),
+    ));
     CarriedOwners::join(error, owners)
 }
 
@@ -170,17 +205,31 @@ pub unsafe fn activate_replay_indexes_offline(
         Ok(reference) => reference,
         Err(failure) => return Err(release_reference_failure(factory, failure, retain)),
     };
-    let result = activate_with_reference(root, namespace, factory, destination, &reference, verify, retain);
+    let result = activate_with_reference(
+        root,
+        namespace,
+        factory,
+        destination,
+        &reference,
+        verify,
+        retain,
+    );
     let (_definition, terminal) = reference.into_original_parts();
     match (result, retain(terminal)) {
         (Ok(report), Ok(())) => Ok(report),
         (Ok(report), Err((terminal, refusal))) => Err(CarriedOwners::carry(
-            refusal.context(format!("{}; schema reference terminal not retained", committed(&report))),
+            refusal.context(format!(
+                "{}; schema reference terminal not retained",
+                committed(&report)
+            )),
             terminal,
         )),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err((terminal, refusal))) => Err(CarriedOwners::carry(
-            contextualize(error, format!("schema reference terminal not retained: {refusal:#}")),
+            contextualize(
+                error,
+                format!("schema reference terminal not retained: {refusal:#}"),
+            ),
             terminal,
         )),
     }
@@ -209,17 +258,23 @@ fn activate_with_reference(
         )
     }?;
     let mut prepared = match PreparedReplayIndexReset::prepare_original(
-        root.clone(), namespace, factory.clone(), inputs, reference, false,
+        root.clone(),
+        namespace,
+        factory.clone(),
+        inputs,
+        reference,
+        false,
     ) {
         Ok(prepared) => prepared,
         Err(failure) => return Err(release_operational_failure(failure, retain)),
     };
     // SAFETY: `verify` revalidates the caller's exclusive StateLock,
     // namespace lock and host operation window (this function's contract).
-    let authority = match unsafe { OriginalOperationalMutationAuthority::issued(&root, factory, verify) } {
-        Ok(authority) => authority,
-        Err(error) => return Err(close_prepared(prepared, factory, error, retain)),
-    };
+    let authority =
+        match unsafe { OriginalOperationalMutationAuthority::issued(&root, factory, verify) } {
+            Ok(authority) => authority,
+            Err(error) => return Err(close_prepared(prepared, factory, error, retain)),
+        };
     let mut last = None;
     for _ in 0..ACTIVATION_ATTEMPTS {
         match prepared
@@ -270,17 +325,29 @@ fn close_prepared(
                 error
             }
             Err(carried) => carry_error(
-                contextualize(error, format!("closed Operational census refused: {carried:#}")),
+                contextualize(
+                    error,
+                    format!("closed Operational census refused: {carried:#}"),
+                ),
                 carried,
             ),
         },
         Err(close) => match close.downcast::<OriginalOperationalFailure>() {
             Ok(failure) => {
                 let released = release_operational_failure(failure, retain);
-                carry_error(contextualize(error, format!("prepared Operational close refused: {released:#}")), released)
+                carry_error(
+                    contextualize(
+                        error,
+                        format!("prepared Operational close refused: {released:#}"),
+                    ),
+                    released,
+                )
             }
             // No owner: the preparation was already transferred.
-            Err(close) => contextualize(error, format!("prepared Operational close refused: {close:#}")),
+            Err(close) => contextualize(
+                error,
+                format!("prepared Operational close refused: {close:#}"),
+            ),
         },
     }
 }
@@ -293,7 +360,12 @@ fn retain_closed_terminals(
 ) -> Result<ClosedOriginalOperational> {
     let terminals = match closed.native_terminals() {
         Ok(terminals) => terminals,
-        Err(error) => return Err(CarriedOwners::carry(error.context("closed Operational terminals refused"), closed)),
+        Err(error) => {
+            return Err(CarriedOwners::carry(
+                error.context("closed Operational terminals refused"),
+                closed,
+            ));
+        }
     };
     let mut refused = Vec::new();
     for terminal in terminals {
@@ -304,14 +376,27 @@ fn retain_closed_terminals(
     if refused.is_empty() {
         return Ok(closed);
     }
-    let reasons = refused.iter().map(|(_, error)| format!("{error:#}")).collect::<Vec<_>>().join("; ");
-    let terminals = refused.into_iter().map(|(terminal, _)| terminal).collect::<Vec<_>>();
-    Err(CarriedOwners::carry(anyhow::anyhow!("Operational terminal not retained: {reasons}"), (closed, terminals)))
+    let reasons = refused
+        .iter()
+        .map(|(_, error)| format!("{error:#}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let terminals = refused
+        .into_iter()
+        .map(|(terminal, _)| terminal)
+        .collect::<Vec<_>>();
+    Err(CarriedOwners::carry(
+        anyhow::anyhow!("Operational terminal not retained: {reasons}"),
+        (closed, terminals),
+    ))
 }
 
 /// Retry the same failed owner's close once. A closed owner's terminals reach
 /// `retain`; a still-refused owner is carried inside the returned error.
-fn release_operational_failure(failure: OriginalOperationalFailure, retain: RetainTerminal<'_>) -> anyhow::Error {
+fn release_operational_failure(
+    failure: OriginalOperationalFailure,
+    retain: RetainTerminal<'_>,
+) -> anyhow::Error {
     let original = anyhow::anyhow!("{failure:#}");
     match failure.retry_close() {
         Ok(closed) => match retain_closed_terminals(closed, retain) {
@@ -356,7 +441,9 @@ pub fn release_schema_reference_failure(
                         original
                     }
                     Err((terminal, refusal)) => CarriedOwners::carry(
-                        original.context(format!("schema reference terminal not retained: {refusal:#}")),
+                        original.context(format!(
+                            "schema reference terminal not retained: {refusal:#}"
+                        )),
                         (released, terminal),
                     ),
                 },
@@ -373,7 +460,9 @@ pub fn release_schema_reference_failure(
                             original
                         }
                         Err((released, refusal)) => CarriedOwners::carry(
-                            original.context(format!("unused schema reference inputs not released: {refusal:#}")),
+                            original.context(format!(
+                                "unused schema reference inputs not released: {refusal:#}"
+                            )),
                             released,
                         ),
                     }
@@ -397,7 +486,9 @@ mod carried_tests {
         let inner = CarriedOwners::carry(anyhow::anyhow!("first refusal"), 1u8);
         let outer = CarriedOwners::carry(contextualize(inner, "outer context"), 2u16);
         let merged = carry_error(anyhow::anyhow!("close refused"), outer);
-        let carried = merged.downcast::<CarriedOwners>().expect("one flat carrier");
+        let carried = merged
+            .downcast::<CarriedOwners>()
+            .expect("one flat carrier");
         assert_eq!(
             carried.owner_names(),
             vec!["u8", "u16", std::any::type_name::<anyhow::Error>()],
@@ -417,11 +508,24 @@ mod carried_tests {
         let inner = CarriedOwners::carry(anyhow::anyhow!("first refusal"), 1u8);
         let wrapped = inner.context("owning context");
         let outer = CarriedOwners::carry(wrapped, 2u16);
-        let carried = outer.downcast::<CarriedOwners>().expect("top-level carrier");
-        assert_eq!(carried.owner_names(), vec!["u16"], "the nested carrier is not split out of its context");
+        let carried = outer
+            .downcast::<CarriedOwners>()
+            .expect("top-level carrier");
+        assert_eq!(
+            carried.owner_names(),
+            vec!["u16"],
+            "the nested carrier is not split out of its context"
+        );
         let (error, _owners) = carried.into_parts();
-        assert_eq!(format!("{error}"), "owning context", "the context layer above the nested carrier survives");
-        assert!(error.downcast_ref::<CarriedOwners>().is_some(), "the nested carrier is still alive");
+        assert_eq!(
+            format!("{error}"),
+            "owning context",
+            "the context layer above the nested carrier survives"
+        );
+        assert!(
+            error.downcast_ref::<CarriedOwners>().is_some(),
+            "the nested carrier is still alive"
+        );
     }
 }
 
@@ -452,10 +556,17 @@ mod tests {
             '2026-01-01T00:00:00Z'
          );";
 
-    fn open(host: &TestNativeHost, root: &Arc<lillux::PinnedDirectory>, mode: OriginalNativeBoundMode)
-        -> lillux_sqlite::OriginalNativeConnection {
-        match host.open_bound(root.clone(), OsStr::new(OPERATIONAL_DB_FILENAME), mode,
-            OriginalNativeDomain::NodeOperational) {
+    fn open(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+        mode: OriginalNativeBoundMode,
+    ) -> lillux_sqlite::OriginalNativeConnection {
+        match host.open_bound(
+            root.clone(),
+            OsStr::new(OPERATIONAL_DB_FILENAME),
+            mode,
+            OriginalNativeDomain::NodeOperational,
+        ) {
             Ok(connection) => connection,
             Err(failure) => {
                 let error = failure.to_string();
@@ -467,7 +578,11 @@ mod tests {
 
     /// An established current-schema Operational database at `epoch`, built
     /// entirely through the native gate.
-    fn seed(host: &TestNativeHost, dir: &tempfile::TempDir, epoch: i32) -> Arc<lillux::PinnedDirectory> {
+    fn seed(
+        host: &TestNativeHost,
+        dir: &tempfile::TempDir,
+        epoch: i32,
+    ) -> Arc<lillux::PinnedDirectory> {
         let root = Arc::new(lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap());
         let path = dir.path().join(OPERATIONAL_DB_FILENAME);
         let connection = open(host, &root, OriginalNativeBoundMode::CreateExclusive);
@@ -476,8 +591,10 @@ mod tests {
                 configure_connection(sql)?;
                 sqlite_schema::init_owned(sql, &operational_schema_spec(), SCHEMA_SQL, &path)?;
                 sql.execute_batch(PREDECESSOR_ROWS)?;
-                sql.execute("UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
-                    rusqlite::params![epoch])?;
+                sql.execute(
+                    "UPDATE replay_index_epoch SET epoch = ?1 WHERE singleton = 1",
+                    rusqlite::params![epoch],
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -485,31 +602,50 @@ mod tests {
         root
     }
 
-    fn activate(host: &TestNativeHost, root: &Arc<lillux::PinnedDirectory>, verify: &dyn Fn() -> Result<()>)
-        -> Result<ReplayIndexResetReport> {
+    fn activate(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+        verify: &dyn Fn() -> Result<()>,
+    ) -> Result<ReplayIndexResetReport> {
         activate_with(host, root, verify, &|terminal| {
             host.retain_terminal(terminal);
             Ok(())
         })
     }
 
-    fn activate_with(host: &TestNativeHost, root: &Arc<lillux::PinnedDirectory>, verify: &dyn Fn() -> Result<()>,
-        retain: RetainTerminal<'_>) -> Result<ReplayIndexResetReport> {
+    fn activate_with(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+        verify: &dyn Fn() -> Result<()>,
+        retain: RetainTerminal<'_>,
+    ) -> Result<ReplayIndexResetReport> {
         let namespace = root.lock_exclusive().unwrap();
         // SAFETY: the test host funds the factory; the test is the sole user
         // of this temporary runtime directory and holds its namespace lock.
         unsafe {
-            activate_replay_indexes_offline(root.clone(), namespace, host.factory(), host.destination(),
-                verify, retain)
+            activate_replay_indexes_offline(
+                root.clone(),
+                namespace,
+                host.factory(),
+                host.destination(),
+                verify,
+                retain,
+            )
         }
     }
 
-    fn rows_and_epoch(host: &TestNativeHost, root: &Arc<lillux::PinnedDirectory>) -> (Vec<String>, i32) {
+    fn rows_and_epoch(
+        host: &TestNativeHost,
+        root: &Arc<lillux::PinnedDirectory>,
+    ) -> (Vec<String>, i32) {
         let connection = open(host, root, OriginalNativeBoundMode::Existing);
         let observed = connection
             .with_sql(|sql| {
-                let mut statement = sql.prepare("SELECT namespace FROM replay_records ORDER BY namespace")?;
-                let rows = statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+                let mut statement =
+                    sql.prepare("SELECT namespace FROM replay_records ORDER BY namespace")?;
+                let rows = statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
                 Ok((rows, replay_index_epoch(sql)?))
             })
             .unwrap();
@@ -519,7 +655,10 @@ mod tests {
 
     fn assert_census_complete(host: &TestNativeHost) {
         let (issued, recorded) = host.ticket_census();
-        assert_eq!(issued as usize, recorded, "every issued ticket must reach the census");
+        assert_eq!(
+            issued as usize, recorded,
+            "every issued ticket must reach the census"
+        );
     }
 
     #[test]
@@ -528,9 +667,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
         let report = activate(&host, &root, &|| Ok(())).unwrap();
-        assert_eq!((report.stored_epoch, report.current_epoch, report.scope),
-            (REPLAY_INDEX_EPOCH - 1, REPLAY_INDEX_EPOCH, ReplayIndexResetScope::AllReplayRecords));
-        assert_eq!(rows_and_epoch(&host, &root), (Vec::new(), REPLAY_INDEX_EPOCH));
+        assert_eq!(
+            (report.stored_epoch, report.current_epoch, report.scope),
+            (
+                REPLAY_INDEX_EPOCH - 1,
+                REPLAY_INDEX_EPOCH,
+                ReplayIndexResetScope::AllReplayRecords
+            )
+        );
+        assert_eq!(
+            rows_and_epoch(&host, &root),
+            (Vec::new(), REPLAY_INDEX_EPOCH)
+        );
         assert_census_complete(&host);
     }
 
@@ -541,7 +689,10 @@ mod tests {
         let root = seed(&host, &dir, 4);
         let report = activate(&host, &root, &|| Ok(())).unwrap();
         assert_eq!(report.scope, ReplayIndexResetScope::AllReplayRecords);
-        assert_eq!(rows_and_epoch(&host, &root), (Vec::new(), REPLAY_INDEX_EPOCH));
+        assert_eq!(
+            rows_and_epoch(&host, &root),
+            (Vec::new(), REPLAY_INDEX_EPOCH)
+        );
         let again = activate(&host, &root, &|| Ok(())).unwrap();
         assert_eq!(again.scope, ReplayIndexResetScope::Unchanged);
         assert_census_complete(&host);
@@ -554,8 +705,15 @@ mod tests {
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
         FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.set(true));
         let report = activate(&host, &root, &|| Ok(())).unwrap();
-        assert_eq!(report.scope, ReplayIndexResetScope::AllReplayRecords, "original decision preserved");
-        assert_eq!(rows_and_epoch(&host, &root), (Vec::new(), REPLAY_INDEX_EPOCH));
+        assert_eq!(
+            report.scope,
+            ReplayIndexResetScope::AllReplayRecords,
+            "original decision preserved"
+        );
+        assert_eq!(
+            rows_and_epoch(&host, &root),
+            (Vec::new(), REPLAY_INDEX_EPOCH)
+        );
         assert_census_complete(&host);
     }
 
@@ -565,7 +723,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH + 1);
         let error = activate(&host, &root, &|| Ok(())).expect_err("future epoch refused");
-        assert!(format!("{error:#}").contains("newer than this binary"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("newer than this binary"),
+            "{error:#}"
+        );
         let other = tempfile::tempdir().unwrap();
         let current = seed(&host, &other, REPLAY_INDEX_EPOCH - 1);
         let calls = std::cell::Cell::new(0);
@@ -575,14 +736,23 @@ mod tests {
             Ok(())
         };
         let error = activate(&host, &current, &verify).expect_err("withdrawn authority refused");
-        assert!(format!("{error:#}").contains("authority withdrawn"), "{error:#}");
-        assert_eq!(rows_and_epoch(&host, &current).1, REPLAY_INDEX_EPOCH - 1, "nothing activated");
+        assert!(
+            format!("{error:#}").contains("authority withdrawn"),
+            "{error:#}"
+        );
+        assert_eq!(
+            rows_and_epoch(&host, &current).1,
+            REPLAY_INDEX_EPOCH - 1,
+            "nothing activated"
+        );
         assert_census_complete(&host);
     }
 
     /// Hand every terminal carried by a refusal back to the host census.
     fn recover_carried(host: &TestNativeHost, error: anyhow::Error) -> usize {
-        let carried = error.downcast::<CarriedOwners>().expect("refusal carries its owners");
+        let carried = error
+            .downcast::<CarriedOwners>()
+            .expect("refusal carries its owners");
         let (_error, owners) = carried.into_parts();
         let mut recovered = 0;
         for owner in owners {
@@ -604,15 +774,23 @@ mod tests {
         let retain = |terminal: OriginalNativeConnectionTerminal| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
-                return Err((terminal, anyhow::anyhow!("census refused the schema reference")));
+                return Err((
+                    terminal,
+                    anyhow::anyhow!("census refused the schema reference"),
+                ));
             }
             host.retain_terminal(terminal);
             Ok(())
         };
-        let error = activate_with(&host, &root, &|| Ok(()), &retain).expect_err("refused terminal surfaces");
+        let error = activate_with(&host, &root, &|| Ok(()), &retain)
+            .expect_err("refused terminal surfaces");
         let message = format!("{error:#}");
         assert!(message.contains("activation committed"), "{message}");
-        assert_eq!(recover_carried(&host, error), 1, "the refused terminal is returned, not dropped");
+        assert_eq!(
+            recover_carried(&host, error),
+            1,
+            "the refused terminal is returned, not dropped"
+        );
         assert_eq!(rows_and_epoch(&host, &root).1, REPLAY_INDEX_EPOCH);
         assert_census_complete(&host);
     }
@@ -625,8 +803,12 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let root = seed(&host, &dir, REPLAY_INDEX_EPOCH - 1);
-        let error = activate(&host, &root, &|| Ok(())).expect_err("no ticket left for the reference");
-        assert!(format!("{error:#}").contains("schema reference refused"), "{error:#}");
+        let error =
+            activate(&host, &root, &|| Ok(())).expect_err("no ticket left for the reference");
+        assert!(
+            format!("{error:#}").contains("schema reference refused"),
+            "{error:#}"
+        );
         assert_census_complete(&host);
     }
 
@@ -638,10 +820,17 @@ mod tests {
         // SAFETY: test-only issuance under the test host's own funded factory;
         // the purpose deliberately differs from the reference's.
         let inputs = unsafe {
-            OriginalNativeTransientInputs::issued(OriginalNativeDomain::StateTransient, destination.clone())
+            OriginalNativeTransientInputs::issued(
+                OriginalNativeDomain::StateTransient,
+                destination.clone(),
+            )
         }
         .unwrap();
-        assert_eq!(Arc::strong_count(&destination), baseline + 1, "the inputs hold the destination");
+        assert_eq!(
+            Arc::strong_count(&destination),
+            baseline + 1,
+            "the inputs hold the destination"
+        );
         let failure = match prepare_operational_schema_reference(host.factory().clone(), inputs) {
             Ok(_) => panic!("a reference input of another purpose is refused"),
             Err(failure) => failure,
@@ -650,8 +839,14 @@ mod tests {
             host.retain_terminal(terminal);
             Ok(())
         });
-        assert!(format!("{error:#}").contains("schema reference refused"), "{error:#}");
-        assert!(error.downcast_ref::<CarriedOwners>().is_none(), "nothing is carried: {error:#}");
+        assert!(
+            format!("{error:#}").contains("schema reference refused"),
+            "{error:#}"
+        );
+        assert!(
+            error.downcast_ref::<CarriedOwners>().is_none(),
+            "nothing is carried: {error:#}"
+        );
         assert_eq!(
             Arc::strong_count(&destination),
             baseline,

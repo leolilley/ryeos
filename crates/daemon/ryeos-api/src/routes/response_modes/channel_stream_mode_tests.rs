@@ -242,7 +242,8 @@ impl ChannelStreamOwner for FixtureOwner {
             .refuse_in_exchange
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.refused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             anyhow::bail!("external channel refused: the lease was refused: test");
         }
         if self.held.load(std::sync::atomic::Ordering::SeqCst)
@@ -1020,7 +1021,10 @@ async fn a_refused_occurrence_has_no_stream_and_is_gone_before_the_upgrade() {
     let error = dial(address, OCCURRENCE, true).await.err().unwrap();
     assert_eq!(refused_status(error), 410);
     assert_eq!(slots.occupancy(), (0, 0));
-    assert_eq!(ChannelStreamRefusal::OccurrenceRefused.code(), OCCURRENCE_REFUSED);
+    assert_eq!(
+        ChannelStreamRefusal::OccurrenceRefused.code(),
+        OCCURRENCE_REFUSED
+    );
 }
 
 #[tokio::test]
@@ -1120,7 +1124,11 @@ async fn an_exchange_with_no_verdict_closes_retryably_and_a_retry_is_served() {
         .await
         .unwrap();
     let (code, reason) = closed_with(&mut socket).await;
-    assert_eq!(code, close_code::ERROR, "a missing verdict is not a policy refusal");
+    assert_eq!(
+        code,
+        close_code::ERROR,
+        "a missing verdict is not a policy refusal"
+    );
     assert_eq!(reason, "external_channel_stream_exchange_unavailable");
     wait_for_occupancy(&slots, (0, 0)).await;
 

@@ -19,6 +19,25 @@ pub fn install_signed_test_bundle(
     key: &SigningKey,
     artifacts: &SyntheticExternalArtifacts<'_>,
 ) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
+    install_signed_test_bundle_with_guest_admission(
+        root,
+        connector_new_group,
+        false,
+        key,
+        artifacts,
+    )
+}
+
+/// As [`install_signed_test_bundle`]; `independent_guest_runtime_admission`
+/// declares the adapter's independent guest-runtime admission capability, which
+/// a placement binding must agree with by carrying a runtime qualification.
+pub fn install_signed_test_bundle_with_guest_admission(
+    root: &Path,
+    connector_new_group: bool,
+    independent_guest_runtime_admission: bool,
+    key: &SigningKey,
+    artifacts: &SyntheticExternalArtifacts<'_>,
+) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
     let bundle = root.join("synthetic-external");
     let ai = bundle.join(ryeos_engine::AI_DIR);
     let target = lillux::platform::current_binary_target().unwrap();
@@ -133,7 +152,7 @@ external_lifecycle_adapters:
       - exact_activation_reconciliation
       - idempotent_termination
       - exact_terminal_observation
-external_providers:
+{guest_admission}external_providers:
   - id: codex-hosted
     protocol: ryeos.external-execution.provider-declaration.v2
     targets: [{target}]
@@ -150,6 +169,11 @@ external_providers:
             "inherited"
         },
         provider_spec_sha256 = provider_spec_sha256,
+        guest_admission = if independent_guest_runtime_admission {
+            "      - independent_guest_runtime_admission\n"
+        } else {
+            ""
+        },
     );
     std::fs::write(
         ai.join("manifest.yaml"),

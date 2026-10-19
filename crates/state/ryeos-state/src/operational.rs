@@ -11,31 +11,34 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::sqlite_schema;
+mod offline_replay;
 mod original;
 mod original_mutation;
-mod offline_replay;
 pub use offline_replay::{
-    CarriedOwner, CarriedOwners, RetainTerminal, activate_replay_indexes_offline, prepare_operational_schema_reference,
-    release_schema_reference_failure,
+    CarriedOwner, CarriedOwners, RetainTerminal, activate_replay_indexes_offline,
+    prepare_operational_schema_reference, release_schema_reference_failure,
 };
 pub(crate) mod live_native;
-pub use live_native::{LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure, ReleasedLiveOperationalStartup, ReleasedLiveOperationalPhysicalCustody};
+pub use live_native::{
+    LiveOperationalOpenFailure, LiveOperationalStartupRecoveryFailure,
+    ReleasedLiveOperationalPhysicalCustody, ReleasedLiveOperationalStartup,
+};
 #[doc(hidden)]
 pub use live_native::{
-    quote_operational_startup_metadata_retirement,
-    quote_maximum_operational_metadata_retirement,
-    quote_operational_startup_packet_transfer,
-    quote_released_live_operational_physical_custody,
+    quote_maximum_operational_metadata_retirement, quote_operational_startup_metadata_retirement,
+    quote_operational_startup_packet_transfer, quote_released_live_operational_physical_custody,
 };
-pub use original::{ClosedOriginalOperational, OriginalOperationalFailure, OutsideOriginalOperationalCustody};
+pub use original::{
+    ClosedOriginalOperational, OriginalOperationalFailure, OutsideOriginalOperationalCustody,
+};
 #[doc(hidden)]
 pub use original::{
-    quote_operational_live_context, quote_operational_main_packet,
-    quote_operational_live_metadata_retirement, quote_maximum_operational_live_metadata_retirement,
-    quote_operational_membership, quote_operational_metadata, quote_operational_retired_shared_roots,
-    quote_operational_marker_owner, quote_operational_marker_receipt,
-    quote_operational_packet_sources,
-    quote_operational_root_transfer, quote_operational_schema_sources,
+    quote_maximum_operational_live_metadata_retirement, quote_operational_live_context,
+    quote_operational_live_metadata_retirement, quote_operational_main_packet,
+    quote_operational_marker_owner, quote_operational_marker_receipt, quote_operational_membership,
+    quote_operational_metadata, quote_operational_packet_sources,
+    quote_operational_retired_shared_roots, quote_operational_root_transfer,
+    quote_operational_schema_sources,
 };
 pub use original_mutation::OriginalOperationalMutationAuthority;
 
@@ -58,12 +61,14 @@ macro_rules! replay_index_epoch_literal {
 }
 const REPLAY_INDEX_EPOCH: i32 = replay_index_epoch_literal!();
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 =
+    crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 pub const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 
-pub(crate) const SCHEMA_SQL: &str = concat!(r#"
+pub(crate) const SCHEMA_SQL: &str = concat!(
+    r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA user_version=6;
@@ -167,7 +172,9 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, "#, replay_index_epoch_literal!(), r#");
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, "#,
+    replay_index_epoch_literal!(),
+    r#");
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -189,7 +196,8 @@ CREATE TABLE credential_profiles (
 
 CREATE INDEX idx_credential_profiles_owner_state
     ON credential_profiles(owner_principal, state);
-"#);
+"#
+);
 
 /// The explicit replay-index reset discards every replay row before entering
 /// the current epoch; durable CAS objects remain.
@@ -1035,7 +1043,9 @@ impl PreparedReplayIndexReset {
             .as_ref()
             .context("replay reset database already transferred")?;
         ensure_operational_bindings(db)?;
-        let current = db.with_sql(|connection| inspect_replay_index_reset(connection, &db.path, db.current_schema_reference()))?;
+        let current = db.with_sql(|connection| {
+            inspect_replay_index_reset(connection, &db.path, db.current_schema_reference())
+        })?;
         let own_committed_retry = self.activation != ReplayResetActivationPhase::Prepared
             && current.stored_epoch == self.report.current_epoch
             && current.current_epoch == self.report.current_epoch
@@ -1044,12 +1054,16 @@ impl PreparedReplayIndexReset {
             anyhow::bail!("replay-index retirement decision changed after preparation");
         }
         self.activation = ReplayResetActivationPhase::MutationEntered;
-        db.with_sql(|connection| enforce_replay_index_epoch(connection, &db.path, true, db.current_schema_reference()))?;
+        db.with_sql(|connection| {
+            enforce_replay_index_epoch(connection, &db.path, true, db.current_schema_reference())
+        })?;
         #[cfg(test)]
         if FAIL_REPLAY_ACTIVATION_AFTER_COMMIT.with(|fail| fail.replace(false)) {
             anyhow::bail!("injected replay activation acknowledgement failure after commit");
         }
-        db.with_sql(|connection| assert_current(connection, &db.path, db.current_schema_reference()))?;
+        db.with_sql(|connection| {
+            assert_current(connection, &db.path, db.current_schema_reference())
+        })?;
         ensure_operational_bindings(db)?;
         self.activation = ReplayResetActivationPhase::Validated;
         Ok(self.report)
@@ -1057,7 +1071,9 @@ impl PreparedReplayIndexReset {
 
     /// Transfer is allowed exactly once after activation validation. Refusal
     /// leaves the original owner here, including after an activation error.
-    fn take_activated_after_authority(&mut self) -> Result<(OperationalDb, ReplayIndexResetReport)> {
+    fn take_activated_after_authority(
+        &mut self,
+    ) -> Result<(OperationalDb, ReplayIndexResetReport)> {
         if self.activation != ReplayResetActivationPhase::Validated {
             anyhow::bail!("replay reset database is not validated for transfer");
         }
@@ -1078,9 +1094,16 @@ impl PreparedReplayIndexReset {
 impl OperationalDb {
     /// SQL borrows stay within this owner's callback. Original native
     /// admission and consuming close remain separate reset caller gates.
-    fn with_sql<T>(&self, operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>) -> Result<T> {
+    fn with_sql<T>(
+        &self,
+        operation: impl for<'connection> FnOnce(&'connection Connection) -> Result<T>,
+    ) -> Result<T> {
         match &self.conn {
-            OperationalConnection::Original { owner, factory: _, reference: _ } => owner.with_sql(operation),
+            OperationalConnection::Original {
+                owner,
+                factory: _,
+                reference: _,
+            } => owner.with_sql(operation),
             OperationalConnection::Live(live) => live.owner.with_sql(operation),
         }
     }
@@ -1089,7 +1112,11 @@ impl OperationalDb {
     fn current_schema_reference(&self) -> &sqlite_schema::SchemaSqlDefinition {
         match &self.conn {
             OperationalConnection::Live(live) => live.references.current(),
-            OperationalConnection::Original { owner: _, factory: _, reference } => reference,
+            OperationalConnection::Original {
+                owner: _,
+                factory: _,
+                reference,
+            } => reference,
         }
     }
 
@@ -1188,7 +1215,9 @@ impl OperationalDb {
         candidate: &OperationalCredentialProfileRecord,
     ) -> Result<OperationalCredentialProfileRecord> {
         if matches!(&self.conn, OperationalConnection::Original { .. }) {
-            anyhow::bail!("original Operational credential mutation requires its durable-intent caller authority");
+            anyhow::bail!(
+                "original Operational credential mutation requires its durable-intent caller authority"
+            );
         }
         self.merge_credential_profile_after_authority(candidate)
     }
@@ -1332,22 +1361,39 @@ fn ensure_same_file(expected: &File, current: &File, label: &str, path: &Path) -
 fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Option<File>> {
     // Metadata-only custody cannot close an aliased live SQLite data inode.
     let Some(marker) = directory.open_mount_entry(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME))?
-    else { return Ok(None); };
-    anyhow::ensure!(marker.metadata()?.is_file(), "operational initialization marker is not regular");
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        marker.metadata()?.is_file(),
+        "operational initialization marker is not regular"
+    );
     let before = lillux::observe_open_file_identity(&marker)?;
-    anyhow::ensure!(before.size() == OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
-        "operational initialization marker has invalid extent");
-    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(directory,
-        OsStr::new(OPERATIONAL_INITIALIZED_FILENAME), OPERATIONAL_INITIALIZED_CONTENT.len())?
-        .context("operational initialization marker disappeared during guarded read")?;
-    anyhow::ensure!(bytes.as_slice() == OPERATIONAL_INITIALIZED_CONTENT,
-        "invalid operational initialization marker content");
-    let current = directory.open_mount_entry(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME))?
+    anyhow::ensure!(
+        before.size() == OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
+        "operational initialization marker has invalid extent"
+    );
+    let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+        directory,
+        OsStr::new(OPERATIONAL_INITIALIZED_FILENAME),
+        OPERATIONAL_INITIALIZED_CONTENT.len(),
+    )?
+    .context("operational initialization marker disappeared during guarded read")?;
+    anyhow::ensure!(
+        bytes.as_slice() == OPERATIONAL_INITIALIZED_CONTENT,
+        "invalid operational initialization marker content"
+    );
+    let current = directory
+        .open_mount_entry(OsStr::new(OPERATIONAL_INITIALIZED_FILENAME))?
         .context("operational initialization marker disappeared after guarded read")?;
     let after = lillux::observe_open_file_identity(&current)?;
-    anyhow::ensure!(current.metadata()?.is_file() && before.device() == after.device()
-        && before.inode() == after.inode() && before.size() == after.size(),
-        "operational initialization marker changed during guarded read");
+    anyhow::ensure!(
+        current.metadata()?.is_file()
+            && before.device() == after.device()
+            && before.inode() == after.inode()
+            && before.size() == after.size(),
+        "operational initialization marker changed during guarded read"
+    );
     Ok(Some(marker))
 }
 
@@ -1383,28 +1429,53 @@ fn ensure_operational_bindings(db: &OperationalDb) -> Result<()> {
     db._directory_lock.ensure_protects(&db._runtime_directory)?;
     match &db.conn {
         OperationalConnection::Live(live) => {
-            lillux_sqlite::OriginalNativeDestinationAuthority::require_original(live.original.as_ref(), live.original.factory())?;
+            lillux_sqlite::OriginalNativeDestinationAuthority::require_original(
+                live.original.as_ref(),
+                live.original.factory(),
+            )?;
             let identity = live.owner.bound_main_identity()?;
-            let current = db._runtime_directory.entry_no_follow(name)?.context("live Operational main absent")?;
-            anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
-                && (current.containing_device, current.inode) == identity,
-                "live Operational differs from actual Bound identity");
-            let marker = inspect_initialized_marker(&db._runtime_directory)?.context("live Operational initialized marker absent")?;
-            ensure_same_file(db._initialization_marker.as_ref().context("original live marker absent")?, &marker,
-                "live Operational marker", &db.path)?;
+            let current = db
+                ._runtime_directory
+                .entry_no_follow(name)?
+                .context("live Operational main absent")?;
+            anyhow::ensure!(
+                current.entry_type == lillux::PinnedEntryType::Regular
+                    && (current.containing_device, current.inode) == identity,
+                "live Operational differs from actual Bound identity"
+            );
+            let marker = inspect_initialized_marker(&db._runtime_directory)?
+                .context("live Operational initialized marker absent")?;
+            ensure_same_file(
+                db._initialization_marker
+                    .as_ref()
+                    .context("original live marker absent")?,
+                &marker,
+                "live Operational marker",
+                &db.path,
+            )?;
         }
-        OperationalConnection::Original { owner, factory, reference: _ } => {
-            anyhow::ensure!(db._initialization_marker.is_none(),
-                "original Operational owner must not duplicate lower source/keeper custody");
+        OperationalConnection::Original {
+            owner,
+            factory,
+            reference: _,
+        } => {
+            anyhow::ensure!(
+                db._initialization_marker.is_none(),
+                "original Operational owner must not duplicate lower source/keeper custody"
+            );
             factory.require_runtime_binding(&db._runtime_directory)?;
             // This actual native call validates the retained destination authority,
             // including its original charged marker read, before observing identity.
             let identity = owner.bound_main_identity()?;
-            let current = db._runtime_directory.entry_no_follow(name)?
+            let current = db
+                ._runtime_directory
+                .entry_no_follow(name)?
                 .context("original Operational main coordinate disappeared")?;
-            anyhow::ensure!(current.entry_type == lillux::PinnedEntryType::Regular
-                && (current.containing_device, current.inode) == identity,
-                "original Operational main differs from actual Bound keeper");
+            anyhow::ensure!(
+                current.entry_type == lillux::PinnedEntryType::Regular
+                    && (current.containing_device, current.inode) == identity,
+                "original Operational main differs from actual Bound keeper"
+            );
         }
     }
     Ok(())
@@ -1536,7 +1607,11 @@ fn enforce_replay_index_epoch(
     Ok(())
 }
 
-fn assert_current(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> Result<()> {
+fn assert_current(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+) -> Result<()> {
     sqlite_schema::assert_owned(conn, &operational_schema_spec(), path)?;
     reference.require_matches(conn, path)?;
     let version: i32 = conn
@@ -3040,7 +3115,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3059,7 +3134,7 @@ impl OperationalDb {
                     let mut rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3111,7 +3186,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3130,7 +3205,7 @@ impl OperationalDb {
                     let mut rows =
                         stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3183,7 +3258,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3204,7 +3279,7 @@ impl OperationalDb {
                         sync_job_from_row,
                     )?;
                     let mut jobs = Vec::new();
-                    while let Some(row) = rows.next() {
+                    for row in rows {
                         jobs.push(row?);
                     }
                     jobs
@@ -3454,11 +3529,20 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = TestOperational::open(&path);
 
-        let app_id: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA application_id", [], |row| row.get(0))?))
+        let app_id: i32 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("PRAGMA application_id", [], |row| row.get(0))?)
+            })
             .unwrap();
-        let version: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?))
+        let version: i32 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+            })
             .unwrap();
-        let synchronous: i32 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
+        let synchronous: i32 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?)
+            })
             .unwrap();
         let tables: i64 = db.with_sql(|connection| Ok(connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -3478,7 +3562,11 @@ mod tests {
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
         assert_eq!(tables, 7);
         assert_eq!(indexes, 17);
-        assert_eq!(db.with_sql(|connection| replay_index_epoch(connection)).unwrap(), REPLAY_INDEX_EPOCH);
+        assert_eq!(
+            db.with_sql(|connection| replay_index_epoch(connection))
+                .unwrap(),
+            REPLAY_INDEX_EPOCH
+        );
     }
 
     fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecord {
@@ -3633,9 +3721,14 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        let marker = format!("INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, {REPLAY_INDEX_EPOCH});");
+        let marker = format!(
+            "INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, {REPLAY_INDEX_EPOCH});"
+        );
         assert_eq!(SCHEMA_SQL.matches(&marker).count(), 1);
-        assert_eq!(SCHEMA_SQL.matches("INSERT INTO replay_index_epoch").count(), 1);
+        assert_eq!(
+            SCHEMA_SQL.matches("INSERT INTO replay_index_epoch").count(),
+            1
+        );
     }
 
     #[test]
@@ -3760,12 +3853,14 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("provider.call"), &record);
-            db.with_sql(|connection| Ok(connection.execute(
+            db.with_sql(|connection| {
+                Ok(connection.execute(
                     "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![produced, replayed, "provider.call", record.cache_key],
-                )?))
-                .unwrap();
+                )?)
+            })
+            .unwrap();
         }
         assert_eq!(
             db.prune_replay_records(&namespace("provider.call"), 1)
@@ -3792,12 +3887,14 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("dispatch.effect"), &record);
-            db.with_sql(|connection| Ok(connection.execute(
+            db.with_sql(|connection| {
+                Ok(connection.execute(
                     "UPDATE replay_records SET last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![at, "dispatch.effect", record.cache_key],
-                )?))
-                .unwrap();
+                )?)
+            })
+            .unwrap();
         }
 
         assert_eq!(
@@ -3859,12 +3956,14 @@ mod tests {
         ] {
             let record = replay_record(key_char, answer_char, object_char);
             publish_verified(&db, &namespace("dispatch.effect"), &record);
-            db.with_sql(|connection| Ok(connection.execute(
+            db.with_sql(|connection| {
+                Ok(connection.execute(
                     "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
                      WHERE namespace = ? AND cache_key = ?",
                     rusqlite::params![produced, replayed, "dispatch.effect", record.cache_key],
-                )?))
-                .unwrap();
+                )?)
+            })
+            .unwrap();
         }
 
         assert_eq!(
@@ -3881,19 +3980,23 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = TestOperational::open(&path);
-        db.with_sql(|connection| Ok(connection.execute_batch(
+        db.with_sql(|connection| {
+            Ok(connection.execute_batch(
                 "CREATE TABLE tx_parent (id INTEGER PRIMARY KEY);
                  CREATE TABLE tx_child (
                      parent_id INTEGER NOT NULL,
                      FOREIGN KEY (parent_id) REFERENCES tx_parent(id)
                          DEFERRABLE INITIALLY DEFERRED
                  );",
-            )?))
-            .unwrap();
+            )?)
+        })
+        .unwrap();
 
         let error = db
             .immediate_transaction("operational commit failure", || {
-                db.with_sql(|connection| Ok(connection.execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?))?;
+                db.with_sql(|connection| {
+                    Ok(connection.execute("INSERT INTO tx_child (parent_id) VALUES (1)", [])?)
+                })?;
                 Ok(())
             })
             .unwrap_err();
@@ -3902,8 +4005,14 @@ mod tests {
             format!("{error:#}")
                 .contains("failed to commit operational commit failure transaction")
         );
-        assert!(db.with_sql(|connection| Ok(connection.is_autocommit())).unwrap());
-        let rows: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?))
+        assert!(
+            db.with_sql(|connection| Ok(connection.is_autocommit()))
+                .unwrap()
+        );
+        let rows: i64 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT COUNT(*) FROM tx_child", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(rows, 0);
     }
@@ -4024,7 +4133,8 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let db = TestOperational::at(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
-        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=5;")?)).unwrap();
+        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=5;")?))
+            .unwrap();
         drop(db);
 
         let error = TestOperational::at(tempdir.path())
@@ -4053,8 +4163,11 @@ mod tests {
             )
         }
         .unwrap();
-        let reference = prepare_operational_schema_reference(std::sync::Arc::clone(host.factory()), reference_inputs)
-            .unwrap_or_else(|failure| panic!("Operational schema reference refused: {failure}"));
+        let reference = prepare_operational_schema_reference(
+            std::sync::Arc::clone(host.factory()),
+            reference_inputs,
+        )
+        .unwrap_or_else(|failure| panic!("Operational schema reference refused: {failure}"));
         let connection = host.open_transient();
         let error = connection
             .with_sql(|conn| {
@@ -4069,7 +4182,10 @@ mod tests {
         host.retain_terminal(terminal);
         crate::test_support::release_shared_test_host(host);
         let message = format!("{error:#}");
-        assert!(message.contains("complete schema SQL mismatch"), "{message}");
+        assert!(
+            message.contains("complete schema SQL mismatch"),
+            "{message}"
+        );
     }
 
     #[cfg(unix)]
@@ -4080,7 +4196,8 @@ mod tests {
         let db = TestOperational::open(&path);
 
         let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
-            db.with_sql(|connection| Ok(connection.execute(
+            db.with_sql(|connection| {
+                Ok(connection.execute(
                     "INSERT INTO sync_jobs (job_id, operation_type, peer, state, phase,
                         roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
                         attempt_count, max_attempts, last_error, result_json,
@@ -4089,8 +4206,9 @@ mod tests {
                         x'5b5d',x'5b5d',x'5b5d',x'5b5d',
                         1,1,NULL,NULL,?3,?3,?4)",
                     rusqlite::params![job_id, state, ts, finished_at],
-                )?))
-                .unwrap();
+                )?)
+            })
+            .unwrap();
         };
         let insert_attempt = |attempt_id: &str, job_id: &str, ts: &str| {
             db.with_sql(|connection| Ok(connection.execute(

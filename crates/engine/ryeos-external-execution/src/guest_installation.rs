@@ -1138,13 +1138,13 @@ impl PreparedGuestSupervisorRequest {
             occurrence_id: owner.record.occurrence_id.clone(),
             occurrence_directory: owner.occurrence.identity()?,
             owner_directory: owner.root.identity()?,
-            install_record_file: installed.intent_identity.record_file.clone(),
+            install_record_file: installed.intent_identity.record_file,
             install_record_sha256: installed.intent_identity.record_sha256.clone(),
             stage: installed.imported.stage_identity()?,
             candidate_runtime: installed.runtime.identity()?,
-            private_parent: self._artifacts.private.observation.private_parent.clone(),
+            private_parent: self._artifacts.private.observation.private_parent,
             scratch: self._artifacts.private.observation.scratch.clone(),
-            supervisor_state_root: self._artifacts.observation.state_root.clone(),
+            supervisor_state_root: self._artifacts.observation.state_root,
             relay_mailbox: self._artifacts.observation.relay_mailbox,
             relay_mailbox_path: self
                 ._artifacts
@@ -2329,7 +2329,7 @@ impl GuestOccurrenceOwner {
             0o600,
             crate::GUEST_TEMP_PURPOSE,
         )?
-            .context("guest occurrence owner record already exists")?;
+        .context("guest occurrence owner record already exists")?;
         Ok(Self {
             occurrence: occurrence.try_clone()?,
             root,
@@ -2566,7 +2566,12 @@ fn prepare_guest_base_install_locked<'a>(
     };
     let bytes = canonical_record(&intent)?;
     let record = journal
-        .atomic_create_regular(OsStr::new(RECORD_NAME), &bytes, 0o600, crate::GUEST_TEMP_PURPOSE)?
+        .atomic_create_regular(
+            OsStr::new(RECORD_NAME),
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("guest installation intent already exists")?;
     let marker = GuestBaseInstallMarker {
         schema: 1,

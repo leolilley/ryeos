@@ -33,7 +33,8 @@ fn profiles_dir() -> PathBuf {
 
 fn load_profile(name: &str) -> serde_yaml::Value {
     let path = profiles_dir().join(format!("{name}.yaml"));
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     serde_yaml::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
@@ -41,7 +42,10 @@ fn profile_names() -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(profiles_dir())
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "yaml"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "yaml")
+        })
         .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
         .collect();
     names.sort();
@@ -83,9 +87,19 @@ impl Host {
         let reason = "no host service delegated a writable cgroup subtree to this node";
         if self.scopes {
             for capability in lillux::ProcessScopeCapability::ALL {
-                view.provide(capability.capability_name(), ProofSource::Measured, "host-runtime", "probe scope");
+                view.provide(
+                    capability.capability_name(),
+                    ProofSource::Measured,
+                    "host-runtime",
+                    "probe scope",
+                );
             }
-            view.provide(SCOPE_LIMITS, ProofSource::Measured, "host-runtime", "per-scope limits");
+            view.provide(
+                SCOPE_LIMITS,
+                ProofSource::Measured,
+                "host-runtime",
+                "per-scope limits",
+            );
         } else {
             for capability in lillux::ProcessScopeCapability::ALL {
                 view.refuse(capability.capability_name(), reason);
@@ -98,12 +112,23 @@ impl Host {
     /// The view plus the node-private credential home a Codex login binds.
     fn capabilities_with_credential_home(&self) -> HostCapabilities {
         let mut view = self.capabilities();
-        view.provide(CREDENTIAL_PRIVATE_HOME, ProofSource::Trusted, HOST_PROVIDER, "private home");
+        view.provide(
+            CREDENTIAL_PRIVATE_HOME,
+            ProofSource::Trusted,
+            HOST_PROVIDER,
+            "private home",
+        );
         view
     }
 }
 
-fn storage(filesystem: &str, f_type: u64, mount_id: u64, kernel_kind: &str, private_pid: bool) -> RootStorageFacts {
+fn storage(
+    filesystem: &str,
+    f_type: u64,
+    mount_id: u64,
+    kernel_kind: &str,
+    private_pid: bool,
+) -> RootStorageFacts {
     RootStorageFacts {
         path: "/data".to_owned(),
         filesystem: Some(filesystem.to_owned()),
@@ -162,13 +187,26 @@ fn facts(storage: RootStorageFacts) -> HostFacts {
             pids_max: None,
         },
         swap_devices: Some(Vec::new()),
-        memlock: MemlockFacts { soft: Some(8 << 20), hard: Some(8 << 20), locked_bytes: Some(0), cap_ipc_lock: false },
-        unshare_user: ProbeOutcome::Refused { errno: 1, reason: "EPERM".to_owned() },
-        unshare_user_pid_mount: ProbeOutcome::Refused { errno: 1, reason: "EPERM".to_owned() },
+        memlock: MemlockFacts {
+            soft: Some(8 << 20),
+            hard: Some(8 << 20),
+            locked_bytes: Some(0),
+            cap_ipc_lock: false,
+        },
+        unshare_user: ProbeOutcome::Refused {
+            errno: 1,
+            reason: "EPERM".to_owned(),
+        },
+        unshare_user_pid_mount: ProbeOutcome::Refused {
+            errno: 1,
+            reason: "EPERM".to_owned(),
+        },
         pidfd: ProbeOutcome::Allowed,
         subreaper: ProbeOutcome::Allowed,
         resident_bytes: 64 << 20,
-        residency: Some(ResidencyProof::SwapAbsent { basis: "no swap device is active".to_owned() }),
+        residency: Some(ResidencyProof::SwapAbsent {
+            basis: "no swap device is active".to_owned(),
+        }),
         residency_refusal: None,
         app_root_storage: storage,
         declared_lifetime: None,
@@ -182,7 +220,9 @@ fn with_storage(mut base: HostFacts, storage: RootStorageFacts) -> HostFacts {
 }
 
 fn locked(mut base: HostFacts) -> HostFacts {
-    base.residency = Some(ResidencyProof::Locked { basis: "mlock of the resident region".to_owned() });
+    base.residency = Some(ResidencyProof::Locked {
+        basis: "mlock of the resident region".to_owned(),
+    });
     base.memlock.cap_ipc_lock = true;
     base
 }
@@ -198,11 +238,16 @@ fn runit() -> Host {
     base.pid1 = Some("runit".to_owned());
     base.pid1_executable = Some("runit".to_owned());
     base.enclosure_exit = None;
-    base.enclosure_exit_refusal = Some("the node is not pid 1 and its parent is not an init policy trusts".to_owned());
+    base.enclosure_exit_refusal =
+        Some("the node is not pid 1 and its parent is not an init policy trusts".to_owned());
     base.unshare_user_pid_mount = ProbeOutcome::Allowed;
     base.unshare_user = ProbeOutcome::Allowed;
     without_hypervisor(&mut base);
-    Host { name: "runit", facts: locked(base), scopes: true }
+    Host {
+        name: "runit",
+        facts: locked(base),
+        scopes: true,
+    }
 }
 
 /// The host's own disk is not behind a hypervisor and is the root mount.
@@ -213,7 +258,11 @@ fn without_hypervisor(base: &mut HostFacts) {
 
 /// Plain Docker under tini with `/data` a volume and the memory lock granted.
 fn local_docker() -> Host {
-    Host { name: "local-docker", facts: locked(facts(volume())), scopes: false }
+    Host {
+        name: "local-docker",
+        facts: locked(facts(volume())),
+        scopes: false,
+    }
 }
 
 fn local_docker_no_volume() -> Host {
@@ -226,23 +275,38 @@ fn local_docker_no_volume() -> Host {
 
 /// Docker whose OCI hook delegates qualified per-job process scopes.
 fn local_docker_oci_hook() -> Host {
-    Host { name: "local-docker-oci-hook", facts: locked(facts(volume())), scopes: true }
+    Host {
+        name: "local-docker-oci-hook",
+        facts: locked(facts(volume())),
+        scopes: true,
+    }
 }
 
 /// A hosting provider's container with an attached volume and no swap lock.
 /// A Render service with a persistent disk proves the same facts (a volume
 /// mount, no scope delegation, no memory lock), so it is not a separate host.
 fn railway() -> Host {
-    Host { name: "railway", facts: facts(volume()), scopes: false }
+    Host {
+        name: "railway",
+        facts: facts(volume()),
+        scopes: false,
+    }
 }
 
 fn railway_no_volume() -> Host {
-    Host { name: "railway-no-volume", facts: with_storage(facts(volume()), container_root()), scopes: false }
+    Host {
+        name: "railway-no-volume",
+        facts: with_storage(facts(volume()), container_root()),
+        scopes: false,
+    }
 }
 
 /// A gVisor sandbox with no persistent disk; the node is its pid 1.
 fn render_sandbox() -> Host {
-    let mut base = with_storage(facts(volume()), storage("overlay", 0x794c7630, 20, "gvisor", true));
+    let mut base = with_storage(
+        facts(volume()),
+        storage("overlay", 0x794c7630, 20, "gvisor", true),
+    );
     base.parent_pid = 0;
     base.node_pid = 1;
     base.enclosure_exit = Some(CapabilityEvidence {
@@ -250,7 +314,11 @@ fn render_sandbox() -> Host {
         provider: HOST_PROVIDER.to_owned(),
         basis: "the node is pid 1 of its pid namespace".to_owned(),
     });
-    Host { name: "render-sandbox", facts: base, scopes: false }
+    Host {
+        name: "render-sandbox",
+        facts: base,
+        scopes: false,
+    }
 }
 
 enum Expect {
@@ -270,7 +338,10 @@ fn check(profile_name: &str, class: &str, host: &Host, expect: &Expect) {
             assert!(!admission.admitted, "expected refusal, {context}");
             for entry in *entries {
                 assert!(
-                    admission.unmet.get(*entry).is_some_and(|reason| !reason.is_empty()),
+                    admission
+                        .unmet
+                        .get(*entry)
+                        .is_some_and(|reason| !reason.is_empty()),
                     "expected {entry} unmet with a reason, {context}"
                 );
             }
@@ -290,8 +361,10 @@ const NO_LOCAL_ENCLOSURE: &[&str] = &[
     "any_of(termination:enclosure, termination:enclosure_trusted_init)",
 ];
 /// The same, for the controller's `hosted` floor.
-const NO_HOSTED_ENCLOSURE: &[&str] =
-    &["recovery:enclosure_trusted_init", "termination:enclosure_trusted_init"];
+const NO_HOSTED_ENCLOSURE: &[&str] = &[
+    "recovery:enclosure_trusted_init",
+    "termination:enclosure_trusted_init",
+];
 
 fn core_cases() -> Vec<(&'static str, Host, Expect)> {
     vec![
@@ -340,12 +413,20 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("hosted-node", &hosted_only),
     ];
     let shipped: BTreeSet<String> = profile_names().into_iter().collect();
-    let covered: BTreeSet<String> = expected.iter().map(|(name, _)| (*name).to_owned()).collect();
-    assert_eq!(shipped, covered, "every shipped profile has a declared-classes row");
+    let covered: BTreeSet<String> = expected
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        shipped, covered,
+        "every shipped profile has a declared-classes row"
+    );
     for (profile, classes) in expected {
         let loaded = load_profile(profile);
-        let declared: BTreeSet<String> =
-            host_classes(&loaded).keys().map(|key| key.as_str().unwrap().to_owned()).collect();
+        let declared: BTreeSet<String> = host_classes(&loaded)
+            .keys()
+            .map(|key| key.as_str().unwrap().to_owned())
+            .collect();
         let want: BTreeSet<String> = classes.iter().map(|class| (*class).to_owned()).collect();
         assert_eq!(declared, want, "{profile}");
     }
@@ -398,7 +479,11 @@ fn the_hosted_compositions_follow_the_host_class_matrix() {
         ("hosted", local_docker(), Expect::Admit),
         ("hosted", railway(), Expect::Admit),
         ("hosted", railway_no_volume(), Expect::Admit),
-        ("hosted", render_sandbox(), Expect::Refuse(&["any_of(accounting, residency:swap_absent)"])),
+        (
+            "hosted",
+            render_sandbox(),
+            Expect::Refuse(&["any_of(accounting, residency:swap_absent)"]),
+        ),
     ];
     for (class, host, expect) in &hosted_node {
         check("hosted-node", class, host, expect);
@@ -441,9 +526,19 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
 #[test]
 fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_proves() {
     for host in [runit(), local_docker(), local_docker_oci_hook(), railway()] {
-        check("release-authority", "local", &host, &Expect::Refuse(NO_ENCLOSURE_LIMIT));
+        check(
+            "release-authority",
+            "local",
+            &host,
+            &Expect::Refuse(NO_ENCLOSURE_LIMIT),
+        );
     }
-    check("release-authority", "local", &local_docker(), &Expect::Refuse(NO_NAMESPACES));
+    check(
+        "release-authority",
+        "local",
+        &local_docker(),
+        &Expect::Refuse(NO_NAMESPACES),
+    );
 }
 
 #[test]
@@ -482,42 +577,66 @@ fn every_shipped_profile_declares_valid_floors_that_a_runit_host_meets_in_its_lo
     let view = runit.capabilities();
     for name in profile_names() {
         let profile = load_profile(&name);
-        assert!(!host_classes(&profile).is_empty(), "{name} declares no host class");
+        assert!(
+            !host_classes(&profile).is_empty(),
+            "{name} declares no host class"
+        );
         for (class, entry) in host_classes(&profile) {
             let class = class.as_str().unwrap();
             let requires = floor(&profile, class);
             for requirement in &requires {
-                assert_eq!(floor_entry_refusal(requirement), None, "{name} [{class}]: {requirement:?}");
+                assert_eq!(
+                    floor_entry_refusal(requirement),
+                    None,
+                    "{name} [{class}]: {requirement:?}"
+                );
             }
-            assert!(entry["requires_capabilities"].is_sequence(), "{name} [{class}]");
+            assert!(
+                entry["requires_capabilities"].is_sequence(),
+                "{name} [{class}]"
+            );
         }
         // The profiles that need an enclosure limit or a container enclosure
         // ask for more than a bare runit host proves.
         let beyond_runit = ["release-authority", "f5r-controller"];
         if name == "f5r-controller" {
             let admission = match_floor(&floor(&profile, "local"), &view);
-            assert!(!admission.admitted, "{name} [local] on runit: {admission:#?}");
+            assert!(
+                !admission.admitted,
+                "{name} [local] on runit: {admission:#?}"
+            );
             for entry in NO_LOCAL_ENCLOSURE {
-                assert!(admission.unmet.contains_key(*entry), "{name} [local] on runit lacks {entry}: {admission:#?}");
+                assert!(
+                    admission.unmet.contains_key(*entry),
+                    "{name} [local] on runit lacks {entry}: {admission:#?}"
+                );
             }
         }
         if declares(&profile, "local") && !beyond_runit.contains(&name.as_str()) {
             let admission = match_floor(&floor(&profile, "local"), &view);
-            assert!(admission.admitted, "{name} [local] on runit: {admission:#?}");
+            assert!(
+                admission.admitted,
+                "{name} [local] on runit: {admission:#?}"
+            );
         }
     }
 }
 
 fn node_reporting(view: HostCapabilities) -> ExtensionState {
     let extensions = ExtensionState::new();
-    extensions.insert(Arc::new(NodeCapabilityReportReader::new(move || Ok(view.clone()))));
+    extensions.insert(Arc::new(NodeCapabilityReportReader::new(move || {
+        Ok(view.clone())
+    })));
     extensions
 }
 
 fn codex_contract() -> serde_json::Value {
-    let path = repo_root().join("bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json");
-    serde_json::from_slice(&std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
-        .unwrap()
+    let path = repo_root()
+        .join("bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json");
+    serde_json::from_slice(
+        &std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+    )
+    .unwrap()
 }
 
 fn refusal_text(error: anyhow::Error) -> String {
@@ -564,7 +683,8 @@ fn a_controller_whose_enclosure_is_unproven_refuses_the_codex_launch() {
     let contract = codex_contract();
     let mut host = railway();
     host.facts.enclosure_exit = None;
-    host.facts.enclosure_exit_refusal = Some("the node is not pid 1 and its parent is not a trusted init".to_owned());
+    host.facts.enclosure_exit_refusal =
+        Some("the node is not pid 1 and its parent is not a trusted init".to_owned());
     let node = node_reporting(host.capabilities_with_credential_home());
     let text = refusal_text(admit_structured_session_controller(&node, &contract).unwrap_err());
     assert!(text.contains("requires.controller"), "{text}");
@@ -587,10 +707,12 @@ const PROBE_REF: &str = "tool:ryeos/core/qualification/namespaces-probe";
 /// The `requires` block of the signed probe item the core bundle ships,
 /// read from the item file itself.
 fn shipped_probe_requires() -> ryeos_bundle::runtime_authority::RuntimeRequires {
-    let path = repo_root().join("bundles/core/.ai/tools/ryeos/core/qualification/namespaces-probe.yaml");
-    let document: serde_yaml::Value =
-        serde_yaml::from_slice(&std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
-            .unwrap();
+    let path =
+        repo_root().join("bundles/core/.ai/tools/ryeos/core/qualification/namespaces-probe.yaml");
+    let document: serde_yaml::Value = serde_yaml::from_slice(
+        &std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+    )
+    .unwrap();
     let requires = serde_json::to_value(&document["requires"]).unwrap();
     ryeos_bundle::runtime_authority::parse_runtime_requires_block(&requires)
         .unwrap_or_else(|reason| panic!("{}: {reason}", path.display()))
@@ -623,7 +745,11 @@ fn workloads_are_admitted_or_refused_on_what_the_host_proves() {
     for host in [local_docker(), railway()] {
         let node = node_reporting(host.capabilities());
         let text = refusal_text(admit_item_requirements(&node, probe, &namespaces).unwrap_err());
-        assert!(text.contains("isolation:namespaces"), "{}: {text}", host.name);
+        assert!(
+            text.contains("isolation:namespaces"),
+            "{}: {text}",
+            host.name
+        );
     }
 }
 
@@ -632,7 +758,12 @@ fn core_carries_no_scheduling_item_and_the_scheduling_bundle_does() {
     // A scheduling item is refused on a core image because the item is not
     // there to resolve: the scheduler services live only in the scheduling
     // bundle that core-scheduling adds.
-    let services = |bundle: &str| repo_root().join("bundles").join(bundle).join(".ai/services/scheduler");
+    let services = |bundle: &str| {
+        repo_root()
+            .join("bundles")
+            .join(bundle)
+            .join(".ai/services/scheduler")
+    };
     assert!(!services("core").exists(), "core ships scheduler services");
     assert!(services("scheduling").join("register.yaml").is_file());
 }

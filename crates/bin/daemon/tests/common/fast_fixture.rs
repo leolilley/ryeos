@@ -1042,7 +1042,11 @@ pub fn author_direct_host_profile_source(
     profile: &str,
     destination: &Path,
 ) -> Result<()> {
-    let profile_dir = destination.join(AI_DIR).join("node").join("init").join("profiles");
+    let profile_dir = destination
+        .join(AI_DIR)
+        .join("node")
+        .join("init")
+        .join("profiles");
     fs::create_dir_all(&profile_dir)
         .with_context(|| format!("create {}", profile_dir.display()))?;
     let authored = authored_source
@@ -1098,8 +1102,7 @@ pub fn author_direct_host_profile_source(
 /// preflight refuses a manifest older than its source, so a copy that
 /// restamped files in arbitrary order would change what the bundle proves.
 fn copy_tree_preserving_mtimes(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("create {}", destination.display()))?;
+    fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
     for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
         let entry = entry?;
         let from = entry.path();

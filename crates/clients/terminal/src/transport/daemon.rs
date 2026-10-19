@@ -444,49 +444,6 @@ impl DaemonClient {
 
         Ok(SseStream::new(resp))
     }
-
-    /// Resolve any effective item by canonical ref (kind-agnostic; the
-    /// engine decides what the ref is). Used by the `--surface-file`
-    /// local-preview path to fetch views for a spec only this client has.
-    pub async fn resolve_effective_item(
-        &self,
-        canonical_ref: &str,
-        expected_kind: &str,
-        project_path: Option<&str>,
-    ) -> Result<serde_json::Value, ClientError> {
-        let mut params = serde_json::json!({
-            "canonical_ref": canonical_ref,
-            "expected_kind": expected_kind,
-        });
-        if let Some(pp) = project_path {
-            params["project_path"] = serde_json::Value::String(pp.to_string());
-        }
-        self.signed_post("/ui/api/items/effective", &params).await
-    }
-
-    /// Resolve an effective surface via the daemon's items.effective
-    /// service. The response arrives with every bound view already
-    /// embedded in `composed_value.views` (failures as degraded entries),
-    /// so no per-view follow-up calls are needed.
-    pub async fn resolve_effective_surface(
-        &self,
-        canonical_ref: &str,
-        project_path: Option<&str>,
-    ) -> Result<serde_json::Value, ClientError> {
-        let params = if let Some(pp) = project_path {
-            serde_json::json!({
-                "canonical_ref": canonical_ref,
-                "expected_kind": "surface",
-                "project_path": pp,
-            })
-        } else {
-            serde_json::json!({
-                "canonical_ref": canonical_ref,
-                "expected_kind": "surface",
-            })
-        };
-        self.signed_post("/ui/api/items/effective", &params).await
-    }
 }
 
 fn ui_session_mint_body(

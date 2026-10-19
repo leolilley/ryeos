@@ -209,7 +209,8 @@ impl NodeCapabilityReport {
             bail!("host generation changed while the node capability report was observed");
         }
         host.declared_lifetime = inputs.isolation.host_lifetime_bound.clone();
-        let state_dir = ryeos_engine::roots::RuntimeRoot::new(inputs.app_root.to_path_buf()).state();
+        let state_dir =
+            ryeos_engine::roots::RuntimeRoot::new(inputs.app_root.to_path_buf()).state();
         let established = ryeos_app::private_artifact_home::ensure_root(&state_dir)
             .err()
             .map(|error| format!("{error:#}"));
@@ -218,7 +219,12 @@ impl NodeCapabilityReport {
             &ryeos_app::private_artifact_home::root(&state_dir),
         );
         let mut view = host.capabilities();
-        add_scope_capabilities(&mut view, inputs.isolation, inputs.host_runtime_provider, host.gvisor());
+        add_scope_capabilities(
+            &mut view,
+            inputs.isolation,
+            inputs.host_runtime_provider,
+            host.gvisor(),
+        );
         add_provider_environment(&mut view, inputs.provider_environment);
         add_credential_home(&mut view, &credential_home, established.as_deref());
         let mut capacity = BTreeMap::new();
@@ -251,7 +257,10 @@ impl NodeCapabilityReport {
             node_fingerprint: inputs.node_fingerprint.to_owned(),
             daemon_digest: inputs.daemon_digest,
             generated_at: lillux::time::iso8601_now(),
-            generation: ReportGeneration { boot_id, cgroup_enclosure },
+            generation: ReportGeneration {
+                boot_id,
+                cgroup_enclosure,
+            },
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: identity.node_profile,
@@ -274,10 +283,16 @@ impl NodeCapabilityReport {
     pub fn digest(&self) -> Result<String> {
         let canonical = lillux::canonical_json(&serde_json::to_value(self)?)
             .context("canonicalize node capability report")?;
-        Ok(format!("sha256:{}", lillux::sha256_hex(canonical.as_bytes())))
+        Ok(format!(
+            "sha256:{}",
+            lillux::sha256_hex(canonical.as_bytes())
+        ))
     }
 
-    pub fn sign(self, signing_key: &lillux::crypto::SigningKey) -> Result<SignedNodeCapabilityReport> {
+    pub fn sign(
+        self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<SignedNodeCapabilityReport> {
         use lillux::crypto::Signer as _;
         let digest = self.digest()?;
         let signature = signing_key.sign(signed_message(&digest).as_bytes());
@@ -296,7 +311,12 @@ impl NodeCapabilityReport {
         if self.floor.admitted {
             return Ok(());
         }
-        Err(CapabilityFloorRefused(refusal_text(self.refusal_stage(), &self.floor, &self.provided)).into())
+        Err(CapabilityFloorRefused(refusal_text(
+            self.refusal_stage(),
+            &self.floor,
+            &self.provided,
+        ))
+        .into())
     }
 
     /// The floor for a service that opens no process scopes and admits no
@@ -311,12 +331,18 @@ impl NodeCapabilityReport {
             .filter(|entry| !entry.names().iter().all(|name| is_scope_capability(name)))
             .cloned()
             .collect();
-        let view = HostCapabilities { provided: self.provided.clone(), missing: self.missing.clone() };
+        let view = HostCapabilities {
+            provided: self.provided.clone(),
+            missing: self.missing.clone(),
+        };
         let floor = match_floor(&requires, &view);
         if floor.admitted {
             return Ok(());
         }
-        Err(CapabilityFloorRefused(refusal_text(self.refusal_stage(), &floor, &self.provided)).into())
+        Err(
+            CapabilityFloorRefused(refusal_text(self.refusal_stage(), &floor, &self.provided))
+                .into(),
+        )
     }
 
     /// Record the residency proof a native reservation or host actually
@@ -404,7 +430,8 @@ impl SignedNodeCapabilityReport {
                 .with_context(|| format!("read {}", identity_path.display()))?,
         )?;
         let fingerprint = identity.verified_fingerprint()?;
-        if fingerprint != self.report.node_fingerprint || self.signer != format!("fp:{fingerprint}") {
+        if fingerprint != self.report.node_fingerprint || self.signer != format!("fp:{fingerprint}")
+        {
             bail!("node capability report was not signed by this node");
         }
         let key_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -417,7 +444,11 @@ impl SignedNodeCapabilityReport {
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid public node key length"))?;
         let key = lillux::crypto::VerifyingKey::from_bytes(&key_bytes)?;
-        if !lillux::signature::verify_signature(&signed_message(&self.digest), &self.signature, &key) {
+        if !lillux::signature::verify_signature(
+            &signed_message(&self.digest),
+            &self.signature,
+            &key,
+        ) {
             bail!("node capability report signature is invalid");
         }
         Ok(())
@@ -440,7 +471,9 @@ impl SignedNodeCapabilityReport {
                 "node policy generation is now {current}, not {}",
                 self.report.composition.policy_generation
             ))),
-            None => Ok(Some("the current node policy generation is unreadable".to_owned())),
+            None => Ok(Some(
+                "the current node policy generation is unreadable".to_owned(),
+            )),
         }
     }
 
@@ -465,7 +498,9 @@ impl SignedNodeCapabilityReport {
 /// layout is refused as stale rather than as unparseable.
 fn stale_format(value: &serde_json::Value) -> Option<String> {
     let report = value.get("report");
-    let schema = report.and_then(|report| report.get("schema")).and_then(serde_json::Value::as_str);
+    let schema = report
+        .and_then(|report| report.get("schema"))
+        .and_then(serde_json::Value::as_str);
     if schema != Some(CAPABILITY_REPORT_SCHEMA) {
         return Some(format!(
             "node capability report schema is {}, not {CAPABILITY_REPORT_SCHEMA}",
@@ -516,7 +551,10 @@ fn add_scope_capabilities(
     let (provider, absent) = match (&isolation.process_scopes, host_runtime_provider) {
         (ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {}, provider) => (
             provider.unwrap_or_default(),
-            Some("node policy configures no process scopes, so no per-job cgroup is opened".to_owned()),
+            Some(
+                "node policy configures no process scopes, so no per-job cgroup is opened"
+                    .to_owned(),
+            ),
         ),
         (_, None) => (
             "",
@@ -534,7 +572,11 @@ fn add_scope_capabilities(
         .flat_map(|entry| entry.names())
         .filter_map(|name| lillux::ProcessScopeCapability::from_capability_name(name))
         .collect::<std::collections::BTreeSet<_>>();
-    let source = if gvisor { ProofSource::ProviderAttested } else { ProofSource::Measured };
+    let source = if gvisor {
+        ProofSource::ProviderAttested
+    } else {
+        ProofSource::Measured
+    };
     for capability in lillux::ProcessScopeCapability::ALL {
         let name = capability.capability_name();
         if qualified.contains(&capability) {
@@ -546,14 +588,19 @@ fn add_scope_capabilities(
             );
         } else if let Some(reason) = &absent {
             view.refuse(name, reason.clone());
-        } else if capability == lillux::ProcessScopeCapability::Quiescence && !wanted.contains(&capability) {
+        } else if capability == lillux::ProcessScopeCapability::Quiescence
+            && !wanted.contains(&capability)
+        {
             view.refuse(
                 name,
                 "not probed: the capability floor does not name it, so the kernel barrier was not \
                  exercised",
             );
         } else {
-            view.refuse(name, "the delegated cgroup provider's probe scope did not qualify it");
+            view.refuse(
+                name,
+                "the delegated cgroup provider's probe scope did not qualify it",
+            );
         }
     }
     if qualified.contains(&lillux::ProcessScopeCapability::Termination) {
@@ -600,7 +647,12 @@ fn add_provider_environment(
     basis.push_str(
         "; delivered as plain child environment, readable by the recipient's model commands",
     );
-    view.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, PROVIDER_ENV_PROVIDER, basis);
+    view.provide(
+        SECRETS_PROVIDER_ENV,
+        ProofSource::ProviderAttested,
+        PROVIDER_ENV_PROVIDER,
+        basis,
+    );
 }
 
 /// Grade the credential home this node holds, from what it observes. It
@@ -617,12 +669,16 @@ fn add_credential_home(
         Some(refusal) => format!("{reason}; the node could not establish it: {refusal}"),
         None => reason,
     });
-    let durable = view.provided.get(PERSISTENCE_DURABLE_STATE).cloned().ok_or_else(|| {
-        view.missing
-            .get(PERSISTENCE_DURABLE_STATE)
-            .cloned()
-            .unwrap_or_else(|| "durable state is undecided".to_owned())
-    });
+    let durable = view
+        .provided
+        .get(PERSISTENCE_DURABLE_STATE)
+        .cloned()
+        .ok_or_else(|| {
+            view.missing
+                .get(PERSISTENCE_DURABLE_STATE)
+                .cloned()
+                .unwrap_or_else(|| "durable state is undecided".to_owned())
+        });
     match (private, durable) {
         // The durable-state entry carries its own basis; naming it here
         // keeps this basis within the view's text bound.
@@ -636,7 +692,10 @@ fn add_credential_home(
                 evidence.provider
             ),
         ),
-        (Err(reason), _) => view.refuse(CREDENTIAL_PRIVATE_HOME, format!("credential home root: {reason}")),
+        (Err(reason), _) => view.refuse(
+            CREDENTIAL_PRIVATE_HOME,
+            format!("credential home root: {reason}"),
+        ),
         (Ok(_), Err(reason)) => view.refuse(
             CREDENTIAL_PRIVATE_HOME,
             format!("{PERSISTENCE_DURABLE_STATE} is not held: {reason}"),
@@ -654,13 +713,16 @@ pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) 
     let mut met_by = BTreeMap::new();
     for entry in requires {
         let mut failures: Vec<(&str, String)> = Vec::new();
-        let met = entry.names().iter().find(|name| match unmet_reason(entry, name, view) {
-            None => true,
-            Some(reason) => {
-                failures.push((name.as_str(), reason));
-                false
-            }
-        });
+        let met = entry
+            .names()
+            .iter()
+            .find(|name| match unmet_reason(entry, name, view) {
+                None => true,
+                Some(reason) => {
+                    failures.push((name.as_str(), reason));
+                    false
+                }
+            });
         match (met, failures.as_slice()) {
             (Some(name), _) => {
                 let evidence = &view.provided[name];
@@ -677,19 +739,33 @@ pub fn match_floor(requires: &[CapabilityRequirement], view: &HostCapabilities) 
                 unmet.insert(entry.label(), reason.clone());
             }
             (None, _) => {
-                let reasons: Vec<String> =
-                    failures.iter().map(|(name, reason)| format!("{name}: {reason}")).collect();
-                unmet.insert(entry.label(), format!("none of its names is met; {}", reasons.join("; ")));
+                let reasons: Vec<String> = failures
+                    .iter()
+                    .map(|(name, reason)| format!("{name}: {reason}"))
+                    .collect();
+                unmet.insert(
+                    entry.label(),
+                    format!("none of its names is met; {}", reasons.join("; ")),
+                );
             }
         }
     }
-    FloorAdmission { requires: requires.to_vec(), admitted: unmet.is_empty(), met_by, unmet }
+    FloorAdmission {
+        requires: requires.to_vec(),
+        admitted: unmet.is_empty(),
+        met_by,
+        unmet,
+    }
 }
 
 /// Why `name`, one of `entry`'s names, is not met here, or `None` when it
 /// is: the proof's basis is appended to a grade or provider mismatch so the
 /// refusal says what was proven instead.
-fn unmet_reason(entry: &CapabilityRequirement, name: &str, view: &HostCapabilities) -> Option<String> {
+fn unmet_reason(
+    entry: &CapabilityRequirement,
+    name: &str,
+    view: &HostCapabilities,
+) -> Option<String> {
     match view.provided.get(name) {
         Some(evidence) => match satisfies(entry, name, evidence) {
             Ok(()) => None,
@@ -717,7 +793,11 @@ fn refusal_text(
     let proven: Vec<&str> = provided.keys().map(String::as_str).collect();
     text.push_str(&format!(
         "\n  this node can prove: {}",
-        if proven.is_empty() { "nothing".to_owned() } else { proven.join(", ") }
+        if proven.is_empty() {
+            "nothing".to_owned()
+        } else {
+            proven.join(", ")
+        }
     ));
     text
 }
@@ -743,7 +823,10 @@ mod tests {
     }
 
     fn floor(names: &[&str]) -> Vec<CapabilityRequirement> {
-        names.iter().map(|name| CapabilityRequirement::from(*name)).collect()
+        names
+            .iter()
+            .map(|name| CapabilityRequirement::from(*name))
+            .collect()
     }
 
     fn any_of(names: &[&str]) -> CapabilityRequirement {
@@ -760,21 +843,34 @@ mod tests {
             name: Some(name.to_owned()),
             any_of: Vec::new(),
             accept: accept.iter().map(|grade| (*grade).to_owned()).collect(),
-            providers: providers.iter().map(|provider| (*provider).to_owned()).collect(),
+            providers: providers
+                .iter()
+                .map(|provider| (*provider).to_owned())
+                .collect(),
         })
     }
 
     fn met(name: &str, source: ProofSource, provider: &str) -> FloorEntryMet {
-        FloorEntryMet { name: name.to_owned(), source, provider: provider.to_owned() }
+        FloorEntryMet {
+            name: name.to_owned(),
+            source,
+            provider: provider.to_owned(),
+        }
     }
 
-    fn report(provided: HostCapabilities, requires: Vec<CapabilityRequirement>) -> NodeCapabilityReport {
+    fn report(
+        provided: HostCapabilities,
+        requires: Vec<CapabilityRequirement>,
+    ) -> NodeCapabilityReport {
         NodeCapabilityReport {
             schema: CAPABILITY_REPORT_SCHEMA.to_owned(),
             node_fingerprint: "fixture".to_owned(),
             daemon_digest: "sha256:fixture".to_owned(),
             generated_at: "fixture".to_owned(),
-            generation: ReportGeneration { boot_id: "fixture".to_owned(), cgroup_enclosure: None },
+            generation: ReportGeneration {
+                boot_id: "fixture".to_owned(),
+                cgroup_enclosure: None,
+            },
             subject: "node".to_owned(),
             composition: NodeComposition {
                 profile: None,
@@ -834,9 +930,21 @@ mod tests {
         durable(&mut controller);
         add_credential_home(&mut controller, &private_home(0o700, 40), None);
         let home = &controller.provided[CREDENTIAL_PRIVATE_HOME];
-        assert_eq!((&home.source, home.provider.as_str()), (&ProofSource::Trusted, HOST_PROVIDER));
-        assert!(home.basis.contains("mode 0700") && home.basis.contains("from /data/app down"), "{}", home.basis);
-        assert!(home.basis.ends_with("persistence:durable_state is held (trusted by host)"), "{}", home.basis);
+        assert_eq!(
+            (&home.source, home.provider.as_str()),
+            (&ProofSource::Trusted, HOST_PROVIDER)
+        );
+        assert!(
+            home.basis.contains("mode 0700") && home.basis.contains("from /data/app down"),
+            "{}",
+            home.basis
+        );
+        assert!(
+            home.basis
+                .ends_with("persistence:durable_state is held (trusted by host)"),
+            "{}",
+            home.basis
+        );
         // A disposable host: durable state is refused, so the home is not held.
         let bounded_reason = "no persistent disk; 24 h hard lifetime (fixture)";
         let mut bounded = view(&["time"], &[(PERSISTENCE_DURABLE_STATE, bounded_reason)]);
@@ -849,35 +957,62 @@ mod tests {
         // and a failure to establish the root is named.
         let mut open = view(&["time"], &[]);
         durable(&mut open);
-        add_credential_home(&mut open, &private_home(0o755, 40), Some("read-only file system"));
+        add_credential_home(
+            &mut open,
+            &private_home(0o755, 40),
+            Some("read-only file system"),
+        );
         let reason = &open.missing[CREDENTIAL_PRIVATE_HOME];
-        assert!(reason.contains("mode 0755") && reason.contains("could not establish it: read-only"), "{reason}");
+        assert!(
+            reason.contains("mode 0755") && reason.contains("could not establish it: read-only"),
+            "{reason}"
+        );
         // A bind mount at the root is refused.
         let mut elsewhere = view(&["time"], &[]);
         durable(&mut elsewhere);
         add_credential_home(&mut elsewhere, &private_home(0o700, 41), None);
-        assert!(elsewhere.missing[CREDENTIAL_PRIVATE_HOME].contains("not the mount 40 of /data/app"));
+        assert!(
+            elsewhere.missing[CREDENTIAL_PRIVATE_HOME].contains("not the mount 40 of /data/app")
+        );
         // A login floor that accepts the trusted durable state admits the
         // controller and refuses the disposable host; a bare-name floor,
         // which accepts only a measured proof, admits neither.
         let accepting = |name: &str| entry(name, &["measured", "trusted"], &[]);
-        let login = vec![accepting(CREDENTIAL_PRIVATE_HOME), accepting(PERSISTENCE_DURABLE_STATE), "time".into()];
+        let login = vec![
+            accepting(CREDENTIAL_PRIVATE_HOME),
+            accepting(PERSISTENCE_DURABLE_STATE),
+            "time".into(),
+        ];
         let admitted = match_floor(&login, &controller);
         assert!(admitted.admitted, "{admitted:?}");
-        assert_eq!(admitted.met_by[CREDENTIAL_PRIVATE_HOME].provider, HOST_PROVIDER);
+        assert_eq!(
+            admitted.met_by[CREDENTIAL_PRIVATE_HOME].provider,
+            HOST_PROVIDER
+        );
         let refused = match_floor(&login, &bounded);
         assert_eq!(refused.unmet[PERSISTENCE_DURABLE_STATE], bounded_reason);
         let bare = match_floor(&floor(&[PERSISTENCE_DURABLE_STATE]), &controller);
-        assert!(bare.unmet[PERSISTENCE_DURABLE_STATE].contains("only trusted-proven"), "{bare:?}");
+        assert!(
+            bare.unmet[PERSISTENCE_DURABLE_STATE].contains("only trusted-proven"),
+            "{bare:?}"
+        );
         // A remote authoring floor may accept the provider environment instead.
         let either = CapabilityRequirement::Spec(CapabilityRequirementSpec {
             name: None,
-            any_of: vec![CREDENTIAL_PRIVATE_HOME.to_owned(), SECRETS_PROVIDER_ENV.to_owned()],
+            any_of: vec![
+                CREDENTIAL_PRIVATE_HOME.to_owned(),
+                SECRETS_PROVIDER_ENV.to_owned(),
+            ],
             accept: vec!["measured".to_owned(), "provider_attested".to_owned()],
             providers: Vec::new(),
         });
         let mut keyed = bounded.clone();
-        keyed.provide(SECRETS_PROVIDER_ENV, ProofSource::ProviderAttested, PROVIDER_ENV_PROVIDER, "OPENAI_API_KEY");
+        keyed.provide(
+            SECRETS_PROVIDER_ENV,
+            ProofSource::ProviderAttested,
+            PROVIDER_ENV_PROVIDER,
+            "OPENAI_API_KEY",
+        );
         let admitted = match_floor(std::slice::from_ref(&either), &keyed);
         assert_eq!(admitted.met_by[&either.label()].name, SECRETS_PROVIDER_ENV);
         assert!(!match_floor(std::slice::from_ref(&either), &bounded).admitted);
@@ -887,22 +1022,40 @@ mod tests {
     #[test]
     fn the_credential_home_root_is_established_private_before_it_is_graded() {
         let app_root = tempfile::tempdir().unwrap();
-        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.path().to_path_buf()).state();
+        let state_dir =
+            ryeos_engine::roots::RuntimeRoot::new(app_root.path().to_path_buf()).state();
         std::fs::create_dir_all(&state_dir).unwrap();
         // Whatever the umask, no directory on the walk is group-writable.
-        for directory in state_dir.ancestors().take_while(|directory| directory.starts_with(app_root.path())) {
-            lillux::PinnedDirectory::open(directory).unwrap().unwrap().set_mode(0o755).unwrap();
+        for directory in state_dir
+            .ancestors()
+            .take_while(|directory| directory.starts_with(app_root.path()))
+        {
+            lillux::PinnedDirectory::open(directory)
+                .unwrap()
+                .unwrap()
+                .set_mode(0o755)
+                .unwrap();
         }
         let root = ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap();
         let facts = PrivateDirectoryFacts::observe(app_root.path(), &root);
         assert_eq!(facts.walk_refusal, None, "{facts:?}");
-        assert_eq!(facts.chain.last().map(|step| step.mode), Some(0o700), "{facts:?}");
+        assert_eq!(
+            facts.chain.last().map(|step| step.mode),
+            Some(0o700),
+            "{facts:?}"
+        );
         let mut view = view(&["time"], &[]);
         durable(&mut view);
         add_credential_home(&mut view, &facts, None);
-        assert!(view.provided.contains_key(CREDENTIAL_PRIVATE_HOME), "{view:?}");
+        assert!(
+            view.provided.contains_key(CREDENTIAL_PRIVATE_HOME),
+            "{view:?}"
+        );
         // Establishing it again is idempotent.
-        assert_eq!(ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap(), root);
+        assert_eq!(
+            ryeos_app::private_artifact_home::ensure_root(&state_dir).unwrap(),
+            root
+        );
     }
 
     #[test]
@@ -911,14 +1064,29 @@ mod tests {
         // the scope limit, the provider environment and the credential home.
         let host = HostFacts::observe(0, Path::new("/"));
         let mut view = host.capabilities();
-        let mut names: std::collections::BTreeSet<String> =
-            view.provided.keys().chain(view.missing.keys()).cloned().collect();
+        let mut names: std::collections::BTreeSet<String> = view
+            .provided
+            .keys()
+            .chain(view.missing.keys())
+            .cloned()
+            .collect();
         for capability in lillux::ProcessScopeCapability::ALL {
             names.insert(capability.capability_name().to_owned());
         }
-        names.extend([SCOPE_LIMITS, SECRETS_PROVIDER_ENV, CREDENTIAL_PRIVATE_HOME].map(str::to_owned));
-        assert!(names.len() <= MAX_CAPABILITY_ENTRIES, "{} names: {names:?}", names.len());
-        assert!(names.iter().all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES), "{names:?}");
+        names.extend(
+            [SCOPE_LIMITS, SECRETS_PROVIDER_ENV, CREDENTIAL_PRIVATE_HOME].map(str::to_owned),
+        );
+        assert!(
+            names.len() <= MAX_CAPABILITY_ENTRIES,
+            "{} names: {names:?}",
+            names.len()
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| name.len() <= MAX_CAPABILITY_NAME_BYTES),
+            "{names:?}"
+        );
         // A credential home basis on a long app root path is kept within the
         // text bound, cut visibly rather than refused.
         durable(&mut view);
@@ -931,7 +1099,10 @@ mod tests {
         deep.anchor = long;
         add_credential_home(&mut view, &deep, None);
         let basis = &view.provided[CREDENTIAL_PRIVATE_HOME].basis;
-        assert!(basis.len() <= MAX_CAPABILITY_TEXT_BYTES && basis.ends_with(" [cut]"), "{basis}");
+        assert!(
+            basis.len() <= MAX_CAPABILITY_TEXT_BYTES && basis.ends_with(" [cut]"),
+            "{basis}"
+        );
     }
 
     #[test]
@@ -944,16 +1115,40 @@ mod tests {
         assert!(admitted.admitted);
         let refused = match_floor(&floor(&["termination:scope", "time", "warp:drive"]), &host);
         assert!(!refused.admitted);
-        assert_eq!(refused.unmet["termination:scope"], "no writable cgroup subtree");
+        assert_eq!(
+            refused.unmet["termination:scope"],
+            "no writable cgroup subtree"
+        );
         assert!(refused.unmet["warp:drive"].contains("does not know how to prove"));
         // Every met entry records the name, grade and provider that met it.
-        assert_eq!(admitted.met_by["accounting"], met("accounting", ProofSource::Measured, HOST_PROVIDER));
-        assert_eq!(admitted.met_by["time"], met("time", ProofSource::Measured, HOST_PROVIDER));
+        assert_eq!(
+            admitted.met_by["accounting"],
+            met("accounting", ProofSource::Measured, HOST_PROVIDER)
+        );
+        assert_eq!(
+            admitted.met_by["time"],
+            met("time", ProofSource::Measured, HOST_PROVIDER)
+        );
         assert_eq!(admitted.met_by.len(), 2);
         let mut attested = host.clone();
-        attested.provide("time", ProofSource::ProviderAttested, HOST_PROVIDER, "gvisor");
-        attested.provide("termination:process_group", ProofSource::Trusted, HOST_PROVIDER, "pidfd");
-        attested.provide("isolation:namespaces", ProofSource::Trusted, HOST_PROVIDER, "policy");
+        attested.provide(
+            "time",
+            ProofSource::ProviderAttested,
+            HOST_PROVIDER,
+            "gvisor",
+        );
+        attested.provide(
+            "termination:process_group",
+            ProofSource::Trusted,
+            HOST_PROVIDER,
+            "pidfd",
+        );
+        attested.provide(
+            "isolation:namespaces",
+            ProofSource::Trusted,
+            HOST_PROVIDER,
+            "policy",
+        );
         // A bare name accepts a measurement only, whatever the name; the
         // refusal names the grade and provider and what was proven.
         let attested_floor = match_floor(
@@ -972,24 +1167,46 @@ mod tests {
         // The grade is data: a floor that accepts trust for the name is met
         // by it, and records the grade it was met at.
         let trusting = match_floor(
-            &[entry("termination:process_group", &["trusted"], &[]), "accounting".into()],
+            &[
+                entry("termination:process_group", &["trusted"], &[]),
+                "accounting".into(),
+            ],
             &attested,
         );
         assert!(trusting.admitted, "{trusting:?}");
         assert_eq!(
             trusting.met_by["termination:process_group"],
-            met("termination:process_group", ProofSource::Trusted, HOST_PROVIDER)
+            met(
+                "termination:process_group",
+                ProofSource::Trusted,
+                HOST_PROVIDER
+            )
         );
-        let scoped = report(host.clone(), floor(&["limits:scope", "termination:scope", "time"]));
+        let scoped = report(
+            host.clone(),
+            floor(&["limits:scope", "termination:scope", "time"]),
+        );
         assert!(scoped.require_floor().is_err());
         scoped.require_floor_without_scopes().unwrap();
         let mut host_level = scoped.clone();
         host_level.floor = match_floor(&floor(&["limits:enclosure", "termination:scope"]), &host);
-        let error = host_level.require_floor_without_scopes().unwrap_err().to_string();
-        assert!(error.contains("requires limits:enclosure") && !error.contains("termination:scope"), "{error}");
+        let error = host_level
+            .require_floor_without_scopes()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires limits:enclosure") && !error.contains("termination:scope"),
+            "{error}"
+        );
         let text = refusal_text("before native reservation", &refused, &host.provided);
-        assert!(text.contains("requires termination:scope: no writable cgroup subtree"), "{text}");
-        assert!(text.contains("can prove: accounting, termination:enclosure, time"), "{text}");
+        assert!(
+            text.contains("requires termination:scope: no writable cgroup subtree"),
+            "{text}"
+        );
+        assert!(
+            text.contains("can prove: accounting, termination:enclosure, time"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -997,34 +1214,62 @@ mod tests {
         use lillux::process_control::{ACCOUNTING, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT};
         let momentary = view(
             &[RESIDENCY_SWAP_ABSENT, "time"],
-            &[(ACCOUNTING, "held only by residency:swap_absent"), (RESIDENCY_LOCKED, "mlock refused")],
+            &[
+                (ACCOUNTING, "held only by residency:swap_absent"),
+                (RESIDENCY_LOCKED, "mlock refused"),
+            ],
         );
         // The strong name alone refuses the momentary basis.
         let strict = match_floor(&floor(&[ACCOUNTING, "time"]), &momentary);
         assert!(!strict.admitted);
-        assert_eq!(strict.unmet[ACCOUNTING], "held only by residency:swap_absent");
+        assert_eq!(
+            strict.unmet[ACCOUNTING],
+            "held only by residency:swap_absent"
+        );
         // A floor that names the weaker basis admits it, and says so.
         let accepting = vec![any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]), "time".into()];
         let admitted = match_floor(&accepting, &momentary);
         assert!(admitted.admitted, "{admitted:?}");
-        assert_eq!(admitted.met_by["any_of(accounting, residency:swap_absent)"].name, RESIDENCY_SWAP_ABSENT);
+        assert_eq!(
+            admitted.met_by["any_of(accounting, residency:swap_absent)"].name,
+            RESIDENCY_SWAP_ABSENT
+        );
         // The same floor on a standing basis is met by the strong name.
         let standing = view(&[ACCOUNTING, RESIDENCY_LOCKED, "time"], &[]);
         assert_eq!(
-            match_floor(&accepting, &standing).met_by["any_of(accounting, residency:swap_absent)"].name,
+            match_floor(&accepting, &standing).met_by["any_of(accounting, residency:swap_absent)"]
+                .name,
             ACCOUNTING
         );
         // Neither name proven: one unmet entry with every name's reason.
-        let neither = view(&["time"], &[(ACCOUNTING, "no proof"), (RESIDENCY_SWAP_ABSENT, "swap active")]);
+        let neither = view(
+            &["time"],
+            &[
+                (ACCOUNTING, "no proof"),
+                (RESIDENCY_SWAP_ABSENT, "swap active"),
+            ],
+        );
         let refused = match_floor(&accepting, &neither);
         let reason = &refused.unmet["any_of(accounting, residency:swap_absent)"];
-        assert!(reason.contains("accounting: no proof") && reason.contains("residency:swap_absent: swap active"), "{reason}");
+        assert!(
+            reason.contains("accounting: no proof")
+                && reason.contains("residency:swap_absent: swap active"),
+            "{reason}"
+        );
         // A set's alternatives obey the grade rule too.
         let mut attested = momentary.clone();
-        attested.provide(RESIDENCY_SWAP_ABSENT, ProofSource::ProviderAttested, HOST_PROVIDER, "gvisor");
+        attested.provide(
+            RESIDENCY_SWAP_ABSENT,
+            ProofSource::ProviderAttested,
+            HOST_PROVIDER,
+            "gvisor",
+        );
         assert!(!match_floor(&accepting, &attested).admitted);
         // An entry with a host-level alternative is checked without scopes.
-        let mixed = report(momentary.clone(), vec![any_of(&[ACCOUNTING, "limits:scope"])]);
+        let mixed = report(
+            momentary.clone(),
+            vec![any_of(&[ACCOUNTING, "limits:scope"])],
+        );
         assert!(mixed.require_floor_without_scopes().is_err());
     }
 
@@ -1035,22 +1280,41 @@ mod tests {
             TERMINATION_ENCLOSURE_TRUSTED_INIT,
         };
         let mut under_tini = view(&["time"], &[]);
-        for name in [TERMINATION_ENCLOSURE_TRUSTED_INIT, RECOVERY_ENCLOSURE_TRUSTED_INIT] {
-            under_tini.provide(name, ProofSource::Trusted, HOST_PROVIDER, "pid 1 is tini, named by node policy");
+        for name in [
+            TERMINATION_ENCLOSURE_TRUSTED_INIT,
+            RECOVERY_ENCLOSURE_TRUSTED_INIT,
+        ] {
+            under_tini.provide(
+                name,
+                ProofSource::Trusted,
+                HOST_PROVIDER,
+                "pid 1 is tini, named by node policy",
+            );
         }
         under_tini.refuse(TERMINATION_ENCLOSURE, "the node is not pid 1");
         under_tini.refuse(RECOVERY_ENCLOSURE, "the node is not pid 1");
         // The trusted-init names carry no trust of their own: the floor
         // says in data that it accepts the trusted grade.
         let bare = match_floor(
-            &floor(&[RECOVERY_ENCLOSURE_TRUSTED_INIT, TERMINATION_ENCLOSURE_TRUSTED_INIT, "time"]),
+            &floor(&[
+                RECOVERY_ENCLOSURE_TRUSTED_INIT,
+                TERMINATION_ENCLOSURE_TRUSTED_INIT,
+                "time",
+            ]),
             &under_tini,
         );
-        assert!(bare.unmet[TERMINATION_ENCLOSURE_TRUSTED_INIT].contains("only trusted-proven here by host"));
+        assert!(
+            bare.unmet[TERMINATION_ENCLOSURE_TRUSTED_INIT]
+                .contains("only trusted-proven here by host")
+        );
         let trusted = match_floor(
             &[
                 entry(RECOVERY_ENCLOSURE_TRUSTED_INIT, &["trusted"], &[]),
-                entry(TERMINATION_ENCLOSURE_TRUSTED_INIT, &["measured", "trusted"], &[]),
+                entry(
+                    TERMINATION_ENCLOSURE_TRUSTED_INIT,
+                    &["measured", "trusted"],
+                    &[],
+                ),
                 "time".into(),
             ],
             &under_tini,
@@ -1058,13 +1322,28 @@ mod tests {
         assert!(trusted.admitted, "{trusted:?}");
         assert_eq!(
             trusted.met_by[TERMINATION_ENCLOSURE_TRUSTED_INIT],
-            met(TERMINATION_ENCLOSURE_TRUSTED_INIT, ProofSource::Trusted, HOST_PROVIDER)
+            met(
+                TERMINATION_ENCLOSURE_TRUSTED_INIT,
+                ProofSource::Trusted,
+                HOST_PROVIDER
+            )
         );
-        let measured = match_floor(&floor(&[RECOVERY_ENCLOSURE, TERMINATION_ENCLOSURE]), &under_tini);
-        assert_eq!(measured.unmet[TERMINATION_ENCLOSURE], "the node is not pid 1");
+        let measured = match_floor(
+            &floor(&[RECOVERY_ENCLOSURE, TERMINATION_ENCLOSURE]),
+            &under_tini,
+        );
+        assert_eq!(
+            measured.unmet[TERMINATION_ENCLOSURE],
+            "the node is not pid 1"
+        );
         assert_eq!(measured.unmet[RECOVERY_ENCLOSURE], "the node is not pid 1");
         // Trust offered under a measured name is still refused.
-        under_tini.provide(TERMINATION_ENCLOSURE, ProofSource::Trusted, HOST_PROVIDER, "policy");
+        under_tini.provide(
+            TERMINATION_ENCLOSURE,
+            ProofSource::Trusted,
+            HOST_PROVIDER,
+            "policy",
+        );
         let forged = match_floor(&floor(&[TERMINATION_ENCLOSURE]), &under_tini);
         assert!(forged.unmet[TERMINATION_ENCLOSURE].contains("trusted-proven"));
     }
@@ -1073,14 +1352,25 @@ mod tests {
     fn a_floor_may_constrain_the_provider_of_a_proof() {
         let mut runit = view(&["time"], &[]);
         for name in ["termination:scope", "recovery:scope", SCOPE_LIMITS] {
-            runit.provide(name, ProofSource::Measured, "host_service", "qualified by a disposable probe scope");
+            runit.provide(
+                name,
+                ProofSource::Measured,
+                "host_service",
+                "qualified by a disposable probe scope",
+            );
         }
         // Open providers: met, with the provider recorded.
         let open = match_floor(&floor(&["termination:scope", "time"]), &runit);
         assert!(open.admitted, "{open:?}");
-        assert_eq!(open.met_by["termination:scope"], met("termination:scope", ProofSource::Measured, "host_service"));
+        assert_eq!(
+            open.met_by["termination:scope"],
+            met("termination:scope", ProofSource::Measured, "host_service")
+        );
         // Constrained to another provider: refused with the exact mismatch.
-        let oci_only = vec![entry("termination:scope", &[], &["external_controller:oci"]), "time".into()];
+        let oci_only = vec![
+            entry("termination:scope", &[], &["external_controller:oci"]),
+            "time".into(),
+        ];
         let refused = match_floor(&oci_only, &runit);
         assert!(!refused.admitted);
         assert_eq!(
@@ -1089,26 +1379,62 @@ mod tests {
              external_controller:oci (qualified by a disposable probe scope)"
         );
         let text = refusal_text("before native reservation", &refused, &runit.provided);
-        assert!(text.contains("requires termination:scope: termination:scope is proven here by host_service"), "{text}");
+        assert!(
+            text.contains(
+                "requires termination:scope: termination:scope is proven here by host_service"
+            ),
+            "{text}"
+        );
         // Constrained to the provider that proved it: admitted.
-        let service_only = vec![entry("termination:scope", &[], &["host_service", "external_controller"]), "time".into()];
+        let service_only = vec![
+            entry(
+                "termination:scope",
+                &[],
+                &["host_service", "external_controller"],
+            ),
+            "time".into(),
+        ];
         let admitted = match_floor(&service_only, &runit);
         assert!(admitted.admitted, "{admitted:?}");
-        assert_eq!(admitted.met_by["termination:scope"].provider, "host_service");
+        assert_eq!(
+            admitted.met_by["termination:scope"].provider,
+            "host_service"
+        );
         // A provider-attested proof from the right provider needs the grade
         // accepted as well, and the grade is judged first.
         let mut emulated = runit.clone();
-        emulated.provide("termination:scope", ProofSource::ProviderAttested, "host_service", "under gVisor");
+        emulated.provide(
+            "termination:scope",
+            ProofSource::ProviderAttested,
+            "host_service",
+            "under gVisor",
+        );
         let graded = match_floor(&service_only, &emulated);
         assert!(graded.unmet["termination:scope"].starts_with("termination:scope is only provider_attested-proven here by host_service; the floor accepts measured"));
-        let widened = vec![entry("termination:scope", &["measured", "provider_attested"], &["host_service"]), "time".into()];
+        let widened = vec![
+            entry(
+                "termination:scope",
+                &["measured", "provider_attested"],
+                &["host_service"],
+            ),
+            "time".into(),
+        ];
         let accepted = match_floor(&widened, &emulated);
         assert!(accepted.admitted, "{accepted:?}");
-        assert_eq!(accepted.met_by["termination:scope"].source, ProofSource::ProviderAttested);
+        assert_eq!(
+            accepted.met_by["termination:scope"].source,
+            ProofSource::ProviderAttested
+        );
         // The admission round-trips with its provider.
         let value = serde_json::to_value(&accepted).unwrap();
-        assert_eq!(value["met_by"]["termination:scope"]["provider"], "host_service");
-        assert_eq!(value["met_by"]["termination:scope"]["source"], "provider_attested");
+        assert_eq!(
+            value["met_by"]["termination:scope"]["provider"],
+            "host_service"
+        );
+        assert_eq!(
+            value["met_by"]["termination:scope"]["source"],
+            "provider_attested"
+        );
         let parsed: FloorAdmission = serde_json::from_value(value).unwrap();
         assert_eq!(parsed, accepted);
     }
@@ -1118,25 +1444,45 @@ mod tests {
         use lillux::process_control::{ACCOUNTING, RESIDENCY_LOCKED, RESIDENCY_SWAP_ABSENT};
         let signing_key = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
         let mut planned = view(&["time"], &[]);
-        let lock = ResidencyProof::Locked { basis: "cap".to_owned() };
+        let lock = ResidencyProof::Locked {
+            basis: "cap".to_owned(),
+        };
         let host = HostFacts::observe(0, Path::new("/"));
         host.apply_residency(&mut planned, Ok(&lock));
-        let weaker = ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() };
+        let weaker = ResidencyProof::SwapAbsent {
+            basis: "no swap now".to_owned(),
+        };
 
         let strict = report(planned.clone(), floor(&[ACCOUNTING, "time"]));
         strict.require_floor().unwrap();
-        let signed = strict.sign(&signing_key).unwrap().with_established_residency(weaker.clone(), &signing_key).unwrap();
+        let signed = strict
+            .sign(&signing_key)
+            .unwrap()
+            .with_established_residency(weaker.clone(), &signing_key)
+            .unwrap();
         assert!(!signed.report.provided.contains_key(ACCOUNTING));
         assert!(!signed.report.provided.contains_key(RESIDENCY_LOCKED));
         assert!(signed.report.provided.contains_key(RESIDENCY_SWAP_ABSENT));
         assert_eq!(signed.digest, signed.report.digest().unwrap());
         let refusal = signed.report.require_floor().unwrap_err();
-        let typed = CapabilityFloorRefused::find(&refusal.context("Phase 1: fixture")).cloned().unwrap();
+        let typed = CapabilityFloorRefused::find(&refusal.context("Phase 1: fixture"))
+            .cloned()
+            .unwrap();
         let error = typed.to_string();
-        assert!(error.contains("after native reservation") && error.contains("requires accounting"), "{error}");
+        assert!(
+            error.contains("after native reservation") && error.contains("requires accounting"),
+            "{error}"
+        );
 
-        let accepting = report(planned, vec![any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]), "time".into()]);
-        let signed = accepting.sign(&signing_key).unwrap().with_established_residency(weaker, &signing_key).unwrap();
+        let accepting = report(
+            planned,
+            vec![any_of(&[ACCOUNTING, RESIDENCY_SWAP_ABSENT]), "time".into()],
+        );
+        let signed = accepting
+            .sign(&signing_key)
+            .unwrap()
+            .with_established_residency(weaker, &signing_key)
+            .unwrap();
         signed.report.require_floor().unwrap();
         assert_eq!(
             signed.report.floor.met_by["any_of(accounting, residency:swap_absent)"],
@@ -1149,13 +1495,26 @@ mod tests {
         use lillux::process_control::{ACCOUNTING, RESIDENCY_SWAP_ABSENT};
         let mut planned = view(&["time"], &[]);
         let host = HostFacts::observe(0, Path::new("/"));
-        host.apply_residency(&mut planned, Ok(&ResidencyProof::Locked { basis: "cap".to_owned() }));
+        host.apply_residency(
+            &mut planned,
+            Ok(&ResidencyProof::Locked {
+                basis: "cap".to_owned(),
+            }),
+        );
         let mut service = report(planned, floor(&[ACCOUNTING, "termination:scope", "time"]));
         service.require_floor_without_scopes().unwrap();
-        service.establish_residency(ResidencyProof::SwapAbsent { basis: "no swap now".to_owned() });
+        service.establish_residency(ResidencyProof::SwapAbsent {
+            basis: "no swap now".to_owned(),
+        });
         assert!(service.provided.contains_key(RESIDENCY_SWAP_ABSENT));
-        let error = service.require_floor_without_scopes().unwrap_err().to_string();
-        assert!(error.contains("after native reservation") && error.contains("requires accounting"), "{error}");
+        let error = service
+            .require_floor_without_scopes()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("after native reservation") && error.contains("requires accounting"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1165,15 +1524,28 @@ mod tests {
                       discarded when the container is replaced";
         let ephemeral = view(&["time"], &[(STORAGE_DURABLE_ROOT, reason)]);
         let durable = report(ephemeral.clone(), floor(&[STORAGE_DURABLE_ROOT, "time"]));
-        for error in [durable.require_floor(), durable.require_floor_without_scopes()] {
+        for error in [
+            durable.require_floor(),
+            durable.require_floor_without_scopes(),
+        ] {
             let error = error.unwrap_err().to_string();
-            assert!(error.contains(&format!("requires {STORAGE_DURABLE_ROOT}: {reason}")), "{error}");
+            assert!(
+                error.contains(&format!("requires {STORAGE_DURABLE_ROOT}: {reason}")),
+                "{error}"
+            );
         }
         // A disposable floor that does not name it admits on the same root.
         report(ephemeral, floor(&["time"])).require_floor().unwrap();
         let mut volume = view(&["time"], &[]);
-        volume.provide(STORAGE_DURABLE_ROOT, ProofSource::Measured, HOST_PROVIDER, "ext4 mounted at /data, durable by mount");
-        report(volume, floor(&[STORAGE_DURABLE_ROOT, "time"])).require_floor().unwrap();
+        volume.provide(
+            STORAGE_DURABLE_ROOT,
+            ProofSource::Measured,
+            HOST_PROVIDER,
+            "ext4 mounted at /data, durable by mount",
+        );
+        report(volume, floor(&[STORAGE_DURABLE_ROOT, "time"]))
+            .require_floor()
+            .unwrap();
     }
 
     #[test]
@@ -1189,15 +1561,26 @@ mod tests {
         let value = serde_json::to_value(&fixture).unwrap();
         assert_eq!(value["daemon_digest"], "sha256:fixture");
         assert!(value["composition"].get("native_services").is_none());
-        assert_eq!(value["composition"]["compiled_features"], serde_json::json!([]));
+        assert_eq!(
+            value["composition"]["compiled_features"],
+            serde_json::json!([])
+        );
         assert_eq!(value["composition"]["host_class"], "hosted");
         let signed = fixture.clone().sign(&signing_key).unwrap();
         let mut reclassed = fixture.clone();
         reclassed.composition.host_class = "local".to_owned();
-        assert_ne!(reclassed.digest().unwrap(), signed.digest, "the digest covers the host class");
+        assert_ne!(
+            reclassed.digest().unwrap(),
+            signed.digest,
+            "the digest covers the host class"
+        );
         let mut renamed = fixture;
         renamed.daemon_digest = "sha256:other".to_owned();
-        assert_ne!(renamed.digest().unwrap(), signed.digest, "the digest covers the daemon image");
+        assert_ne!(
+            renamed.digest().unwrap(),
+            signed.digest,
+            "the digest covers the daemon image"
+        );
     }
 
     fn provider_environment(
@@ -1248,9 +1631,21 @@ mod tests {
         let evidence = &present.provided[SECRETS_PROVIDER_ENV];
         assert_eq!(evidence.source, ProofSource::ProviderAttested);
         assert_eq!(evidence.provider, PROVIDER_ENV_PROVIDER);
-        assert!(evidence.basis.contains("declared names present at startup: OPENAI_API_KEY"));
-        assert!(evidence.basis.contains("absent at startup: ANTHROPIC_API_KEY"));
-        assert!(evidence.basis.contains("readable by the recipient's model commands"));
+        assert!(
+            evidence
+                .basis
+                .contains("declared names present at startup: OPENAI_API_KEY")
+        );
+        assert!(
+            evidence
+                .basis
+                .contains("absent at startup: ANTHROPIC_API_KEY")
+        );
+        assert!(
+            evidence
+                .basis
+                .contains("readable by the recipient's model commands")
+        );
         assert!(!present.missing.contains_key(SECRETS_PROVIDER_ENV));
 
         let serialized = serde_json::to_string(&report(present, floor(&["time"]))).unwrap();
@@ -1267,18 +1662,32 @@ mod tests {
         let older_schema = serde_json::json!({
             "report": {"schema": "ryeos.node.capability-report/v6", "host": {"version": 5}}
         });
-        assert!(stale_format(&older_schema).unwrap().contains("capability-report/v6"));
+        assert!(
+            stale_format(&older_schema)
+                .unwrap()
+                .contains("capability-report/v6")
+        );
         let older_host = serde_json::json!({
             "report": {"schema": CAPABILITY_REPORT_SCHEMA, "host": {"version": 5}}
         });
-        assert!(stale_format(&older_host).unwrap().contains("host facts version is 5"));
-        assert!(stale_format(&serde_json::json!({})).unwrap().contains("absent"));
+        assert!(
+            stale_format(&older_host)
+                .unwrap()
+                .contains("host facts version is 5")
+        );
+        assert!(
+            stale_format(&serde_json::json!({}))
+                .unwrap()
+                .contains("absent")
+        );
 
         let app_root = tempfile::tempdir().unwrap();
         let path = SignedNodeCapabilityReport::path(app_root.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_vec(&older_schema).unwrap()).unwrap();
-        let error = SignedNodeCapabilityReport::read_verified(app_root.path()).unwrap_err().to_string();
+        let error = SignedNodeCapabilityReport::read_verified(app_root.path())
+            .unwrap_err()
+            .to_string();
         assert!(error.starts_with("stale report:"), "{error}");
     }
 }

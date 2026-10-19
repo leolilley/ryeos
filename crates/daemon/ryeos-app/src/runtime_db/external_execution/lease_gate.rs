@@ -26,8 +26,9 @@ impl RuntimeDb {
         admission: &ExternalLeaseAdmission,
         now_ms: i64,
     ) -> Result<()> {
+        admission.validate()?;
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let held: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = tx
                 .query_row(
                     "SELECT state,held_ready_frame,held_report_frame
@@ -70,7 +71,10 @@ impl RuntimeDb {
                     admission.resume_state_json,
                 ],
             )?;
-            ensure!(changed == 1, "lease record of {placement} left activated during admission");
+            ensure!(
+                changed == 1,
+                "lease record of {placement} left activated during admission"
+            );
             tx.commit()?;
             Ok(())
         })
@@ -116,7 +120,7 @@ impl RuntimeDb {
             "lease refusal reason is empty or exceeds 1024 bytes"
         );
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let state: Option<String> = tx
                 .query_row(
                     "SELECT state FROM external_execution_lease WHERE placement_thread_id=?1",
@@ -138,22 +142,22 @@ impl RuntimeDb {
                     )?;
                 }
             }
-            if let Some(allocation) = read(&tx, placement)? {
-                if !allocation.phase.is_settled() {
-                    tx.execute(
-                        "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3
+            if let Some(allocation) = read(&tx, placement)?
+                && !allocation.phase.is_settled()
+            {
+                tx.execute(
+                    "UPDATE external_execution_allocation SET phase=?2,updated_at_ms=?3
                           WHERE placement_thread_id=?1",
-                        params![
-                            placement,
-                            if allocation.phase == ExternalAllocationPhase::Reserved {
-                                "no_contact"
-                            } else {
-                                "quarantined"
-                            },
-                            now_ms
-                        ],
-                    )?;
-                }
+                    params![
+                        placement,
+                        if allocation.phase == ExternalAllocationPhase::Reserved {
+                            "no_contact"
+                        } else {
+                            "quarantined"
+                        },
+                        now_ms
+                    ],
+                )?;
             }
             tx.commit()?;
             Ok(true)
@@ -170,7 +174,6 @@ mod tests {
         ChannelDirection, ExecutionChannelBinding, ExecutionChannelPayload, ExecutionFrame,
         SignedExecutionFrame,
     };
-
 
     /// `db` is declared before `_dir` so the database closes before its
     /// directory is removed.
@@ -213,9 +216,8 @@ mod tests {
     /// and its lease record activated, the guest's two frames signed.
     fn activated_lease(ready_deadline_ms: i64) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let db = crate::runtime_db::test_native::TestRuntime::open(
-            &dir.path().join("runtime.sqlite3"),
-        );
+        let db =
+            crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));
         let retained = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         let mut held = reservation(&db, "gate");
         held.admitted_adapter_request_base64 = Some(
@@ -386,19 +388,26 @@ mod tests {
         assert!(refusal.contains("judged different frames"), "{refusal}");
         assert_eq!(journalled(&fixture), 0);
         assert_eq!(
-            db.external_lease_record(&fixture.placement).unwrap().unwrap().state,
+            db.external_lease_record(&fixture.placement)
+                .unwrap()
+                .unwrap()
+                .state,
             ExternalLeaseRecordState::Activated
         );
 
         db.admit_external_lease_with_ready(&fixture.placement, &judged(&fixture), 30)
             .unwrap();
-        assert_eq!(journalled(&fixture), 2, "the held Ready and report entered the journal");
-        let record = db.external_lease_record(&fixture.placement).unwrap().unwrap();
-        assert_eq!(record.state, ExternalLeaseRecordState::Admitted);
         assert_eq!(
-            record.admission.unwrap().resume_state_json,
-            "{\"chain\":1}"
+            journalled(&fixture),
+            2,
+            "the held Ready and report entered the journal"
         );
+        let record = db
+            .external_lease_record(&fixture.placement)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, ExternalLeaseRecordState::Admitted);
+        assert_eq!(record.admission.unwrap().resume_state_json, "{\"chain\":1}");
         // Admission is once.
         assert!(
             db.admit_external_lease_with_ready(&fixture.placement, &judged(&fixture), 31)
@@ -436,7 +445,10 @@ mod tests {
         db.refuse_external_lease_and_cancel(&fixture.placement, "route is open", 40)
             .unwrap();
         assert_eq!(phase(&fixture), ExternalAllocationPhase::Quarantined);
-        let record = db.external_lease_record(&fixture.placement).unwrap().unwrap();
+        let record = db
+            .external_lease_record(&fixture.placement)
+            .unwrap()
+            .unwrap();
         assert_eq!(record.state, ExternalLeaseRecordState::Refused);
         assert_eq!(record.refusal_reason.as_deref(), Some("route is open"));
 
@@ -492,7 +504,10 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            db.external_lease_record(&fixture.placement).unwrap().unwrap().state,
+            db.external_lease_record(&fixture.placement)
+                .unwrap()
+                .unwrap()
+                .state,
             ExternalLeaseRecordState::Admitted
         );
         assert_eq!(phase(&fixture), before, "the allocation is not cancelled");

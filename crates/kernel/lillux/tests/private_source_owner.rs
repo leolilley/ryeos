@@ -113,8 +113,8 @@ fn sandbox_target(name: &str) -> Result<(), String> {
             rlim_max: 0,
         };
         if unsafe { libc::getrlimit(resource, &mut actual) } != 0
-            || actual.rlim_cur as u64 != expected
-            || actual.rlim_max as u64 != expected
+            || actual.rlim_cur != expected
+            || actual.rlim_max != expected
         {
             return Err("released native target observed different resource limits".to_owned());
         }
@@ -360,16 +360,15 @@ fn held_source_target(
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
-    if let Err(error) = &outcome {
-        if let Err(cleanup) = held
+    if let Err(error) = &outcome
+        && let Err(cleanup) = held
             .held()
             .terminate_namespace_for_export(Duration::from_secs(5))
-        {
-            eprintln!(
-                "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
-            );
-            lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
-        }
+    {
+        eprintln!(
+            "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
+        );
+        lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
     }
     outcome
 }
@@ -420,7 +419,12 @@ fn child(
         .create_child(OsStr::new(name), 0o700)
         .map_err(|error| error.to_string())?;
     child
-        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600, TEST_PURPOSE)
+        .atomic_create_pinned_regular(
+            OsStr::new("payload"),
+            b"private-source",
+            0o600,
+            TEST_PURPOSE,
+        )
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
     if wrong_source {

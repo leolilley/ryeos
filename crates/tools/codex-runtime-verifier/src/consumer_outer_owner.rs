@@ -277,24 +277,6 @@ fn require_exact_wire_bytes(bytes: &[u8], count: usize, digest: &str) -> Result<
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wire_join_rejects_prefix_tail_and_same_length_mutation() {
-        let bytes = b"reply\nnotification\n";
-        let digest = lillux::sha256_hex(bytes);
-        require_exact_wire_bytes(bytes, bytes.len(), &digest).unwrap();
-        assert!(require_exact_wire_bytes(b"reply\n", bytes.len(), &digest).is_err());
-        assert!(
-            require_exact_wire_bytes(b"reply\nnotification\nextra", bytes.len(), &digest).is_err()
-        );
-        assert!(require_exact_wire_bytes(b"Reply\nnotification\n", bytes.len(), &digest).is_err());
-        assert!(require_exact_wire_bytes(bytes, bytes.len() - 1, &digest).is_err());
-    }
-}
-
 /// Missing evidence is pending, never success or permission to relaunch.
 #[allow(clippy::too_many_arguments)]
 pub fn read_outer_observation(
@@ -519,4 +501,22 @@ pub fn run_outer_protocol(
         "outer owner evidence publication exceeded deadline"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_join_rejects_prefix_tail_and_same_length_mutation() {
+        let bytes = b"reply\nnotification\n";
+        let digest = lillux::sha256_hex(bytes);
+        require_exact_wire_bytes(bytes, bytes.len(), &digest).unwrap();
+        assert!(require_exact_wire_bytes(b"reply\n", bytes.len(), &digest).is_err());
+        assert!(
+            require_exact_wire_bytes(b"reply\nnotification\nextra", bytes.len(), &digest).is_err()
+        );
+        assert!(require_exact_wire_bytes(b"Reply\nnotification\n", bytes.len(), &digest).is_err());
+        assert!(require_exact_wire_bytes(bytes, bytes.len() - 1, &digest).is_err());
+    }
 }

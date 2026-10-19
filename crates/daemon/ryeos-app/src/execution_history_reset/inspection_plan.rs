@@ -205,15 +205,24 @@ pub(super) struct OperationalSourcePins {
 }
 impl OperationalSourcePins {
     pub(super) fn main(&self) -> Result<&Arc<lillux_sqlite::RetainedOriginalMetadataPin>> {
-        self.roles[0].as_ref().context("original Operational main pin absent")
+        self.roles[0]
+            .as_ref()
+            .context("original Operational main pin absent")
     }
-    pub(super) fn marker(&self) -> &Arc<lillux_sqlite::RetainedOriginalMetadataPin> { &self.marker }
+    pub(super) fn marker(&self) -> &Arc<lillux_sqlite::RetainedOriginalMetadataPin> {
+        &self.marker
+    }
     /// Exact original present-role inventory, followed by the marker. These
     /// Arc clones retain the same physical owners; no descriptor is duplicated.
-    pub(super) fn retirement_pins(&self) -> Vec<(u8, Arc<lillux_sqlite::RetainedOriginalMetadataPin>)> {
-        self.roles.iter().enumerate().filter_map(|(index, pin)|
-            pin.as_ref().map(|pin| (index as u8, pin.clone())))
-            .chain(std::iter::once((4, self.marker.clone()))).collect()
+    pub(super) fn retirement_pins(
+        &self,
+    ) -> Vec<(u8, Arc<lillux_sqlite::RetainedOriginalMetadataPin>)> {
+        self.roles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pin)| pin.as_ref().map(|pin| (index as u8, pin.clone())))
+            .chain(std::iter::once((4, self.marker.clone())))
+            .collect()
     }
     pub(super) fn retained_count(&self) -> usize {
         // Inventory size only, never evidence of physical retirement.
@@ -224,22 +233,38 @@ impl SourceFact {
     fn capture_pin(pin: &File) -> Result<Self> {
         ensure!(pin.metadata()?.is_file(), "source role is not regular");
         let fact = lillux::observe_open_file_identity(pin)?;
-        ensure!(fact.size() <= i64::MAX as u64, "source extent exceeds native range");
-        Ok(Self { device: fact.device(), inode: fact.inode(), byte_length: fact.size() })
+        ensure!(
+            fact.size() <= i64::MAX as u64,
+            "source extent exceeds native range"
+        );
+        Ok(Self {
+            device: fact.device(),
+            inode: fact.inode(),
+            byte_length: fact.size(),
+        })
     }
-    fn require_retained_pin(&self, pin: &lillux_sqlite::RetainedOriginalMetadataPin,
-        require_extent: bool) -> Result<()> {
+    fn require_retained_pin(
+        &self,
+        pin: &lillux_sqlite::RetainedOriginalMetadataPin,
+        require_extent: bool,
+    ) -> Result<()> {
         let current = pin.observed_identity()?;
-        ensure!(current.device() == self.device && current.inode() == self.inode
-            && (!require_extent || current.size() == self.byte_length),
-            "actual retained source pin differs from signed original identity");
+        ensure!(
+            current.device() == self.device
+                && current.inode() == self.inode
+                && (!require_extent || current.size() == self.byte_length),
+            "actual retained source pin differs from signed original identity"
+        );
         Ok(())
     }
     fn require_pin(&self, pin: &File, require_extent: bool) -> Result<()> {
         let current = Self::capture_pin(pin)?;
-        ensure!(current.device == self.device && current.inode == self.inode
-            && (!require_extent || current.byte_length == self.byte_length),
-            "actual source pin differs from signed original identity");
+        ensure!(
+            current.device == self.device
+                && current.inode == self.inode
+                && (!require_extent || current.byte_length == self.byte_length),
+            "actual source pin differs from signed original identity"
+        );
         Ok(())
     }
 }
@@ -253,80 +278,145 @@ impl OperationalSourcePlan {
         namespace.ensure_protects(runtime)?;
         let names = role_names(ryeos_state::operational::OPERATIONAL_DB_FILENAME)?;
         let mut roles: [Option<SourceFact>; 4] = std::array::from_fn(|_| None);
-        let mut pins: [Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 4] = std::array::from_fn(|_| None);
+        let mut pins: [Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 4] =
+            std::array::from_fn(|_| None);
         for (index, name) in names.iter().enumerate() {
             if let Some(pin) = runtime.open_mount_entry(name)? {
                 roles[index] = Some(SourceFact::capture_pin(&pin)?);
                 // SAFETY: this is the actual regular O_PATH pin captured
                 // above from the locked namespace, not a descriptor clone.
-                pins[index] = Some(unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(pin) });
+                pins[index] =
+                    Some(unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(pin) });
             }
         }
-        let marker_pin = runtime.open_mount_entry(OsStr::new(
-            ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME))?
+        let marker_pin = runtime
+            .open_mount_entry(OsStr::new(
+                ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
+            ))?
             .context("established Operational initialization marker absent")?;
         let marker = SourceFact::capture_pin(&marker_pin)?;
-        let plan = Self { directory_identity: serde_json::to_string(&runtime.identity()?)?, roles, marker };
+        let plan = Self {
+            directory_identity: serde_json::to_string(&runtime.identity()?)?,
+            roles,
+            marker,
+        };
         plan.validate_with_copies(copies)?;
         // SAFETY: actual regular metadata-only marker pin already validated
         // against the canonical original fact, under this same namespace.
-        let pins = OperationalSourcePins { roles: pins,
-            marker: unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(marker_pin) } };
+        let pins = OperationalSourcePins {
+            roles: pins,
+            marker: unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(marker_pin) },
+        };
         plan.require_current(runtime, &pins)?;
         namespace.ensure_protects(runtime)?;
         Ok((plan, pins))
     }
     pub(super) fn validate(&self) -> Result<()> {
-        ensure!(!self.directory_identity.is_empty(), "Operational source directory absent");
-        ensure!(self.roles[0].is_some(), "established Operational main is absent");
-        for fact in self.roles.iter().flatten().chain(std::iter::once(&self.marker)) {
-            ensure!(fact.byte_length <= i64::MAX as u64, "Operational source extent exceeds native range");
+        ensure!(
+            !self.directory_identity.is_empty(),
+            "Operational source directory absent"
+        );
+        ensure!(
+            self.roles[0].is_some(),
+            "established Operational main is absent"
+        );
+        for fact in self
+            .roles
+            .iter()
+            .flatten()
+            .chain(std::iter::once(&self.marker))
+        {
+            ensure!(
+                fact.byte_length <= i64::MAX as u64,
+                "Operational source extent exceeds native range"
+            );
         }
-        ensure!(self.marker.byte_length == ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
-            "Operational initialization marker has invalid extent");
+        ensure!(
+            self.marker.byte_length
+                == ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
+            "Operational initialization marker has invalid extent"
+        );
         Ok(())
     }
     pub(super) fn validate_with_copies(&self, copies: &[InspectionSourcePlan; 2]) -> Result<()> {
         self.validate()?;
         validate_sources(copies)?;
-        ensure!(self.directory_identity == copies[1].directory_identity,
-            "Operational provenance selects another runtime namespace");
+        ensure!(
+            self.directory_identity == copies[1].directory_identity,
+            "Operational provenance selects another runtime namespace"
+        );
         let mut coordinates = std::collections::BTreeSet::new();
         let mut physical = std::collections::BTreeSet::new();
         for copy in copies {
-            for (name, fact) in role_names(&copy.database_name)?.into_iter().zip(&copy.roles) {
-                ensure!(coordinates.insert((copy.directory_identity.as_str(), name)), "duplicate source coordinate");
-                if let Some(fact) = fact { ensure!(physical.insert((fact.device, fact.inode)), "aliased source inode"); }
+            for (name, fact) in role_names(&copy.database_name)?
+                .into_iter()
+                .zip(&copy.roles)
+            {
+                ensure!(
+                    coordinates.insert((copy.directory_identity.as_str(), name)),
+                    "duplicate source coordinate"
+                );
+                if let Some(fact) = fact {
+                    ensure!(
+                        physical.insert((fact.device, fact.inode)),
+                        "aliased source inode"
+                    );
+                }
             }
         }
         let names = role_names(ryeos_state::operational::OPERATIONAL_DB_FILENAME)?;
-        for (name, fact) in names.into_iter().zip(&self.roles).map(|(name, fact)| (name, fact.as_ref())).chain(std::iter::once((
-            OsString::from(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME), Some(&self.marker)))) {
-            ensure!(coordinates.insert((self.directory_identity.as_str(), name)), "Operational source coordinate aliases another source");
-            if let Some(fact) = fact { ensure!(physical.insert((fact.device, fact.inode)), "Operational source inode aliases another source"); }
+        for (name, fact) in names
+            .into_iter()
+            .zip(&self.roles)
+            .map(|(name, fact)| (name, fact.as_ref()))
+            .chain(std::iter::once((
+                OsString::from(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+                Some(&self.marker),
+            )))
+        {
+            ensure!(
+                coordinates.insert((self.directory_identity.as_str(), name)),
+                "Operational source coordinate aliases another source"
+            );
+            if let Some(fact) = fact {
+                ensure!(
+                    physical.insert((fact.device, fact.inode)),
+                    "Operational source inode aliases another source"
+                );
+            }
         }
         Ok(())
     }
     fn require_directory(&self, runtime: &lillux::PinnedDirectory) -> Result<()> {
         self.validate()?;
         runtime.ensure_path_binding()?;
-        ensure!(serde_json::to_string(&runtime.identity()?)? == self.directory_identity,
-            "Operational source runtime identity changed");
+        ensure!(
+            serde_json::to_string(&runtime.identity()?)? == self.directory_identity,
+            "Operational source runtime identity changed"
+        );
         Ok(())
     }
     /// Initial admission only: exact original presence, inode and extents.
     /// Do not repeat these stale size/absence requirements after activation.
-    pub(super) fn require_current(&self, runtime: &lillux::PinnedDirectory, pins: &OperationalSourcePins) -> Result<()> {
+    pub(super) fn require_current(
+        &self,
+        runtime: &lillux::PinnedDirectory,
+        pins: &OperationalSourcePins,
+    ) -> Result<()> {
         self.require_directory(runtime)?;
-        for ((name, expected), pin) in role_names(ryeos_state::operational::OPERATIONAL_DB_FILENAME)?
-            .iter().zip(&self.roles).zip(&pins.roles) {
+        for ((name, expected), pin) in
+            role_names(ryeos_state::operational::OPERATIONAL_DB_FILENAME)?
+                .iter()
+                .zip(&self.roles)
+                .zip(&pins.roles)
+        {
             let current = runtime.open_mount_entry(name)?;
             match (expected, pin, current) {
-                (None, None, None) => {},
+                (None, None, None) => {}
                 (Some(fact), Some(original), Some(current)) => {
                     fact.require_retained_pin(original, true)?;
                     fact.require_pin(&current, true)?;
-                },
+                }
                 _ => anyhow::bail!("Operational source presence changed before admission"),
             }
         }
@@ -334,37 +424,62 @@ impl OperationalSourcePlan {
         runtime.ensure_path_binding()
     }
     /// Stable main inode custody after legitimate mutation; no old size test.
-    pub(super) fn require_main_identity(&self, runtime: &lillux::PinnedDirectory, pins: &OperationalSourcePins) -> Result<()> {
+    pub(super) fn require_main_identity(
+        &self,
+        runtime: &lillux::PinnedDirectory,
+        pins: &OperationalSourcePins,
+    ) -> Result<()> {
         self.require_directory(runtime)?;
-        let expected = self.roles[0].as_ref().context("Operational main fact absent")?;
+        let expected = self.roles[0]
+            .as_ref()
+            .context("Operational main fact absent")?;
         expected.require_retained_pin(pins.main()?, false)?;
-        let current = runtime.open_mount_entry(OsStr::new(ryeos_state::operational::OPERATIONAL_DB_FILENAME))?
+        let current = runtime
+            .open_mount_entry(OsStr::new(
+                ryeos_state::operational::OPERATIONAL_DB_FILENAME,
+            ))?
             .context("Operational main coordinate disappeared")?;
         expected.require_pin(&current, false)
     }
-    fn require_marker_identity(&self, runtime: &lillux::PinnedDirectory, pins: &OperationalSourcePins) -> Result<()> {
+    fn require_marker_identity(
+        &self,
+        runtime: &lillux::PinnedDirectory,
+        pins: &OperationalSourcePins,
+    ) -> Result<()> {
         self.require_directory(runtime)?;
         self.marker.require_retained_pin(pins.marker(), true)?;
-        let current = runtime.open_mount_entry(OsStr::new(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME))?
+        let current = runtime
+            .open_mount_entry(OsStr::new(
+                ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
+            ))?
             .context("Operational marker coordinate disappeared")?;
         self.marker.require_pin(&current, true)
     }
     /// Caller must irreversibly debit the real original read/memory dimensions
     /// before the actual alias-excluding reader. No default debit is supplied.
     pub(super) fn require_marker(
-        &self, runtime: &lillux::PinnedDirectory, pins: &OperationalSourcePins,
+        &self,
+        runtime: &lillux::PinnedDirectory,
+        pins: &OperationalSourcePins,
         debit_original_read: impl FnOnce(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_marker_identity(runtime, pins)?;
         let expected = ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT;
         // The guarded reader allocates and may read one extra growth byte.
-        let maximum = u64::try_from(expected.len())?.checked_add(1)
+        let maximum = u64::try_from(expected.len())?
+            .checked_add(1)
             .context("Operational marker read bound overflow")?;
         debit_original_read(maximum, maximum)?;
-        let bytes = lillux_sqlite::read_regular_without_sqlite_alias(runtime,
-            OsStr::new(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME), expected.len())?
-            .context("Operational initialization marker disappeared during read")?;
-        ensure!(bytes.as_slice() == expected, "Operational initialization marker content invalid");
+        let bytes = lillux_sqlite::read_regular_without_sqlite_alias(
+            runtime,
+            OsStr::new(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+            expected.len(),
+        )?
+        .context("Operational initialization marker disappeared during read")?;
+        ensure!(
+            bytes.as_slice() == expected,
+            "Operational initialization marker content invalid"
+        );
         self.require_marker_identity(runtime, pins)
     }
 }
@@ -386,14 +501,14 @@ pub(super) fn capture_sources(
     let name = db_target
         .file_name()
         .context("runtime inspection target has no basename")?;
-    let (runtime_plan, mut pins) = InspectionSourcePlan::capture(&runtime_source, name, "runtime", false)?;
-    let (scheduler_plan, scheduler_pins) =
-        InspectionSourcePlan::capture(
-            runtime,
-            OsStr::new("scheduler.sqlite3"),
-            "scheduler",
-            scheduler_main_was_retired_by_prior,
-        )?;
+    let (runtime_plan, mut pins) =
+        InspectionSourcePlan::capture(&runtime_source, name, "runtime", false)?;
+    let (scheduler_plan, scheduler_pins) = InspectionSourcePlan::capture(
+        runtime,
+        OsStr::new("scheduler.sqlite3"),
+        "scheduler",
+        scheduler_main_was_retired_by_prior,
+    )?;
     pins.extend(scheduler_pins);
     let plans = [runtime_plan, scheduler_plan];
     validate_sources(&plans)?;
@@ -431,17 +546,34 @@ pub(super) fn validate_sources(plans: &[InspectionSourcePlan; 2]) -> Result<()> 
 mod controls {
     use super::*;
 
-    fn operational_fixture() -> (tempfile::TempDir, lillux::PinnedDirectory,
-        lillux::PinnedDirectoryLock, [InspectionSourcePlan; 2]) {
+    fn operational_fixture() -> (
+        tempfile::TempDir,
+        lillux::PinnedDirectory,
+        lillux::PinnedDirectoryLock,
+        [InspectionSourcePlan; 2],
+    ) {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("runtime.sqlite3"),
-            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT).unwrap();
-        std::fs::write(temp.path().join(ryeos_state::operational::OPERATIONAL_DB_FILENAME), b"initial").unwrap();
-        std::fs::write(temp.path().join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
-            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT).unwrap();
+        std::fs::write(
+            temp.path().join("runtime.sqlite3"),
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
+            b"initial",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT,
+        )
+        .unwrap();
         let directory = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (copies, _, _) = capture_sources(&directory, &temp.path().join("runtime.sqlite3"), false).unwrap();
+        let (copies, _, _) =
+            capture_sources(&directory, &temp.path().join("runtime.sqlite3"), false).unwrap();
         (temp, directory, namespace, copies)
     }
 
@@ -451,13 +583,22 @@ mod controls {
         let (plan, pins) = OperationalSourcePlan::capture(&directory, &namespace, &copies).unwrap();
         assert_eq!(pins.retained_count(), 2);
         plan.require_current(&directory, &pins).unwrap();
-        std::fs::write(temp.path().join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
-            b"legitimate same-inode growth after activation").unwrap();
+        std::fs::write(
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
+            b"legitimate same-inode growth after activation",
+        )
+        .unwrap();
         assert!(plan.require_current(&directory, &pins).is_err());
         plan.require_main_identity(&directory, &pins).unwrap();
         let replacement = temp.path().join("replacement");
         std::fs::write(&replacement, b"different inode").unwrap();
-        std::fs::rename(replacement, temp.path().join(ryeos_state::operational::OPERATIONAL_DB_FILENAME)).unwrap();
+        std::fs::rename(
+            replacement,
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME),
+        )
+        .unwrap();
         assert!(plan.require_main_identity(&directory, &pins).is_err());
     }
 
@@ -465,10 +606,14 @@ mod controls {
     fn operational_provenance_refuses_cross_source_inode_aliases() {
         for marker_alias in [false, true] {
             let (temp, directory, namespace, copies) = operational_fixture();
-            let name = if marker_alias { ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME }
-                else { ryeos_state::operational::OPERATIONAL_DB_FILENAME };
+            let name = if marker_alias {
+                ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME
+            } else {
+                ryeos_state::operational::OPERATIONAL_DB_FILENAME
+            };
             std::fs::remove_file(temp.path().join(name)).unwrap();
-            std::fs::hard_link(temp.path().join("runtime.sqlite3"), temp.path().join(name)).unwrap();
+            std::fs::hard_link(temp.path().join("runtime.sqlite3"), temp.path().join(name))
+                .unwrap();
             assert!(OperationalSourcePlan::capture(&directory, &namespace, &copies).is_err());
         }
     }
@@ -478,15 +623,18 @@ mod controls {
         let (_temp, directory, namespace, copies) = operational_fixture();
         let (plan, pins) = OperationalSourcePlan::capture(&directory, &namespace, &copies).unwrap();
         let called = std::cell::Cell::new(false);
-        assert!(plan.require_marker(&directory, &pins, |read, memory| {
-            let bound = ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len() as u64 + 1;
-            assert_eq!((read, memory), (bound, bound));
-            called.set(true);
-            anyhow::bail!("injected original debit refusal")
-        }).is_err());
+        assert!(
+            plan.require_marker(&directory, &pins, |read, memory| {
+                let bound =
+                    ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len() as u64 + 1;
+                assert_eq!((read, memory), (bound, bound));
+                called.set(true);
+                anyhow::bail!("injected original debit refusal")
+            })
+            .is_err()
+        );
         assert!(called.get());
     }
-
 
     #[test]
     fn pinned_plan_rejects_changed_extent_replacement_and_new_sidecar() {
@@ -495,7 +643,8 @@ mod controls {
         std::fs::write(&path, b"original").unwrap();
         let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let (plan, pins) =
-            InspectionSourcePlan::capture(&root, OsStr::new("runtime.sqlite3"), "runtime", false).unwrap();
+            InspectionSourcePlan::capture(&root, OsStr::new("runtime.sqlite3"), "runtime", false)
+                .unwrap();
         plan.require_current(&root).unwrap();
         std::fs::write(&path, b"changed extent").unwrap();
         assert!(plan.require_current(&root).is_err());

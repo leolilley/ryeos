@@ -2729,7 +2729,7 @@ impl GuestStore {
             .optional()?;
         if let Some((occurrence, program, digest, receipt_json)) = &applied {
             let receipt: lillux::LinuxSandboxAppliedLaunchReceipt =
-                serde_json::from_str(&receipt_json)?;
+                serde_json::from_str(receipt_json)?;
             let release_applied: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM external_execution_frame
                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'

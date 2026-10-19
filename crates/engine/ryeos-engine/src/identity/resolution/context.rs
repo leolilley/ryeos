@@ -754,6 +754,18 @@ fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
     }
 }
 
+/// Canonicalize a possibly-bare ID against a default kind.
+///
+/// `directive:foo/bar` and `@alias` pass through unchanged.
+/// A bare `foo/bar` becomes `<default_kind>:foo/bar`.
+pub(crate) fn ensure_canonical(id: &str, default_kind: &str) -> String {
+    if id.starts_with('@') || id.contains(':') {
+        id.to_string()
+    } else {
+        format!("{default_kind}:{id}")
+    }
+}
+
 #[cfg(test)]
 mod parser_failure_class_tests {
     use super::*;
@@ -770,17 +782,5 @@ mod parser_failure_class_tests {
             parser_failure_class(&error),
             ResolutionFailureClass::InvalidDefinition
         );
-    }
-}
-
-/// Canonicalize a possibly-bare ID against a default kind.
-///
-/// `directive:foo/bar` and `@alias` pass through unchanged.
-/// A bare `foo/bar` becomes `<default_kind>:foo/bar`.
-pub(crate) fn ensure_canonical(id: &str, default_kind: &str) -> String {
-    if id.starts_with('@') || id.contains(':') {
-        id.to_string()
-    } else {
-        format!("{default_kind}:{id}")
     }
 }

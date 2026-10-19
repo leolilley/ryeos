@@ -314,7 +314,11 @@ fn expected_record(
     timeout_seconds: u32,
     policy: &EgressPolicy,
 ) -> Value {
-    let hosts: Vec<&str> = policy.rules.iter().map(|rule| rule.domain.as_str()).collect();
+    let hosts: Vec<&str> = policy
+        .rules
+        .iter()
+        .map(|rule| rule.domain.as_str())
+        .collect();
     expected_policy_record(
         pin,
         lease_set,
@@ -554,7 +558,11 @@ mod tests {
         fields
     }
 
-    fn run_allocate(steps: Vec<Step>, policy: &EgressPolicy, lifetime: u32) -> (LifecycleAdapterResponse, Scripted) {
+    fn run_allocate(
+        steps: Vec<Step>,
+        policy: &EgressPolicy,
+        lifetime: u32,
+    ) -> (LifecycleAdapterResponse, Scripted) {
         let fake = Scripted::new(steps);
         let pin = pin();
         let response = allocate(
@@ -572,7 +580,12 @@ mod tests {
     }
 
     fn get_fields(tagged: bool, state: &str, code: Option<i64>) -> Value {
-        get_fields_with(tagged, state, code, &sorted_compact_sha256(&record(&deny_all(), 600)))
+        get_fields_with(
+            tagged,
+            state,
+            code,
+            &sorted_compact_sha256(&record(&deny_all(), 600)),
+        )
     }
 
     fn get_fields_with(tagged: bool, state: &str, code: Option<i64>, policy_tag: &str) -> Value {
@@ -594,7 +607,12 @@ mod tests {
                 &policy,
                 600,
             );
-            let LifecycleAdapterResponse::AllocationBound { occurrence_id, provider_observation_digest, .. } = response else {
+            let LifecycleAdapterResponse::AllocationBound {
+                occurrence_id,
+                provider_observation_digest,
+                ..
+            } = response
+            else {
                 panic!("not bound: {response:?}");
             };
             assert_eq!(occurrence_id, SANDBOX);
@@ -615,7 +633,10 @@ mod tests {
                 {"protocol": "https", "host": "b.example.com"},
             ]})
         );
-        assert_eq!(network_object(&deny_all()), json!({"type": "block-network"}));
+        assert_eq!(
+            network_object(&deny_all()),
+            json!({"type": "block-network"})
+        );
     }
 
     #[test]
@@ -626,7 +647,10 @@ mod tests {
             &policy,
             600,
         );
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
     }
 
     #[test]
@@ -634,12 +658,19 @@ mod tests {
         let policy = deny_all();
         let digest = |created: bool| {
             let (response, _) = run_allocate(
-                vec![envelope("create", 200, created_fields(&policy, 600, created))],
+                vec![envelope(
+                    "create",
+                    200,
+                    created_fields(&policy, 600, created),
+                )],
                 &policy,
                 600,
             );
             match response {
-                LifecycleAdapterResponse::AllocationBound { provider_observation_digest, .. } => provider_observation_digest,
+                LifecycleAdapterResponse::AllocationBound {
+                    provider_observation_digest,
+                    ..
+                } => provider_observation_digest,
                 other => panic!("{other:?}"),
             }
         };
@@ -670,8 +701,19 @@ mod tests {
         not_running["state"] = "terminated".into();
         let mut both = created_fields(&policy, 600, true);
         both["name_taken"] = true.into();
-        for fields in [digest_off, other_hosts, other_lifetime, other_set, blocked, other_name, bad_id, not_running, both] {
-            let (response, _) = run_allocate(vec![envelope("create", 200, fields.clone())], &policy, 600);
+        for fields in [
+            digest_off,
+            other_hosts,
+            other_lifetime,
+            other_set,
+            blocked,
+            other_name,
+            bad_id,
+            not_running,
+            both,
+        ] {
+            let (response, _) =
+                run_allocate(vec![envelope("create", 200, fields.clone())], &policy, 600);
             assert!(is_pending(&response), "{fields}");
         }
     }
@@ -680,7 +722,12 @@ mod tests {
     fn pin_mismatch_and_unattested_replies_stay_pending() {
         let policy = deny_all();
         let (response, _) = run_allocate(
-            vec![envelope_with("create", 200, &"9".repeat(64), created_fields(&policy, 600, true))],
+            vec![envelope_with(
+                "create",
+                200,
+                &"9".repeat(64),
+                created_fields(&policy, 600, true),
+            )],
             &policy,
             600,
         );
@@ -700,9 +747,20 @@ mod tests {
     #[test]
     fn transport_contact_state_decides_no_occurrence() {
         let policy = deny_all();
-        let (response, _) = run_allocate(vec![Step::Fail(TransportFailure::NoRequestSent)], &policy, 600);
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationNoOccurrence { .. }));
-        let (response, _) = run_allocate(vec![Step::Fail(TransportFailure::MayHaveBeenSent)], &policy, 600);
+        let (response, _) = run_allocate(
+            vec![Step::Fail(TransportFailure::NoRequestSent)],
+            &policy,
+            600,
+        );
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationNoOccurrence { .. }
+        ));
+        let (response, _) = run_allocate(
+            vec![Step::Fail(TransportFailure::MayHaveBeenSent)],
+            &policy,
+            600,
+        );
         assert!(is_pending(&response));
     }
 
@@ -722,16 +780,27 @@ mod tests {
             &policy,
             60,
         );
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
     }
 
     #[test]
     fn refusals_map_to_no_occurrence_or_pending() {
         let policy = deny_all();
-        for code in ["invalid_host", "too_many_rules", "timeout_out_of_range", "unknown_field"] {
+        for code in [
+            "invalid_host",
+            "too_many_rules",
+            "timeout_out_of_range",
+            "unknown_field",
+        ] {
             let (response, _) = run_allocate(vec![refusal("create", code)], &policy, 600);
             assert!(
-                matches!(response, LifecycleAdapterResponse::AllocationNoOccurrence { .. }),
+                matches!(
+                    response,
+                    LifecycleAdapterResponse::AllocationNoOccurrence { .. }
+                ),
                 "{code}"
             );
         }
@@ -756,7 +825,10 @@ mod tests {
             &policy,
             600,
         );
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
         assert_eq!(
             fake.routes(),
             [
@@ -776,7 +848,10 @@ mod tests {
             &policy,
             600,
         );
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
         assert_eq!(fake.requests.borrow().len(), 4);
     }
 
@@ -788,7 +863,11 @@ mod tests {
                 refusal("create", NAME_TAKEN_UNTAGGED),
                 envelope("get", 200, get_fields(false, "running", None)),
                 envelope("get", 200, get_fields(false, "running", None)),
-                envelope("terminate", 200, json!({"ok": true, "found": true, "tagged": false})),
+                envelope(
+                    "terminate",
+                    200,
+                    json!({"ok": true, "found": true, "tagged": false}),
+                ),
             ],
             &policy,
             600,
@@ -854,7 +933,10 @@ mod tests {
             &policy,
             600,
         );
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
         let (response, fake) = run_allocate(
             vec![
                 provider_error("create", PROVIDER_NOT_FOUND),
@@ -865,7 +947,11 @@ mod tests {
         );
         assert!(is_pending(&response));
         assert_eq!(fake.requests.borrow().len(), 2);
-        let (response, _) = run_allocate(vec![provider_error("create", "InternalError")], &policy, 600);
+        let (response, _) = run_allocate(
+            vec![provider_error("create", "InternalError")],
+            &policy,
+            600,
+        );
         assert!(is_pending(&response));
     }
 
@@ -884,12 +970,19 @@ mod tests {
 
     #[test]
     fn reconcile_binds_only_an_exact_running_tagged_lease() {
-        let (response, fake) = run_reconcile(vec![envelope("get", 200, get_fields(true, "running", None))]);
+        let (response, fake) = run_reconcile(vec![envelope(
+            "get",
+            200,
+            get_fields(true, "running", None),
+        )]);
         let LifecycleAdapterResponse::AllocationBound { occurrence_id, .. } = response else {
             panic!("{response:?}");
         };
         assert_eq!(occurrence_id, SANDBOX);
-        assert_eq!(fake.requests.borrow()[0].1, json!({"name": lease_name(DIGEST)}));
+        assert_eq!(
+            fake.requests.borrow()[0].1,
+            json!({"name": lease_name(DIGEST)})
+        );
         let mutations: [fn(&mut Value); 6] = [
             |f| f["found"] = false.into(),
             |f| f["state"] = "terminated".into(),
@@ -934,7 +1027,11 @@ mod tests {
 
     #[test]
     fn reconcile_not_found_and_failures_stay_pending() {
-        let (response, _) = run_reconcile(vec![envelope("get", 200, json!({"ok": true, "found": false}))]);
+        let (response, _) = run_reconcile(vec![envelope(
+            "get",
+            200,
+            json!({"ok": true, "found": false}),
+        )]);
         assert!(is_pending(&response));
         let (response, _) = run_reconcile(vec![Step::Fail(TransportFailure::NoRequestSent)]);
         assert!(is_pending(&response));
@@ -950,7 +1047,10 @@ mod tests {
             envelope("get", 200, get_fields(false, "running", None)),
             envelope("get", 200, get_fields(true, "running", None)),
         ]);
-        assert!(matches!(response, LifecycleAdapterResponse::AllocationBound { .. }));
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::AllocationBound { .. }
+        ));
         assert_eq!(fake.requests.borrow().len(), 2);
         let (response, fake) = run_reconcile(vec![
             envelope("get", 200, get_fields(false, "running", None)),
@@ -977,15 +1077,30 @@ mod tests {
     #[test]
     fn terminate_then_exact_observation_settles() {
         let fake = Scripted::new(vec![
-            envelope("terminate", 200, json!({"ok": true, "found": true, "tagged": true, "already_terminal": false})),
+            envelope(
+                "terminate",
+                200,
+                json!({"ok": true, "found": true, "tagged": true, "already_terminal": false}),
+            ),
             envelope("get", 200, get_fields(true, "terminated", Some(137))),
         ]);
         let pin = pin();
-        let response = terminate(&FacadeClient::new(&fake, &pin), &common(), &occurrence(), &intent());
-        assert!(matches!(response, LifecycleAdapterResponse::OccurrenceTerminal { .. }));
+        let response = terminate(
+            &FacadeClient::new(&fake, &pin),
+            &common(),
+            &occurrence(),
+            &intent(),
+        );
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::OccurrenceTerminal { .. }
+        ));
         assert_eq!(
             fake.routes(),
-            [crate::provider_spec::RouteName::Terminate, crate::provider_spec::RouteName::GetById]
+            [
+                crate::provider_spec::RouteName::Terminate,
+                crate::provider_spec::RouteName::GetById
+            ]
         );
         assert_eq!(fake.requests.borrow()[1].1, json!({"sandbox_id": SANDBOX}));
     }
@@ -993,14 +1108,29 @@ mod tests {
     #[test]
     fn terminate_acknowledgement_alone_never_settles() {
         for ack in [
-            envelope("terminate", 200, json!({"ok": true, "found": true, "state": "terminated", "returncode": 0})),
+            envelope(
+                "terminate",
+                200,
+                json!({"ok": true, "found": true, "state": "terminated", "returncode": 0}),
+            ),
             Step::Fail(TransportFailure::MayHaveBeenSent),
             provider_error("terminate", "terminal_state_not_observed"),
         ] {
-            let fake = Scripted::new(vec![ack, envelope("get", 200, get_fields(true, "running", None))]);
+            let fake = Scripted::new(vec![
+                ack,
+                envelope("get", 200, get_fields(true, "running", None)),
+            ]);
             let pin = pin();
-            let response = terminate(&FacadeClient::new(&fake, &pin), &common(), &occurrence(), &intent());
-            assert!(matches!(response, LifecycleAdapterResponse::TerminationPending { .. }));
+            let response = terminate(
+                &FacadeClient::new(&fake, &pin),
+                &common(),
+                &occurrence(),
+                &intent(),
+            );
+            assert!(matches!(
+                response,
+                LifecycleAdapterResponse::TerminationPending { .. }
+            ));
         }
     }
 
@@ -1019,35 +1149,79 @@ mod tests {
             mutate(&mut fields);
             let fake = Scripted::new(vec![envelope("get", 200, fields.clone())]);
             let pin = pin();
-            let response = observe_termination(&FacadeClient::new(&fake, &pin), &common(), &occurrence(), &intent());
-            assert!(matches!(response, LifecycleAdapterResponse::TerminationPending { .. }), "{fields}");
+            let response = observe_termination(
+                &FacadeClient::new(&fake, &pin),
+                &common(),
+                &occurrence(),
+                &intent(),
+            );
+            assert!(
+                matches!(
+                    response,
+                    LifecycleAdapterResponse::TerminationPending { .. }
+                ),
+                "{fields}"
+            );
         }
         for step in [
             Step::Fail(TransportFailure::NoRequestSent),
             refusal("get", "not_facade_sandbox"),
             provider_error("get", "NotFoundError"),
-            envelope_with("get", 200, &"1".repeat(64), get_fields(true, "terminated", Some(0))),
+            envelope_with(
+                "get",
+                200,
+                &"1".repeat(64),
+                get_fields(true, "terminated", Some(0)),
+            ),
         ] {
             let fake = Scripted::new(vec![step]);
             let pin = pin();
-            let response = observe_termination(&FacadeClient::new(&fake, &pin), &common(), &occurrence(), &intent());
-            assert!(matches!(response, LifecycleAdapterResponse::TerminationPending { .. }));
+            let response = observe_termination(
+                &FacadeClient::new(&fake, &pin),
+                &common(),
+                &occurrence(),
+                &intent(),
+            );
+            assert!(matches!(
+                response,
+                LifecycleAdapterResponse::TerminationPending { .. }
+            ));
         }
         let mut malformed = occurrence();
         malformed.occurrence_id = "sbx-1".into();
         let fake = Scripted::new(vec![]);
         let pin = pin();
-        let response = terminate(&FacadeClient::new(&fake, &pin), &common(), &malformed, &intent());
-        assert!(matches!(response, LifecycleAdapterResponse::TerminationPending { .. }));
+        let response = terminate(
+            &FacadeClient::new(&fake, &pin),
+            &common(),
+            &malformed,
+            &intent(),
+        );
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::TerminationPending { .. }
+        ));
         assert!(fake.requests.borrow().is_empty());
     }
 
     #[test]
     fn reconcile_termination_observes_without_a_mutation() {
-        let fake = Scripted::new(vec![envelope("get", 200, get_fields(true, "terminated", Some(0)))]);
+        let fake = Scripted::new(vec![envelope(
+            "get",
+            200,
+            get_fields(true, "terminated", Some(0)),
+        )]);
         let pin = pin();
-        let response = observe_termination(&FacadeClient::new(&fake, &pin), &common(), &occurrence(), &intent());
-        assert!(matches!(response, LifecycleAdapterResponse::OccurrenceTerminal { .. }));
+        let response = observe_termination(
+            &FacadeClient::new(&fake, &pin),
+            &common(),
+            &occurrence(),
+            &intent(),
+        );
+        assert!(matches!(
+            response,
+            LifecycleAdapterResponse::OccurrenceTerminal { .. }
+        ));
         assert_eq!(fake.routes(), [crate::provider_spec::RouteName::GetById]);
     }
 
@@ -1056,18 +1230,34 @@ mod tests {
         let name = lease_name(DIGEST);
         assert_eq!(name, "ryeos-0123456789abcdef0123456789abcdef");
         assert!(name.len() <= 63);
-        assert!(name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        );
     }
 
     #[test]
     fn upload_and_run_once_are_wired_through_the_client() {
         let fake = Scripted::new(vec![
-            envelope("upload", 200, json!({"ok": true, "sandbox_id": SANDBOX, "bytes": 3, "sha256": lillux::sha256_hex(b"abc")})),
+            envelope(
+                "upload",
+                200,
+                json!({"ok": true, "sandbox_id": SANDBOX, "bytes": 3, "sha256": lillux::sha256_hex(b"abc")}),
+            ),
             refusal("run_once", "upload_not_complete"),
         ]);
         let pin = pin();
         let client = FacadeClient::new(&fake, &pin);
-        assert!(client.upload(SANDBOX, b"abc").unwrap().observation::<crate::facade::UploadObservation>().is_some());
-        assert_eq!(client.run_once(SANDBOX, b"x").unwrap().refusal(), Some("upload_not_complete"));
+        assert!(
+            client
+                .upload(SANDBOX, b"abc")
+                .unwrap()
+                .observation::<crate::facade::UploadObservation>()
+                .is_some()
+        );
+        assert_eq!(
+            client.run_once(SANDBOX, b"x").unwrap().refusal(),
+            Some("upload_not_complete")
+        );
     }
 }

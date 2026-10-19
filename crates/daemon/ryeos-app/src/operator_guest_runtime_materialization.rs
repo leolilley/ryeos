@@ -418,7 +418,7 @@ fn verify_retained_executor_source(
     let signed_ref = std::str::from_utf8(signed_manifest_ref)?;
     let verified_ref = ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
         signed_ref,
-        |fingerprint| (fingerprint == signer.signer_fingerprint).then(|| key.clone()),
+        |fingerprint| (fingerprint == signer.signer_fingerprint).then_some(key),
         TrustClass::TrustedBundle,
     )?;
     ensure!(
@@ -816,7 +816,8 @@ mod tests {
             operator_authority: AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", hash('4')),
                 origin_site_id: "site:controller".into(),
-                principal_class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
                 grant_digest: hash('5'),
                 scopes: vec!["ryeos.execute.service.guest-runtime/materialize".into()],
             },
@@ -987,7 +988,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
-        let db = ryeos_state::test_support::TestState::open(tmp.path(), std::sync::Arc::new(trust)).unwrap();
+        let db = ryeos_state::test_support::TestState::open(tmp.path(), std::sync::Arc::new(trust))
+            .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -1220,8 +1222,11 @@ mod tests {
         drop(db);
         let mut reopened_trust = ryeos_state::refs::TrustStore::new();
         reopened_trust.insert(node_signer.fingerprint.clone(), node_signer.verifying_key());
-        let reopened =
-            ryeos_state::test_support::TestState::open(tmp.path(), std::sync::Arc::new(reopened_trust)).unwrap();
+        let reopened = ryeos_state::test_support::TestState::open(
+            tmp.path(),
+            std::sync::Arc::new(reopened_trust),
+        )
+        .unwrap();
         let reopened_authority = reopened.pinned_authority().unwrap();
         let reopened_guard = reopened_authority.acquire_shared_guard().unwrap();
         let reopened_head = ryeos_state::immutable_testimony::read_immutable_attestation_head(

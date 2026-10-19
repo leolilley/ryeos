@@ -458,9 +458,9 @@ pub fn install_portable_state_conditionally(
                         if !current_observation.matches_quarantined_incumbent(&observation) {
                             bail!("portable predecessor identity changed before replacement");
                         }
-                        let mut current = current.try_clone()?;
+                        let current = current.try_clone()?;
                         let bytes = lillux::read_open_regular_file_stable_bounded(
-                            &mut current,
+                            &current,
                             &current_observation,
                             max_file_bytes,
                         )?;
@@ -617,7 +617,7 @@ fn capture_portable_state_directory(
                     directory.ensure_entry_observation(&entry)?;
                     continue;
                 }
-                let mut file = directory
+                let file = directory
                     .open_regular(&entry.name, false)?
                     .ok_or_else(|| anyhow::anyhow!("portable-state file disappeared"))?;
                 let observation = lillux::observe_open_regular_file(&file)?;
@@ -625,7 +625,7 @@ fn capture_portable_state_directory(
                     bail!("portable-state file changed identity before capture");
                 }
                 let bytes = lillux::read_open_regular_file_stable_bounded(
-                    &mut file,
+                    &file,
                     &observation,
                     contract.max_file_bytes,
                 )?;

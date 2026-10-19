@@ -354,7 +354,7 @@ fn service_descriptor_table_matches_api_handlers() {
         "failed to parse API handler service refs"
     );
 
-    let workspace = workspace_root();
+    let _workspace = workspace_root();
     for service_ref in services {
         let bare = service_ref
             .strip_prefix("service:")
@@ -381,9 +381,7 @@ const RUNTIME_BINARIES: [(&str, &str); 3] = [
     ("knowledge", "ryeos-knowledge-runtime"),
 ];
 
-fn bundle_manifest_item_hashes(
-    bundle: &Path,
-) -> Option<std::collections::HashMap<String, String>> {
+fn bundle_manifest_item_hashes(bundle: &Path) -> Option<std::collections::HashMap<String, String>> {
     let ref_path = bundle.join(".ai/refs/bundles/manifest");
     if !ref_path.exists() {
         return None; // bundle not built

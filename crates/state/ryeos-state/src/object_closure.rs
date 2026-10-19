@@ -508,14 +508,15 @@ pub fn load_exact_cas_object_with_cas(
     if !is_canonical_hash(requested_hash) {
         anyhow::bail!("invalid requested CAS object hash {requested_hash}");
     }
-    let raw = cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
-        requested_hash,
-        max_bytes,
-        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
-    )?
+    let raw = cas
+        .get_object_raw_bytes_bounded_with_capsule_ceiling(
+            requested_hash,
+            max_bytes,
+            crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
-    let cap = usize::try_from(max_bytes)
-        .context("admitted object byte limit exceeds this platform")?;
+    let cap =
+        usize::try_from(max_bytes).context("admitted object byte limit exceeds this platform")?;
     let value: Value = serde_json::from_slice(&raw)
         .with_context(|| format!("failed to parse CAS object {requested_hash}"))?;
     if lillux::canonical_json_bounded(&value, cap)?.as_slice() != raw {
@@ -757,17 +758,6 @@ pub fn collect_object_closure_with_cas_and_limits(
     collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check, false)
 }
 
-/// Collect a bounded closure from one pinned CAS authority while preserving
-/// the caller's cancellation or deadline check at each traversal step.
-pub(crate) fn collect_object_closure_with_cas_and_limits_and_check(
-    cas: &lillux::CasStore,
-    roots: impl IntoIterator<Item = String>,
-    limits: ObjectClosureLimits,
-    check: &mut dyn FnMut() -> anyhow::Result<()>,
-) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, check, false)
-}
-
 pub(crate) fn collect_object_closure_with_cas_and_limits_and_check_and_verify(
     cas: &lillux::CasStore,
     roots: impl IntoIterator<Item = String>,
@@ -827,13 +817,11 @@ impl ClosureCas<'_> {
     fn read_object(self, hash: &str, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
         match self {
             Self::Path(root) => read_cas_file_no_follow(root, "objects", hash, ".json", max_bytes),
-            Self::Pinned(cas) => {
-                cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
-                    hash,
-                    max_bytes,
-                    crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
-                )
-            }
+            Self::Pinned(cas) => cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+                hash,
+                max_bytes,
+                crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+            ),
             Self::Memory { objects, .. } => {
                 let Some(bytes) = objects.get(hash) else {
                     return Ok(None);
@@ -988,7 +976,9 @@ fn collect_object_closure_from_source(
             }
         };
         total_object_bytes = total_object_bytes
-            .checked_add(u64::try_from(content.len()).context("object closure object size exceeds u64")?)
+            .checked_add(
+                u64::try_from(content.len()).context("object closure object size exceeds u64")?,
+            )
             .context("object closure total object-byte count overflow")?;
         report.object_bytes_read = total_object_bytes;
         if total_object_bytes > limits.max_total_object_bytes {
@@ -2595,20 +2585,29 @@ mod tests {
             max_total_object_bytes: u64::try_from(canonical.len()).unwrap(),
             ..ObjectClosureLimits::default()
         };
-        let mut budget = BoundedCasObjectReadBudget::new(
-            &admitted,
-            limits,
-            object_bytes,
-        ).unwrap();
+        let mut budget = BoundedCasObjectReadBudget::new(&admitted, limits, object_bytes).unwrap();
         for _ in 0..8 {
             assert_eq!(
-                budget.get_object(&cas, &hash, limits.max_object_bytes).unwrap(),
+                budget
+                    .get_object(&cas, &hash, limits.max_object_bytes)
+                    .unwrap(),
                 Some(value.clone()),
             );
         }
-        assert_eq!(budget.validation_work_bytes, budget.max_validation_work_bytes);
-        assert!(budget.get_object(&cas, &hash, limits.max_object_bytes).is_err());
-        assert!(budget.get_object(&cas, &outside_hash, limits.max_object_bytes).is_err());
+        assert_eq!(
+            budget.validation_work_bytes,
+            budget.max_validation_work_bytes
+        );
+        assert!(
+            budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_err()
+        );
+        assert!(
+            budget
+                .get_object(&cas, &outside_hash, limits.max_object_bytes)
+                .is_err()
+        );
 
         let mut read_budget = BoundedCasObjectReadBudget::new(
             &admitted,
@@ -2617,11 +2616,23 @@ mod tests {
                 ..limits
             },
             object_bytes * 2,
-        ).unwrap();
+        )
+        .unwrap();
         read_budget.validation_reads = read_budget.max_validation_reads - 1;
-        assert!(read_budget.get_object(&cas, &hash, limits.max_object_bytes).is_ok());
-        assert_eq!(read_budget.validation_reads, read_budget.max_validation_reads);
-        assert!(read_budget.get_object(&cas, &hash, limits.max_object_bytes).is_err());
+        assert!(
+            read_budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_ok()
+        );
+        assert_eq!(
+            read_budget.validation_reads,
+            read_budget.max_validation_reads
+        );
+        assert!(
+            read_budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2648,7 +2659,11 @@ mod tests {
             u64::MAX,
         )
         .unwrap_err();
-        assert!(byte_overflow.to_string().contains("work-byte ceiling overflow"));
+        assert!(
+            byte_overflow
+                .to_string()
+                .contains("work-byte ceiling overflow")
+        );
     }
 
     #[test]
@@ -2666,7 +2681,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(budget.max_validation_reads, MAX_BOUNDED_VALIDATION_READS);
-        assert_eq!(budget.max_validation_work_bytes, MAX_BOUNDED_VALIDATION_BYTES);
+        assert_eq!(
+            budget.max_validation_work_bytes,
+            MAX_BOUNDED_VALIDATION_BYTES
+        );
         assert_eq!(MAX_BOUNDED_VALIDATION_READS, 800_064);
         assert_eq!(MAX_BOUNDED_VALIDATION_BYTES, 4 * 1024 * 1024 * 1024);
 

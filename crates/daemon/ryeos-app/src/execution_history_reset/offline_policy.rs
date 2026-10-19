@@ -54,7 +54,10 @@ impl<'a> OfflineResetPolicyOwner<'a> {
     }
 
     pub(super) fn require_held(&self) -> Result<()> {
-        ensure!(self.process == std::process::id(), "foreign original offline policy owner");
+        ensure!(
+            self.process == std::process::id(),
+            "foreign original offline policy owner"
+        );
         self.app_root.ensure_path_binding()?;
         self.runtime.ensure_path_binding()?;
         self.state_lock
@@ -66,7 +69,9 @@ impl<'a> OfflineResetPolicyOwner<'a> {
     /// The claim's own StateLock lease. Only the claim retains one; copy work
     /// and the native host take their lifelines from [`Self::retain_copy_inputs`].
     /// The lease cannot issue stopped-node mutation authority.
-    pub(super) fn retain_state_lease(&self) -> Result<ryeos_node_runtime::state_lock::StateLockLease> {
+    pub(super) fn retain_state_lease(
+        &self,
+    ) -> Result<ryeos_node_runtime::state_lock::StateLockLease> {
         self.require_held()?;
         Ok(self.state_lock.retain())
     }

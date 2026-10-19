@@ -28,3 +28,6 @@ path = "src/bin/parser_regex_kv.rs"
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

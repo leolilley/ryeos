@@ -802,7 +802,7 @@ impl RunningExecution {
                 .running
                 .require_cached_native_terminal_correspondence(Err(error.to_string()));
             return Err(EngineError::Internal(
-                failure.err().expect("upstream refusal stays refused"),
+                failure.expect_err("upstream refusal stays refused"),
             ));
         }
         let context = self
@@ -821,7 +821,7 @@ impl RunningExecution {
                 .running
                 .require_cached_native_terminal_correspondence(Err(error.to_string()));
             return Err(EngineError::Internal(
-                failure.err().expect("late refusal stays refused"),
+                failure.expect_err("late refusal stays refused"),
             ));
         }
         Ok(())

@@ -277,7 +277,10 @@ impl SubstrateIdentity {
 
 /// A profile is selected together with the host class the deployment
 /// declares for it, and a host class only together with a profile.
-fn validate_host_class_selection(node_profile: Option<&str>, host_class: Option<&str>) -> Result<()> {
+fn validate_host_class_selection(
+    node_profile: Option<&str>,
+    host_class: Option<&str>,
+) -> Result<()> {
     match (node_profile, host_class) {
         (Some(_), None) => bail!(
             "a node profile is selected with an explicit host class (--host-class); none was given"
@@ -285,7 +288,9 @@ fn validate_host_class_selection(node_profile: Option<&str>, host_class: Option<
         (None, Some(host_class)) => {
             bail!("host class `{host_class}` was given without a node profile to select it from")
         }
-        (Some(_), Some(host_class)) if !ryeos_engine::isolation::valid_host_class_name(host_class) => {
+        (Some(_), Some(host_class))
+            if !ryeos_engine::isolation::valid_host_class_name(host_class) =>
+        {
             bail!("host class `{host_class}` is not a canonical name")
         }
         _ => Ok(()),
@@ -299,7 +304,8 @@ fn select_profile_host_class(
     host_class: Option<&str>,
 ) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
     validate_host_class_selection(Some(name), host_class)?;
-    let host_class = host_class.context("a node profile is selected with an explicit host class")?;
+    let host_class =
+        host_class.context("a node profile is selected with an explicit host class")?;
     profile
         .for_host_class(host_class)
         .with_context(|| format!("select host class `{host_class}` of node profile {name}"))
@@ -465,8 +471,10 @@ pub fn preflight_existing_policy_generation(
     let trust = TrustStore::load(None, &operator_config_root)
         .context("load node trust for policy-generation preflight")?;
     if schema_cut {
-        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
-            .context("prove complete signed predecessor policy generation")
+        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
+            app_root, &trust,
+        )
+        .context("prove complete signed predecessor policy generation")
     } else {
         let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             app_root,
@@ -501,7 +509,12 @@ fn run_init_internal(
     ceremony: Option<InitOperatorCeremony>,
     observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
-    run_init_on_storage(opts, ceremony, lillux::process_control::RootStorageFacts::observe, observe)
+    run_init_on_storage(
+        opts,
+        ceremony,
+        lillux::process_control::RootStorageFacts::observe,
+        observe,
+    )
 }
 
 /// Initialization with the app-root storage observation supplied, so the
@@ -572,13 +585,14 @@ fn run_init_on_storage(
     if let Some(name) = opts.node_profile.as_deref() {
         validate_host_class_selection(Some(name), opts.host_class.as_deref())?;
     }
-    let bootstrap_config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-        app_root: Some(opts.app_root.clone()),
-        bind: opts.bind,
-        uds_path: opts.uds_path.clone(),
-        ..Default::default()
-    })
-    .context("resolve node bootstrap configuration")?;
+    let bootstrap_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(opts.app_root.clone()),
+            bind: opts.bind,
+            uds_path: opts.uds_path.clone(),
+            ..Default::default()
+        })
+        .context("resolve node bootstrap configuration")?;
     ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
         .context("seed node bootstrap configuration")?;
     // Operator config root (`<app_root>/.ai/config`) — the single trust
@@ -778,9 +792,9 @@ fn run_init_on_storage(
         (None, None) => {
             bail!("node initialization requires an explicit publisher-signed --node-profile")
         }
-        (None, Some(selected)) if opts.replace_node_policy_generation => {
-            Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::schema_cut(selected))
-        }
+        (None, Some(selected)) if opts.replace_node_policy_generation => Some(
+            ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::schema_cut(selected),
+        ),
         (None, Some(selected)) => {
             Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::initial(selected))
         }
@@ -937,7 +951,10 @@ fn run_init_on_storage(
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&bundle_registry_lock, name)?;
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &bundle_registry_lock,
+            name,
+        )?;
         transaction.reconcile(&node_key)?;
         let registration = bundle_registration_value(&target);
         // Source-set preflight above validates the complete graph before init
@@ -1054,7 +1071,10 @@ fn run_init_on_storage(
             if desired.contains(&name) {
                 continue;
             }
-            let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&bundle_registry_lock, &name)?;
+            let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+                &bundle_registry_lock,
+                &name,
+            )?;
             transaction.reconcile(&node_key)?;
             transaction.begin_remove()?;
             transaction.commit_absent()?;
@@ -1166,7 +1186,8 @@ fn run_init_on_storage(
         &vault_pubkey_fingerprint,
         prospective_policy.generation_digest(),
         capacity_issuance.binding(),
-    ).map_err(|error| capacity_issuance.retain_error(error))?;
+    )
+    .map_err(|error| capacity_issuance.retain_error(error))?;
     let next_steps = Vec::new();
 
     Ok(InitReport {
@@ -1374,7 +1395,9 @@ pub fn prepare_prospective_init_completion(
         require_lower_hex_digest(label, digest)?;
     }
     let substrate_identity = load_substrate_identity_record_from_input(&input)?;
-    input.capacity_account.require_node(&input.node_fingerprint)?;
+    input
+        .capacity_account
+        .require_node(&input.node_fingerprint)?;
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_owned(),
         operator_fingerprint: signer.fingerprint(),
@@ -1458,7 +1481,9 @@ pub fn prepare_bundle_set_init_completion(
             registration_digests: future,
             substrate_identity: Some(load_verified_substrate_identity(app_root)?),
             capacity_account: verify_init_completion(app_root)?
-                .context("prospective bundle completion requires original verified capacity issuance")?
+                .context(
+                    "prospective bundle completion requires original verified capacity issuance",
+                )?
                 .capacity_account,
         },
     )
@@ -1586,8 +1611,9 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
         &ryeos_node_runtime::state_lock::default_lock_path(app_root),
     )?;
     state_lock.ensure_protects_app_root(app_root)?;
-    let config = lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR).join("config"))?
-        .context("test fixture operator configuration is absent")?;
+    let config =
+        lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR).join("config"))?
+            .context("test fixture operator configuration is absent")?;
     let onboarding = config.open_or_create_child(OsStr::new("onboarding"), 0o700)?;
     // An earlier completion is evidence of an existing fixture incarnation.
     // Absence of its issuance must refuse through the real issuer, not turn a
@@ -1595,14 +1621,17 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
     let first_completion = onboarding
         .open_pinned_regular(OsStr::new("init-completion.json"), false)?
         .is_none();
-    let operator_key_path = app_root.join(ryeos_engine::AI_DIR)
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
         .join("config/keys/signing/private_key.pem");
     let operator_pem = Zeroizing::new(String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
     let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
     let node = ryeos_node_runtime::identity::NodeIdentity::load(
-        &app_root.join(ryeos_engine::AI_DIR).join("node/identity/private_key.pem"),
+        &app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node/identity/private_key.pem"),
     )?;
     let trust = TrustStore::load(None, config.path())?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
@@ -1742,14 +1771,16 @@ fn prospective_bundle_records(
 ) -> Vec<ryeos_node_runtime::node_config_source::BundleRecord> {
     plan.bundles
         .iter()
-        .map(|(name, bundle)| ryeos_node_runtime::node_config_source::BundleRecord {
-            name: name.clone(),
-            path: replacement
-                .filter(|(replacement_name, _)| *replacement_name == name)
-                .map(|(_, path)| path.to_path_buf())
-                .unwrap_or_else(|| bundle.source.root_path().clone()),
-            source_file: PathBuf::from(format!("prospective/{name}.yaml")),
-        })
+        .map(
+            |(name, bundle)| ryeos_node_runtime::node_config_source::BundleRecord {
+                name: name.clone(),
+                path: replacement
+                    .filter(|(replacement_name, _)| *replacement_name == name)
+                    .map(|(_, path)| path.to_path_buf())
+                    .unwrap_or_else(|| bundle.source.root_path().clone()),
+                source_file: PathBuf::from(format!("prospective/{name}.yaml")),
+            },
+        )
         .collect()
 }
 
@@ -1814,11 +1845,12 @@ fn require_profile_storage(
         &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         Path::new("selected-node-profile"),
     )?;
-    let Some(entry) = isolation
-        .requires_capabilities
-        .iter()
-        .find(|entry| entry.names().iter().any(|entry_name| entry_name == STORAGE_DURABLE_ROOT))
-    else {
+    let Some(entry) = isolation.requires_capabilities.iter().find(|entry| {
+        entry
+            .names()
+            .iter()
+            .any(|entry_name| entry_name == STORAGE_DURABLE_ROOT)
+    }) else {
         return Ok(());
     };
     let storage = observe_storage(app_root);
@@ -1856,7 +1888,10 @@ pub fn load_trusted_init_node_profile(
     let parsed: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
         serde_yaml::from_str(&body)
             .with_context(|| format!("parse init node profile {}", path.display()))?;
-    parsed.validate(&ryeos_node_runtime::node_policy::NodePolicyTable::new(), &path)?;
+    parsed.validate(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        &path,
+    )?;
     Ok(parsed)
 }
 
@@ -1885,10 +1920,10 @@ fn verify_trusted_seed_yaml(content: &str, path: &Path, trust_store: &TrustStore
         suffix: None,
         after_shebang: false,
     };
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
         .with_context(|| format!("seed YAML {} has no valid signature", path.display()))?;
     let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
+        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)
             .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
     if trust_class != TrustClass::Trusted {
         bail!(
@@ -2568,21 +2603,40 @@ mod tests {
     fn a_profile_requiring_durable_storage_refuses_an_ephemeral_root_before_any_key() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
-        let error = run_init_on_storage(&make_opts(&state, tmp.path()), None, ephemeral_root, |_| Ok(()))
+        let error =
+            run_init_on_storage(&make_opts(&state, tmp.path()), None, ephemeral_root, |_| {
+                Ok(())
+            })
             .expect_err("an ephemeral root must refuse a durable-storage profile");
         let text = format!("{error:#}");
-        assert!(text.contains("profile full requires storage:durable_root"), "{text}");
-        assert!(text.contains("is on overlay (the container's writable layer)"), "{text}");
+        assert!(
+            text.contains("profile full requires storage:durable_root"),
+            "{text}"
+        );
+        assert!(
+            text.contains("is on overlay (the container's writable layer)"),
+            "{text}"
+        );
         assert!(text.contains("Attach a persistent volume"), "{text}");
         assert!(text.contains("No identity or key was created"), "{text}");
-        assert!(!state.join(".ai/config/keys/signing/private_key.pem").exists());
+        assert!(
+            !state
+                .join(".ai/config/keys/signing/private_key.pem")
+                .exists()
+        );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
-        assert!(!state.join(".ai/node/identity/public-identity.json").exists());
+        assert!(
+            !state
+                .join(".ai/node/identity/public-identity.json")
+                .exists()
+        );
         assert!(!state.join(".ai/node/vault/private_key.pem").exists());
         assert!(!state.join(".ai/node/vault/public_key.pem").exists());
     }
 
-    fn authored_profile(name: &str) -> ryeos_node_runtime::node_policy::generation::NodeInitProfile {
+    fn authored_profile(
+        name: &str,
+    ) -> ryeos_node_runtime::node_policy::generation::NodeInitProfile {
         let raw = fs::read_to_string(
             workspace_root().join(format!("bundles/.ai/node/init/profiles/{name}.yaml")),
         )
@@ -2598,19 +2652,37 @@ mod tests {
         let local = select_profile_host_class("core", &core, Some("local")).unwrap();
         assert_eq!(local.host_classes().unwrap(), ["local"]);
 
-        let missing = format!("{:#}", select_profile_host_class("core", &core, None).unwrap_err());
-        assert!(missing.contains("explicit host class (--host-class)"), "{missing}");
-        let undeclared =
-            format!("{:#}", select_profile_host_class("core", &core, Some("edge")).unwrap_err());
-        assert!(undeclared.contains("does not declare host class `edge`"), "{undeclared}");
+        let missing = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, None).unwrap_err()
+        );
+        assert!(
+            missing.contains("explicit host class (--host-class)"),
+            "{missing}"
+        );
+        let undeclared = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, Some("edge")).unwrap_err()
+        );
+        assert!(
+            undeclared.contains("does not declare host class `edge`"),
+            "{undeclared}"
+        );
         // A profile without a hosted variant does not run hosted.
         let full = authored_profile("full");
-        let refused =
-            format!("{:#}", select_profile_host_class("full", &full, Some("hosted")).unwrap_err());
+        let refused = format!(
+            "{:#}",
+            select_profile_host_class("full", &full, Some("hosted")).unwrap_err()
+        );
         assert!(refused.contains("it declares local"), "{refused}");
-        let noncanonical =
-            format!("{:#}", select_profile_host_class("core", &core, Some("Hosted")).unwrap_err());
-        assert!(noncanonical.contains("not a canonical name"), "{noncanonical}");
+        let noncanonical = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, Some("Hosted")).unwrap_err()
+        );
+        assert!(
+            noncanonical.contains("not a canonical name"),
+            "{noncanonical}"
+        );
     }
 
     #[test]
@@ -2620,7 +2692,14 @@ mod tests {
         let mut names = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| {
-                entry.unwrap().path().file_stem().unwrap().to_str().unwrap().to_owned()
+                entry
+                    .unwrap()
+                    .path()
+                    .file_stem()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
             })
             .collect::<Vec<_>>();
         names.sort();
@@ -2628,7 +2707,9 @@ mod tests {
         for name in names {
             let profile = authored_profile(&name);
             let path = directory.join(format!("{name}.yaml"));
-            profile.validate(&table, &path).unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            profile
+                .validate(&table, &path)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
             for host_class in profile.host_classes().unwrap() {
                 let selected = select_profile_host_class(&name, &profile, Some(&host_class))
                     .unwrap_or_else(|error| panic!("{name} {host_class}: {error:#}"));
@@ -2658,15 +2739,19 @@ mod tests {
         .unwrap();
         assert_ne!(bound.digest().unwrap(), other.digest().unwrap());
         assert!(SubstrateIdentity::new(digest.clone(), 1, Some("core".to_owned()), None).is_err());
-        assert!(SubstrateIdentity::new(digest.clone(), 1, None, Some("hosted".to_owned())).is_err());
+        assert!(
+            SubstrateIdentity::new(digest.clone(), 1, None, Some("hosted".to_owned())).is_err()
+        );
         SubstrateIdentity::new(digest, 1, None, None).unwrap();
         let mut previous = serde_json::to_value(&bound).unwrap();
         previous["schema"] = "ryeos/substrate-identity/v1".into();
         previous.as_object_mut().unwrap().remove("host_class");
-        assert!(serde_json::from_value::<SubstrateIdentity>(previous.clone())
-            .map_err(anyhow::Error::from)
-            .and_then(|identity| identity.validate())
-            .is_err());
+        assert!(
+            serde_json::from_value::<SubstrateIdentity>(previous.clone())
+                .map_err(anyhow::Error::from)
+                .and_then(|identity| identity.validate())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2684,14 +2769,27 @@ mod tests {
             )
             .unwrap(),
         );
-        let error = format!("{:#}", run_init(&opts).expect_err("full declares no hosted class"));
-        assert!(error.contains("does not declare host class `hosted`"), "{error}");
-        assert!(!state.join(".ai/config/keys/signing/private_key.pem").exists());
+        let error = format!(
+            "{:#}",
+            run_init(&opts).expect_err("full declares no hosted class")
+        );
+        assert!(
+            error.contains("does not declare host class `hosted`"),
+            "{error}"
+        );
+        assert!(
+            !state
+                .join(".ai/config/keys/signing/private_key.pem")
+                .exists()
+        );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
 
         let mut unbound = make_opts(&state, tmp.path());
         unbound.host_class = None;
-        let error = format!("{:#}", run_init(&unbound).expect_err("profile without a class"));
+        let error = format!(
+            "{:#}",
+            run_init(&unbound).expect_err("profile without a class")
+        );
         assert!(error.contains("host-class binding disagrees"), "{error}");
     }
 
@@ -2706,7 +2804,10 @@ mod tests {
             Some("local")
         );
         assert_eq!(
-            load_verified_substrate_identity(&state).unwrap().host_class.as_deref(),
+            load_verified_substrate_identity(&state)
+                .unwrap()
+                .host_class
+                .as_deref(),
             Some("local")
         );
         let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
@@ -2726,7 +2827,10 @@ mod tests {
         other.host_class = Some("hosted".to_owned());
         other.substrate_identity = None;
         let error = format!("{:#}", run_init(&other).unwrap_err());
-        assert!(error.contains("a node's host class does not change"), "{error}");
+        assert!(
+            error.contains("a node's host class does not change"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2766,10 +2870,7 @@ mod tests {
         };
 
         let report = run_init(&opts).expect("init hosted-node profile");
-        assert_eq!(
-            report.bundles_installed,
-            vec!["core".to_string()]
-        );
+        assert_eq!(report.bundles_installed, vec!["core".to_string()]);
         assert!(state.join(".ai/bundles/core/.ai").is_dir());
         assert!(state.join(".ai/node/bundles/core.yaml").exists());
         for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
@@ -2800,11 +2901,12 @@ mod tests {
                 .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
                 .exists()
         );
-        let config = ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
-            app_root: Some(state.clone()),
-            ..Default::default()
-        })
-        .expect("load init-owned bootstrap config");
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .expect("load init-owned bootstrap config");
         assert_eq!(config.app_root, state);
         assert!(state.join(".ai/node/config.yaml").is_file());
     }
@@ -2914,7 +3016,9 @@ mod tests {
         .unwrap();
         let lock =
             ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state).unwrap();
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&lock, "knowledge").unwrap();
+        let transaction =
+            ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&lock, "knowledge")
+                .unwrap();
         transaction.begin_remove().unwrap();
         assert!(verify_init_completion(&state).unwrap().is_some());
         drop(transaction);
@@ -3127,12 +3231,9 @@ mod tests {
         run_init(&replacement).expect("replace policy and exact bundle inventory");
 
         let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
-        let profile = load_trusted_init_node_profile(
-            &workspace_root().join("bundles"),
-            "standard",
-            &trust,
-        )
-        .unwrap();
+        let profile =
+            load_trusted_init_node_profile(&workspace_root().join("bundles"), "standard", &trust)
+                .unwrap();
         assert_eq!(
             installed_bundle_names(&state).unwrap(),
             profile.exact_bundles().iter().cloned().collect()
@@ -3188,7 +3289,10 @@ mod tests {
 
         opts.host_class = Some("other".to_owned());
         let refused = run_init(&opts).expect_err("a host-class change is refused");
-        assert!(format!("{refused:#}").contains("disagrees with the class"), "got: {refused:#}");
+        assert!(
+            format!("{refused:#}").contains("disagrees with the class"),
+            "got: {refused:#}"
+        );
     }
 
     #[test]

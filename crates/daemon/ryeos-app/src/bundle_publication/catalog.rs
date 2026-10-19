@@ -5,8 +5,8 @@
 //! fence, and current local policy have all been checked. The caller must keep
 //! the closure protected until its compare-and-swap head commit is durable.
 
-use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY};
 use anyhow::{Context as _, bail};
+use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY};
 use ryeos_bundle_publication_contract::{
     BundleCatalogPublication, BundleCatalogSnapshot, BundleGeneration, BundleSet,
 };
@@ -617,10 +617,10 @@ pub fn publish_catalog(
             &request.authenticated_principal,
         )?;
     stage.ensure_publication_contract(&publication_key, request.expected_current.as_deref())?;
-    if let Some(target) = stage.admitted_target_hash() {
-        if target != request.candidate_attestation_hash {
-            bail!("catalog upload session is already admitted for another publication target");
-        }
+    if let Some(target) = stage.admitted_target_hash()
+        && target != request.candidate_attestation_hash
+    {
+        bail!("catalog upload session is already admitted for another publication target");
     }
     stage.protect_cas_closure(
         &guard,
@@ -898,9 +898,11 @@ mod transport_binding_tests {
     fn trusted_uploader_cannot_sign_publisher_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let publisher =
-            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
+                .unwrap();
         let uploader =
-            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("uploader.pem"))
+                .unwrap();
         let mut trust = ryeos_state::TrustStore::new();
         trust.insert(
             publisher.fingerprint().to_owned(),

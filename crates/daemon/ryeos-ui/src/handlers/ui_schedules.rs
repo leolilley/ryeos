@@ -33,11 +33,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
     // Batch-load fire counts
     let fire_counts: std::collections::HashMap<String, usize> = schedule_ids
         .iter()
-        .filter_map(|id| {
-            db.count_fires(id, None)
-                .ok()
-                .map(|c| (id.clone(), c))
-        })
+        .filter_map(|id| db.count_fires(id, None).ok().map(|c| (id.clone(), c)))
         .collect();
 
     let schedules: Vec<Value> = specs

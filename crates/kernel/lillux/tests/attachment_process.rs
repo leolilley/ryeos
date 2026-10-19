@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use lillux::{
-    ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive,
-    try_retain_fork_sensitive_descriptors, spawn, spawn_awaiting_attachment,
-    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive, spawn,
+    spawn_awaiting_attachment, supervised_launcher_attachment_status_pipe,
+    supervised_launcher_status_pipe, try_retain_fork_sensitive_descriptors,
 };
 
 fn shell(script: String) -> SubprocessRequest {

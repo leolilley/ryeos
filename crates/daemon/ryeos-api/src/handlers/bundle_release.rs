@@ -1141,7 +1141,10 @@ fn verified_calibration_environment(
     context: &HandlerContext,
     state: &AppState,
 ) -> anyhow::Result<ryeos_node_runtime::calibration_policy::CalibrationEnvironmentEvidence> {
-    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentEvidence, CalibrationEnvironmentKind as Kind, CalibrationEnvironmentUse, CalibrationTerminal as Terminal};
+    use ryeos_node_runtime::calibration_policy::{
+        CalibrationEnvironmentEvidence, CalibrationEnvironmentKind as Kind,
+        CalibrationEnvironmentUse, CalibrationTerminal as Terminal,
+    };
     selected.validate()?;
     let loader = ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
         source_generation.root().to_path_buf(),
@@ -1423,8 +1426,8 @@ fn calibrated_catalog_environment(
     context: &HandlerContext,
     state: &AppState,
 ) -> anyhow::Result<ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection> {
-    use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection};
-    use ryeos_app::bundle_publication::calibration::{AuthorityCalibrationEvidence};
+    use ryeos_app::bundle_publication::calibration::AuthorityCalibrationEvidence;
+    use ryeos_node_runtime::calibration_policy::CalibrationEnvironmentSelection;
     let authority = state.state_store.pinned_state_authority()?;
     let attestation = ryeos_state::objects::Attestation::from_value(
         &authority
@@ -2460,7 +2463,7 @@ impl ryeos_app::bundle_publication::consumer::ConsumerPublicationPolicy
             .state
             .engine
             .node_trust_store
-            .get(&fingerprint)
+            .get(fingerprint)
             .context("release publisher is not node-trusted")?;
         attestation.verify_with_key(&signer.verifying_key)?;
         anyhow::ensure!(
@@ -4663,7 +4666,9 @@ mod tests {
 
     #[test]
     fn static_inputs_are_selected_for_native_builds_only() {
-        use ryeos_node_runtime::calibration_policy::{CalibrationEnvironmentSelection, CalibrationProductSelection};
+        use ryeos_node_runtime::calibration_policy::{
+            CalibrationEnvironmentSelection, CalibrationProductSelection,
+        };
         let product = |digit: &str| CalibrationProductSelection {
             product_witness_hash: digit.repeat(64),
             qualification_attestation_hash: "f".repeat(64),

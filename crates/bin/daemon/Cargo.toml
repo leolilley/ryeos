@@ -107,3 +107,6 @@ ryeos-codex-runtime-verifier = { path = "../../tools/codex-runtime-verifier" }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[lints]
+workspace = true

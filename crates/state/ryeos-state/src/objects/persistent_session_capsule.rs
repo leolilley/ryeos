@@ -908,7 +908,9 @@ impl AdmittedPersistentSessionCapsule {
             anyhow::bail!("persistent-session exact program hash mismatch");
         }
         let retained = self.retained_exact_program()?;
-        if lillux::canonical_json_bounded(&retained, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES).is_err() {
+        if lillux::canonical_json_bounded(&retained, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES)
+            .is_err()
+        {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
@@ -1076,7 +1078,8 @@ impl AdmittedPersistentSessionCapsule {
     }
 
     pub fn from_current_value(value: &Value) -> anyhow::Result<Self> {
-        let canonical = lillux::canonical_json_bounded(value, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)?;
+        let canonical =
+            lillux::canonical_json_bounded(value, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)?;
         if canonical.len() > MAX_PERSISTENT_SESSION_CAPSULE_BYTES {
             anyhow::bail!("persistent-session capsule exceeds its raw canonical byte ceiling");
         }

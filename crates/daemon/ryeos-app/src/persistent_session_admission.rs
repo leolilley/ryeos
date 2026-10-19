@@ -2453,7 +2453,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_missing_bytes_or_seal_refuse_without_replacement() {
         for missing in ["bytes", "seal"] {
-            let (_root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+            let (_root, _store_owner, _state, value, hash, mut document) =
+                borrowed_manifest_data_fixture();
             let original = document.sealed.as_ref().unwrap().clone();
             let diagnostic = if missing == "bytes" {
                 document.bytes = None;
@@ -2477,7 +2478,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_mutable_descriptor_refuses_even_with_same_raw_bytes() {
-        let (root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+        let (root, _store_owner, _state, value, hash, mut document) =
+            borrowed_manifest_data_fixture();
         let original = document.sealed.as_ref().unwrap().clone();
         std::fs::write(
             root.path().join("mutable-manifest.json"),
@@ -2509,7 +2511,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn borrowed_manifest_substituted_sealed_copy_refuses_and_retains_late_failure_data() {
-        let (_root, _store_owner, _state, value, hash, mut document) = borrowed_manifest_data_fixture();
+        let (_root, _store_owner, _state, value, hash, mut document) =
+            borrowed_manifest_data_fixture();
         let original = document.sealed.as_ref().unwrap().clone();
         let bytes = document.bytes.as_ref().unwrap().clone();
         document.sealed = Some(lillux::sealed_memfd(c"substituted-data-control", b"{}").unwrap());
@@ -2723,21 +2726,21 @@ mod tests {
         let member =
             serde_json::json!({"root":"source","path":"bootstrap.py","sha256":"a".repeat(64)});
         serde_json::json!({
-            "schema":"ryeos.local_tinygrad_current_assignment_startup.v2", "role":"current_assignment_nvml_preflight_v2",
-            "entry":member.clone(), "bootstrap_members":[member],
-            "launch":{"command_sha256":"b".repeat(64),"args":[{"kind":"admitted_source_entry"}],"env":{},
-                "process_environment_sha256":"c".repeat(64),"dynamic_channels":[{"env":"RYEOS_SESSION_FD","target_fd":0},{"env":"RYEOS_RESOURCE_CLEANUP_FD","target_fd":4}]},
-            "products":{"gnu_slot":"python-gnu","driver_slot":"driver","nvml_member":"lib/libnvidia-ml.so.1",
-                "provider_checks":"trusted-gnu-loader-provider-and-function-origin-v1","gnu_manifest_sha256":"d".repeat(64),
-                "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
-            "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
-            "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096},
-            "manifest_delivery":{
-                "abi":"fixed_namespace_v1",
-                "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
-                "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
-                "consumer":{"root":"source","path":"bootstrap.py"}
-            }})
+        "schema":"ryeos.local_tinygrad_current_assignment_startup.v2", "role":"current_assignment_nvml_preflight_v2",
+        "entry":member.clone(), "bootstrap_members":[member],
+        "launch":{"command_sha256":"b".repeat(64),"args":[{"kind":"admitted_source_entry"}],"env":{},
+            "process_environment_sha256":"c".repeat(64),"dynamic_channels":[{"env":"RYEOS_SESSION_FD","target_fd":0},{"env":"RYEOS_RESOURCE_CLEANUP_FD","target_fd":4}]},
+        "products":{"gnu_slot":"python-gnu","driver_slot":"driver","nvml_member":"lib/libnvidia-ml.so.1",
+            "provider_checks":"trusted-gnu-loader-provider-and-function-origin-v1","gnu_manifest_sha256":"d".repeat(64),
+            "driver_manifest_sha256":"e".repeat(64),"tinygrad_manifest_sha256":"f".repeat(64)},
+        "policy":{"schema":"ryeos.local_tinygrad_nvml_assignment_policy.v1","primary_device_role":"primary","l4_query_policy":null},
+        "wire":{"target_fd":4,"preflight_version":3,"result_version":3,"init_version":2,"maximum_frame_bytes":4096},
+        "manifest_delivery":{
+            "abi":"fixed_namespace_v1",
+            "gnu":{"destination":"/opt/ryeos-original-manifests/gnu.json","access":"read_only"},
+            "driver":{"destination":"/opt/ryeos-original-manifests/driver.json","access":"read_only"},
+            "consumer":{"root":"source","path":"bootstrap.py"}
+        }})
     }
 
     #[test]
@@ -3014,7 +3017,10 @@ session:
   wire_version: 1
   max_frame_bytes: 4096
 "#;
-        let refusal = format!("{:#}", decode_retained_protocol_descriptor(exclusive).unwrap_err());
+        let refusal = format!(
+            "{:#}",
+            decode_retained_protocol_descriptor(exclusive).unwrap_err()
+        );
         assert!(refusal.contains("cleanup_authority"), "{refusal}");
         let pooled = exclusive.replace("exclusive_session", "pooled_requests");
         assert!(decode_retained_protocol_descriptor(&pooled).is_err());

@@ -2802,7 +2802,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::ToggleViewItemExpansion {
                 instance_key: instance_key.clone(),
-                item_id: format!("view:test/exact#id:b"),
+                item_id: "view:test/exact#id:b".to_string(),
                 expand: true,
             },
         });
@@ -2817,7 +2817,7 @@ mod tests {
 
         // A removed stale target is an exact no-op; it cannot fall through to
         // whichever row remains at the old position.
-        let a_id = format!("view:test/exact#id:a");
+        let a_id = "view:test/exact#id:a".to_string();
         core.data.sources.insert(
             source_key,
             serde_json::json!({ "rows": [{"id": "b", "detail": "B"}] }),

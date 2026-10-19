@@ -28,11 +28,13 @@ fn sync_transfer_limits() -> crate::object_closure::ObjectClosureLimits {
 }
 
 fn load_export_object_bytes(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Vec<u8>> {
-    let raw = cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
-        hash,
-        crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES,
-        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
-    )?.ok_or_else(|| anyhow::anyhow!("exported chain object {hash} disappeared"))?;
+    let raw = cas
+        .get_object_raw_bytes_bounded_with_capsule_ceiling(
+            hash,
+            crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES,
+            crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("exported chain object {hash} disappeared"))?;
     let value: serde_json::Value = serde_json::from_slice(&raw)?;
     let maximum = usize::try_from(crate::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES)
         .context("transfer object ceiling exceeds this platform")?;
@@ -204,9 +206,14 @@ pub fn export_chain_pinned(
     }
 
     let limits = sync_transfer_limits();
-    let entry_count = reachable.object_hashes.len().checked_add(reachable.blob_hashes.len())
+    let entry_count = reachable
+        .object_hashes
+        .len()
+        .checked_add(reachable.blob_hashes.len())
         .context("exported closure entry count overflow")?;
-    if reachable.object_hashes.len() > limits.max_objects || reachable.blob_hashes.len() > limits.max_blobs {
+    if reachable.object_hashes.len() > limits.max_objects
+        || reachable.blob_hashes.len() > limits.max_blobs
+    {
         anyhow::bail!("exported closure exceeds admitted object or blob count");
     }
     let mut entries = Vec::with_capacity(entry_count);
@@ -220,7 +227,8 @@ pub fn export_chain_pinned(
         let data = load_export_object_bytes(cas, &hash)
             .with_context(|| format!("read bounded exported chain object {hash}"))?;
         let object_bytes = u64::try_from(data.len()).context("exported object size exceeds u64")?;
-        total_object_bytes = total_object_bytes.checked_add(object_bytes)
+        total_object_bytes = total_object_bytes
+            .checked_add(object_bytes)
             .context("exported object byte count overflow")?;
         if total_object_bytes > limits.max_total_object_bytes {
             anyhow::bail!("exported object bytes exceed their aggregate ceiling");
@@ -242,13 +250,10 @@ pub fn export_chain_pinned(
             .max_total_blob_bytes
             .checked_sub(total_blob_bytes)
             .context("exported chain blob bytes exceed the default closure total")?;
-        let data = load_export_blob_bytes(
-            cas,
-            &hash,
-            limits.max_blob_bytes.min(remaining_total),
-        )
-        .with_context(|| format!("read bounded exported chain blob {hash}"))?;
-        let blob_bytes = u64::try_from(data.len()).context("exported chain blob size exceeds u64")?;
+        let data = load_export_blob_bytes(cas, &hash, limits.max_blob_bytes.min(remaining_total))
+            .with_context(|| format!("read bounded exported chain blob {hash}"))?;
+        let blob_bytes =
+            u64::try_from(data.len()).context("exported chain blob size exceeds u64")?;
         total_blob_bytes = total_blob_bytes
             .checked_add(blob_bytes)
             .context("exported chain blob byte count overflow")?;
@@ -307,16 +312,25 @@ pub fn export_exact_chain_head_cas_payload_pinned(
     let cas = authority.cas_store()?;
     let limits = sync_transfer_limits();
     let reachable = crate::rebuild::verified_repair_closure_with_cas_and_limits(
-        &cas, chain_root_id, head_hash, true, limits,
+        &cas,
+        chain_root_id,
+        head_hash,
+        true,
+        limits,
     )?;
     let mut large_object_requirements = reachable
         .large_object_hashes
         .into_iter()
         .collect::<Vec<_>>();
     large_object_requirements.sort();
-    let entry_count = reachable.object_hashes.len().checked_add(reachable.blob_hashes.len())
+    let entry_count = reachable
+        .object_hashes
+        .len()
+        .checked_add(reachable.blob_hashes.len())
         .context("staged closure entry count overflow")?;
-    if reachable.object_hashes.len() > limits.max_objects || reachable.blob_hashes.len() > limits.max_blobs {
+    if reachable.object_hashes.len() > limits.max_objects
+        || reachable.blob_hashes.len() > limits.max_blobs
+    {
         anyhow::bail!("staged closure exceeds admitted object or blob count");
     }
     let mut entries = Vec::with_capacity(entry_count);
@@ -327,7 +341,8 @@ pub fn export_exact_chain_head_cas_payload_pinned(
     for hash in object_hashes {
         let data = load_export_object_bytes(&cas, &hash)
             .with_context(|| format!("read bounded staged chain object {hash}"))?;
-        total_object_bytes = total_object_bytes.checked_add(u64::try_from(data.len())?)
+        total_object_bytes = total_object_bytes
+            .checked_add(u64::try_from(data.len())?)
             .context("staged object byte count overflow")?;
         if total_object_bytes > limits.max_total_object_bytes {
             anyhow::bail!("staged object bytes exceed their aggregate ceiling");
@@ -347,12 +362,8 @@ pub fn export_exact_chain_head_cas_payload_pinned(
             .max_total_blob_bytes
             .checked_sub(total_blob_bytes)
             .context("staged chain blob bytes exceed the default closure total")?;
-        let data = load_export_blob_bytes(
-            &cas,
-            &hash,
-            limits.max_blob_bytes.min(remaining_total),
-        )
-        .with_context(|| format!("read bounded staged chain blob {hash}"))?;
+        let data = load_export_blob_bytes(&cas, &hash, limits.max_blob_bytes.min(remaining_total))
+            .with_context(|| format!("read bounded staged chain blob {hash}"))?;
         let blob_bytes = u64::try_from(data.len()).context("staged chain blob size exceeds u64")?;
         total_blob_bytes = total_blob_bytes
             .checked_add(blob_bytes)
@@ -447,7 +458,9 @@ pub fn reconcile_export_pinned(
     if missing_objects.len() > limits.max_objects || missing_blobs.len() > limits.max_blobs {
         anyhow::bail!("reconciled closure exceeds admitted object or blob count");
     }
-    let entry_count = missing_objects.len().checked_add(missing_blobs.len())
+    let entry_count = missing_objects
+        .len()
+        .checked_add(missing_blobs.len())
         .context("reconciled closure entry count overflow")?;
     let mut entries = Vec::with_capacity(entry_count);
     let mut total_bytes = 0usize;
@@ -455,9 +468,10 @@ pub fn reconcile_export_pinned(
     let mut total_blob_bytes = 0_u64;
 
     for hash in missing_objects {
-        let data = load_export_object_bytes(&cas, &hash)
+        let data = load_export_object_bytes(cas, &hash)
             .with_context(|| format!("read bounded reconciled chain object {hash}"))?;
-        total_object_bytes = total_object_bytes.checked_add(u64::try_from(data.len())?)
+        total_object_bytes = total_object_bytes
+            .checked_add(u64::try_from(data.len())?)
             .context("reconciled object byte count overflow")?;
         if total_object_bytes > limits.max_total_object_bytes {
             anyhow::bail!("reconciled object bytes exceed their aggregate ceiling");
@@ -475,13 +489,10 @@ pub fn reconcile_export_pinned(
             .max_total_blob_bytes
             .checked_sub(total_blob_bytes)
             .context("reconciled chain blob bytes exceed the default closure total")?;
-        let data = load_export_blob_bytes(
-            cas,
-            &hash,
-            limits.max_blob_bytes.min(remaining_total),
-        )
-        .with_context(|| format!("read bounded reconciled chain blob {hash}"))?;
-        let blob_bytes = u64::try_from(data.len()).context("reconciled chain blob size exceeds u64")?;
+        let data = load_export_blob_bytes(cas, &hash, limits.max_blob_bytes.min(remaining_total))
+            .with_context(|| format!("read bounded reconciled chain blob {hash}"))?;
+        let blob_bytes =
+            u64::try_from(data.len()).context("reconciled chain blob size exceeds u64")?;
         total_blob_bytes = total_blob_bytes
             .checked_add(blob_bytes)
             .context("reconciled chain blob byte count overflow")?;
@@ -1478,7 +1489,8 @@ mod tests {
     fn finalize_import_signs_local_ref() {
         let tmp = tempfile::tempdir().unwrap();
         let runtime_state_dir = tmp.path();
-        let db = crate::test_support::TestState::open(runtime_state_dir, test_trust_store()).unwrap();
+        let db =
+            crate::test_support::TestState::open(runtime_state_dir, test_trust_store()).unwrap();
         let signer = TestSigner::default();
 
         let cas_root = db.cas_root();

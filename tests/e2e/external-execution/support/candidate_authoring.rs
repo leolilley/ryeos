@@ -35,27 +35,93 @@ pub fn sign_candidate_qualification_inputs(
     parameters: &serde_json::Value,
     final_policy: bool,
 ) {
-    let parameters = lillux::canonical_json(parameters).unwrap();
-    let claims = if final_policy {
-        "    - bounded_candidate_capture\n    - candidate_only_execution\n    - controller_credential_exclusion\n    - native_writer_exclusion\n    - no_local_execution_fallback\n"
+    let claim_names: &[&str] = if final_policy {
+        &[
+            "bounded_candidate_capture",
+            "candidate_only_execution",
+            "controller_credential_exclusion",
+            "native_writer_exclusion",
+            "no_local_execution_fallback",
+        ]
     } else {
-        "    - fixture_draft_never_admit\n"
+        &["fixture_draft_never_admit"]
     };
     let ai = bundle_root.join(".ai");
-    let policy = format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: Exact synthetic external candidate runtime qualification\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: tool:fixtures/verify-external-runtime\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
-    );
     let path = ai.join("config/fixtures/qualification.yaml");
     std::fs::write(
         path,
-        lillux::signature::sign_content(&policy, identity.signing_key(), "#", None),
+        lillux::signature::sign_content(
+            &qualification_policy_source(
+                "Exact synthetic external candidate runtime qualification",
+                "tool:fixtures/verify-external-runtime",
+                claim_names,
+                parameters,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
     )
     .unwrap();
-    let tool = format!(
+    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
+    std::fs::write(
+        path,
+        lillux::signature::sign_content(
+            &qualification_verifier_tool_source(
+                "verify-external-runtime",
+                "Execute the exact synthetic runtime's independent qualification probe",
+                external_runtime_manifest_hash,
+                qualification_runtime_manifest_hash,
+                claim_names,
+                parameters,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
+    )
+    .unwrap();
+}
+
+/// Signed policy source whose allowed claims and verifier parameters are the
+/// exact values the paired verifier tool is rendered from.
+pub fn qualification_policy_source(
+    description: &str,
+    verifier_ref: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    let claims = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    format!(
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v4\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
+    )
+}
+
+/// Signed verifier tool source. The probe receives the policy's claim list as
+/// argv, and `config_schema` pins the one parameter object the matching policy
+/// carries, so a verifier cannot be reused under another policy.
+pub fn qualification_verifier_tool_source(
+    name: &str,
+    description: &str,
+    external_runtime_manifest_hash: &str,
+    qualification_runtime_manifest_hash: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    let claim_args = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    format!(
         r#"category: fixtures
-name: verify-external-runtime
+name: {name}
 version: "1.0.0"
-description: Execute the exact synthetic runtime's independent qualification probe
+description: {description}
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -89,19 +155,13 @@ config:
     - /ryeos/realizations/qualification/verifier/bin/candidate
     - --qualification-probe
     - {external_runtime_manifest_hash}
-  env: {{}}
+{claim_args}  env: {{}}
   timeout_secs: 30
 config_schema:
   type: object
   const: {parameters}
-"#,
-    );
-    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
-    std::fs::write(
-        path,
-        lillux::signature::sign_content(&tool, identity.signing_key(), "#", None),
+"#
     )
-    .unwrap();
 }
 
 /// One exact recipe source for both the installed consumer and its real
@@ -191,111 +251,6 @@ product_relationships:
     let relationships = ProductRelationships::from_value(parsed["product_relationships"].clone())?;
     relationships.validate_against(&declarations, "product_recipe")?;
     Ok(source)
-}
-
-#[cfg(test)]
-mod runtime_recipe_tests {
-    use super::external_runtime_recipe_source;
-    use ryeos_state::external_content::products::composition::ProductRelationships;
-    use ryeos_state::external_content::products::{
-        ProductDeclarations, ProductShape, ProductSource, ProductStorage,
-    };
-
-    fn assert_exact_recipe(
-        large: bool,
-        storage: ProductStorage,
-        file_limit: u64,
-        total_limit: u64,
-    ) {
-        let manifest_hash = "a".repeat(64);
-        let source = external_runtime_recipe_source(&manifest_hash, large).unwrap();
-        assert_eq!(
-            source,
-            external_runtime_recipe_source(&manifest_hash, large).unwrap()
-        );
-        let parsed: serde_json::Value = serde_yaml::from_str(&source).unwrap();
-        let declarations =
-            ProductDeclarations::from_value(parsed["build_products"].clone()).unwrap();
-        let relationships =
-            ProductRelationships::from_value(parsed["product_relationships"].clone()).unwrap();
-        relationships
-            .validate_against(&declarations, "product_recipe")
-            .unwrap();
-        assert!(declarations.output_roots.is_empty());
-        assert_eq!(declarations.products.len(), 1);
-        let runtime = declarations.select("auxiliary").unwrap();
-        assert!(matches!(runtime.source, ProductSource::RetainedProject {}));
-        assert_eq!(runtime.path, "products/external-runtime");
-        assert_eq!(runtime.shape, ProductShape::Tree);
-        assert_eq!(runtime.storage, storage);
-        assert!(runtime.required);
-        assert_eq!(
-            runtime.expected_manifest_hash.as_deref(),
-            Some(manifest_hash.as_str())
-        );
-        assert_eq!(runtime.bounds.maximum_entries, 16);
-        assert_eq!(runtime.bounds.maximum_depth, 4);
-        assert_eq!(runtime.bounds.maximum_file_bytes, file_limit);
-        assert_eq!(runtime.bounds.maximum_total_bytes, total_limit);
-        assert_eq!(relationships.relationships.len(), 1);
-        let relationship = relationships.select("auxiliary_to_verifier").unwrap();
-        assert_eq!(runtime.bounds, relationship.required_product.bounds);
-        assert_eq!(runtime.storage, relationship.required_product.storage);
-        assert_eq!(
-            relationship.producer.canonical_ref,
-            "graph:fixtures/build_runtime"
-        );
-        assert_eq!(relationship.producer.product_name, "auxiliary");
-        assert_eq!(relationship.producer.recipe_binding, "product_recipe");
-        assert_eq!(relationship.producer.parameters, serde_json::json!({}));
-        assert_eq!(
-            relationship.consumer.canonical_ref,
-            "worker:test/external-candidate"
-        );
-        assert_eq!(relationship.consumer.declaration_id, "auxiliary");
-        assert_eq!(
-            relationship.qualification.policy_ref.as_deref(),
-            Some("config:fixtures/qualification")
-        );
-        assert_eq!(
-            relationship.qualification.required_claims,
-            [
-                "bounded_candidate_capture",
-                "candidate_only_execution",
-                "controller_credential_exclusion",
-                "native_writer_exclusion",
-                "no_local_execution_fallback",
-            ]
-        );
-        assert_ne!(
-            source,
-            external_runtime_recipe_source(&"b".repeat(64), large).unwrap()
-        );
-    }
-
-    #[test]
-    fn ordinary_runtime_recipe_has_exact_valid_declaration_and_relationship() {
-        assert_exact_recipe(false, ProductStorage::Content, 33_554_432, 134_217_728);
-    }
-
-    #[test]
-    fn large_runtime_recipe_has_exact_valid_declaration_and_relationship() {
-        assert_exact_recipe(
-            true,
-            ProductStorage::LargeContent,
-            536_870_912,
-            1_073_741_824,
-        );
-    }
-
-    #[test]
-    fn runtime_recipe_refuses_malformed_expected_manifest_hash() {
-        for large in [false, true] {
-            for invalid in [String::new(), "not-a-manifest-hash".into(), "a".repeat(63)] {
-                assert!(external_runtime_recipe_source(&invalid, large).is_err());
-            }
-        }
-    }
 }
 
 pub fn write_candidate_authoring_bundle(
@@ -1052,4 +1007,109 @@ print(json.dumps({"schema_version": 1, "candidate_snapshot_hash": candidate,
             ),
         ),
     ])
+}
+
+#[cfg(test)]
+mod runtime_recipe_tests {
+    use super::external_runtime_recipe_source;
+    use ryeos_state::external_content::products::composition::ProductRelationships;
+    use ryeos_state::external_content::products::{
+        ProductDeclarations, ProductShape, ProductSource, ProductStorage,
+    };
+
+    fn assert_exact_recipe(
+        large: bool,
+        storage: ProductStorage,
+        file_limit: u64,
+        total_limit: u64,
+    ) {
+        let manifest_hash = "a".repeat(64);
+        let source = external_runtime_recipe_source(&manifest_hash, large).unwrap();
+        assert_eq!(
+            source,
+            external_runtime_recipe_source(&manifest_hash, large).unwrap()
+        );
+        let parsed: serde_json::Value = serde_yaml::from_str(&source).unwrap();
+        let declarations =
+            ProductDeclarations::from_value(parsed["build_products"].clone()).unwrap();
+        let relationships =
+            ProductRelationships::from_value(parsed["product_relationships"].clone()).unwrap();
+        relationships
+            .validate_against(&declarations, "product_recipe")
+            .unwrap();
+        assert!(declarations.output_roots.is_empty());
+        assert_eq!(declarations.products.len(), 1);
+        let runtime = declarations.select("auxiliary").unwrap();
+        assert!(matches!(runtime.source, ProductSource::RetainedProject {}));
+        assert_eq!(runtime.path, "products/external-runtime");
+        assert_eq!(runtime.shape, ProductShape::Tree);
+        assert_eq!(runtime.storage, storage);
+        assert!(runtime.required);
+        assert_eq!(
+            runtime.expected_manifest_hash.as_deref(),
+            Some(manifest_hash.as_str())
+        );
+        assert_eq!(runtime.bounds.maximum_entries, 16);
+        assert_eq!(runtime.bounds.maximum_depth, 4);
+        assert_eq!(runtime.bounds.maximum_file_bytes, file_limit);
+        assert_eq!(runtime.bounds.maximum_total_bytes, total_limit);
+        assert_eq!(relationships.relationships.len(), 1);
+        let relationship = relationships.select("auxiliary_to_verifier").unwrap();
+        assert_eq!(runtime.bounds, relationship.required_product.bounds);
+        assert_eq!(runtime.storage, relationship.required_product.storage);
+        assert_eq!(
+            relationship.producer.canonical_ref,
+            "graph:fixtures/build_runtime"
+        );
+        assert_eq!(relationship.producer.product_name, "auxiliary");
+        assert_eq!(relationship.producer.recipe_binding, "product_recipe");
+        assert_eq!(relationship.producer.parameters, serde_json::json!({}));
+        assert_eq!(
+            relationship.consumer.canonical_ref,
+            "worker:test/external-candidate"
+        );
+        assert_eq!(relationship.consumer.declaration_id, "auxiliary");
+        assert_eq!(
+            relationship.qualification.policy_ref.as_deref(),
+            Some("config:fixtures/qualification")
+        );
+        assert_eq!(
+            relationship.qualification.required_claims,
+            [
+                "bounded_candidate_capture",
+                "candidate_only_execution",
+                "controller_credential_exclusion",
+                "native_writer_exclusion",
+                "no_local_execution_fallback",
+            ]
+        );
+        assert_ne!(
+            source,
+            external_runtime_recipe_source(&"b".repeat(64), large).unwrap()
+        );
+    }
+
+    #[test]
+    fn ordinary_runtime_recipe_has_exact_valid_declaration_and_relationship() {
+        assert_exact_recipe(false, ProductStorage::Content, 33_554_432, 134_217_728);
+    }
+
+    #[test]
+    fn large_runtime_recipe_has_exact_valid_declaration_and_relationship() {
+        assert_exact_recipe(
+            true,
+            ProductStorage::LargeContent,
+            536_870_912,
+            1_073_741_824,
+        );
+    }
+
+    #[test]
+    fn runtime_recipe_refuses_malformed_expected_manifest_hash() {
+        for large in [false, true] {
+            for invalid in [String::new(), "not-a-manifest-hash".into(), "a".repeat(63)] {
+                assert!(external_runtime_recipe_source(&invalid, large).is_err());
+            }
+        }
+    }
 }

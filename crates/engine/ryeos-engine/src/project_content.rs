@@ -166,12 +166,12 @@ impl AuthoritativeProjectContent for lillux::PinnedDirectory {
         root.visit_regular_files_bounded(
             lillux::DirectoryTraversalBudget::new(max_entries, 64),
             |_relative, is_directory| Ok(is_directory && !recursive),
-            |relative, mut file| {
+            |relative, file| {
                 let before = file.metadata()?;
                 let size = before.len();
                 let normalized_mode = lillux::normalized_portable_regular_mode(&before)?;
                 let (content_hash, after) =
-                    lillux::digest_open_regular_file_stable_exact(&mut file, size)?;
+                    lillux::digest_open_regular_file_stable_exact(&file, size)?;
                 if after.len() != size {
                     anyhow::bail!("live project file changed while it was enumerated");
                 }

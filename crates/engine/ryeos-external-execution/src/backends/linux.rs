@@ -1226,10 +1226,10 @@ impl NativeExternalCandidate {
         self.input = None;
         self.terminal = true;
         self.protocol.revoke();
-        if let Some(input) = &mut self.direct_input {
-            if !input.is_complete() {
-                input.revoke();
-            }
+        if let Some(input) = &mut self.direct_input
+            && !input.is_complete()
+        {
+            input.revoke();
         }
         Ok(Some(exit))
     }

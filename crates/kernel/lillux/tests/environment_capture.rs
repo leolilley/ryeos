@@ -17,8 +17,7 @@ mod linux {
     const RAW_MARKER: &[u8] = b"capture-raw-marker-9b1c";
 
     fn proc_environment_contains(needle: &[u8]) -> Result<bool, String> {
-        let environment =
-            std::fs::read("/proc/self/environ").map_err(|error| error.to_string())?;
+        let environment = std::fs::read("/proc/self/environ").map_err(|error| error.to_string())?;
         Ok(environment
             .windows(needle.len())
             .any(|window| window == needle))
@@ -83,7 +82,10 @@ mod linux {
     pub(super) fn run() {
         // Argument inspection is test startup setup; it spawns no thread.
         let arguments: Vec<_> = std::env::args_os().collect();
-        if arguments.get(1).is_some_and(|argument| argument == CHILD_FLAG) {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == CHILD_FLAG)
+        {
             std::process::exit(match child() {
                 Ok(()) => 0,
                 Err(error) => {

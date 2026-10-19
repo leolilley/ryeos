@@ -67,6 +67,10 @@ pub const LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV: &str = "RYEOS_LIFECYCLE_SIGNED_ASS
 pub const LIFECYCLE_GUEST_PACKAGE_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_PACKAGE_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
+/// Sealed tar of the guest runtime the controller stages for a provider whose
+/// activation uploads that runtime itself. Delivered exactly with the guest
+/// package on one activation contact, and measured by the activation intent.
+pub const LIFECYCLE_GUEST_RUNTIME_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_RUNTIME_FD";
 pub const LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV: &str = "RYEOS_LIFECYCLE_ADAPTER_EXECUTABLE_FD";
 pub const LIFECYCLE_PROVIDER_SPEC_FD_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_FD";
 pub const LIFECYCLE_PROVIDER_SPEC_SHA256_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_SHA256";
@@ -1209,6 +1213,13 @@ pub struct SupervisorActivationIntent {
     pub activation_request_digest: String,
     pub supervisor_runtime_hash: String,
     pub launcher_artifact_hash: String,
+    /// Sha256 of the sealed guest runtime tar delivered under
+    /// `LIFECYCLE_GUEST_RUNTIME_FD_ENV`; present exactly when the bytes are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_runtime_artifact_hash: Option<String>,
+    /// Byte length of that same tar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_runtime_artifact_bytes: Option<u64>,
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
@@ -1757,6 +1768,20 @@ impl SupervisorActivationIntent {
                 && (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
             "supervisor activation bounds are invalid"
         );
+        match (
+            &self.guest_runtime_artifact_hash,
+            self.guest_runtime_artifact_bytes,
+        ) {
+            (None, None) => {}
+            (Some(hash), Some(bytes)) => {
+                digest(hash, "guest runtime artifact")?;
+                ensure!(
+                    (1..=MAX_GUEST_SOURCE_BYTES).contains(&bytes),
+                    "guest runtime artifact bytes are invalid"
+                );
+            }
+            _ => bail!("guest runtime artifact hash and bytes must be declared together"),
+        }
         Ok(())
     }
 }
@@ -2782,6 +2807,8 @@ mod tests {
             activation_request_digest: digest('a'),
             supervisor_runtime_hash: digest('b'),
             launcher_artifact_hash: digest('c'),
+            guest_runtime_artifact_hash: None,
+            guest_runtime_artifact_bytes: None,
             attachment_deadline_ms: 1,
             execution_timeout_seconds: 1,
             post_execution_timeout_seconds: 1,
@@ -2830,6 +2857,17 @@ mod tests {
         let decoded: LifecycleAdapterRequest =
             from_json_slice_strict(&encoded, encoded.len()).unwrap();
         assert_eq!(decoded, request);
+        let mut runtime_hash_alone = serde_json::to_value(&request).unwrap();
+        runtime_hash_alone["activation"]["guest_runtime_artifact_hash"] =
+            serde_json::json!(digest('8'));
+        let alone: LifecycleAdapterRequest = serde_json::from_value(runtime_hash_alone).unwrap();
+        assert!(alone.validate().is_err());
+        let mut runtime_declared = serde_json::to_value(&request).unwrap();
+        runtime_declared["activation"]["guest_runtime_artifact_hash"] =
+            serde_json::json!(digest('8'));
+        runtime_declared["activation"]["guest_runtime_artifact_bytes"] = serde_json::json!(4096);
+        let declared: LifecycleAdapterRequest = serde_json::from_value(runtime_declared).unwrap();
+        declared.validate().unwrap();
         let mut missing_projection = serde_json::to_value(&request).unwrap();
         missing_projection
             .as_object_mut()

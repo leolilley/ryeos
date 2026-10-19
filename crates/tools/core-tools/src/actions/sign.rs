@@ -301,7 +301,7 @@ fn sign_target_descriptors(
     // no reason to make the caller retype what we already resolved.
     let target = match parsed_target {
         Ok(t) => t,
-        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, &kinds) {
+        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, kinds) {
             Some(resolved) => {
                 tracing::info!(
                     path = %item_ref,
@@ -1148,12 +1148,12 @@ pub(super) fn sign_in_place_with_key(
     let parent = lillux::PinnedDirectory::open(parent_path)?
         .ok_or_else(|| anyhow!("sign target parent is unavailable"))?;
     let _lock = parent.lock_exclusive()?;
-    let mut incumbent = parent
+    let incumbent = parent
         .open_regular(name, false)?
         .ok_or_else(|| anyhow!("sign target is not a regular file"))?;
     let observation = lillux::observe_open_regular_file(&incumbent)?;
     let incumbent_bytes = lillux::read_open_regular_file_stable_bounded(
-        &mut incumbent,
+        &incumbent,
         &observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )?;
@@ -1230,9 +1230,9 @@ pub(super) fn sign_in_place_with_key(
             if !observed.matches_quarantined_incumbent(&expected_observation) {
                 bail!("sign target metadata changed before publication");
             }
-            let mut current = current.try_clone()?;
+            let current = current.try_clone()?;
             let current = lillux::read_open_regular_file_stable_bounded(
-                &mut current,
+                &current,
                 &observed,
                 ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
             )?;

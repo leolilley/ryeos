@@ -388,26 +388,6 @@ fn decode_retained_transcript(encoded: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-#[cfg(test)]
-mod retained_transcript_tests {
-    use super::decode_retained_transcript;
-    use base64::Engine as _;
-
-    #[test]
-    fn retained_transcript_decode_is_exact_canonical_and_bounded() {
-        let encoding = base64::engine::general_purpose::STANDARD;
-        let bytes = b"{\"method\":\"notification\"}\n\xff";
-        assert_eq!(
-            decode_retained_transcript(&encoding.encode(bytes)).unwrap(),
-            bytes
-        );
-        assert!(decode_retained_transcript("Zg").is_err());
-        assert!(decode_retained_transcript("Zg==\n").is_err());
-        assert!(decode_retained_transcript(&encoding.encode(vec![0; 1024 * 1024 + 1])).is_err());
-        assert_eq!(decode_retained_transcript("").unwrap(), Vec::<u8>::new());
-    }
-}
-
 impl ConsumerObservedProtocol {
     /// Product-owned raw evidence envelope for the existing adapter/journal
     /// transport. No success, qualification or provider-death claim is encoded.
@@ -703,4 +683,24 @@ pub fn collect_scripted_turn<T: AppServerTransport>(
         "consumer semantic checks exceeded deadline"
     );
     Ok(collected)
+}
+
+#[cfg(test)]
+mod retained_transcript_tests {
+    use super::decode_retained_transcript;
+    use base64::Engine as _;
+
+    #[test]
+    fn retained_transcript_decode_is_exact_canonical_and_bounded() {
+        let encoding = base64::engine::general_purpose::STANDARD;
+        let bytes = b"{\"method\":\"notification\"}\n\xff";
+        assert_eq!(
+            decode_retained_transcript(&encoding.encode(bytes)).unwrap(),
+            bytes
+        );
+        assert!(decode_retained_transcript("Zg").is_err());
+        assert!(decode_retained_transcript("Zg==\n").is_err());
+        assert!(decode_retained_transcript(&encoding.encode(vec![0; 1024 * 1024 + 1])).is_err());
+        assert_eq!(decode_retained_transcript("").unwrap(), Vec::<u8>::new());
+    }
 }

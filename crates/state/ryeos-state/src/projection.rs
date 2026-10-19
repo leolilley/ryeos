@@ -12,12 +12,17 @@ use rusqlite::Connection;
 
 use crate::sqlite_schema;
 
-mod native;
 mod generation_lease;
+mod native;
 pub(crate) use generation_lease::OriginalGenerationLease;
 use native::ProjectionConnection;
-pub(crate) use native::{ClosedOriginalProjection, DurableOriginalProjection, OutsideOriginalProjectionCustody};
-pub use native::{OriginalProjectionFailure, ReleasedOriginalProjectionAcquisition, RecoveredOriginalProjectionDurability};
+pub(crate) use native::{
+    ClosedOriginalProjection, DurableOriginalProjection, OutsideOriginalProjectionCustody,
+};
+pub use native::{
+    OriginalProjectionFailure, RecoveredOriginalProjectionDurability,
+    ReleasedOriginalProjectionAcquisition,
+};
 
 mod chain_commit;
 mod cursor;
@@ -113,7 +118,9 @@ fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn projection_schema_sql() -> &'static str { SCHEMA_SQL }
+pub(crate) fn projection_schema_sql() -> &'static str {
+    SCHEMA_SQL
+}
 
 /// Initializes a generation this code just created, then verifies it against
 /// the natively prepared same-library schema reference.
@@ -165,7 +172,11 @@ impl ProjectionDb {
     }
 }
 
-fn validate_selected_current(conn: &Connection, path: &Path, reference: &sqlite_schema::SchemaSqlDefinition) -> anyhow::Result<()> {
+fn validate_selected_current(
+    conn: &Connection,
+    path: &Path,
+    reference: &sqlite_schema::SchemaSqlDefinition,
+) -> anyhow::Result<()> {
     let spec = projection_schema_spec();
     match classify_projection_db(conn, spec.application_id)? {
         ProjectionOwnershipState::Owned => {}
@@ -201,13 +212,17 @@ mod tests {
         let db = crate::test_support::TestProjection::open();
 
         // Verify tables were created
-        let tables: Vec<String> = db.with_sql(|connection| {
-            let mut stmt = connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
-            let tables = stmt.query_map([], |row| row.get(0))?
-                .filter_map(|row| row.ok())
-                .collect();
-            Ok(tables)
-        }).unwrap();
+        let tables: Vec<String> = db
+            .with_sql(|connection| {
+                let mut stmt =
+                    connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
+                let tables = stmt
+                    .query_map([], |row| row.get(0))?
+                    .filter_map(|row| row.ok())
+                    .collect();
+                Ok(tables)
+            })
+            .unwrap();
 
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
@@ -229,7 +244,10 @@ mod tests {
             projection_schema_epoch()
         );
 
-        let synchronous: i64 = db.with_sql(|connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?))
+        let synchronous: i64 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?)
+            })
             .unwrap();
         assert_eq!(synchronous, 2, "projection DB must use synchronous=FULL");
     }
@@ -530,15 +548,23 @@ mod tests {
             project_event(&db, &edge).unwrap();
         }
 
-        let artifacts: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
-                row.get(0)
-            })?))
+        let artifacts: i64 = db
+            .with_sql(|connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
             .unwrap();
-        let edges: i64 = db.with_sql(|connection| Ok(connection.query_row(
-                "SELECT COUNT(*) FROM thread_edges WHERE source_event_hash IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )?))
+        let edges: i64 = db
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM thread_edges WHERE source_event_hash IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(artifacts, 1);
         assert_eq!(edges, 1);
@@ -563,9 +589,14 @@ mod tests {
         project_event(&db, &existing).unwrap();
         let error = project_event(&db, &authoritative).unwrap_err();
         assert!(error.is::<ProjectionEventConflict>());
-        let artifacts: i64 = db.with_sql(|connection| Ok(connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
-                row.get(0)
-            })?))
+        let artifacts: i64 = db
+            .with_sql(|connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
             .unwrap();
         assert_eq!(artifacts, 0);
     }

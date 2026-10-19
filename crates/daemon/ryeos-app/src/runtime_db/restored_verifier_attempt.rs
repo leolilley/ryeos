@@ -131,54 +131,6 @@ fn admitted_consumer_selection(
     }
 }
 
-#[cfg(test)]
-mod callback_launch_tests {
-    use super::*;
-
-    #[test]
-    fn remote_consumer_current_launch_refuses_replacement_stop_and_missing_authority() {
-        crate::runtime_db::test_native::with_transient(|conn| {
-            // Minimal relational fixture for the admission predicate, not a
-            // substitute for joined born-root/callback admission acceptance.
-            conn.execute_batch(
-                "CREATE TABLE thread_launch_claim(thread_id TEXT PRIMARY KEY, claimed_by TEXT);
-                 CREATE TABLE thread_runtime(thread_id TEXT PRIMARY KEY, chain_root_id TEXT,
-                     stop_requested_at_ms INTEGER, stop_intent TEXT);
-                 INSERT INTO thread_launch_claim VALUES('root','owner');
-                 INSERT INTO thread_runtime VALUES('root','root',NULL,NULL);",
-            )
-            .unwrap();
-            require_current_callback_launch(&conn, "root", "owner").unwrap();
-            assert!(require_current_callback_launch(&conn, "root", "replacement").is_err());
-            assert!(require_current_callback_launch(&conn, "missing", "owner").is_err());
-            for sql in [
-                "UPDATE thread_runtime SET stop_requested_at_ms=1",
-                "UPDATE thread_runtime SET stop_requested_at_ms=NULL, stop_intent='cancel'",
-                "UPDATE thread_runtime SET stop_intent=NULL, chain_root_id='foreign'",
-                "DELETE FROM thread_runtime",
-            ] {
-                conn.execute(sql, []).unwrap();
-                assert!(require_current_callback_launch(&conn, "root", "owner").is_err());
-            }
-            conn.execute(
-                "INSERT INTO thread_runtime VALUES('root','root',NULL,NULL)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE thread_launch_claim SET claimed_by='replacement'",
-                [],
-            )
-            .unwrap();
-            assert!(require_current_callback_launch(&conn, "root", "owner").is_err());
-            require_current_callback_launch(&conn, "root", "replacement").unwrap();
-            conn.execute("DELETE FROM thread_launch_claim", []).unwrap();
-            assert!(require_current_callback_launch(&conn, "root", "replacement").is_err());
-            Ok(())
-        });
-    }
-}
-
 fn read(conn: &Connection, operation_id: &str) -> Result<Option<RestoredVerifierAttemptRecord>> {
     let row: Option<(String, String, Option<String>, Option<String>, String, Option<String>, i64, i64)> = conn
         .query_row(
@@ -524,7 +476,7 @@ impl RuntimeDb {
         value: T,
     ) -> Result<T> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             require_current_callback_launch(&tx, root, launch_owner)?;
             tx.commit()?;
             Ok(value)
@@ -535,14 +487,15 @@ impl RuntimeDb {
     /// after observation. Both are Blob roots owned by the existing attempt.
     pub(crate) fn restored_verifier_blob_roots(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            let mut statement = conn
-                .prepare("SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id")?;
+            let mut statement = conn.prepare(
+                "SELECT operation_id FROM restored_verifier_attempt ORDER BY operation_id",
+            )?;
             let ids = statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut roots = BTreeSet::new();
             for id in ids {
-                let record = read(&conn, &id)?.context("verifier evidence root disappeared")?;
+                let record = read(conn, &id)?.context("verifier evidence root disappeared")?;
                 if let Some(hash) = record.consumer_input_blob_hash {
                     roots.insert(hash);
                 }
@@ -566,7 +519,7 @@ impl RuntimeDb {
     ) -> Result<RestoredVerifierAttemptRecord> {
         self.conn.with_sql(|conn| {
             observation.verify_evidence_bytes(evidence)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("consumer observation has no claimed attempt")?;
             observation.validate_for_intent(&record.intent)?;
@@ -612,7 +565,7 @@ impl RuntimeDb {
     ) -> Result<super::runtime_snapshot_qualification::SnapshotQualificationRecord> {
         self.conn.with_sql(|conn| {
             selection.validate()?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             read_retained_owner_measurement_prerequisite(
                 &tx,
                 &selection.qualification_operation_id,
@@ -647,7 +600,7 @@ impl RuntimeDb {
         coordinate: &ConsumerRuntimeVerificationCoordinate,
     ) -> Result<RestoredVerifierAttemptRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read_consumer_prerequisite(
                 &tx,
                 qualification_operation_id,
@@ -663,9 +616,7 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<RestoredVerifierAttemptRecord>> {
-        self.conn.with_sql(|conn| {
-            read(&conn, operation_id)
-        })
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_restored_verifier_attempt(
@@ -701,7 +652,7 @@ impl RuntimeDb {
                 }
                 _ => anyhow::bail!("verifier reservation requires its matching consumer input lane"),
             }
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let qualification =
                 super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
                     .context("restored verifier qualification was not retained")?;
@@ -797,7 +748,7 @@ impl RuntimeDb {
         admission: Option<&AuthenticatedConsumerRoot>,
     ) -> Result<RestoredVerifierAttemptClaim> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("restored verifier was not reserved")?;
             let qualification = super::runtime_snapshot_qualification::read(
                 &tx,
@@ -848,7 +799,7 @@ impl RuntimeDb {
         operation_id: &str,
     ) -> Result<RestoredVerifierAttemptRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, operation_id)?.context("restored verifier attempt is absent")?;
             if record.phase == RestoredVerifierAttemptPhase::Quarantined {
                 tx.commit()?;
@@ -864,7 +815,8 @@ impl RuntimeDb {
              WHERE operation_id=?1 AND phase='attempt_pending'",
                 params![operation_id, now],
             )?;
-            let current = read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
+            let current =
+                read(&tx, operation_id)?.context("restored verifier quarantine vanished")?;
             tx.commit()?;
             Ok(current)
         })
@@ -875,7 +827,7 @@ impl RuntimeDb {
         observation: &RestoredVerifierAdapterObservation,
     ) -> Result<RestoredVerifierAttemptRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let record = read(&tx, &observation.operation_id)?
                 .context("restored verifier observation has no claimed attempt")?;
             let tagged = RestoredVerifierObservation::OwnerMeasurement {
@@ -938,5 +890,53 @@ impl RuntimeDb {
             tx.commit()?;
             Ok(current)
         })
+    }
+}
+
+#[cfg(test)]
+mod callback_launch_tests {
+    use super::*;
+
+    #[test]
+    fn remote_consumer_current_launch_refuses_replacement_stop_and_missing_authority() {
+        crate::runtime_db::test_native::with_transient(|conn| {
+            // Minimal relational fixture for the admission predicate, not a
+            // substitute for joined born-root/callback admission acceptance.
+            conn.execute_batch(
+                "CREATE TABLE thread_launch_claim(thread_id TEXT PRIMARY KEY, claimed_by TEXT);
+                 CREATE TABLE thread_runtime(thread_id TEXT PRIMARY KEY, chain_root_id TEXT,
+                     stop_requested_at_ms INTEGER, stop_intent TEXT);
+                 INSERT INTO thread_launch_claim VALUES('root','owner');
+                 INSERT INTO thread_runtime VALUES('root','root',NULL,NULL);",
+            )
+            .unwrap();
+            require_current_callback_launch(conn, "root", "owner").unwrap();
+            assert!(require_current_callback_launch(conn, "root", "replacement").is_err());
+            assert!(require_current_callback_launch(conn, "missing", "owner").is_err());
+            for sql in [
+                "UPDATE thread_runtime SET stop_requested_at_ms=1",
+                "UPDATE thread_runtime SET stop_requested_at_ms=NULL, stop_intent='cancel'",
+                "UPDATE thread_runtime SET stop_intent=NULL, chain_root_id='foreign'",
+                "DELETE FROM thread_runtime",
+            ] {
+                conn.execute(sql, []).unwrap();
+                assert!(require_current_callback_launch(conn, "root", "owner").is_err());
+            }
+            conn.execute(
+                "INSERT INTO thread_runtime VALUES('root','root',NULL,NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE thread_launch_claim SET claimed_by='replacement'",
+                [],
+            )
+            .unwrap();
+            assert!(require_current_callback_launch(conn, "root", "owner").is_err());
+            require_current_callback_launch(conn, "root", "replacement").unwrap();
+            conn.execute("DELETE FROM thread_launch_claim", []).unwrap();
+            assert!(require_current_callback_launch(conn, "root", "replacement").is_err());
+            Ok(())
+        });
     }
 }

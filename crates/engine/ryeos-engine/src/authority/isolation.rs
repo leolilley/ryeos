@@ -51,10 +51,10 @@ pub use inspection::{
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 pub use policy::{
-    AUTHORING_HOST_CLASS, ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
-    IsolationFilesystemPolicy, IsolationHostClass, IsolationLimitsPolicy,
-    IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode, IsolationNetworkPolicy,
-    IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
+    AUTHORING_HOST_CLASS, ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION,
+    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationHostClass,
+    IsolationLimitsPolicy, IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode,
+    IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
     IsolationProcessScopePolicy, IsolationSharedFilesystemPolicy, MAX_HOST_CLASSES,
     floor_requires_outright, nested_sandbox_from, valid_host_class_name,
 };
@@ -113,7 +113,8 @@ impl CompiledOriginalCommandBinding {
         mounts: &lillux::LinuxSandboxMountPreparationCommitments,
         backend: &Arc<VerifiedIsolationBackendCapture>,
     ) -> Result<(), EngineError> {
-        if self.target != *target || self.mounts != *mounts || !Arc::ptr_eq(&self.backend, backend) {
+        if self.target != *target || self.mounts != *mounts || !Arc::ptr_eq(&self.backend, backend)
+        {
             return Err(refused(
                 "original command custody differs from its compiler return".into(),
             ));
@@ -126,7 +127,9 @@ impl CompiledOriginalCommandBinding {
         let command = match &self.command {
             IsolationAdmittedCommand::DescriptorBound(command) => {
                 if self.realization_tree.is_some() {
-                    return Err(refused("standalone command custody carries a foreign tree".into()));
+                    return Err(refused(
+                        "standalone command custody carries a foreign tree".into(),
+                    ));
                 }
                 command
             }
@@ -136,8 +139,11 @@ impl CompiledOriginalCommandBinding {
                 })?;
                 if tree.directory_identity().map_err(|error| {
                     refused(format!("identify retained original command tree: {error}"))
-                })? != command.realization_root() {
-                    return Err(refused("original member command custody changed tree".into()));
+                })? != command.realization_root()
+                {
+                    return Err(refused(
+                        "original member command custody changed tree".into(),
+                    ));
                 }
                 command.command()
             }
@@ -153,18 +159,14 @@ fn retain_original_prepared_command(
     prepared_target: &lillux::InheritedDescriptorAuthority,
 ) -> Result<IsolationAdmittedCommand, EngineError> {
     let (retained, command) = match authority {
-        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
-            (
-                IsolationAdmittedCommand::DescriptorBound(command.clone()),
-                command,
-            )
-        }
-        Some(IsolationCommandAuthorityRef::RealizationMember(member)) => {
-            (
-                IsolationAdmittedCommand::RealizationMember(member.clone()),
-                member.command(),
-            )
-        }
+        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => (
+            IsolationAdmittedCommand::DescriptorBound(command.clone()),
+            command,
+        ),
+        Some(IsolationCommandAuthorityRef::RealizationMember(member)) => (
+            IsolationAdmittedCommand::RealizationMember(member.clone()),
+            member.command(),
+        ),
         _ => {
             return Err(refused(
                 "original held compiler requires an admitted descriptor-backed command".into(),
@@ -192,17 +194,25 @@ fn retain_original_prepared_tree(
     let IsolationAdmittedCommand::RealizationMember(member) = command else {
         return Ok(None);
     };
-    let mount = mounts.iter().find(|mount| {
-        matches!(
-            mount.scope(),
-            IsolationReadOnlyMountScope::ProjectRealization
-                | IsolationReadOnlyMountScope::ExecutionRuntimeRealization
-        ) && mount.destination() == member.realization_destination()
-    }).ok_or_else(|| refused("original command custody lost its prepared tree mount".into()))?;
-    if mount.source().directory_identity().map_err(|error| {
-        refused(format!("identify original prepared command tree: {error}"))
-    })? != member.realization_root() {
-        return Err(refused("original prepared command tree binding changed".into()));
+    let mount = mounts
+        .iter()
+        .find(|mount| {
+            matches!(
+                mount.scope(),
+                IsolationReadOnlyMountScope::ProjectRealization
+                    | IsolationReadOnlyMountScope::ExecutionRuntimeRealization
+            ) && mount.destination() == member.realization_destination()
+        })
+        .ok_or_else(|| refused("original command custody lost its prepared tree mount".into()))?;
+    if mount
+        .source()
+        .directory_identity()
+        .map_err(|error| refused(format!("identify original prepared command tree: {error}")))?
+        != member.realization_root()
+    {
+        return Err(refused(
+            "original prepared command tree binding changed".into(),
+        ));
     }
     Ok(Some(mount.source().clone()))
 }
@@ -2335,7 +2345,7 @@ impl IsolationRuntime {
         }
         #[cfg(target_os = "linux")]
         let executable = {
-            let mut source = source;
+            let source = source;
             let before =
                 lillux::require_effective_user_owned_regular(&source).map_err(|error| {
                     refused(format!("admitted command source is not protected: {error}"))
@@ -2351,7 +2361,7 @@ impl IsolationRuntime {
             let observation = lillux::observe_open_regular_file(&source)
                 .map_err(|error| refused(format!("observe admitted command source: {error}")))?;
             let content =
-                lillux::read_open_regular_file_stable_bounded(&mut source, &observation, max_bytes)
+                lillux::read_open_regular_file_stable_bounded(&source, &observation, max_bytes)
                     .map_err(|error| {
                         refused(format!(
                             "read admitted command source {}: {error}",
@@ -2666,16 +2676,19 @@ impl IsolationRuntime {
                 "original backend capture deadline expired during compilation".into(),
             ));
         }
-        let binding = applied.original_command_binding.as_ref().ok_or_else(|| {
-            refused("original compiler omitted prepared command custody".into())
-        })?;
+        let binding = applied
+            .original_command_binding
+            .as_ref()
+            .ok_or_else(|| refused("original compiler omitted prepared command custody".into()))?;
         binding.require_same_compilation(
-            applied.expected_applied_launch.as_ref().ok_or_else(|| {
-                refused("original compiler omitted target commitments".into())
-            })?,
-            applied.expected_mount_preparation.as_ref().ok_or_else(|| {
-                refused("original compiler omitted mount commitments".into())
-            })?,
+            applied
+                .expected_applied_launch
+                .as_ref()
+                .ok_or_else(|| refused("original compiler omitted target commitments".into()))?,
+            applied
+                .expected_mount_preparation
+                .as_ref()
+                .ok_or_else(|| refused("original compiler omitted mount commitments".into()))?,
             capture,
         )?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
@@ -4074,12 +4087,11 @@ impl IsolationRuntime {
                 | IsolationReadOnlyMountScope::OriginalProductManifest(_) => {
                     if let IsolationReadOnlyMountScope::OriginalProductManifest(role) =
                         external.scope()
+                        && destination != role.destination()
                     {
-                        if destination != role.destination() {
-                            return Err(refused(
-                                "original product manifest has a non-role destination".into(),
-                            ));
-                        }
+                        return Err(refused(
+                            "original product manifest has a non-role destination".into(),
+                        ));
                     }
                     ryeos_state::objects::validate_session_runtime_configuration_destination(
                         destination.to_str().ok_or_else(|| {
@@ -5069,7 +5081,8 @@ impl IsolationRuntime {
             .map_err(|error| refused(format!("invalid isolation launch request: {error}")))?;
         // Only now have descriptor/member preparation, target mount selection,
         // exact commitments and the complete request validation succeeded.
-        let original_command_binding = if let Some(original_deadline) = original_occupancy_deadline {
+        let original_command_binding = if let Some(original_deadline) = original_occupancy_deadline
+        {
             let target_role = launch_request
                 .authorities
                 .iter()
@@ -5090,10 +5103,9 @@ impl IsolationRuntime {
                 retain_original_prepared_command(verified_command_authority, prepared_target)?;
             let realization_tree =
                 retain_original_prepared_tree(&command, context.external_read_only_mounts)?;
-            let backend_capture = self
-                .verified_backend_capture
-                .as_ref()
-                .ok_or_else(|| refused("original compiled command lacks captured backend".into()))?;
+            let backend_capture = self.verified_backend_capture.as_ref().ok_or_else(|| {
+                refused("original compiled command lacks captured backend".into())
+            })?;
             let binding = CompiledOriginalCommandBinding {
                 command,
                 realization_tree,
@@ -6111,40 +6123,53 @@ fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError
             return Err(refused(format!("isolation requires_capabilities {reason}")));
         }
     }
-    if entries.windows(2).any(|pair| pair[0].names()[0] >= pair[1].names()[0]) {
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].names()[0] >= pair[1].names()[0])
+    {
         return Err(refused(
             "isolation requires_capabilities must be sorted and unique".to_owned(),
         ));
     }
     let inits = &policy.enclosure_inits;
     if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(refused("isolation enclosure_inits must be sorted and unique".to_owned()));
+        return Err(refused(
+            "isolation enclosure_inits must be sorted and unique".to_owned(),
+        ));
     }
     for init in inits {
         let file_name = !init.is_empty()
             && init.len() <= 255
             && init != "."
             && init != ".."
-            && init.bytes().all(|byte| byte.is_ascii_graphic() && byte != b'/');
+            && init
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && byte != b'/');
         if !file_name {
             return Err(refused(format!(
                 "isolation enclosure_inits names {init:?}, which is not an executable file name"
             )));
         }
     }
-    if let Some(reason) = policy.host_lifetime_bound.as_ref().and_then(|bound| bound.refusal()) {
+    if let Some(reason) = policy
+        .host_lifetime_bound
+        .as_ref()
+        .and_then(|bound| bound.refusal())
+    {
         return Err(refused(format!("isolation {reason}")));
     }
     let scoped = policy.required_process_scope_capabilities();
     match &policy.process_scopes {
-        IsolationProcessScopePolicy::Unconfigured {} if !scoped.is_empty() => Err(refused(format!(
-            "isolation requires per-scope capabilities {} but process scopes are unconfigured",
-            scoped
-                .iter()
-                .map(|capability| capability.capability_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        IsolationProcessScopePolicy::Unconfigured {} if !scoped.is_empty() => {
+            Err(refused(format!(
+                "isolation requires per-scope capabilities {} but process scopes are unconfigured",
+                scoped
+                    .iter()
+                    .map(|capability| capability.capability_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
         IsolationProcessScopePolicy::Required { .. } => {
             for capability in [
                 lillux::ProcessScopeCapability::Termination,
@@ -6750,7 +6775,7 @@ fn read_regular_file_bytes_limited(
 fn read_regular_file_handle_limited(
     kind: &str,
     path: &Path,
-    mut file: std::fs::File,
+    file: std::fs::File,
     max_bytes: u64,
 ) -> Result<(Vec<u8>, lillux::OpenRegularFileObservation), EngineError> {
     let observation = lillux::observe_open_regular_file(&file).map_err(|error| {
@@ -6766,7 +6791,7 @@ fn read_regular_file_handle_limited(
             observation.size()
         )));
     }
-    let content = lillux::read_open_regular_file_stable_bounded(&mut file, &observation, max_bytes)
+    let content = lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
         .map_err(|error| refused(format!("{kind} {} cannot be read: {error}", path.display())))?;
     Ok((content, observation))
 }
@@ -7952,17 +7977,21 @@ mod tests {
             content_hash: lillux::sha256_hex(b"data"),
         };
         assert!(retain_original_prepared_command(None, &target).is_err());
-        assert!(retain_original_prepared_command(
-            Some(IsolationCommandAuthorityRef::Revalidate(&identity)),
-            &target,
-        ).is_err());
+        assert!(
+            retain_original_prepared_command(
+                Some(IsolationCommandAuthorityRef::Revalidate(&identity)),
+                &target,
+            )
+            .is_err()
+        );
         assert!(target.file_identity().is_ok());
     }
 
     #[cfg(target_os = "linux")]
     fn original_retention_control_command() -> IsolationDescriptorBoundCommand {
         let bytes = b"original command retention component control";
-        let executable = lillux::sealed_executable_memfd(c"original-command-control", bytes).unwrap();
+        let executable =
+            lillux::sealed_executable_memfd(c"original-command-control", bytes).unwrap();
         let file_identity = descriptor_file_identity(&executable).unwrap();
         IsolationDescriptorBoundCommand::new(
             IsolationVerifiedCode {
@@ -7980,10 +8009,13 @@ mod tests {
         let command = original_retention_control_command();
         let replacement = original_retention_control_command();
         assert_eq!(command.identity(), replacement.identity());
-        assert!(retain_original_prepared_command(
-            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
-            replacement.executable(),
-        ).is_err());
+        assert!(
+            retain_original_prepared_command(
+                Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+                replacement.executable(),
+            )
+            .is_err()
+        );
         assert!(command.executable().file_identity().is_ok());
         assert!(replacement.executable().file_identity().is_ok());
     }
@@ -7995,14 +8027,18 @@ mod tests {
         let retained = retain_original_prepared_command(
             Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
             command.executable(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(retained.same_binding_as(&command.clone().into()).unwrap());
         let before = command.file_identity();
         drop(command);
         let IsolationAdmittedCommand::DescriptorBound(command) = retained else {
             panic!("retention changed command variant");
         };
-        assert_eq!(descriptor_file_identity(command.executable()).unwrap(), before);
+        assert_eq!(
+            descriptor_file_identity(command.executable()).unwrap(),
+            before
+        );
         validate_descriptor_bound_command(&command).unwrap();
     }
 
@@ -8012,21 +8048,32 @@ mod tests {
         let command = original_retention_control_command();
         let root_a = tempfile::tempdir().unwrap();
         let root_b = tempfile::tempdir().unwrap();
-        let root_a = lillux::PinnedDirectory::open(root_a.path()).unwrap().unwrap();
-        let root_b = lillux::PinnedDirectory::open(root_b.path()).unwrap().unwrap();
+        let root_a = lillux::PinnedDirectory::open(root_a.path())
+            .unwrap()
+            .unwrap();
+        let root_b = lillux::PinnedDirectory::open(root_b.path())
+            .unwrap()
+            .unwrap();
         let member = IsolationRealizationMemberCommand::new(
-            command.clone(), root_a.identity().unwrap(), "/runtime/selected".into(),
+            command.clone(),
+            root_a.identity().unwrap(),
+            "/runtime/selected".into(),
         );
         let retained = retain_original_prepared_command(
             Some(IsolationCommandAuthorityRef::RealizationMember(&member)),
             command.executable(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(retained.same_binding_as(&member.clone().into()).unwrap());
         let other_root = IsolationRealizationMemberCommand::new(
-            command.clone(), root_b.identity().unwrap(), "/runtime/selected".into(),
+            command.clone(),
+            root_b.identity().unwrap(),
+            "/runtime/selected".into(),
         );
         let other_destination = IsolationRealizationMemberCommand::new(
-            command, root_a.identity().unwrap(), "/runtime/substituted".into(),
+            command,
+            root_a.identity().unwrap(),
+            "/runtime/substituted".into(),
         );
         assert!(!retained.same_binding_as(&other_root.into()).unwrap());
         assert!(!retained.same_binding_as(&other_destination.into()).unwrap());
@@ -8042,30 +8089,40 @@ mod tests {
     fn original_prepared_tree_refuses_substitution_and_retains_live_root() {
         let source = tempfile::tempdir().unwrap();
         let foreign = tempfile::tempdir().unwrap();
-        let root = lillux::PinnedDirectory::open(source.path()).unwrap().unwrap();
-        let other = lillux::PinnedDirectory::open(foreign.path()).unwrap().unwrap();
+        let root = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let other = lillux::PinnedDirectory::open(foreign.path())
+            .unwrap()
+            .unwrap();
         let member: IsolationAdmittedCommand = IsolationRealizationMemberCommand::new(
             original_retention_control_command(),
             root.identity().unwrap(),
             "/runtime/selected".into(),
-        ).into();
+        )
+        .into();
         let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
-            source.path().into(), "/runtime/selected".into(),
+            source.path().into(),
+            "/runtime/selected".into(),
             root.inherited_descriptor_authority().unwrap(),
         );
         let replacement = IsolationReadOnlyMountAuthority::new_execution_runtime(
-            foreign.path().into(), "/runtime/selected".into(),
+            foreign.path().into(),
+            "/runtime/selected".into(),
             other.inherited_descriptor_authority().unwrap(),
         );
         let wrong_destination = IsolationReadOnlyMountAuthority::new_execution_runtime(
-            source.path().into(), "/runtime/other".into(),
+            source.path().into(),
+            "/runtime/other".into(),
             root.inherited_descriptor_authority().unwrap(),
         );
         assert!(retain_original_prepared_tree(&member, &[]).is_err());
         assert!(retain_original_prepared_tree(&member, &[replacement]).is_err());
         assert!(retain_original_prepared_tree(&member, &[wrong_destination]).is_err());
         let identity = root.identity().unwrap();
-        let retained = retain_original_prepared_tree(&member, &[mount]).unwrap().unwrap();
+        let retained = retain_original_prepared_tree(&member, &[mount])
+            .unwrap()
+            .unwrap();
         drop(root);
         assert_eq!(retained.directory_identity().unwrap(), identity);
     }
@@ -10821,7 +10878,10 @@ mod tests {
         // Required scopes cannot run without termination and recovery, so
         // the declared floor must name both; quiescence stays optional.
         let error = IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap_err();
-        assert!(error.to_string().contains("need termination:scope"), "{error}");
+        assert!(
+            error.to_string().contains("need termination:scope"),
+            "{error}"
+        );
         scoped_without_sandbox.requires_capabilities =
             vec!["recovery:scope".into(), "termination:scope".into()];
         IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
@@ -10843,35 +10903,73 @@ mod tests {
             )
         };
         let mut alternatives = policy.clone();
-        alternatives.requires_capabilities =
-            vec![any_of(&["accounting", "residency:swap_absent"]), "time".into()];
+        alternatives.requires_capabilities = vec![
+            any_of(&["accounting", "residency:swap_absent"]),
+            "time".into(),
+        ];
         IsolationRuntime::validate_policy(&alternatives).unwrap();
         let value = serde_json::to_value(&alternatives).unwrap();
         assert_eq!(
             value["requires_capabilities"],
             serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
         );
-        assert_eq!(serde_json::from_value::<IsolationPolicy>(value).unwrap(), alternatives);
+        assert_eq!(
+            serde_json::from_value::<IsolationPolicy>(value).unwrap(),
+            alternatives
+        );
         for (floor, refusal) in [
-            (vec![any_of(&["accounting"]), "time".into()], "at least two names"),
-            (vec![any_of(&["residency:swap_absent", "accounting"])], "at least two names"),
-            (vec![any_of(&["accounting", "termination:scope"])], "per-scope capability"),
-            (vec![any_of(&["accounting", "limits:scope"])], "per-scope capability"),
-            (vec!["residency:swap_absent".into()], "stronger residency basis does not meet"),
+            (
+                vec![any_of(&["accounting"]), "time".into()],
+                "at least two names",
+            ),
+            (
+                vec![any_of(&["residency:swap_absent", "accounting"])],
+                "at least two names",
+            ),
+            (
+                vec![any_of(&["accounting", "termination:scope"])],
+                "per-scope capability",
+            ),
+            (
+                vec![any_of(&["accounting", "limits:scope"])],
+                "per-scope capability",
+            ),
+            (
+                vec!["residency:swap_absent".into()],
+                "stronger residency basis does not meet",
+            ),
             (
                 vec![any_of(&["residency:locked", "residency:swap_absent"])],
                 "stronger residency basis does not meet",
             ),
-            (vec!["accounting".into(), any_of(&["accounting", "residency:swap_absent"])], "more than once"),
-            (vec!["time".into(), any_of(&["accounting", "residency:swap_absent"])], "sorted and unique"),
+            (
+                vec![
+                    "accounting".into(),
+                    any_of(&["accounting", "residency:swap_absent"]),
+                ],
+                "more than once",
+            ),
+            (
+                vec![
+                    "time".into(),
+                    any_of(&["accounting", "residency:swap_absent"]),
+                ],
+                "sorted and unique",
+            ),
         ] {
             let mut invalid = policy.clone();
             invalid.requires_capabilities = floor;
-            let error = IsolationRuntime::validate_policy(&invalid).unwrap_err().to_string();
+            let error = IsolationRuntime::validate_policy(&invalid)
+                .unwrap_err()
+                .to_string();
             assert!(error.contains(refusal), "{refusal}: {error}");
         }
         let mut inits = scoped_without_sandbox.clone();
-        inits.enclosure_inits = vec!["catatonit".to_owned(), "dumb-init".to_owned(), "tini".to_owned()];
+        inits.enclosure_inits = vec![
+            "catatonit".to_owned(),
+            "dumb-init".to_owned(),
+            "tini".to_owned(),
+        ];
         IsolationRuntime::validate_policy(&inits).unwrap();
         inits.enclosure_inits.reverse();
         assert!(IsolationRuntime::validate_policy(&inits).is_err());
@@ -10885,14 +10983,27 @@ mod tests {
         IsolationRuntime::validate_policy(&bounded).unwrap();
         let value = serde_json::to_value(&bounded).unwrap();
         assert_eq!(value["host_lifetime_bound"]["seconds"], 86_400);
-        assert_eq!(serde_json::from_value::<IsolationPolicy>(value).unwrap(), bounded);
-        assert!(serde_json::to_value(&scoped_without_sandbox).unwrap().get("host_lifetime_bound").is_none());
+        assert_eq!(
+            serde_json::from_value::<IsolationPolicy>(value).unwrap(),
+            bounded
+        );
+        assert!(
+            serde_json::to_value(&scoped_without_sandbox)
+                .unwrap()
+                .get("host_lifetime_bound")
+                .is_none()
+        );
         bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
             provider: "render-sandbox".to_owned(),
             seconds: 0,
         });
-        let error = IsolationRuntime::validate_policy(&bounded).unwrap_err().to_string();
-        assert!(error.contains("host lifetime bound must be positive"), "{error}");
+        let error = IsolationRuntime::validate_policy(&bounded)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("host lifetime bound must be positive"),
+            "{error}"
+        );
         assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
         assert!(!scoped_without_sandbox.nested_sandbox());
         let mut value = serde_json::to_value(&policy).unwrap();
@@ -11010,7 +11121,12 @@ mod tests {
 
         // A malformed floor in one class is refused under that class's name.
         let mut unsorted = document.clone();
-        unsorted.host_classes.get_mut("hosted").unwrap().requires_capabilities.reverse();
+        unsorted
+            .host_classes
+            .get_mut("hosted")
+            .unwrap()
+            .requires_capabilities
+            .reverse();
         let error = IsolationRuntime::validate_policy_document(&unsorted)
             .unwrap_err()
             .to_string();
@@ -11033,7 +11149,10 @@ mod tests {
         let error = IsolationRuntime::validate_policy_document(&previous)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("unsupported node isolation policy version 9"), "{error}");
+        assert!(
+            error.contains("unsupported node isolation policy version 9"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -11062,10 +11181,20 @@ mod tests {
         let policy = IsolationPolicy::disabled_for_authoring();
         let mut declared = policy.clone();
         declared.requires_capabilities = vec![
-            spec(None, &["accounting", "residency:swap_absent"], &["measured"], &[]),
+            spec(
+                None,
+                &["accounting", "residency:swap_absent"],
+                &["measured"],
+                &[],
+            ),
             spec(Some("storage:durable_root"), &[], &[], &["host"]),
             spec(Some("termination:process_group"), &[], &["trusted"], &[]),
-            spec(Some("time"), &[], &["measured", "provider_attested"], &["host", "provider_env"]),
+            spec(
+                Some("time"),
+                &[],
+                &["measured", "provider_attested"],
+                &["host", "provider_env"],
+            ),
         ];
         IsolationRuntime::validate_policy(&declared).unwrap();
         let value = serde_json::to_value(&declared).unwrap();
@@ -11091,10 +11220,12 @@ mod tests {
             ]))
             .unwrap();
         assert_eq!(object_form, declared.requires_capabilities);
-        assert!(serde_json::from_value::<Vec<lillux::process_control::CapabilityRequirement>>(
-            serde_json::json!([{"name": "time", "grade": "measured"}])
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<Vec<lillux::process_control::CapabilityRequirement>>(
+                serde_json::json!([{"name": "time", "grade": "measured"}])
+            )
+            .is_err()
+        );
 
         for (floor, refusal) in [
             (
@@ -11106,7 +11237,12 @@ mod tests {
                 "cannot judge",
             ),
             (
-                vec![spec(Some("time"), &[], &["provider_attested", "measured"], &[])],
+                vec![spec(
+                    Some("time"),
+                    &[],
+                    &["provider_attested", "measured"],
+                    &[],
+                )],
                 "accept sorted and unique",
             ),
             (
@@ -11135,7 +11271,10 @@ mod tests {
                 "requires_capabilities",
             ),
             (
-                vec!["accounting".into(), spec(Some("accounting"), &[], &["trusted"], &[])],
+                vec![
+                    "accounting".into(),
+                    spec(Some("accounting"), &[], &["trusted"], &[]),
+                ],
                 "more than once",
             ),
         ] {
@@ -11181,7 +11320,10 @@ mod tests {
         let error = IsolationRuntime::validate_policy(&floor_only)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("requires pid_namespace_nested proc"), "{error}");
+        assert!(
+            error.contains("requires pid_namespace_nested proc"),
+            "{error}"
+        );
         assert!(!floor_only.nested_sandbox());
 
         let mut nested = floor_only.clone();
@@ -11207,7 +11349,10 @@ mod tests {
         let error = IsolationRuntime::validate_policy(&unscoped)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("requires required process scopes"), "{error}");
+        assert!(
+            error.contains("requires required process scopes"),
+            "{error}"
+        );
 
         let mut unenforced = nested.clone();
         unenforced.mode = IsolationMode::Disabled;
@@ -11234,7 +11379,12 @@ mod tests {
             ])
         );
         policy.requires_capabilities = vec![
-            spec(Some("quiescence:scope"), &[], &["measured"], &["host_service"]),
+            spec(
+                Some("quiescence:scope"),
+                &[],
+                &["measured"],
+                &["host_service"],
+            ),
             "recovery:scope".into(),
             "termination:scope".into(),
         ];

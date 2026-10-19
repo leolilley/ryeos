@@ -141,7 +141,7 @@ fn ordinary_main(
     );
     if let Some(encoded) = outer_challenge {
         ensure!(
-            std::env::args_os().skip(1).next().is_none(),
+            std::env::args_os().nth(1).is_none(),
             "consumer outer environment conflicts with CLI arguments"
         );
         return ryeos_codex_runtime_verifier::consumer_outer_owner::run_startup(
@@ -150,7 +150,7 @@ fn ordinary_main(
     }
     if let Some(encoded) = native_challenge {
         ensure!(
-            std::env::args_os().skip(1).next().is_none(),
+            std::env::args_os().nth(1).is_none(),
             "consumer native environment conflicts with CLI arguments"
         );
         return native_guest::run_production_probe(

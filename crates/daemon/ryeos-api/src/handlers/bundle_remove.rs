@@ -48,7 +48,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // always acquired before the per-name transaction lock.
     let registry_lock =
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
-    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, &req.name)?;
+    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+        &registry_lock,
+        &req.name,
+    )?;
     let recovered = match transaction.reconcile(state.identity.signing_key()) {
         Ok(recovered) => recovered,
         Err(error) => {
@@ -226,12 +229,12 @@ fn admit_prospective_remove(
         trust_store: node_trust_store,
     }
     .load_full(
-            &config_table,
-            &prospective_records,
-            command_registration,
-            &policy_table,
-        )
-        .context("prospective removal would fail full node-config boot")?;
+        &config_table,
+        &prospective_records,
+        command_registration,
+        &policy_table,
+    )
+    .context("prospective removal would fail full node-config boot")?;
     prospective_validator
         .validate(&snapshot)
         .context("prospective removal would fail composed node-config admission")?;

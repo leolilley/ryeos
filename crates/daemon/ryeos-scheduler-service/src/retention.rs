@@ -80,8 +80,10 @@ impl SchedulerService {
         }
         // Successful task drain must leave this exact gate immediately free.
         // Contention is retained unresolved work, not a new waiting interval.
-        let _guard = self.runtime_gate.clone().try_write_owned()
-            .map_err(|_| anyhow::anyhow!("scheduler shutdown gate remains occupied after drain"))?;
+        let _guard =
+            self.runtime_gate.clone().try_write_owned().map_err(|_| {
+                anyhow::anyhow!("scheduler shutdown gate remains occupied after drain")
+            })?;
         self.db
             .close()
             .map_err(anyhow::Error::new)
@@ -96,13 +98,24 @@ impl SchedulerService {
     /// remaining service state for the caller to restore into AppState.
     pub fn into_native_finalization_owner(
         self: Arc<Self>,
-    ) -> std::result::Result<ryeos_scheduler::db::SchedulerNativeFinalizationOwner, (Arc<Self>, anyhow::Error)> {
+    ) -> std::result::Result<
+        ryeos_scheduler::db::SchedulerNativeFinalizationOwner,
+        (Arc<Self>, anyhow::Error),
+    > {
         if !self.closed_for_finalization.load(Ordering::Acquire) {
-            return Err((self, anyhow::anyhow!("scheduler service has not completed its shutdown close")));
+            return Err((
+                self,
+                anyhow::anyhow!("scheduler service has not completed its shutdown close"),
+            ));
         }
         let service = match Arc::try_unwrap(self) {
             Ok(service) => service,
-            Err(service) => return Err((service, anyhow::anyhow!("scheduler service still has active aliases"))),
+            Err(service) => {
+                return Err((
+                    service,
+                    anyhow::anyhow!("scheduler service still has active aliases"),
+                ));
+            }
         };
         let Self {
             app_root,
@@ -118,19 +131,41 @@ impl SchedulerService {
         } = service;
         let db = match Arc::try_unwrap(db) {
             Ok(db) => db,
-            Err(db) => return Err((Arc::new(Self {
-                app_root, runtime_directory, runtime_identity, db, runtime_gate,
-                identity, trust_store, reload_tx, project_recovery_pending,
-                closed_for_finalization,
-            }), anyhow::anyhow!("scheduler database still has active aliases"))),
+            Err(db) => {
+                return Err((
+                    Arc::new(Self {
+                        app_root,
+                        runtime_directory,
+                        runtime_identity,
+                        db,
+                        runtime_gate,
+                        identity,
+                        trust_store,
+                        reload_tx,
+                        project_recovery_pending,
+                        closed_for_finalization,
+                    }),
+                    anyhow::anyhow!("scheduler database still has active aliases"),
+                ));
+            }
         };
         match db.into_native_finalization() {
             Ok(owner) => Ok(owner),
-            Err((db, error)) => Err((Arc::new(Self {
-                app_root, runtime_directory, runtime_identity, db: Arc::new(db), runtime_gate,
-                identity, trust_store, reload_tx, project_recovery_pending,
-                closed_for_finalization,
-            }), error)),
+            Err((db, error)) => Err((
+                Arc::new(Self {
+                    app_root,
+                    runtime_directory,
+                    runtime_identity,
+                    db: Arc::new(db),
+                    runtime_gate,
+                    identity,
+                    trust_store,
+                    reload_tx,
+                    project_recovery_pending,
+                    closed_for_finalization,
+                }),
+                error,
+            )),
         }
     }
 

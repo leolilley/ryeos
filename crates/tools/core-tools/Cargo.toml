@@ -61,3 +61,6 @@ test-support = []
 [[bin]]
 name = "ryeos-core-tools"
 path = "src/bin/ryeos-core-tools.rs"
+
+[lints]
+workspace = true

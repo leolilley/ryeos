@@ -958,14 +958,18 @@ pub fn path_pin_open_regular_file(file: &File) -> Result<File> {
     #[cfg(target_os = "linux")]
     {
         let expected = observe_open_file_identity(file)?;
-        ensure!(file.metadata()?.is_file(), "path pin source is not a regular file");
+        ensure!(
+            file.metadata()?.is_file(),
+            "path pin source is not a regular file"
+        );
         let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
             .context("descriptor pin path")?;
         // SAFETY: a valid NUL-terminated path; the returned descriptor is
         // owned exactly once below.
         let descriptor = unsafe { libc::open(source.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
         if descriptor < 0 {
-            return Err(std::io::Error::last_os_error()).context("pin open regular file as path-only");
+            return Err(std::io::Error::last_os_error())
+                .context("pin open regular file as path-only");
         }
         // SAFETY: `descriptor` is a newly opened descriptor owned by nobody else.
         let pin = unsafe { File::from_raw_fd(descriptor) };
@@ -2845,8 +2849,10 @@ impl PinnedDirectoryLock {
     pub fn observe_retained_identity(&self) -> Result<OpenFileIdentity> {
         let identity = observe_open_file_identity(&self.inner.file)?;
         #[cfg(unix)]
-        ensure!(identity.file_type == libc::S_IFDIR,
-            "retained namespace lock descriptor is not a directory");
+        ensure!(
+            identity.file_type == libc::S_IFDIR,
+            "retained namespace lock descriptor is not a directory"
+        );
         Ok(identity)
     }
 
@@ -6567,7 +6573,13 @@ impl PinnedDirectory {
         mode: u32,
         purpose: TempPurpose,
     ) -> Result<()> {
-        self.atomic_write_if_same(name, expected.map(|entry| &entry.file), bytes, mode, purpose)
+        self.atomic_write_if_same(
+            name,
+            expected.map(|entry| &entry.file),
+            bytes,
+            mode,
+            purpose,
+        )
     }
 
     /// Stage complete replacement bytes inside this exact directory, then
@@ -7320,7 +7332,9 @@ impl PinnedDirectory {
                         disposition: PlannedQuarantineDisposition::DurabilityUncertain,
                         stage: PlannedQuarantineStage::QuarantinedOriginal,
                         quarantine_name: quarantine.to_os_string(),
-                        error: anyhow::anyhow!("injected failure after planned move, before unlink"),
+                        error: anyhow::anyhow!(
+                            "injected failure after planned move, before unlink"
+                        ),
                     });
                 }
             }
@@ -9053,7 +9067,10 @@ mod tests {
         let file = File::open(&original).unwrap();
         assert_eq!(
             observe_open_file_path(&file).unwrap(),
-            OpenedPath { path: original.clone(), unlinked: false }
+            OpenedPath {
+                path: original.clone(),
+                unlinked: false
+            }
         );
         assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 1);
 
@@ -9061,13 +9078,19 @@ mod tests {
         std::fs::rename(&original, &renamed).unwrap();
         assert_eq!(
             observe_open_file_path(&file).unwrap(),
-            OpenedPath { path: renamed.clone(), unlinked: false }
+            OpenedPath {
+                path: renamed.clone(),
+                unlinked: false
+            }
         );
 
         std::fs::remove_file(&renamed).unwrap();
         assert_eq!(
             observe_open_file_path(&file).unwrap(),
-            OpenedPath { path: renamed, unlinked: true }
+            OpenedPath {
+                path: renamed,
+                unlinked: true
+            }
         );
         assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 0);
     }
@@ -9090,8 +9113,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("input"), b"pinned source").unwrap();
         let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
-        let pinned = parent.open_pinned_regular(OsStr::new("input"), false)
-            .unwrap().unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("input"), false)
+            .unwrap()
+            .unwrap();
         let original_fd = pinned.file.as_raw_fd();
 
         let mut transferred = pinned.into_owned_close_descriptor();
@@ -10390,7 +10415,10 @@ mod tests {
         retained.ensure_protects(&directory).unwrap();
         let observed = retained.observe_retained_identity().unwrap();
         let original = directory.identity().unwrap();
-        assert_eq!((observed.device, observed.inode), (original.containing_device, original.inode));
+        assert_eq!(
+            (observed.device, observed.inode),
+            (original.containing_device, original.inode)
+        );
         let same = guard.observe_retained_identity().unwrap();
         assert_eq!((same.device, same.inode), (observed.device, observed.inode));
         drop(guard);
@@ -11501,8 +11529,12 @@ mod original_removal_step_control {
         let tmp = tempfile::tempdir().unwrap();
         let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let child = parent.create_child(OsStr::new("child"), 0o700).unwrap();
-        let receipt = Arc::new(parent.remove_empty_child_if_same(OsStr::new("child"), &child)
-            .unwrap().unwrap());
+        let receipt = Arc::new(
+            parent
+                .remove_empty_child_if_same(OsStr::new("child"), &child)
+                .unwrap()
+                .unwrap(),
+        );
         let parent_fd = receipt.parent.directory.as_raw_fd();
         let child_fd = receipt.child.directory.as_raw_fd();
         let alias = Arc::clone(&receipt);
@@ -11525,8 +11557,10 @@ mod original_removal_step_control {
         let tmp = tempfile::tempdir().unwrap();
         let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let child = parent.create_child(OsStr::new("child"), 0o700).unwrap();
-        let mut receipt = parent.remove_empty_child_if_same(OsStr::new("child"), &child)
-            .unwrap().unwrap();
+        let mut receipt = parent
+            .remove_empty_child_if_same(OsStr::new("child"), &child)
+            .unwrap()
+            .unwrap();
         let parent_fd = receipt.parent.directory.as_raw_fd();
         let child_fd = receipt.child.directory.as_raw_fd();
         receipt.process = std::process::id().wrapping_add(1);
@@ -11716,15 +11750,30 @@ mod unlink_regular_if_same_tests {
         let tmp = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         std::fs::write(tmp.path().join("debris"), b"one").unwrap();
-        let pin = directory.open_mount_entry(OsStr::new("debris")).unwrap().unwrap();
+        let pin = directory
+            .open_mount_entry(OsStr::new("debris"))
+            .unwrap()
+            .unwrap();
         // A replacement at the same name is refused and kept.
         std::fs::rename(tmp.path().join("debris"), tmp.path().join("moved")).unwrap();
         std::fs::write(tmp.path().join("debris"), b"two").unwrap();
-        assert!(directory.unlink_regular_if_same(OsStr::new("debris"), &pin).is_err());
+        assert!(
+            directory
+                .unlink_regular_if_same(OsStr::new("debris"), &pin)
+                .is_err()
+        );
         assert_eq!(std::fs::read(tmp.path().join("debris")).unwrap(), b"two");
         // The expected inode is unlinked; a second call finds it absent.
-        assert!(directory.unlink_regular_if_same(OsStr::new("moved"), &pin).unwrap());
+        assert!(
+            directory
+                .unlink_regular_if_same(OsStr::new("moved"), &pin)
+                .unwrap()
+        );
         assert!(!tmp.path().join("moved").exists());
-        assert!(!directory.unlink_regular_if_same(OsStr::new("moved"), &pin).unwrap());
+        assert!(
+            !directory
+                .unlink_regular_if_same(OsStr::new("moved"), &pin)
+                .unwrap()
+        );
     }
 }

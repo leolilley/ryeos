@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-15T20:11:12Z:d30da7730b2ab3de94dab818b4b59a6b66ed91e417791850dcdf6e32b3d3cbe8:HbEvXvAuNW42oJNbsCzWfJ4NXonuL0NohleEnf1PKL7uU8AjR//HLiqaOCtW5sYcdGWe/9isSE6kt5cXi0StAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T04:40:31Z:3a248e271fa5e619c82595a360b0adcc8e2c6bf0c3d12cbc343a4538a02b808d:m+QwCsEB+uGFeV5N+W63uoemNyz8izdjoosWHGmH5Dh1kgDimimlokgymcYn+XyL2YIX5tXUrbkQ9zhpNTSjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """RyeOS Modal lease facade: fixed HTTP routes over Modal sandboxes.
 
 One ``asgi_app`` behind Modal proxy auth serves eight fixed POST paths. The only
@@ -371,6 +371,27 @@ def _read(sandbox, *argv: str) -> tuple[int, str]:
     return process.wait(), text if isinstance(text, str) else bytes(text).decode('utf-8', 'replace')
 
 
+# Fixed guest scripts: the target path is only ever a positional argument, and
+# the bytes travel raw over exec stdin because Modal refuses the sandbox file
+# API.
+_WRITE_SCRIPT = 'cat > "$1"'
+_APPEND_SCRIPT = 'cat >> "$1"'
+_STDIN_PIECE_BYTES = 4 * 1024 * 1024
+
+
+def _write(sandbox, path: str, data: bytes, append: bool = False) -> None:
+    """Write (or append) bytes to a fixed guest path over exec stdin."""
+    script = _APPEND_SCRIPT if append else _WRITE_SCRIPT
+    process = sandbox.exec('sh', '-c', script, 'sh', path)
+    for start in range(0, len(data), _STDIN_PIECE_BYTES):
+        process.stdin.write(data[start:start + _STDIN_PIECE_BYTES])
+        process.stdin.drain()
+    process.stdin.write_eof()
+    process.stdin.drain()
+    if process.wait() != 0:
+        raise Refusal('guest_step_failed', 'fixed step write failed')
+
+
 def _guarded(operation: str, action: Callable[[], tuple[int, dict]]) -> tuple[int, dict]:
     try:
         return action()
@@ -532,8 +553,7 @@ def handle_upload(body: Any) -> tuple[int, dict]:
         if UPLOAD_TAG in tags or _run(sandbox, 'mkdir', UPLOAD_CLAIM) != 0:
             raise Refusal('upload_already_claimed', 'the one upload for this lease was already claimed')
         tags = _set_tags(sandbox, tags, **{UPLOAD_TAG: CLAIMED})
-        with sandbox.open(GUEST_ENTRYPOINT, 'wb') as handle:
-            handle.write(data)
+        _write(sandbox, GUEST_ENTRYPOINT, data)
         _step(sandbox, 'chmod', '0755', GUEST_ENTRYPOINT)
         _step(sandbox, 'mkdir', UPLOAD_DONE)
         _set_tags(sandbox, tags, **{UPLOAD_TAG: expected})
@@ -654,8 +674,7 @@ def handle_stage(body: Any) -> tuple[int, dict]:
             raise
         # A seal or run claim taken after the checks above must not be missed.
         _refuse_if_raced(sandbox, slot)
-        with sandbox.open(_stage_file(slot), 'ab') as handle:
-            handle.write(data)
+        _write(sandbox, _stage_file(slot), data, append=True)
         _refuse_if_raced(sandbox, slot)
         if _stage_size(sandbox, slot) != offset + len(data):
             raise Refusal('guest_step_failed', 'the slot size after the append is not the expected one')
@@ -736,8 +755,7 @@ def handle_run_once(body: Any) -> tuple[int, dict]:
         if _run(sandbox, 'mkdir', RUN_CLAIM) != 0:
             raise Refusal('run_once_already_claimed', 'the one run for this lease was already claimed')
         tags = _set_tags(sandbox, tags, **{RUN_TAG: CLAIMED})
-        with sandbox.open(RUN_STDIN, 'wb') as handle:
-            handle.write(stdin)
+        _write(sandbox, RUN_STDIN, stdin)
         _step(sandbox, 'mkdir', RUN_RELEASE)
         digest = hashlib.sha256(stdin).hexdigest()
         _set_tags(sandbox, tags, **{RUN_TAG: digest})

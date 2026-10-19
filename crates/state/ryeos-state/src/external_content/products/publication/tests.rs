@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::TrustStore;
 use crate::objects::{
     EXTERNAL_CONTENT_TREE_SCHEMA, EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
     EXTERNAL_LARGE_CONTENT_SCHEMA, ExternalContentManifestEntry, ExternalContentManifestEntryKind,
@@ -8,7 +9,6 @@ use crate::objects::{
     ExternalLargeContentManifestObject,
 };
 use crate::signer::TestSigner;
-use crate::TrustStore;
 
 fn declaration() -> super::super::ProductDeclaration {
     super::super::ProductDeclaration {

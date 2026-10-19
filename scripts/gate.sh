@@ -196,6 +196,8 @@ if [[ "$crash_qualification_only" != "1" ]]; then
             for selection in "${selected_packages[@]}"; do
                 # Cargo accepts package globs and name@version selectors.
                 # Match their name component; forward the original unchanged.
+                # The unquoted pattern is deliberate: selections may be globs.
+                # shellcheck disable=SC2254
                 case "$package" in ${selection%@*}) package_selected=1 ;; esac
             done
         fi

@@ -568,7 +568,10 @@ mod tests {
     }
 
     fn tree_paths(tree: &FileTree) -> Vec<String> {
-        tree.entries.iter().map(|entry| entry.path.clone()).collect()
+        tree.entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
     }
 
     #[test]
@@ -714,8 +717,7 @@ mod tests {
             std::fs::write(temporary.path().join(format!("f{index}")), b"").expect("write");
         }
 
-        let listing =
-            list_directory(&pinned(temporary.path()), 3, 1_000).expect("bounded listing");
+        let listing = list_directory(&pinned(temporary.path()), 3, 1_000).expect("bounded listing");
 
         assert_eq!(listing.entries.len(), 3);
         assert!(listing.truncated);

@@ -25,7 +25,6 @@ use axum::routing::post;
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use lillux::time::{Duration, MonotonicTimer};
-use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_app::runtime_db::{NewCredentialProfile, NewCredentialProfileReservation};
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord, NodeIdentitySigner, StateStore};
 use ryeos_app::test_support::TestStateStore;
@@ -47,6 +46,7 @@ use ryeos_app::worker_handoff::{
     WorkerPlacementAdoptRequest, WorkerPlacementAdoptResult, WorkerSessionHandoffJobOperation,
     WorkerSessionHandoffProgress,
 };
+use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_state::{
     FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt,
     SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptState, SyncJobState,
@@ -655,8 +655,7 @@ fn opt_in_trusted_portable_session(state_path: &Path, node: &SigningKey) -> Resu
     );
     let mut policy: serde_json::Value = serde_yaml::from_str(&body)?;
     anyhow::ensure!(
-        policy.pointer("/policy/host_classes/local/mode")
-            == Some(&serde_json::json!("disabled"))
+        policy.pointer("/policy/host_classes/local/mode") == Some(&serde_json::json!("disabled"))
             && policy.pointer("/policy/host_classes/local/trusted_process_group_sessions")
                 == Some(&serde_json::json!(false)),
         "trusted lost-ACK fixture requires an unmodified disabled-isolation seed"
@@ -2447,8 +2446,10 @@ fn assert_retry_disposition(
     )?;
 
     let cut_attempts = combined_attempts(at_cut)?;
-    let before_attempts =
-        combined_job_attempts(before_retry.source_job.as_ref(), before_retry.target_job.as_ref())?;
+    let before_attempts = combined_job_attempts(
+        before_retry.source_job.as_ref(),
+        before_retry.target_job.as_ref(),
+    )?;
     let after_attempts = combined_attempts(after_retry)?;
     assert_attempt_ledger_transition("startup recovery", &cut_attempts, &before_attempts)?;
     assert_attempt_ledger_transition("explicit retry", &before_attempts, &after_attempts)?;
@@ -3123,7 +3124,7 @@ fn plant_target_abort_state(
     target_authority.ensure_guard(&target_guard)?;
     let target_signer = NodeIdentitySigner::from_identity(&daemon_identity(state_path)?);
     store.write_project_head_ref(
-        &project_principal_key,
+        project_principal_key,
         &target_project_hash,
         &target_project_head_hash,
         &target_signer,
@@ -3140,7 +3141,7 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
-        project_principal_key: &project_principal_key,
+        project_principal_key: project_principal_key,
         project_hash: &target_project_hash,
         target_project_head_hash: &target_project_head_hash,
     })?;
@@ -4254,10 +4255,7 @@ async fn assert_real_handoff_aborted(
 }
 
 /// [`assert_real_handoff_aborted`] for daemons that have already exited.
-fn assert_stopped_handoff_aborted(
-    handoff: &RealPortableHandoff,
-    successor_id: &str,
-) -> Result<()> {
+fn assert_stopped_handoff_aborted(handoff: &RealPortableHandoff, successor_id: &str) -> Result<()> {
     let source_store = open_daemon_state(&handoff.source.state_path)?;
     anyhow::ensure!(
         source_store.current_chain_placement_thread_id(&handoff.checkpoint.chain_root_id)?
@@ -4597,13 +4595,13 @@ fn build_handoff_measurement_record(
         link_count = link_count.saturating_add(u64::try_from(
             links.object_hashes.len() + links.blob_hashes.len() + links.large_object_hashes.len(),
         )?);
-        if let Some((schema, version)) = object_schema_version(&value) {
-            if let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
-                anyhow::ensure!(
-                    previous == version,
-                    "measured closure mixed versions for schema `{schema}`"
-                );
-            }
+        if let Some((schema, version)) = object_schema_version(&value)
+            && let Some(previous) = object_schema_versions.insert(schema.clone(), version)
+        {
+            anyhow::ensure!(
+                previous == version,
+                "measured closure mixed versions for schema `{schema}`"
+            );
         }
         total_bytes = total_bytes.saturating_add(bytes);
         largest_entry_bytes = largest_entry_bytes.max(bytes);
@@ -4704,13 +4702,13 @@ fn build_abort_payload_measurement_record(
                     + links.blob_hashes.len()
                     + links.large_object_hashes.len(),
             )?);
-            if let Some((schema, version)) = object_schema_version(&value) {
-                if let Some(previous) = object_schema_versions.insert(schema.clone(), version) {
-                    anyhow::ensure!(
-                        previous == version,
-                        "abort closure mixed versions for schema `{schema}`"
-                    );
-                }
+            if let Some((schema, version)) = object_schema_version(&value)
+                && let Some(previous) = object_schema_versions.insert(schema.clone(), version)
+            {
+                anyhow::ensure!(
+                    previous == version,
+                    "abort closure mixed versions for schema `{schema}`"
+                );
             }
         }
         if target_present.contains(&(entry.is_blob, entry.hash.as_str())) {
@@ -5553,7 +5551,8 @@ async fn qualify_source_request_case(
     await_declared_startup_recovery(case, &mut handoff).await?;
     // Between the crash cut and the final stop both daemons keep running, so
     // only RPC-exposed job evidence is read before the retry.
-    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
+    let retry_evidence_before_retry =
+        observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
     // Recovery ends with the retry response; the final stop and Store read
     // that follow are observation, not recovery.
@@ -5673,7 +5672,8 @@ async fn qualify_source_recovery_case(
     await_declared_startup_recovery(case, &mut handoff).await?;
     // Between the crash cut and the final stop both daemons keep running, so
     // only RPC-exposed job evidence is read before the retry.
-    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
+    let retry_evidence_before_retry =
+        observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
     // Recovery ends with the retry response; the final stop and Store read
     // that follow are observation, not recovery.
@@ -5754,7 +5754,8 @@ async fn qualify_target_request_case(
     await_declared_startup_recovery(case, &mut handoff).await?;
     // Between the crash cut and the final stop both daemons keep running, so
     // only RPC-exposed job evidence is read before the retry.
-    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
+    let retry_evidence_before_retry =
+        observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
     // Recovery ends with the retry response; the final stop and Store read
     // that follow are observation, not recovery.
@@ -5900,7 +5901,8 @@ async fn qualify_target_recovery_case(
     await_declared_startup_recovery(case, &mut handoff).await?;
     // Between the crash cut and the final stop both daemons keep running, so
     // only RPC-exposed job evidence is read before the retry.
-    let retry_evidence_before_retry = observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
+    let retry_evidence_before_retry =
+        observe_live_retry_jobs(&handoff, &cut_evidence.operation_id).await?;
     let (status, response) = handoff.handoff(&preflight_id).await?;
     // Recovery ends with the retry response; the final stop and Store read
     // that follow are observation, not recovery.

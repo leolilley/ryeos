@@ -30,9 +30,7 @@ pub unsafe fn take_environment_values(
 ) -> Result<Vec<(String, Zeroizing<String>)>, String> {
     let mut unique = BTreeSet::new();
     for name in names {
-        if name.is_empty()
-            || name.len() > MAX_ENVIRONMENT_NAME_BYTES
-            || name.contains(['=', '\0'])
+        if name.is_empty() || name.len() > MAX_ENVIRONMENT_NAME_BYTES || name.contains(['=', '\0'])
         {
             return Err("environment capture name is invalid".to_owned());
         }
@@ -113,9 +111,7 @@ mod imp {
                         owned.push_str(text);
                         Ok(Some(owned))
                     }
-                    Err(_) => Err(format!(
-                        "environment value for `{name}` is not UTF-8"
-                    )),
+                    Err(_) => Err(format!("environment value for `{name}` is not UTF-8")),
                 }
             }
             _ => Err(format!("environment name `{name}` occurs more than once")),

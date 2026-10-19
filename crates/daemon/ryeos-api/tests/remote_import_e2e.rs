@@ -386,8 +386,7 @@ async fn serve_scenario(
         }
         GOOD_AND_BAD => {
             let good_subject = store_subject_with_root(&state, "T-remote-import-partial-good");
-            let mut bad_subject =
-                store_item_subject_with_blob_content(&state, b"bad dependency 0");
+            let mut bad_subject = store_item_subject_with_blob_content(&state, b"bad dependency 0");
             for index in 1..64 {
                 if good_subject < bad_subject {
                     break;

@@ -120,6 +120,28 @@ hand_app_root_to_node_account() {
   done < <(find "$app_root" -xdev ! -type d \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) -links +1 -print0)
   find "$app_root" -xdev \( ! -user "$NODE_UID" -o ! -group "$NODE_GID" \) \
     \( -type d -o -links 1 \) -exec chown -h "$NODE_UID:$NODE_GID" -- {} +
+  # The node pins directories under the app root as owner-private and refuses
+  # any mode other than exactly 0700. A directory made under the default
+  # umask is 0755, and one made under a platform volume that sets the group
+  # bit is inherited by every directory created beneath it, so the five-digit
+  # mode clears the set-id bits as well as the group and other access.
+  chmod 00700 -- "$app_root"
+  if [[ "$(stat -c %a -- "$app_root")" != 700 ]]; then
+    echo "[entrypoint] refusing to start: $app_root could not be set to owner-private mode 0700" >&2
+    return 1
+  fi
+}
+
+# Log the owner, mode and name of each existing path given, so a refusal that
+# turns on a directory mode is explained by the service log alone. A missing
+# path is skipped, never an error.
+log_path_modes() {
+  local path
+  for path in "$@"; do
+    if [[ -e "$path" ]]; then
+      echo "[entrypoint] $(stat -c '%a %U:%G %n' -- "$path" 2>&1 || true)"
+    fi
+  done
 }
 
 # Re-execute this script as the node account before any ryeos command. As
@@ -153,6 +175,9 @@ run_as_node_account() {
   chown -h "$NODE_UID:$NODE_GID" /data
   hand_app_root_to_node_account /data/app
   echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
+  log_path_modes /data /data/app
+  echo "[entrypoint] umask $(umask)"
+  echo "[entrypoint] /data mount: $(awk '$2=="/data" {print $1, $3, $4}' /proc/self/mounts 2>&1 || true)"
   local -a cap_args=(--inh-caps=-all)
   # Some hosted sandboxes refuse changes to the capability bounding set. The
   # uid change already empties the effective and permitted sets, and
@@ -442,6 +467,7 @@ main() {
   if [[ ! -e /data/app/.ai/bundles && ! -L /data/app/.ai/bundles ]]; then
     echo "[entrypoint] installed bundle generation absent; seeding from substrate image"
     collect_baked_publisher_trust_args /opt/ryeos
+    log_path_modes /data/app/.ai/node /data/app/.ai/node/native-capacity
     build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
     ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
   else

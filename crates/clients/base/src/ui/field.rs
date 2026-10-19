@@ -1301,8 +1301,8 @@ pub fn project_field_for_instance(
             expansions,
             changes: local
                 .changes
-                .iter()
-                .filter_map(|(_key, change)| {
+                .values()
+                .filter_map(|change| {
                     let kind = match change.kind.as_str() {
                         "entered" => RyeOsFieldChangeKind::Entered,
                         "exited" => RyeOsFieldChangeKind::Exited,
@@ -2259,7 +2259,7 @@ fn replay_vm(
             selected: anchor.as_ref() == Some(event),
         })
         .collect::<Vec<_>>();
-    rail.sort_by(|left, right| left.event.chain_seq.cmp(&right.event.chain_seq));
+    rail.sort_by_key(|left| left.event.chain_seq);
     RyeOsFieldReplayVm {
         mode,
         playing: local.playback.playing,
@@ -2458,8 +2458,9 @@ fn apply_grid_comparison(previews: &mut [RyeOsArtifactPreviewVm], compare: &[Str
                 .iter()
                 .zip(&right.cells)
                 .enumerate()
-                .filter_map(|(index, (left, right))| {
-                    (left != right).then(|| u32::try_from(index).expect("grid index is bounded"))
+                .filter(|&(_index, (left, right))| left != right)
+                .map(|(index, (_left, _right))| {
+                    u32::try_from(index).expect("grid index is bounded")
                 })
                 .collect::<Vec<_>>()
         })

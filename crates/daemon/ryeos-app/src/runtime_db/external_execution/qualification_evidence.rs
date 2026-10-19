@@ -35,7 +35,7 @@ impl RuntimeDb {
                 coordinate,
                 qualification_operation_id,
             )?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Deferred)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
             let allocation =
                 read(&tx, &placement)?.context("Q historical transport has no retained allocation")?;
             let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner

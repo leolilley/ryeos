@@ -460,9 +460,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
     ) -> Result<Option<QualificationWorkerProcessRecord>> {
-        self.conn.with_sql(|conn| {
-            read_process(&conn, placement)
-        })
+        self.conn.with_sql(|conn| read_process(conn, placement))
     }
 
     /// Persist one held local Worker before allowing Lillux to release it.
@@ -474,7 +472,7 @@ impl RuntimeDb {
         configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
     ) -> Result<QualificationWorkerProcessRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             ensure!(
                 read_process(&tx, placement)?.is_none(),
                 "qualification Worker already has a retained process incarnation"
@@ -605,11 +603,12 @@ impl RuntimeDb {
         proof: QualificationWorkerDeathProof,
     ) -> Result<QualificationWorkerProcessRecord> {
         self.conn.with_sql(|conn| {
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let current = read_process(&tx, &proof.record.placement_thread_id)?
                 .context("qualification Worker death proof lost its attached row")?;
             ensure!(
-                current == proof.record && current.phase == QualificationWorkerProcessPhase::Attached,
+                current == proof.record
+                    && current.phase == QualificationWorkerProcessPhase::Attached,
                 "qualification Worker death proof changed its exact process incarnation"
             );
             require_retained_process_owner(&tx, &current)?;

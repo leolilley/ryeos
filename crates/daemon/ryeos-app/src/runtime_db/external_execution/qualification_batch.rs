@@ -361,7 +361,7 @@ impl RuntimeDb {
             let batch = prepare_batch(raw, wire_max_bytes)?;
             let first = i64::try_from(batch.first_sequence)?;
             let through = i64::try_from(batch.through_sequence)?;
-            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let command =
                 read_command(&tx, placement)?.context("Q observation has no one-use command")?;
             require_owner(&tx, &command)?;
@@ -484,16 +484,6 @@ impl RuntimeDb {
                 through_sequence: batch.through_sequence,
                 batch_digest: batch.batch_digest,
             })
-        })
-    }
-
-    /// Typed no-permit read for restartable semantic verification.
-    pub(crate) fn qualification_worker_observation_batches(
-        &self,
-        placement: &str,
-    ) -> Result<Vec<QualificationWorkerObservationBatchRecord>> {
-        self.conn.with_sql(|conn| {
-            read_batches(&conn, placement)
         })
     }
 }

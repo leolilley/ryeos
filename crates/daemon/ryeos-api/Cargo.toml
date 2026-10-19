@@ -84,3 +84,6 @@ rusqlite = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-scheduler = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

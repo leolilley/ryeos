@@ -587,7 +587,6 @@ mod tests {
     }
 }
 
-
 // Unused finite data leaf. These structural bounds grant no admission,
 // physical allocation, heap fit, funding or process-lifetime authority.
 const ORIGINAL_PHYSICAL_BOUNDS_SCHEMA: &str = "ryeos.original_physical_resource_bounds.v1";
@@ -631,21 +630,53 @@ impl OriginalPhysicalResourceBoundsV1 {
             "unsupported original physical bounds schema"
         );
         for (name, value, ceiling) in [
-            ("memory", self.maximum_memory_bytes, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
-            ("processes", u64::from(self.maximum_processes), u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES)),
-            ("private source", self.maximum_private_source_bytes, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
-            ("private source inodes", self.maximum_private_source_inodes, MAX_ORIGINAL_PRIVATE_SOURCE_INODES),
-            ("retained exports", self.maximum_retained_export_bytes, MAX_ORIGINAL_RETAINED_EXPORT_BYTES),
-            ("single document", self.maximum_single_document_bytes, MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES),
-            ("constructor buffer", self.maximum_constructor_buffer_bytes, MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES),
+            (
+                "memory",
+                self.maximum_memory_bytes,
+                MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES,
+            ),
+            (
+                "processes",
+                u64::from(self.maximum_processes),
+                u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES),
+            ),
+            (
+                "private source",
+                self.maximum_private_source_bytes,
+                MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES,
+            ),
+            (
+                "private source inodes",
+                self.maximum_private_source_inodes,
+                MAX_ORIGINAL_PRIVATE_SOURCE_INODES,
+            ),
+            (
+                "retained exports",
+                self.maximum_retained_export_bytes,
+                MAX_ORIGINAL_RETAINED_EXPORT_BYTES,
+            ),
+            (
+                "single document",
+                self.maximum_single_document_bytes,
+                MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES,
+            ),
+            (
+                "constructor buffer",
+                self.maximum_constructor_buffer_bytes,
+                MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES,
+            ),
         ] {
-            anyhow::ensure!(value > 0 && value <= ceiling, "original physical {name} exceeds finite structural bounds");
+            anyhow::ensure!(
+                value > 0 && value <= ceiling,
+                "original physical {name} exceeds finite structural bounds"
+            );
         }
         anyhow::ensure!(
             self.maximum_single_document_bytes <= self.maximum_retained_export_bytes,
             "original physical document exceeds retained export bound"
         );
-        let known_bytes = self.maximum_private_source_bytes
+        let known_bytes = self
+            .maximum_private_source_bytes
             .checked_add(self.maximum_retained_export_bytes)
             .and_then(|bytes| bytes.checked_add(self.maximum_constructor_buffer_bytes))
             .ok_or_else(|| anyhow::anyhow!("original physical byte sum overflow"))?;
@@ -666,13 +697,34 @@ impl OriginalPhysicalResourceBoundsV1 {
         node.validate()?;
         let effective = Self {
             schema: ORIGINAL_PHYSICAL_BOUNDS_SCHEMA.to_owned(),
-            maximum_memory_bytes: request.maximum_memory_bytes.min(descriptor.maximum_memory_bytes).min(node.maximum_memory_bytes),
-            maximum_processes: request.maximum_processes.min(descriptor.maximum_processes).min(node.maximum_processes),
-            maximum_private_source_bytes: request.maximum_private_source_bytes.min(descriptor.maximum_private_source_bytes).min(node.maximum_private_source_bytes),
-            maximum_private_source_inodes: request.maximum_private_source_inodes.min(descriptor.maximum_private_source_inodes).min(node.maximum_private_source_inodes),
-            maximum_retained_export_bytes: request.maximum_retained_export_bytes.min(descriptor.maximum_retained_export_bytes).min(node.maximum_retained_export_bytes),
-            maximum_single_document_bytes: request.maximum_single_document_bytes.min(descriptor.maximum_single_document_bytes).min(node.maximum_single_document_bytes),
-            maximum_constructor_buffer_bytes: request.maximum_constructor_buffer_bytes.min(descriptor.maximum_constructor_buffer_bytes).min(node.maximum_constructor_buffer_bytes),
+            maximum_memory_bytes: request
+                .maximum_memory_bytes
+                .min(descriptor.maximum_memory_bytes)
+                .min(node.maximum_memory_bytes),
+            maximum_processes: request
+                .maximum_processes
+                .min(descriptor.maximum_processes)
+                .min(node.maximum_processes),
+            maximum_private_source_bytes: request
+                .maximum_private_source_bytes
+                .min(descriptor.maximum_private_source_bytes)
+                .min(node.maximum_private_source_bytes),
+            maximum_private_source_inodes: request
+                .maximum_private_source_inodes
+                .min(descriptor.maximum_private_source_inodes)
+                .min(node.maximum_private_source_inodes),
+            maximum_retained_export_bytes: request
+                .maximum_retained_export_bytes
+                .min(descriptor.maximum_retained_export_bytes)
+                .min(node.maximum_retained_export_bytes),
+            maximum_single_document_bytes: request
+                .maximum_single_document_bytes
+                .min(descriptor.maximum_single_document_bytes)
+                .min(node.maximum_single_document_bytes),
+            maximum_constructor_buffer_bytes: request
+                .maximum_constructor_buffer_bytes
+                .min(descriptor.maximum_constructor_buffer_bytes)
+                .min(node.maximum_constructor_buffer_bytes),
         };
         effective.validate()?;
         Ok(effective)
@@ -720,7 +772,10 @@ mod original_physical_bounds_tests {
         let (bytes, digest) = actual.canonical_commitment().unwrap();
         assert_eq!(bytes.as_slice(), expected);
         assert_eq!(digest, lillux::sha256_hex(expected));
-        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(expected).unwrap(), actual);
+        assert_eq!(
+            OriginalPhysicalResourceBoundsV1::decode(expected).unwrap(),
+            actual
+        );
         let mut changed = bounds();
         changed.maximum_private_source_inodes += 1;
         let (changed_bytes, changed_digest) = changed.canonical_commitment().unwrap();
@@ -750,13 +805,19 @@ mod original_physical_bounds_tests {
         expected.maximum_retained_export_bytes = 60;
         let expected_commitment = expected.canonical_commitment().unwrap();
         for (r, d, c) in [
-            (&request, &descriptor, &node), (&request, &node, &descriptor),
-            (&descriptor, &request, &node), (&descriptor, &node, &request),
-            (&node, &request, &descriptor), (&node, &descriptor, &request),
+            (&request, &descriptor, &node),
+            (&request, &node, &descriptor),
+            (&descriptor, &request, &node),
+            (&descriptor, &node, &request),
+            (&node, &request, &descriptor),
+            (&node, &descriptor, &request),
         ] {
             let effective = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap();
             assert_eq!(effective, expected);
-            assert_eq!(effective.canonical_commitment().unwrap(), expected_commitment);
+            assert_eq!(
+                effective.canonical_commitment().unwrap(),
+                expected_commitment
+            );
         }
     }
 
@@ -766,11 +827,16 @@ mod original_physical_bounds_tests {
         let mut invalid = bounds();
         invalid.maximum_processes = MAX_ORIGINAL_PHYSICAL_PROCESSES + 1;
         for (r, d, c) in [
-            (&invalid, &valid, &valid), (&valid, &invalid, &valid),
+            (&invalid, &valid, &valid),
+            (&valid, &invalid, &valid),
             (&valid, &valid, &invalid),
         ] {
             let error = OriginalPhysicalResourceBoundsV1::intersect(r, d, c).unwrap_err();
-            assert!(error.to_string().contains("processes exceeds finite structural bounds"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("processes exceeds finite structural bounds")
+            );
         }
         assert!(invalid.canonical_commitment().is_err());
     }
@@ -788,16 +854,31 @@ mod original_physical_bounds_tests {
             wire.replace(field, "\"maximum_processes\":2,\"maximum_processes\":2"),
             wire.replace("\"maximum_processes\":2,", ""),
             wire.replace(field, "\"maximum_processes\":2,\"unknown\":1"),
-            wire.replace(ORIGINAL_PHYSICAL_BOUNDS_SCHEMA, "ryeos.original_physical_resource_bounds.v2"),
-            wire.replace("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":18446744073709551616"),
+            wire.replace(
+                ORIGINAL_PHYSICAL_BOUNDS_SCHEMA,
+                "ryeos.original_physical_resource_bounds.v2",
+            ),
+            wire.replace(
+                "\"maximum_memory_bytes\":1000",
+                "\"maximum_memory_bytes\":18446744073709551616",
+            ),
         ] {
-            assert!(OriginalPhysicalResourceBoundsV1::decode(malformed.as_bytes()).is_err(), "{malformed}");
+            assert!(
+                OriginalPhysicalResourceBoundsV1::decode(malformed.as_bytes()).is_err(),
+                "{malformed}"
+            );
         }
         assert!(OriginalPhysicalResourceBoundsV1::decode(b"").is_err());
         assert!(OriginalPhysicalResourceBoundsV1::decode(b"{}").is_err());
         let mut padded = wire.clone();
-        padded.extend(std::iter::repeat_n(' ', MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES - wire.len()));
-        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap(), bounds());
+        padded.extend(std::iter::repeat_n(
+            ' ',
+            MAX_ORIGINAL_PHYSICAL_BOUNDS_DOCUMENT_BYTES - wire.len(),
+        ));
+        assert_eq!(
+            OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap(),
+            bounds()
+        );
         padded.push(' ');
         let error = OriginalPhysicalResourceBoundsV1::decode(padded.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("exceeds decode bound"));
@@ -807,18 +888,51 @@ mod original_physical_bounds_tests {
     fn all_numeric_fields_refuse_zero_and_structural_maximum_plus_one() {
         let wire = String::from_utf8(bounds().canonical_commitment().unwrap().0).unwrap();
         for (key, old, maximum) in [
-            ("maximum_memory_bytes", 1000, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
-            ("maximum_processes", 2, u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES)),
-            ("maximum_private_source_bytes", 100, MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES),
-            ("maximum_private_source_inodes", 10, MAX_ORIGINAL_PRIVATE_SOURCE_INODES),
-            ("maximum_retained_export_bytes", 80, MAX_ORIGINAL_RETAINED_EXPORT_BYTES),
-            ("maximum_single_document_bytes", 40, MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES),
-            ("maximum_constructor_buffer_bytes", 50, MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES),
+            (
+                "maximum_memory_bytes",
+                1000,
+                MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES,
+            ),
+            (
+                "maximum_processes",
+                2,
+                u64::from(MAX_ORIGINAL_PHYSICAL_PROCESSES),
+            ),
+            (
+                "maximum_private_source_bytes",
+                100,
+                MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES,
+            ),
+            (
+                "maximum_private_source_inodes",
+                10,
+                MAX_ORIGINAL_PRIVATE_SOURCE_INODES,
+            ),
+            (
+                "maximum_retained_export_bytes",
+                80,
+                MAX_ORIGINAL_RETAINED_EXPORT_BYTES,
+            ),
+            (
+                "maximum_single_document_bytes",
+                40,
+                MAX_ORIGINAL_SINGLE_DOCUMENT_BYTES,
+            ),
+            (
+                "maximum_constructor_buffer_bytes",
+                50,
+                MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES,
+            ),
         ] {
             for invalid in [0, maximum + 1] {
-                let changed = wire.replace(&format!("\"{key}\":{old}"), &format!("\"{key}\":{invalid}"));
-                let error = OriginalPhysicalResourceBoundsV1::decode(changed.as_bytes()).unwrap_err();
-                assert!(error.to_string().contains("finite structural bounds"), "{key}: {error}");
+                let changed =
+                    wire.replace(&format!("\"{key}\":{old}"), &format!("\"{key}\":{invalid}"));
+                let error =
+                    OriginalPhysicalResourceBoundsV1::decode(changed.as_bytes()).unwrap_err();
+                assert!(
+                    error.to_string().contains("finite structural bounds"),
+                    "{key}: {error}"
+                );
             }
         }
     }
@@ -834,7 +948,10 @@ mod original_physical_bounds_tests {
         maximum.maximum_constructor_buffer_bytes = MAX_ORIGINAL_CONSTRUCTOR_BUFFER_BYTES;
         maximum.validate().unwrap();
         let wire = maximum.canonical_commitment().unwrap().0;
-        assert_eq!(OriginalPhysicalResourceBoundsV1::decode(&wire).unwrap(), maximum);
+        assert_eq!(
+            OriginalPhysicalResourceBoundsV1::decode(&wire).unwrap(),
+            maximum
+        );
         // Source's absolute ceiling cannot be reached with positive other
         // bounds and memory<=16GiB. Test its greatest feasible value instead.
         maximum.maximum_retained_export_bytes = 1;
@@ -843,20 +960,36 @@ mod original_physical_bounds_tests {
         maximum.maximum_private_source_bytes = MAX_ORIGINAL_PHYSICAL_MEMORY_BYTES - 3;
         maximum.validate().unwrap();
         maximum.maximum_private_source_bytes += 1;
-        assert!(maximum.validate().unwrap_err().to_string().contains("no memory headroom"));
+        assert!(
+            maximum
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("no memory headroom")
+        );
         let mut relationship = bounds();
         relationship.maximum_single_document_bytes = relationship.maximum_retained_export_bytes;
         relationship.validate().unwrap();
         relationship.maximum_single_document_bytes += 1;
-        assert!(relationship.validate().unwrap_err().to_string().contains("document exceeds retained export"));
+        assert!(
+            relationship
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("document exceeds retained export")
+        );
         let mut sum = bounds();
         sum.maximum_memory_bytes = 230;
-        assert!(sum.validate().unwrap_err().to_string().contains("no memory headroom"));
+        assert!(
+            sum.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("no memory headroom")
+        );
         sum.maximum_memory_bytes += 1;
         sum.validate().unwrap();
     }
 }
-
 
 // Bounded request DATA decoder. It supplies neither signed-request provenance nor
 // original admission, physical coverage, allocation or funding authority.
@@ -921,9 +1054,16 @@ impl DecodedOriginalTargetRequest {
         // Visit all raw object keys before a BTreeMap can overwrite facts.
         // The same borrowed input is used throughout; no Value-tree preparse.
         let mut scan = serde_json::Deserializer::from_slice(bytes);
-        let mut budget = RawOriginalTargetScanBudget { values: 0, output: None };
-        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }
-            .deserialize(&mut scan)?;
+        let mut budget = RawOriginalTargetScanBudget {
+            values: 0,
+            output: None,
+        };
+        RawOriginalTargetScanSeed {
+            budget: &mut budget,
+            depth: 1,
+            comma: false,
+        }
+        .deserialize(&mut scan)?;
         scan.end()?;
         let presence: RawOriginalTargetPresence = serde_json::from_slice(bytes)?;
         match presence.schema {
@@ -969,14 +1109,22 @@ impl DecodedOriginalTargetRequest {
         }
     }
 
-    fn require_original_physical_request(&self) -> anyhow::Result<&OriginalPhysicalResourceBoundsV1> {
+    fn require_original_physical_request(
+        &self,
+    ) -> anyhow::Result<&OriginalPhysicalResourceBoundsV1> {
         match self {
-            Self::LegacyOrdinary(_) => anyhow::bail!("legacy ordinary target has no original physical request"),
+            Self::LegacyOrdinary(_) => {
+                anyhow::bail!("legacy ordinary target has no original physical request")
+            }
             Self::CurrentV1(current) => {
-                anyhow::ensure!(current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA, "unsupported original target request schema");
+                anyhow::ensure!(
+                    current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA,
+                    "unsupported original target request schema"
+                );
                 current.ordinary.validate()?;
-                let request = current.original_physical_bounds.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("current ordinary target has null original physical request"))?;
+                let request = current.original_physical_bounds.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("current ordinary target has null original physical request")
+                })?;
                 request.validate()?;
                 Ok(request)
             }
@@ -990,7 +1138,10 @@ impl DecodedOriginalTargetRequest {
                 serde_json::to_value(ordinary)?
             }
             Self::CurrentV1(current) => {
-                anyhow::ensure!(current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA, "unsupported original target request schema");
+                anyhow::ensure!(
+                    current.schema == ORIGINAL_TARGET_REQUEST_SCHEMA,
+                    "unsupported original target request schema"
+                );
                 current.ordinary.validate()?;
                 if let Some(request) = current.original_physical_bounds.as_ref() {
                     request.validate()?;
@@ -1007,7 +1158,10 @@ impl DecodedOriginalTargetRequest {
         let bytes = lillux::canonical_json(&value)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
             .into_bytes();
-        anyhow::ensure!(bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES, "original target canonical bytes exceed decode bound");
+        anyhow::ensure!(
+            bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
+            "original target canonical bytes exceed decode bound"
+        );
         Ok(bytes)
     }
 }
@@ -1017,12 +1171,16 @@ struct OriginalTargetWriter(Vec<u8>);
 impl std::io::Write for OriginalTargetWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > MAX_ORIGINAL_TARGET_RAW_BYTES.saturating_sub(self.0.len()) {
-            return Err(std::io::Error::other("original target encoded bytes exceed bound"));
+            return Err(std::io::Error::other(
+                "original target encoded bytes exceed bound",
+            ));
         }
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 struct RawOriginalTargetScanBudget {
     values: usize,
@@ -1036,7 +1194,10 @@ impl RawOriginalTargetScanBudget {
         }
         Ok(())
     }
-    fn scalar<E: serde::de::Error, T: serde::Serialize + ?Sized>(&mut self, value: &T) -> Result<(), E> {
+    fn scalar<E: serde::de::Error, T: serde::Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+    ) -> Result<(), E> {
         if let Some(writer) = self.output.as_mut() {
             serde_json::to_writer(writer, value).map_err(E::custom)?;
         }
@@ -1051,18 +1212,30 @@ struct RawOriginalTargetScanSeed<'a> {
 impl<'de> serde::de::DeserializeSeed<'de> for RawOriginalTargetScanSeed<'_> {
     type Value = ();
     fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         use serde::de::Error as _;
         if self.depth > MAX_ORIGINAL_TARGET_RAW_DEPTH {
             return Err(D::Error::custom("original target raw depth exceeds bound"));
         }
-        self.budget.values = self.budget.values.checked_add(1)
+        self.budget.values = self
+            .budget
+            .values
+            .checked_add(1)
             .ok_or_else(|| D::Error::custom("original target raw value count overflow"))?;
         if self.budget.values > MAX_ORIGINAL_TARGET_RAW_VALUES {
-            return Err(D::Error::custom("original target raw value count exceeds bound"));
+            return Err(D::Error::custom(
+                "original target raw value count exceeds bound",
+            ));
         }
-        if self.comma { self.budget.token::<D::Error>(b",")?; }
-        deserializer.deserialize_any(RawOriginalTargetScanVisitor { budget: self.budget, depth: self.depth })
+        if self.comma {
+            self.budget.token::<D::Error>(b",")?;
+        }
+        deserializer.deserialize_any(RawOriginalTargetScanVisitor {
+            budget: self.budget,
+            depth: self.depth,
+        })
     }
 }
 struct RawOriginalTargetScanVisitor<'a> {
@@ -1074,51 +1247,101 @@ impl<'de> serde::de::Visitor<'de> for RawOriginalTargetScanVisitor<'_> {
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("bounded original target JSON data without duplicate object keys")
     }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> { self.budget.token(b"null") }
-    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<(), E> { self.budget.scalar(&v) }
-    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<(), E> { self.budget.scalar(&v) }
-    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<(), E> { self.budget.scalar(&v) }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        self.budget.token(b"null")
+    }
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<(), E> {
+        self.budget.scalar(&v)
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<(), E> {
+        self.budget.scalar(&v)
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<(), E> {
+        self.budget.scalar(&v)
+    }
     fn visit_i128<E: serde::de::Error>(self, v: i128) -> Result<(), E> {
-        if let Ok(signed) = i64::try_from(v) { self.budget.scalar(&signed) }
-        else { let unsigned = u64::try_from(v).map_err(E::custom)?; self.budget.scalar(&unsigned) }
+        if let Ok(signed) = i64::try_from(v) {
+            self.budget.scalar(&signed)
+        } else {
+            let unsigned = u64::try_from(v).map_err(E::custom)?;
+            self.budget.scalar(&unsigned)
+        }
     }
     fn visit_u128<E: serde::de::Error>(self, v: u128) -> Result<(), E> {
-        let v = u64::try_from(v).map_err(E::custom)?; self.budget.scalar(&v)
+        let v = u64::try_from(v).map_err(E::custom)?;
+        self.budget.scalar(&v)
     }
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<(), E> {
-        if !v.is_finite() { return Err(E::custom("nonfinite target scalar")); }
+        if !v.is_finite() {
+            return Err(E::custom("nonfinite target scalar"));
+        }
         self.budget.scalar(&v)
     }
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<(), E> {
-        if v.len() > MAX_ORIGINAL_TARGET_RAW_BYTES { return Err(E::custom("target string exceeds bound")); }
+        if v.len() > MAX_ORIGINAL_TARGET_RAW_BYTES {
+            return Err(E::custom("target string exceeds bound"));
+        }
         self.budget.scalar(v)
     }
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<(), E> { self.visit_str(&v) }
-    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error> where A: serde::de::SeqAccess<'de> {
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<(), E> {
+        self.visit_str(&v)
+    }
+    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
         use serde::de::Error as _;
-        let depth = self.depth.checked_add(1).ok_or_else(|| A::Error::custom("target depth overflow"))?;
+        let depth = self
+            .depth
+            .checked_add(1)
+            .ok_or_else(|| A::Error::custom("target depth overflow"))?;
         self.budget.token::<A::Error>(b"[")?;
         let mut comma = false;
-        while seq.next_element_seed(RawOriginalTargetScanSeed { budget: &mut *self.budget, depth, comma })?.is_some() {
+        while seq
+            .next_element_seed(RawOriginalTargetScanSeed {
+                budget: &mut *self.budget,
+                depth,
+                comma,
+            })?
+            .is_some()
+        {
             comma = true;
         }
         self.budget.token(b"]")
     }
-    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error> where A: serde::de::MapAccess<'de> {
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
         use serde::de::Error as _;
-        let depth = self.depth.checked_add(1).ok_or_else(|| A::Error::custom("target depth overflow"))?;
+        let depth = self
+            .depth
+            .checked_add(1)
+            .ok_or_else(|| A::Error::custom("target depth overflow"))?;
         self.budget.token::<A::Error>(b"{")?;
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            if keys.len() >= MAX_ORIGINAL_TARGET_RAW_MEMBERS || key.len() > MAX_ORIGINAL_TARGET_RAW_BYTES {
-                return Err(A::Error::custom("original target raw object member count exceeds bound"));
+            if keys.len() >= MAX_ORIGINAL_TARGET_RAW_MEMBERS
+                || key.len() > MAX_ORIGINAL_TARGET_RAW_BYTES
+            {
+                return Err(A::Error::custom(
+                    "original target raw object member count exceeds bound",
+                ));
             }
-            if keys.contains(&key) { return Err(A::Error::custom("original target raw duplicate object key")); }
-            if !keys.is_empty() { self.budget.token::<A::Error>(b",")?; }
+            if keys.contains(&key) {
+                return Err(A::Error::custom("original target raw duplicate object key"));
+            }
+            if !keys.is_empty() {
+                self.budget.token::<A::Error>(b",")?;
+            }
             self.budget.scalar::<A::Error, _>(&key)?;
             self.budget.token::<A::Error>(b":")?;
             keys.insert(key);
-            map.next_value_seed(RawOriginalTargetScanSeed { budget: &mut *self.budget, depth, comma: false })?;
+            map.next_value_seed(RawOriginalTargetScanSeed {
+                budget: &mut *self.budget,
+                depth,
+                comma: false,
+            })?;
         }
         self.budget.token(b"}")
     }
@@ -1128,28 +1351,47 @@ impl<'de> serde::de::Visitor<'de> for RawOriginalTargetScanVisitor<'_> {
 #[derive(Debug, Clone)]
 pub struct CurrentExecutionTargetRequest(CurrentOriginalTargetRequestV1);
 impl CurrentExecutionTargetRequest {
-    pub fn ordinary(&self) -> &ExecutionTargetRequirement { &self.0.ordinary }
+    pub fn ordinary(&self) -> &ExecutionTargetRequirement {
+        &self.0.ordinary
+    }
     pub fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let value = serde_json::to_value(self)?;
         let bytes = lillux::canonical_json(&value)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?.into_bytes();
-        anyhow::ensure!(bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
-            "current target canonical bytes exceed decode bound");
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .into_bytes();
+        anyhow::ensure!(
+            bytes.len() <= MAX_ORIGINAL_TARGET_RAW_BYTES,
+            "current target canonical bytes exceed decode bound"
+        );
         Ok(bytes)
     }
 }
 impl serde::Serialize for CurrentExecutionTargetRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         CurrentOriginalTargetRequestSerialization {
-            schema: &self.0.schema, os: &self.0.ordinary.os, arch: &self.0.ordinary.arch,
-            resources: &self.0.ordinary.resources, original_physical_bounds: &self.0.original_physical_bounds,
-        }.serialize(serializer)
+            schema: &self.0.schema,
+            os: &self.0.ordinary.os,
+            arch: &self.0.ordinary.arch,
+            resources: &self.0.ordinary.resources,
+            original_physical_bounds: &self.0.original_physical_bounds,
+        }
+        .serialize(serializer)
     }
 }
-fn transcode_original_target<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+fn transcode_original_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
     use serde::de::DeserializeSeed as _;
-    let mut budget = RawOriginalTargetScanBudget { values: 0, output: Some(OriginalTargetWriter(Vec::new())) };
-    RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }.deserialize(deserializer)?;
+    let mut budget = RawOriginalTargetScanBudget {
+        values: 0,
+        output: Some(OriginalTargetWriter(Vec::new())),
+    };
+    RawOriginalTargetScanSeed {
+        budget: &mut budget,
+        depth: 1,
+        comma: false,
+    }
+    .deserialize(deserializer)?;
     Ok(budget.output.expect("emission mode retained").0)
 }
 impl<'de> serde::Deserialize<'de> for CurrentExecutionTargetRequest {
@@ -1158,17 +1400,25 @@ impl<'de> serde::Deserialize<'de> for CurrentExecutionTargetRequest {
         let bytes = transcode_original_target(deserializer)?;
         match DecodedOriginalTargetRequest::decode(&bytes).map_err(D::Error::custom)? {
             DecodedOriginalTargetRequest::CurrentV1(v) => Ok(Self(v)),
-            DecodedOriginalTargetRequest::LegacyOrdinary(_) => Err(D::Error::custom("current wrapper refuses ordinary target")),
+            DecodedOriginalTargetRequest::LegacyOrdinary(_) => {
+                Err(D::Error::custom("current wrapper refuses ordinary target"))
+            }
         }
     }
 }
 // Borrowed composed input still has upstream allocation/duplicate limitations.
-pub(crate) fn project_current_target_data(value: &serde_json::Value)
-    -> anyhow::Result<(ExecutionTargetRequirement, Option<CurrentExecutionTargetRequest>)> {
+pub(crate) fn project_current_target_data(
+    value: &serde_json::Value,
+) -> anyhow::Result<(
+    ExecutionTargetRequirement,
+    Option<CurrentExecutionTargetRequest>,
+)> {
     let bytes = transcode_original_target(value)?;
     match DecodedOriginalTargetRequest::decode(&bytes)? {
         DecodedOriginalTargetRequest::LegacyOrdinary(v) => Ok((v, None)),
-        DecodedOriginalTargetRequest::CurrentV1(v) => Ok((v.ordinary.clone(), Some(CurrentExecutionTargetRequest(v)))),
+        DecodedOriginalTargetRequest::CurrentV1(v) => {
+            Ok((v.ordinary.clone(), Some(CurrentExecutionTargetRequest(v))))
+        }
     }
 }
 
@@ -1218,7 +1468,8 @@ impl<'de> Deserialize<'de> for RawOriginalTargetPresence {
         impl<'de> serde::de::Visitor<'de> for PresenceVisitor {
             type Value = RawOriginalTargetPresence;
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an original target object with explicit schema/request presence")
+                formatter
+                    .write_str("an original target object with explicit schema/request presence")
             }
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
@@ -1235,7 +1486,9 @@ impl<'de> Deserialize<'de> for RawOriginalTargetPresence {
                             presence.physical_request_present = true;
                             let _: serde::de::IgnoredAny = map.next_value()?;
                         }
-                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
                     }
                 }
                 Ok(presence)
@@ -1244,7 +1497,6 @@ impl<'de> Deserialize<'de> for RawOriginalTargetPresence {
         deserializer.deserialize_map(PresenceVisitor)
     }
 }
-
 
 #[cfg(test)]
 mod original_target_decoder_tests {
@@ -1270,19 +1522,32 @@ mod original_target_decoder_tests {
 
     fn current_request_wire() -> Vec<u8> {
         let (bytes, _) = request().canonical_commitment().unwrap();
-        String::from_utf8(CURRENT_NULL.to_vec()).unwrap()
-            .replace("\"original_physical_bounds\":null", &format!(
-                "\"original_physical_bounds\":{}", String::from_utf8(bytes).unwrap(),
-            )).into_bytes()
+        String::from_utf8(CURRENT_NULL.to_vec())
+            .unwrap()
+            .replace(
+                "\"original_physical_bounds\":null",
+                &format!(
+                    "\"original_physical_bounds\":{}",
+                    String::from_utf8(bytes).unwrap(),
+                ),
+            )
+            .into_bytes()
     }
 
     // Raw scan guard fixtures are JSON DATA only, not valid target/owner proof.
     fn scan_data(bytes: &[u8]) -> anyhow::Result<()> {
         use serde::de::DeserializeSeed as _;
         let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let mut budget = RawOriginalTargetScanBudget { values: 0, output: None };
-        RawOriginalTargetScanSeed { budget: &mut budget, depth: 1, comma: false }
-            .deserialize(&mut deserializer)?;
+        let mut budget = RawOriginalTargetScanBudget {
+            values: 0,
+            output: None,
+        };
+        RawOriginalTargetScanSeed {
+            budget: &mut budget,
+            depth: 1,
+            comma: false,
+        }
+        .deserialize(&mut deserializer)?;
         deserializer.end()?;
         Ok(())
     }
@@ -1290,18 +1555,43 @@ mod original_target_decoder_tests {
     #[test]
     fn legacy_and_explicit_current_null_preserve_ordinary_data_only() {
         let legacy = DecodedOriginalTargetRequest::decode(LEGACY).unwrap();
-        assert!(matches!(&legacy, DecodedOriginalTargetRequest::LegacyOrdinary(_)));
+        assert!(matches!(
+            &legacy,
+            DecodedOriginalTargetRequest::LegacyOrdinary(_)
+        ));
         assert_eq!(legacy.canonical_bytes().unwrap(), LEGACY_CANONICAL);
         let canonical_legacy = DecodedOriginalTargetRequest::decode(LEGACY_CANONICAL).unwrap();
-        assert!(matches!(&canonical_legacy, DecodedOriginalTargetRequest::LegacyOrdinary(_)));
-        assert_eq!(canonical_legacy.canonical_bytes().unwrap(), LEGACY_CANONICAL);
-        assert!(legacy.require_original_physical_request().unwrap_err().to_string().contains("legacy ordinary"));
-        let omitted = DecodedOriginalTargetRequest::decode(br#"{"os":"linux","arch":"x86_64"}"#).unwrap();
+        assert!(matches!(
+            &canonical_legacy,
+            DecodedOriginalTargetRequest::LegacyOrdinary(_)
+        ));
+        assert_eq!(
+            canonical_legacy.canonical_bytes().unwrap(),
+            LEGACY_CANONICAL
+        );
+        assert!(
+            legacy
+                .require_original_physical_request()
+                .unwrap_err()
+                .to_string()
+                .contains("legacy ordinary")
+        );
+        let omitted =
+            DecodedOriginalTargetRequest::decode(br#"{"os":"linux","arch":"x86_64"}"#).unwrap();
         assert_eq!(omitted.canonical_bytes().unwrap(), LEGACY_CANONICAL);
         let current = DecodedOriginalTargetRequest::decode(CURRENT_NULL).unwrap();
-        assert!(matches!(&current, DecodedOriginalTargetRequest::CurrentV1(_)));
+        assert!(matches!(
+            &current,
+            DecodedOriginalTargetRequest::CurrentV1(_)
+        ));
         assert_eq!(current.canonical_bytes().unwrap(), CURRENT_NULL);
-        assert!(current.require_original_physical_request().unwrap_err().to_string().contains("null original physical"));
+        assert!(
+            current
+                .require_original_physical_request()
+                .unwrap_err()
+                .to_string()
+                .contains("null original physical")
+        );
     }
 
     #[test]
@@ -1309,16 +1599,36 @@ mod original_target_decoder_tests {
         let wire = current_request_wire();
         let decoded = DecodedOriginalTargetRequest::decode(&wire).unwrap();
         let borrowed = decoded.require_original_physical_request().unwrap();
-        let DecodedOriginalTargetRequest::CurrentV1(current) = &decoded else { panic!("current branch required") };
-        assert!(std::ptr::eq(borrowed, current.original_physical_bounds.as_ref().unwrap()));
+        let DecodedOriginalTargetRequest::CurrentV1(current) = &decoded else {
+            panic!("current branch required")
+        };
+        assert!(std::ptr::eq(
+            borrowed,
+            current.original_physical_bounds.as_ref().unwrap()
+        ));
         assert_eq!(borrowed, &request());
-        assert_eq!(borrowed.canonical_commitment().unwrap(), request().canonical_commitment().unwrap());
+        assert_eq!(
+            borrowed.canonical_commitment().unwrap(),
+            request().canonical_commitment().unwrap()
+        );
         let canonical = decoded.canonical_bytes().unwrap();
         assert_eq!(canonical, wire);
         let roundtrip = DecodedOriginalTargetRequest::decode(&canonical).unwrap();
-        assert_eq!(roundtrip.require_original_physical_request().unwrap(), borrowed);
-        let changed = String::from_utf8(wire).unwrap().replace("\"maximum_private_source_inodes\":10", "\"maximum_private_source_inodes\":11");
-        assert_ne!(DecodedOriginalTargetRequest::decode(changed.as_bytes()).unwrap().canonical_bytes().unwrap(), canonical);
+        assert_eq!(
+            roundtrip.require_original_physical_request().unwrap(),
+            borrowed
+        );
+        let changed = String::from_utf8(wire).unwrap().replace(
+            "\"maximum_private_source_inodes\":10",
+            "\"maximum_private_source_inodes\":11",
+        );
+        assert_ne!(
+            DecodedOriginalTargetRequest::decode(changed.as_bytes())
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+            canonical
+        );
     }
 
     #[test]
@@ -1336,15 +1646,25 @@ mod original_target_decoder_tests {
         let current = String::from_utf8(CURRENT_NULL.to_vec()).unwrap();
         let absent = current.replace("\"original_physical_bounds\":null,", "");
         let error = DecodedOriginalTargetRequest::decode(absent.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("missing original physical request field"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing original physical request field")
+        );
         for malformed in [
             current.replace("\"resources\":[],", ""),
             current.replace("\"resources\":[]", "\"resources\":null"),
-            current.replace("\"original_physical_bounds\":null", "\"original_physical_bounds\":{}"),
+            current.replace(
+                "\"original_physical_bounds\":null",
+                "\"original_physical_bounds\":{}",
+            ),
             current.replace("\"os\":\"linux\"", "\"os\":1"),
             current.replace("\"os\":\"linux\"", "\"os\":\"linux\",\"unknown\":1"),
         ] {
-            assert!(DecodedOriginalTargetRequest::decode(malformed.as_bytes()).is_err(), "{malformed}");
+            assert!(
+                DecodedOriginalTargetRequest::decode(malformed.as_bytes()).is_err(),
+                "{malformed}"
+            );
         }
     }
 
@@ -1352,11 +1672,31 @@ mod original_target_decoder_tests {
     fn nested_invalid_request_uses_existing_finite_validator() {
         let wire = String::from_utf8(current_request_wire()).unwrap();
         for (old, new, diagnostic) in [
-            ("\"maximum_processes\":2", "\"maximum_processes\":0", "finite structural bounds"),
-            ("\"maximum_processes\":2", "\"maximum_processes\":257", "finite structural bounds"),
-            ("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":230", "no memory headroom"),
-            ("\"maximum_single_document_bytes\":40", "\"maximum_single_document_bytes\":81", "document exceeds retained export"),
-            (ORIGINAL_PHYSICAL_BOUNDS_SCHEMA, "ryeos.original_physical_resource_bounds.v2", "unsupported original physical"),
+            (
+                "\"maximum_processes\":2",
+                "\"maximum_processes\":0",
+                "finite structural bounds",
+            ),
+            (
+                "\"maximum_processes\":2",
+                "\"maximum_processes\":257",
+                "finite structural bounds",
+            ),
+            (
+                "\"maximum_memory_bytes\":1000",
+                "\"maximum_memory_bytes\":230",
+                "no memory headroom",
+            ),
+            (
+                "\"maximum_single_document_bytes\":40",
+                "\"maximum_single_document_bytes\":81",
+                "document exceeds retained export",
+            ),
+            (
+                ORIGINAL_PHYSICAL_BOUNDS_SCHEMA,
+                "ryeos.original_physical_resource_bounds.v2",
+                "unsupported original physical",
+            ),
         ] {
             let changed = wire.replace(old, new);
             let error = DecodedOriginalTargetRequest::decode(changed.as_bytes()).unwrap_err();
@@ -1366,7 +1706,10 @@ mod original_target_decoder_tests {
             wire.replace("\"maximum_processes\":2,", ""),
             wire.replace("\"maximum_processes\":2", "\"maximum_processes\":null"),
             wire.replace("\"maximum_processes\":2", "\"maximum_processes\":1.0"),
-            wire.replace("\"maximum_memory_bytes\":1000", "\"maximum_memory_bytes\":\"1000\""),
+            wire.replace(
+                "\"maximum_memory_bytes\":1000",
+                "\"maximum_memory_bytes\":\"1000\"",
+            ),
         ] {
             assert!(DecodedOriginalTargetRequest::decode(changed.as_bytes()).is_err());
         }
@@ -1398,10 +1741,20 @@ mod original_target_decoder_tests {
         assert!(DecodedOriginalTargetRequest::decode(&trailing).is_err());
         let mut padded = LEGACY.to_vec();
         padded.resize(MAX_ORIGINAL_TARGET_RAW_BYTES, b' ');
-        assert_eq!(DecodedOriginalTargetRequest::decode(&padded).unwrap().canonical_bytes().unwrap(), LEGACY_CANONICAL);
+        assert_eq!(
+            DecodedOriginalTargetRequest::decode(&padded)
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+            LEGACY_CANONICAL
+        );
         padded.push(b' ');
         let error = DecodedOriginalTargetRequest::decode(&padded).unwrap_err();
-        assert!(error.to_string().contains("raw document exceeds decode bound"));
+        assert!(
+            error
+                .to_string()
+                .contains("raw document exceeds decode bound")
+        );
     }
 
     #[test]
@@ -1414,11 +1767,22 @@ mod original_target_decoder_tests {
         scan_data(nodes(MAX_ORIGINAL_TARGET_RAW_VALUES - 1).as_bytes()).unwrap();
         let error = scan_data(nodes(MAX_ORIGINAL_TARGET_RAW_VALUES).as_bytes()).unwrap_err();
         assert!(error.to_string().contains("raw value count exceeds bound"));
-        let members = |count: usize| format!("{{{}}}", (0..count)
-            .map(|index| format!("\"key{index}\":null")).collect::<Vec<_>>().join(","));
+        let members = |count: usize| {
+            format!(
+                "{{{}}}",
+                (0..count)
+                    .map(|index| format!("\"key{index}\":null"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         scan_data(members(MAX_ORIGINAL_TARGET_RAW_MEMBERS).as_bytes()).unwrap();
         let error = scan_data(members(MAX_ORIGINAL_TARGET_RAW_MEMBERS + 1).as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("raw object member count exceeds bound"));
+        assert!(
+            error
+                .to_string()
+                .contains("raw object member count exceeds bound")
+        );
         // Successful raw scans are NOT successful target decoding.
         assert!(DecodedOriginalTargetRequest::decode(nodes(2).as_bytes()).is_err());
         assert!(DecodedOriginalTargetRequest::decode(members(2).as_bytes()).is_err());
@@ -1441,7 +1805,10 @@ mod original_target_decoder_tests {
             target.replace("\"memory\":1", "\"model\":1"),
             target.replace("\"gpu\"", "\"bad class\""),
         ] {
-            assert!(DecodedOriginalTargetRequest::decode(invalid.as_bytes()).is_err(), "{invalid}");
+            assert!(
+                DecodedOriginalTargetRequest::decode(invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
         }
     }
 }
@@ -1456,25 +1823,38 @@ mod current_request_codec_controls {
         let canonical = current.canonical_bytes().unwrap();
         let round: CurrentExecutionTargetRequest = serde_json::from_slice(&canonical).unwrap();
         assert_eq!(round.canonical_bytes().unwrap(), canonical);
-        for bad in [CURRENT.replace(",\"original_physical_bounds\":null", ""),
+        for bad in [
+            CURRENT.replace(",\"original_physical_bounds\":null", ""),
             CURRENT.replace(",\"resources\":[]", ""),
             CURRENT.replace("ryeos.execution_target.v1", "unknown"),
-            CURRENT.replace("\"resources\":[]", "\"resources\":[],\"resources\":[]") ] {
+            CURRENT.replace("\"resources\":[]", "\"resources\":[],\"resources\":[]"),
+        ] {
             assert!(serde_json::from_str::<CurrentExecutionTargetRequest>(&bad).is_err());
         }
-        assert!(serde_json::from_str::<CurrentExecutionTargetRequest>(r#"{"os":"linux","arch":"x86_64"}"#).is_err());
+        assert!(
+            serde_json::from_str::<CurrentExecutionTargetRequest>(
+                r#"{"os":"linux","arch":"x86_64"}"#
+            )
+            .is_err()
+        );
         assert!(serde_json::from_str::<CurrentExecutionTargetRequest>("null").is_err());
     }
     #[test]
     fn transcode_keeps_lossless_integer_and_caps_escaped_output_before_growth() {
         let mut de = serde_json::Deserializer::from_str("18446744073709551615");
-        assert_eq!(transcode_original_target(&mut de).unwrap(), b"18446744073709551615");
+        assert_eq!(
+            transcode_original_target(&mut de).unwrap(),
+            b"18446744073709551615"
+        );
         // Quoted control bytes expand sixfold; no unbounded Value tree.
-        let value = serde_json::Value::String("\u{0001}".repeat(MAX_ORIGINAL_TARGET_RAW_BYTES / 6 + 1));
+        let value =
+            serde_json::Value::String("\u{0001}".repeat(MAX_ORIGINAL_TARGET_RAW_BYTES / 6 + 1));
         assert!(transcode_original_target(&value).is_err());
         let mut writer = OriginalTargetWriter(Vec::new());
         use std::io::Write as _;
-        writer.write_all(&vec![b'x'; MAX_ORIGINAL_TARGET_RAW_BYTES]).unwrap();
+        writer
+            .write_all(&vec![b'x'; MAX_ORIGINAL_TARGET_RAW_BYTES])
+            .unwrap();
         assert!(writer.write_all(b"x").is_err());
         assert_eq!(writer.0.len(), MAX_ORIGINAL_TARGET_RAW_BYTES);
     }

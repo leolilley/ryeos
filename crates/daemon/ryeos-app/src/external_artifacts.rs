@@ -731,8 +731,10 @@ pub fn resolve_external_execution_artifacts(
                 &declaration.configuration_adapter,
                 "external provider configuration adapter",
             )?;
-            provider_connector_hashes
-                .insert(declaration.id.clone(), connector.identity.content_hash.clone());
+            provider_connector_hashes.insert(
+                declaration.id.clone(),
+                connector.identity.content_hash.clone(),
+            );
             connectors.push(connector);
             configurations.push(InstalledExternalProviderConfiguration::new(
                 declaration.clone(),

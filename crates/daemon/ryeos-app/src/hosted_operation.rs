@@ -670,7 +670,8 @@ mod tests {
         let root_id = "root-async-drain-fixture";
         let dir = tempfile::tempdir().unwrap();
         let identity =
-            ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem"))
+                .unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));

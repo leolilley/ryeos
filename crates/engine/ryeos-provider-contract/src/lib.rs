@@ -130,10 +130,10 @@ impl AdmittedLocalWorkerFinal {
             .input_tokens
             .checked_add(self.usage.output_tokens)
             .ok_or_else(|| anyhow::anyhow!("local worker token accounting overflows"))?;
-        if let Some(reasoning) = self.usage.reasoning_tokens {
-            if reasoning > self.usage.output_tokens {
-                bail!("local worker reasoning tokens exceed output tokens");
-            }
+        if let Some(reasoning) = self.usage.reasoning_tokens
+            && reasoning > self.usage.output_tokens
+        {
+            bail!("local worker reasoning tokens exceed output tokens");
         }
         if let Some(response_id) = &self.response_id {
             validate_identifier("local worker response id", response_id)?;

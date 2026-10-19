@@ -88,7 +88,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &state.config.app_root,
         )?;
         scavenge_stale_remote_fetches(&bundles_root)?;
-        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, &req.bundle_name)?;
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &registry_lock,
+            &req.bundle_name,
+        )?;
         if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
             return Ok(report);
         }
@@ -151,7 +154,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // both locks.
     let registry_lock =
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
-    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&registry_lock, &req.bundle_name)?;
+    let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+        &registry_lock,
+        &req.bundle_name,
+    )?;
     if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
         return Ok(report);
     }
