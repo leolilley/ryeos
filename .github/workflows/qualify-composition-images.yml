@@ -104,6 +104,10 @@ jobs:
       - name: Build and push composition candidates
         id: bake
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          # Ten targets' provenance makes the metadata output larger than an
+          # environment variable can carry; only the digests are read below.
+          BUILDX_METADATA_PROVENANCE: "false"
         with:
           source: .
           files: ./docker-bake.composition.hcl
