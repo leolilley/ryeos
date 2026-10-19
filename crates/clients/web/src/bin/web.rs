@@ -1,7 +1,7 @@
 //! `web` — mints a RyeOS RyeOs launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
-//! 1. Parses launch args (surface and project).
+//! 1. Parses an explicit Config or Surface selection and project.
 //! 2. Resolves the daemon URL from `daemon.json` or `RYEOSD_URL`.
 //! 3. Discovers the daemon's public key for request signing.
 //! 4. Calls `POST /ui/api/launch/mint` with the launch context.
@@ -21,9 +21,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
-    /// Surface ref backing RyeOs. Command descriptors provide the default.
-    #[arg(long = "surface", required = true)]
-    surface: String,
+    /// Signed shared presentation Config. Command descriptors select it.
+    #[arg(
+        long = "presentation",
+        required_unless_present = "surface",
+        conflicts_with = "surface"
+    )]
+    presentation: Option<String>,
+
+    /// Signed Surface root to open directly, without a shared Config.
+    #[arg(
+        long = "surface",
+        required_unless_present = "presentation",
+        conflicts_with = "presentation"
+    )]
+    surface: Option<String>,
 
     /// Project path
     #[arg(long = "project")]
@@ -47,7 +59,7 @@ struct Cli {
 #[serde(rename_all = "snake_case")]
 struct MintRequest {
     ui_binding_contract_revision: &'static str,
-    surface_ref: String,
+    composition: ryeos_client_base::presentation::UiCompositionSelection,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,9 +128,20 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8"))
         })
         .transpose()?;
+    let composition = match (cli.presentation, cli.surface) {
+        (Some(config_ref), None) => {
+            ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
+                config_ref,
+            }
+        }
+        (None, Some(surface_ref)) => {
+            ryeos_client_base::presentation::UiCompositionSelection::Surface { surface_ref }
+        }
+        _ => bail!("select exactly one of --presentation or --surface"),
+    };
     let mint_req = MintRequest {
         ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-        surface_ref: cli.surface,
+        composition,
         project_path,
         user_principal_id: cli
             .hosted_principal
@@ -366,15 +389,22 @@ mod tests {
     }
 
     #[test]
-    fn mint_request_serializes_surface() {
+    fn mint_request_serializes_shared_presentation() {
         let req = MintRequest {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
+            composition:
+                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
+                    config_ref: "config:ryeos/ui/presentation".into(),
+                },
             project_path: Some("/tmp/proj".to_string()),
             user_principal_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["surface_ref"], "surface:ryeos/ryeos/base");
+        assert_eq!(
+            json["composition"]["config_ref"],
+            "config:ryeos/ui/presentation"
+        );
+        assert_eq!(json["composition"]["kind"], "shared_presentation");
         assert_eq!(json["project_path"], "/tmp/proj");
         assert!(json.get("mode").is_none());
         assert!(json.get("read_only").is_none());
@@ -385,10 +415,47 @@ mod tests {
     }
 
     #[test]
+    fn launcher_selects_surface_root_without_inventing_a_config() {
+        let cli = Cli::try_parse_from(["web", "--surface", "surface:ryeos/ui/assistant-observe"])
+            .unwrap();
+        assert!(cli.presentation.is_none());
+        let json = serde_json::to_value(
+            ryeos_client_base::presentation::UiCompositionSelection::Surface {
+                surface_ref: cli.surface.unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(json["kind"], "surface");
+        assert_eq!(json["surface_ref"], "surface:ryeos/ui/assistant-observe");
+        assert!(json.get("config_ref").is_none());
+    }
+
+    #[test]
+    fn launcher_requires_exactly_one_composition_root() {
+        assert!(Cli::try_parse_from(["web"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "web",
+                "--presentation",
+                "config:ryeos/ui/presentation",
+                "--surface",
+                "surface:ryeos/ui/assistant-observe",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["web", "--presentation", "config:ryeos/ui/presentation",]).is_ok()
+        );
+    }
+
+    #[test]
     fn mint_request_omits_none_project_path() {
         let req = MintRequest {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:x/y/z".to_string(),
+            composition:
+                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
+                    config_ref: "config:ryeos/ui/presentation".into(),
+                },
             project_path: None,
             user_principal_id: None,
         };
@@ -405,7 +472,10 @@ mod tests {
     fn mint_request_includes_user_principal_when_bound() {
         let req = MintRequest {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:x/y/z".to_string(),
+            composition:
+                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
+                    config_ref: "config:ryeos/ui/presentation".into(),
+                },
             project_path: None,
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
         };
@@ -424,9 +494,9 @@ mod tests {
                 "binding_attachment_id": "attachment-789",
                 "binding_generation": 1,
                 "binding_digest": "digest-789",
-                "surface_ref": "surface:ryeos/ui/assistant-observe",
-                "surface_generation": "surface-generation-789",
-                "effective_surface": {"name": "assistant-observe"},
+                "root_ref": "surface:ryeos/ui/assistant-observe",
+                "root_generation": "surface-generation-789",
+                "presentation": {"definition": {"kind": "surface", "surface": {"name": "assistant-observe"}}, "views": {}},
                 "project_path": null,
                 "posture": "observation_only",
                 "binding_request_bounds": {
@@ -448,7 +518,12 @@ mod tests {
     #[test]
     fn launcher_rejects_authority_posture_flags() {
         for posture_flag in ["--read-only", "--allow-intents", "--mode"] {
-            let mut args = vec!["web", "--surface", "surface:ryeos/ryeos/base", posture_flag];
+            let mut args = vec![
+                "web",
+                "--presentation",
+                "config:ryeos/ui/presentation",
+                posture_flag,
+            ];
             if posture_flag == "--mode" {
                 args.push("operate");
             }

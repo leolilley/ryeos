@@ -134,17 +134,20 @@ pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
 pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
-    AddThreadWithEventSuccessorRequest, AuthoritativeContinuationPredecessorReadback,
-    AuthoritativeRootBirthReadback, AuthoritativeRootGenesisReadback,
-    AuthoritativeRootThreadReadback, AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
+    AddThreadWithEventSuccessorRequest, AnchoredThreadAppend,
+    AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
+    AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
+    AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
     AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,
-    AuthoritativeThreadEventChainReadback, AuthoritativeThreadHistoryDiscardProgress,
-    AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
-    AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,
-    CommittedWrite, CreateChainWithEventSuccessorRequest, PendingRemoveHeadState,
-    PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
+    AuthoritativeThreadEventChainReadback, AuthoritativeThreadEventReadAnchor,
+    AuthoritativeThreadEventReadPage, AuthoritativeThreadEventReadProgress,
+    AuthoritativeThreadHistoryDiscardProgress, AuthoritativeThreadHistoryDiscardReport,
+    AuthoritativeThreadPairReadback, AuthoritativeThreadSnapshotReadback,
+    AuthoritativeThreadSnapshotWithLastEventReadback, CommittedWrite,
+    ConditionalThreadEventAppendResult, CreateChainWithEventSuccessorRequest, MixedCutDependencies,
+    PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
     ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
-    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector,
-    StateDb,
+    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RetiredChainDependency,
+    RuntimeLivenessInspector, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
 };
 pub use sync::ImportAttribution;

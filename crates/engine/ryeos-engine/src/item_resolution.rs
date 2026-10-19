@@ -566,7 +566,18 @@ pub fn enumerate_kind_refs(
     kind_schema: &KindSchema,
     kind: &str,
 ) -> Vec<CanonicalRef> {
-    enumerate_kind_refs_inner(roots, kind_schema, kind, None).unwrap_or_default()
+    try_enumerate_kind_refs(roots, kind_schema, kind).unwrap_or_default()
+}
+
+/// Discover candidates while preserving traversal/budget failures for callers
+/// that report inventory coverage. This is a bounded live filesystem read, not
+/// an authenticated or atomic snapshot of the installed corpus.
+pub fn try_enumerate_kind_refs(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    enumerate_kind_refs_inner(roots, kind_schema, kind, None)
 }
 
 /// Enumerate the installed item corpus whose signed kind schemas select one
@@ -931,6 +942,23 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&file_path, content).unwrap();
+    }
+
+    #[test]
+    fn fallible_enumeration_preserves_traversal_budget_failure() {
+        let root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let mut nested = root.join("tools");
+        for _ in 0..(MAX_CORPUS_TRAVERSAL_DEPTH + 2) {
+            nested.push("nested");
+        }
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("item.yaml"), "name: item").unwrap();
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        assert!(try_enumerate_kind_refs(&roots, &schema, "tool").is_err());
+        // The best-effort wrapper deliberately keeps its lossy contract.
+        assert!(enumerate_kind_refs(&roots, &schema, "tool").is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

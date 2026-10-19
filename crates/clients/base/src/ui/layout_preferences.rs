@@ -2,20 +2,20 @@
 //! grants, seat authority, observations, pending effects and drafts are excluded.
 //! Restoring allocates fresh mounts and revalidates every ref against this session.
 
-use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockSlotState};
+use super::model::RyeOsCore;
 use crate::layout::LayoutTree;
+use crate::surface::ViewKindSpec;
 use crate::surface::view_sets::{
     LayoutSeedSpec, SavedViewMountRef, SavedViewSelectionRelationship, SavedViewSelectionSource,
-    SavedViewSetTemplate, SavedViewSlotEdge, ViewSetSeedSpec, validate_saved_view_set_templates,
-    validate_seeds,
+    SavedViewSetTemplate, VIEW_SET_COMPOSITION_SCHEMA, ViewSetSeedSpec,
+    validate_saved_view_set_templates, validate_seeds,
 };
-use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
-const SCHEMA: &str = "ryeos.ui.layout-preferences.v4";
+const SCHEMA: &str = "ryeos.ui.layout-preferences.v6";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequiredSubjectMountPolicy {
@@ -27,9 +27,11 @@ pub(crate) enum RequiredSubjectMountPolicy {
 #[serde(deny_unknown_fields)]
 struct Scope {
     principal: String,
+    presentation_id: crate::ids::PresentationId,
+    surface_instance_id: crate::ids::SurfaceInstanceId,
     surface: String,
     /// Exact compiled surface generation that admitted this arrangement.
-    /// A stable surface ref is not enough: authored view sets and slots may
+    /// A stable surface ref is not enough: authored view sets may
     /// change beneath it, and an older complete composition must not replace
     /// the newly compiled defaults merely because all of its views remain
     /// individually admitted.
@@ -51,16 +53,6 @@ struct Preferences {
 struct SavedViewSet {
     seed: ViewSetSeedSpec,
     focused_view: Option<usize>,
-}
-
-fn slot(slot: &Option<RyeOsDockSlotState>) -> Option<SlotSpec> {
-    slot.as_ref().map(|slot| SlotSpec {
-        content: match &slot.content {
-            RyeOsDockContent::View { view_ref } => SlotContentSpec::View(view_ref.clone()),
-        },
-        open: slot.visible,
-        size: slot.size,
-    })
 }
 
 fn capture_layout(
@@ -107,11 +99,12 @@ fn capture_layout(
     })
 }
 
-fn capture_view_set(
+pub(crate) fn capture_view_set(
     view_set: &crate::view_set::ViewSet,
     id: String,
 ) -> Result<ViewSetSeedSpec, String> {
     Ok(ViewSetSeedSpec {
+        schema: VIEW_SET_COMPOSITION_SCHEMA,
         id,
         title: view_set.title.clone(),
         root: view_set
@@ -119,12 +112,6 @@ fn capture_view_set(
             .as_ref()
             .map(|root| capture_layout(root, view_set))
             .transpose()?,
-        slots: SlotsSpec {
-            top: slot(&view_set.docks.top),
-            bottom: slot(&view_set.docks.bottom),
-            left: slot(&view_set.docks.left),
-            right: slot(&view_set.docks.right),
-        },
     })
 }
 
@@ -167,34 +154,33 @@ fn center_mounts(
 fn relationship_mounts(
     view_set: &crate::view_set::ViewSet,
 ) -> Result<Vec<(SavedViewMountRef, crate::ids::RyeOsViewInstanceKey)>, String> {
-    use super::model::{RyeOsDockEdge, dock_view_instance_key};
-    let mut mounts = center_mounts(view_set)?
+    let mounts = center_mounts(view_set)?
         .into_iter()
         .enumerate()
         .map(|(index, instance)| (SavedViewMountRef::Tile { index }, instance))
         .collect::<Vec<_>>();
-    for (edge, saved_edge) in [
-        (RyeOsDockEdge::Top, SavedViewSlotEdge::Top),
-        (RyeOsDockEdge::Bottom, SavedViewSlotEdge::Bottom),
-        (RyeOsDockEdge::Left, SavedViewSlotEdge::Left),
-        (RyeOsDockEdge::Right, SavedViewSlotEdge::Right),
-    ] {
-        if view_set.docks.slot(edge).is_some() {
-            mounts.push((
-                SavedViewMountRef::Slot { edge: saved_edge },
-                dock_view_instance_key(view_set.id, edge),
-            ));
-        }
-    }
     Ok(mounts)
 }
 
 impl RyeOsCore {
-    pub(crate) fn live_saved_set_resolutions(
+    pub(crate) fn live_saved_set_resolutions_at(
         &self,
+        surface_id: &crate::ids::SurfaceInstanceId,
+        required_names: &std::collections::BTreeSet<&str>,
     ) -> Result<BTreeMap<String, crate::ids::ViewSetId>, String> {
         let mut resolved = BTreeMap::new();
+        let surface = self
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.surfaces().get(surface_id))
+            .ok_or("saved-set resolution requires a live captured Surface")?;
         for (view_set_id, saved_id) in &self.view_set_template_ids {
+            if !required_names.contains(saved_id.as_str()) {
+                continue;
+            }
+            if !surface.view_sets().iter().any(|set| set.id == *view_set_id) {
+                continue;
+            }
             if resolved.insert(saved_id.clone(), *view_set_id).is_some() {
                 return Err(format!(
                     "saved view set has multiple live instances and cannot be linked unambiguously: {saved_id}"
@@ -215,16 +201,35 @@ impl RyeOsCore {
             .as_ref()
             .filter(|id| !id.is_empty())
             .ok_or("layout preferences require an authenticated principal")?;
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or("layout preferences require an admitted presentation")?;
+        let instance = self
+            .active_surface()
+            .ok_or("layout preferences require a selected Surface")?;
         let surface = self
-            .binding_attachment(&self.surface_attachment_id)
+            .binding_attachment(&instance.binding().binding_attachment_id)
             .ok_or("layout preferences require the admitted surface attachment")?;
-        if surface.surface_generation.is_empty() {
+        if surface.binding_generation != instance.binding().binding_generation
+            || surface.binding_digest != instance.binding().binding_digest
+        {
+            return Err("layout preferences require the exact Surface attachment".into());
+        }
+        if surface.presentation.definition.surface().is_none() {
+            return Err(
+                "Surface layout preferences cannot capture shared presentation state".into(),
+            );
+        }
+        if surface.root_generation.is_empty() {
             return Err("layout preferences require an exact surface generation".into());
         }
         Ok(Scope {
             principal: principal.clone(),
-            surface: surface.surface_ref.clone(),
-            surface_generation: surface.surface_generation.clone(),
+            presentation_id: presentation.id().clone(),
+            surface_instance_id: instance.id().clone(),
+            surface: surface.root_ref.clone(),
+            surface_generation: surface.root_generation.clone(),
             project: surface.project_path.clone(),
         })
     }
@@ -237,8 +242,20 @@ impl RyeOsCore {
 
     pub fn export_layout_preferences(&self) -> Result<String, String> {
         self.validate_layout_export_contexts()?;
-        let view_sets = self
-            .view_sets
+        let surface = self
+            .active_surface()
+            .ok_or("layout preferences require a selected Surface")?;
+        let selected = surface
+            .active_view_set()
+            .ok_or("layout preferences require a selected tab")?
+            .id;
+        let active_view_set = surface
+            .view_sets()
+            .iter()
+            .position(|set| set.id == selected)
+            .ok_or("selected tab is not part of the Surface")?;
+        let view_sets = surface
+            .view_sets()
             .iter()
             .enumerate()
             .map(|(index, view_set)| {
@@ -254,7 +271,7 @@ impl RyeOsCore {
         let snapshot = Preferences {
             schema: SCHEMA.into(),
             scope: self.preference_scope()?,
-            active_view_set: self.active_view_set,
+            active_view_set,
             view_sets,
         };
         let encoded = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
@@ -269,12 +286,27 @@ impl RyeOsCore {
     /// Refuse mixed or unresolved layouts instead of exporting a snapshot
     /// that restoration would silently retarget onto the authored surface.
     fn validate_layout_export_contexts(&self) -> Result<(), String> {
-        use super::model::{RyeOsDockEdge, dock_view_instance_key};
-
+        let surface = self
+            .active_surface()
+            .ok_or("layout export requires a selected Surface")?;
+        let sets = surface.view_sets();
+        let surface_attachment_id = &surface.binding().binding_attachment_id;
         for (instance, attachment) in &self.selection_attachments {
-            let owner = self
-                .view_set_index_for_instance(instance)
-                .map(|index| self.view_sets[index].id);
+            if !sets.iter().any(|set| {
+                set.tiles
+                    .values()
+                    .any(|tile| &tile.instance_key == instance)
+            }) {
+                continue; // Shared dock/dialog state is not part of tab persistence.
+            }
+            if self
+                .mounted_view_ref(instance)
+                .and_then(|view_ref| self.binding_for_instance(instance, view_ref))
+                .is_some_and(|binding| !super::attachment::participates_in_selection(binding))
+            {
+                continue; // Inert replay metadata is not a portable relationship.
+            }
+            let owner = self.view_set_for_instance(instance).map(|set| set.id);
             match attachment {
                 super::attachment::SelectionAttachment::FollowViewSet { view_set_id }
                     if owner == Some(*view_set_id) => {}
@@ -284,32 +316,22 @@ impl RyeOsCore {
                 ),
             }
         }
-        for view_set in &self.view_sets {
-            if self.view_set_insertion_attachments.get(&view_set.id)
-                != Some(&self.surface_attachment_id)
+        for view_set in sets {
+            if self.view_set_insertion_attachments.get(&view_set.id) != Some(surface_attachment_id)
             {
                 return Err(
                     "layout preferences cannot represent this view set's insertion context".into(),
                 );
             }
             let tile_contexts_match = view_set.tiles.values().all(|tile| {
-                self.instance_binding_attachments.get(&tile.instance_key)
-                    == Some(&self.surface_attachment_id)
+                self.binding_attachment_for_instance(&tile.instance_key)
+                    .is_some_and(|attachment| {
+                        attachment.binding_attachment_id == *surface_attachment_id
+                            && attachment.binding_generation == surface.binding().binding_generation
+                            && attachment.binding_digest == surface.binding().binding_digest
+                    })
             });
-            let dock_contexts_match = [
-                RyeOsDockEdge::Top,
-                RyeOsDockEdge::Bottom,
-                RyeOsDockEdge::Left,
-                RyeOsDockEdge::Right,
-            ]
-            .into_iter()
-            .filter(|edge| view_set.docks.slot(*edge).is_some())
-            .all(|edge| {
-                self.instance_binding_attachments
-                    .get(&dock_view_instance_key(view_set.id, edge))
-                    == Some(&self.surface_attachment_id)
-            });
-            if !tile_contexts_match || !dock_contexts_match {
+            if !tile_contexts_match {
                 return Err(
                     "layout preferences cannot represent mixed or unresolved mount contexts".into(),
                 );
@@ -351,14 +373,39 @@ impl RyeOsCore {
         exclude: Option<&crate::ids::RyeOsViewInstanceKey>,
         saved_set_ids: &BTreeMap<crate::ids::ViewSetId, String>,
     ) -> Result<SavedViewSetTemplate, String> {
+        let view_set_id = match exclude {
+            Some(instance) => self.composition_destination(instance)?.view_set_id,
+            None => {
+                self.active_view_set()
+                    .ok_or("captured view set is unavailable")?
+                    .id
+            }
+        };
+        self.capture_view_set_template_at(view_set_id, id, name, exclude, saved_set_ids)
+    }
+
+    pub(crate) fn capture_view_set_template_at(
+        &self,
+        view_set_id: crate::ids::ViewSetId,
+        id: String,
+        name: String,
+        exclude: Option<&crate::ids::RyeOsViewInstanceKey>,
+        saved_set_ids: &BTreeMap<crate::ids::ViewSetId, String>,
+    ) -> Result<SavedViewSetTemplate, String> {
         let view_set = self
-            .view_sets
-            .get(self.active_view_set)
-            .ok_or("active view set is unavailable")?;
+            .view_set(view_set_id)
+            .ok_or("captured view set is unavailable")?;
         let mut captured = view_set.clone();
         if let Some(instance) = exclude {
-            if self.view_set_index_for_instance(instance) != Some(self.active_view_set)
-                || self.mounted_view_ref(instance).is_none()
+            let management = self
+                .presentation
+                .as_ref()
+                .and_then(|composition| composition.mount(instance))
+                .ok_or("composition-management instance is not mounted")?;
+            if matches!(
+                management,
+                super::presentation_state::MountRef::SurfaceTile { .. }
+            ) && self.view_set_for_instance(instance).map(|set| set.id) != Some(view_set.id)
             {
                 return Err(
                     "composition-management instance is not mounted in this view set".into(),
@@ -370,24 +417,9 @@ impl RyeOsCore {
                 .find_map(|(id, tile)| (&tile.instance_key == instance).then_some(*id))
             {
                 captured.close_tile(tile);
-            } else {
-                use super::model::{RyeOsDockEdge, dock_view_instance_key};
-                let edge = [
-                    RyeOsDockEdge::Top,
-                    RyeOsDockEdge::Bottom,
-                    RyeOsDockEdge::Left,
-                    RyeOsDockEdge::Right,
-                ]
-                .into_iter()
-                .find(|edge| dock_view_instance_key(captured.id, *edge) == *instance)
-                .ok_or("composition-management instance is not mounted in this view set")?;
-                match edge {
-                    RyeOsDockEdge::Top => captured.docks.top = None,
-                    RyeOsDockEdge::Bottom => captured.docks.bottom = None,
-                    RyeOsDockEdge::Left => captured.docks.left = None,
-                    RyeOsDockEdge::Right => captured.docks.right = None,
-                }
             }
+            // Shared management Views need no exclusion: they never belong
+            // to the captured nested tab layout.
         }
         // Project bindings remain one insertion context. Subject relationships
         // are captured separately below without persisting runtime authority.
@@ -398,9 +430,8 @@ impl RyeOsCore {
         let mut relationships = Vec::with_capacity(mounts.len());
         for (mount, instance) in mounts {
             if self
-                .instance_binding_attachments
-                .get(&instance)
-                .map(String::as_str)
+                .binding_attachment_for_instance(&instance)
+                .map(|attachment| attachment.binding_attachment_id.as_str())
                 != Some(insertion)
             {
                 return Err("this composition has mixed or unresolved project contexts; the reusable template cannot preserve them".into());
@@ -438,9 +469,6 @@ impl RyeOsCore {
                     }
                     let input = match &mount {
                         SavedViewMountRef::Tile { index } => format!("subject_tile_{index}"),
-                        SavedViewMountRef::Slot { edge } => {
-                            format!("subject_slot_{}", format!("{edge:?}").to_lowercase())
-                        }
                     };
                     SavedViewSelectionSource::RequiredSubject { input, facets }
                 }
@@ -483,7 +511,22 @@ impl RyeOsCore {
                 SavedViewSelectionSource::FollowSet { .. }
             )
         }) {
-            self.live_saved_set_resolutions()?
+            let required = template
+                .relationships
+                .iter()
+                .filter_map(|relationship| match &relationship.source {
+                    SavedViewSelectionSource::FollowSet { saved_view_set_id } => {
+                        Some(saved_view_set_id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let surface_id = self
+                .active_surface()
+                .ok_or("saved-set resolution requires a selected Surface")?
+                .id()
+                .clone();
+            self.live_saved_set_resolutions_at(&surface_id, &required)?
         } else {
             BTreeMap::new()
         };
@@ -504,8 +547,7 @@ impl RyeOsCore {
         template: &SavedViewSetTemplate,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
         let active_view_set_id = self
-            .view_sets
-            .get(self.active_view_set)
+            .active_view_set()
             .ok_or("active view set is unavailable")?
             .id;
         let insertion_attachment_id = self
@@ -515,9 +557,9 @@ impl RyeOsCore {
         self.open_saved_view_set_template(template, &insertion_attachment_id)
     }
 
-    /// Open with explicit fresh subjects and explicit saved-set resolutions.
-    /// Neither input can grant authority: the insertion attachment and every
-    /// view are still revalidated before the fresh mounts are committed.
+    /// Prepare a reusable set through the existing retained operation owner.
+    /// Supplied subjects and external follows are validated and installed
+    /// atomically by the retained composition owner after acknowledgement.
     pub fn open_saved_view_set_template_with_relationships(
         &mut self,
         template: &SavedViewSetTemplate,
@@ -542,195 +584,178 @@ impl RyeOsCore {
         saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
         subject_policy: RequiredSubjectMountPolicy,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
-        self.mount_saved_view_set_template_with_relationships(
+        let surface = self
+            .active_surface()
+            .ok_or("opening a reusable set requires a selected Surface")?;
+        let destination = super::presentation_state::PresentationInsertionDestination {
+            surface_instance_id: surface.id().clone(),
+            view_set_id: self
+                .active_view_set()
+                .ok_or("active view set is unavailable")?
+                .id,
+        };
+        self.open_saved_view_set_template_with_policy_at(
             template,
             insertion_attachment_id,
             fresh_subjects,
             saved_sets,
             subject_policy,
-        )?;
-        Ok(self.refresh_view_set_sources())
+            &destination,
+        )
     }
 
-    /// Commit a validated composition and its subject relationships without
-    /// emitting source work. Particular-set resume uses this boundary so its
-    /// freshly resolved logical subject is installed before the first fetch.
-    pub(crate) fn mount_saved_view_set_template_with_relationships(
+    pub(crate) fn open_saved_view_set_template_with_policy_at(
         &mut self,
         template: &SavedViewSetTemplate,
         insertion_attachment_id: &str,
         fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
         saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
         subject_policy: RequiredSubjectMountPolicy,
-    ) -> Result<(), String> {
-        if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
+        destination: &super::presentation_state::PresentationInsertionDestination,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        validate_saved_view_set_templates(std::slice::from_ref(template))?;
+        let required_inputs = template
+            .relationships
+            .iter()
+            .filter_map(|relationship| match &relationship.source {
+                SavedViewSelectionSource::RequiredSubject { input, .. } => Some(input.as_str()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let required_sets = template
+            .relationships
+            .iter()
+            .filter_map(|relationship| match &relationship.source {
+                SavedViewSelectionSource::FollowSet { saved_view_set_id } => {
+                    Some(saved_view_set_id.as_str())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if fresh_subjects
+            .keys()
+            .any(|input| !required_inputs.contains(input.as_str()))
+        {
+            return Err("fresh subject input is not used by this template".into());
+        }
+        if saved_sets
+            .keys()
+            .any(|id| !required_sets.contains(id.as_str()))
+        {
+            return Err("saved-set resolution is not used by this template".into());
+        }
+        if subject_policy == RequiredSubjectMountPolicy::RequireResolved {
+            for input in required_inputs {
+                if !fresh_subjects.contains_key(input) {
+                    return Err(format!("required fresh subject is missing: {input}"));
+                }
+            }
+        }
+        for id in required_sets {
+            if !saved_sets.contains_key(id) {
+                return Err(format!("required saved view set is not open: {id}"));
+            }
+        }
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or("presentation is unavailable")?;
+        presentation
+            .view_set(&destination.surface_instance_id, destination.view_set_id)
+            .ok_or("captured insertion tab is no longer open")?;
+        if self.insertion_attachment_id(destination.view_set_id) != Some(insertion_attachment_id) {
+            return Err(
+                "insertion attachment does not belong to the captured destination tab".into(),
+            );
+        }
+        let surface = presentation
+            .surfaces()
+            .get(&destination.surface_instance_id)
+            .ok_or("captured insertion Surface is no longer open")?;
+        let owner = crate::ui::composition_operation::CompositionOwner::Surface {
+            surface_instance_id: surface.id().clone(),
+            binding: surface.binding().clone(),
+        };
+        let index = surface.view_sets().len();
+        if index >= crate::surface::view_sets::MAX_VIEW_SETS {
             return Err("view set limit reached".into());
         }
-        validate_saved_view_set_templates(std::slice::from_ref(template))?;
-        let insertion_context = self
-            .binding_attachments
-            .get(insertion_attachment_id)
+        let descriptor = self
+            .binding_attachment(insertion_attachment_id)
             .ok_or("saved view set requires a live admitted insertion context")?;
-        let tiling = self
-            .view_sets
-            .get(self.active_view_set)
-            .ok_or("active view set is unavailable")?
-            .tiling
-            .clone();
-        let view_set = template.composition.instantiate(&tiling)?;
-        for tile in view_set.tiles.values() {
-            if !insertion_context.views.contains_key(&tile.view.view_ref) {
-                return Err(format!(
-                    "saved view is not admitted: {}",
-                    tile.view.view_ref
-                ));
-            }
-        }
-        for slot in [
-            &view_set.docks.top,
-            &view_set.docks.bottom,
-            &view_set.docks.left,
-            &view_set.docks.right,
-        ]
-        .into_iter()
-        .flatten()
+        let binding = super::binding::UiBindingAttachmentCoordinate {
+            binding_attachment_id: descriptor.binding_attachment_id.clone(),
+            binding_generation: descriptor.binding_generation,
+            binding_digest: descriptor.binding_digest.clone(),
+        };
+        self.prepare_saved_composition_owned(
+            crate::ui::composition_operation::CompositionMutation::InsertTab {
+                index,
+                tab: crate::ui::composition_operation::CompositionTabSeed {
+                    template: template.clone(),
+                    binding,
+                    focused_view: None,
+                    fresh_subjects: fresh_subjects.clone(),
+                    followed_sets: saved_sets.clone(),
+                },
+                activate: true,
+            },
+            owner,
+        )
+    }
+
+    /// A successful result means write-ahead PREPARATION only. Publication and
+    /// first source fetch wait for the exact preparation/completion ACKs.
+    fn prepare_saved_composition(
+        &mut self,
+        mutation: crate::ui::composition_operation::CompositionMutation,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        let surface = self
+            .active_surface()
+            .ok_or("saved composition requires a selected Surface")?;
+        let owner = crate::ui::composition_operation::CompositionOwner::Surface {
+            surface_instance_id: surface.id().clone(),
+            binding: surface.binding().clone(),
+        };
+        self.prepare_saved_composition_owned(mutation, owner)
+    }
+
+    fn prepare_saved_composition_owned(
+        &mut self,
+        mutation: crate::ui::composition_operation::CompositionMutation,
+        owner: crate::ui::composition_operation::CompositionOwner,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        let before = self.seat.events().len();
+        let effects = self.prepare_composition_owned(mutation, owner);
+        if self.seat.events().len() != before + 1
+            || !matches!(
+                self.seat.events().last().map(|event| &event.kind),
+                Some(super::seat::SeatEventKind::PresentationOperationPrepared(_))
+            )
         {
-            let RyeOsDockContent::View { view_ref } = &slot.content;
-            if !insertion_context.views.contains_key(view_ref) {
-                return Err(format!("saved slot is not admitted: {view_ref}"));
-            }
+            return Err("saved composition was not prepared; inspect the current owner or pending operation".into());
         }
-        let relationship_mounts = relationship_mounts(&view_set)?;
-        let relationship_instances = relationship_mounts.into_iter().collect::<BTreeMap<_, _>>();
-        let mut instance_view_refs = view_set
-            .tiles
-            .values()
-            .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (edge, slot) in [
-            (super::model::RyeOsDockEdge::Top, &view_set.docks.top),
-            (super::model::RyeOsDockEdge::Bottom, &view_set.docks.bottom),
-            (super::model::RyeOsDockEdge::Left, &view_set.docks.left),
-            (super::model::RyeOsDockEdge::Right, &view_set.docks.right),
-        ] {
-            if let Some(slot) = slot {
-                let RyeOsDockContent::View { view_ref } = &slot.content;
-                instance_view_refs.insert(
-                    super::model::dock_view_instance_key(view_set.id, edge),
-                    view_ref.clone(),
-                );
-            }
-        }
-        let mut resolved_relationships = Vec::with_capacity(template.relationships.len());
-        for relationship in &template.relationships {
-            let instance = relationship_instances
-                .get(&relationship.mount)
-                .cloned()
-                .ok_or("saved relationship mount is unavailable")?;
-            let attachment = match &relationship.source {
-                SavedViewSelectionSource::FollowOwnSet => {
-                    super::attachment::SelectionAttachment::FollowViewSet {
-                        view_set_id: view_set.id,
-                    }
-                }
-                SavedViewSelectionSource::FollowSet { saved_view_set_id } => {
-                    let view_set_id =
-                        saved_sets.get(saved_view_set_id).copied().ok_or_else(|| {
-                            format!("required saved view set is not open: {saved_view_set_id}")
-                        })?;
-                    if !self.view_sets.iter().any(|set| set.id == view_set_id) {
-                        return Err(format!(
-                            "required saved view set is unavailable: {saved_view_set_id}"
-                        ));
-                    }
-                    super::attachment::SelectionAttachment::FollowViewSet { view_set_id }
-                }
-                SavedViewSelectionSource::RequiredSubject { input, facets } => {
-                    let view_ref = instance_view_refs
-                        .get(&instance)
-                        .ok_or("saved relationship view is unavailable")?;
-                    let binding = insertion_context
-                        .views
-                        .get(view_ref)
-                        .ok_or("saved relationship binding is unavailable")?;
-                    let declared = super::attachment::selection_dependencies(binding);
-                    if declared.len() != facets.len()
-                        || facets.iter().any(|facet| !declared.contains(facet))
-                    {
-                        return Err(format!(
-                            "required fresh subject has facets not read by the current view: {input}"
-                        ));
-                    }
-                    let Some(supplied) = fresh_subjects.get(input) else {
-                        if subject_policy == RequiredSubjectMountPolicy::AllowUnresolved {
-                            resolved_relationships.push((
-                                instance,
-                                super::attachment::SelectionAttachment::RequiredSubject {
-                                    input: input.clone(),
-                                    facets: facets.clone(),
-                                },
-                            ));
-                            continue;
-                        }
-                        return Err(format!("required fresh subject is missing: {input}"));
-                    };
-                    if supplied.len() != facets.len()
-                        || facets.iter().any(|facet| !supplied.contains_key(facet))
-                    {
-                        return Err(format!(
-                            "fresh subject does not exactly satisfy required facets: {input}"
-                        ));
-                    }
-                    let encoded =
-                        serde_json::to_vec(supplied).map_err(|error| error.to_string())?;
-                    let byte_limit = usize::try_from(
-                        insertion_context
-                            .descriptor
-                            .binding_request_bounds
-                            .max_request_bytes,
-                    )
-                    .map_err(|_| "binding request byte bound exceeds this platform")?;
-                    if byte_limit == 0 || encoded.len() > byte_limit {
-                        return Err(format!(
-                            "fresh subject exceeds binding request bounds: {input}"
-                        ));
-                    }
-                    use sha2::{Digest, Sha256};
-                    super::attachment::SelectionAttachment::Pinned {
-                        values: supplied.clone(),
-                        fingerprint: format!("{:x}", Sha256::digest(&encoded)),
-                    }
-                }
-            };
-            resolved_relationships.push((instance, attachment));
-        }
-        self.view_sets.push(view_set);
-        self.active_view_set = self.view_sets.len() - 1;
-        if !self.stamp_view_set_mounts(self.active_view_set, insertion_attachment_id) {
-            self.view_sets.pop();
-            self.active_view_set = self.active_view_set.saturating_sub(1);
-            return Err("saved view set lost its admitted insertion context".into());
-        }
-        for (instance, attachment) in resolved_relationships {
-            self.selection_attachments.insert(instance, attachment);
-        }
-        self.view_set_template_ids
-            .insert(self.view_sets[self.active_view_set].id, template.id.clone());
-        Ok(())
+        Ok(effects)
     }
 
     pub fn restore_layout_preferences(
         &mut self,
         encoded: &str,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
-        // This restores presentation only; it has no authority to discard live
-        // input. In particular, a later browser/client caller must not turn the
-        // startup restore API into an implicit "discard all drafts" action.
-        if self.view_sets.iter().any(|view_set| {
-            view_set
-                .input_buffers
-                .values()
-                .any(|input| !input.text.is_empty())
+        let surface = self
+            .active_surface()
+            .ok_or("layout restoration requires a selected Surface")?;
+        let old_mounts = surface
+            .view_sets()
+            .iter()
+            .flat_map(|set| set.tiles.values())
+            .map(|tile| tile.instance_key.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.input_buffers.iter().any(|(key, input)| {
+            !input.text.is_empty()
+                && old_mounts.iter().any(|instance| {
+                    super::model::InputBufferKey::storage_key_belongs_to(key, instance)
+                })
         }) {
             return Err(
                 "layout restoration would discard current input; clear it explicitly first".into(),
@@ -740,7 +765,7 @@ impl RyeOsCore {
             return Err("layout preferences exceed byte limit".into());
         }
         let snapshot: Preferences = serde_json::from_str(encoded)
-            .map_err(|e| format!("invalid layout preferences: {e}"))?;
+            .map_err(|error| format!("invalid layout preferences: {error}"))?;
         if snapshot.schema != SCHEMA || snapshot.scope != self.preference_scope()? {
             return Err("layout preferences have a different schema or session scope".into());
         }
@@ -754,169 +779,236 @@ impl RyeOsCore {
                 .map(|saved| saved.seed.clone())
                 .collect::<Vec<_>>(),
         )?;
-        let tiling = self.view_sets[self.active_view_set].tiling.clone();
-        let insertion_attachment_id = self.surface_attachment_id.clone();
-        let insertion_context = self
+        let descriptor = self
+            .binding_attachment(surface.binding().binding_attachment_id.as_str())
+            .ok_or("layout restoration requires the admitted Surface attachment")?;
+        let binding = super::binding::UiBindingAttachmentCoordinate {
+            binding_attachment_id: descriptor.binding_attachment_id.clone(),
+            binding_generation: descriptor.binding_generation,
+            binding_digest: descriptor.binding_digest.clone(),
+        };
+        let views = self
             .binding_attachments
-            .get(&insertion_attachment_id)
-            .ok_or("layout restoration requires the admitted surface attachment")?;
-        let mut restored = Vec::with_capacity(snapshot.view_sets.len());
+            .get(&binding.binding_attachment_id)
+            .ok_or("layout binding context absent")?;
+        let active_seed_id = snapshot.view_sets[snapshot.active_view_set].seed.id.clone();
+        let mut tabs = Vec::new();
+        // Preferences retain arrangement, not pinned values or execution state.
+        // Reused subject-dependent Views reopen explicitly unresolved.
         for saved in snapshot.view_sets {
-            let mut view_set = saved.seed.instantiate(&tiling)?;
-            for tile in view_set.tiles.values() {
-                if !insertion_context.views.contains_key(&tile.view.view_ref) {
-                    return Err(format!(
-                        "saved view is not admitted: {}",
-                        tile.view.view_ref
-                    ));
+            fn refs<'a>(node: &'a LayoutSeedSpec, output: &mut Vec<&'a str>) {
+                match node {
+                    LayoutSeedSpec::Group { views, .. } => {
+                        output.extend(views.iter().map(|view| view.0.as_str()))
+                    }
+                    LayoutSeedSpec::Split { first, second, .. } => {
+                        refs(first, output);
+                        refs(second, output);
+                    }
                 }
             }
-            // Closed slots need the same check as visible slots: they may be
-            // revealed later, so hiding cannot smuggle an unadmitted view in.
-            for slot in [
-                &view_set.docks.top,
-                &view_set.docks.bottom,
-                &view_set.docks.left,
-                &view_set.docks.right,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let RyeOsDockContent::View { view_ref } = &slot.content;
-                if !insertion_context.views.contains_key(view_ref) {
-                    return Err(format!("saved slot is not admitted: {view_ref}"));
-                }
+            let mut ordered = Vec::new();
+            if let Some(root) = &saved.seed.root {
+                refs(root, &mut ordered);
             }
-            if let Some(index) = saved.focused_view {
-                let id = *view_set
-                    .tile_ids()
-                    .get(index)
-                    .ok_or("saved focus is outside the view set")?;
-                view_set.focus_tile(id);
+            let mut relationships = Vec::new();
+            for (index, view_ref) in ordered.into_iter().enumerate() {
+                let view = views
+                    .views
+                    .get(view_ref)
+                    .ok_or_else(|| format!("saved view is not admitted: {view_ref}"))?;
+                let facets = super::attachment::selection_dependencies(view)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let source = if facets.is_empty() {
+                    SavedViewSelectionSource::FollowOwnSet
+                } else {
+                    SavedViewSelectionSource::RequiredSubject {
+                        input: format!("restored_subject_{index}"),
+                        facets,
+                    }
+                };
+                relationships.push(SavedViewSelectionRelationship {
+                    mount: SavedViewMountRef::Tile { index },
+                    source,
+                });
             }
-            restored.push(view_set);
+            tabs.push(crate::ui::composition_operation::CompositionTabSeed {
+                template: SavedViewSetTemplate {
+                    id: saved.seed.id.clone(),
+                    name: saved.seed.title.clone(),
+                    composition: saved.seed,
+                    relationships,
+                },
+                binding: binding.clone(),
+                focused_view: saved.focused_view,
+                fresh_subjects: BTreeMap::new(),
+                followed_sets: BTreeMap::new(),
+            });
         }
-        // Complete validation precedes replacement. This operation never replays
-        // an input/command, mutates the seat route or imports saved privileges.
-        // Fresh mounts must not retain pins/follow links to retired instances.
-        self.selection_attachments.clear();
-        self.instance_binding_attachments.clear();
-        self.view_set_insertion_attachments.clear();
-        self.view_set_template_ids.clear();
-        self.view_sets = restored;
-        self.active_view_set = snapshot.active_view_set;
-        for index in 0..self.view_sets.len() {
-            if !self.stamp_view_set_mounts(index, &insertion_attachment_id) {
-                return Err("layout restoration lost its admitted insertion context".into());
-            }
-        }
-        Ok(self.refresh_view_set_sources())
+        self.prepare_saved_composition(
+            crate::ui::composition_operation::CompositionMutation::RestoreTabs {
+                tabs,
+                active_seed_id,
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::model::{BrowserSession, BrowserViewport, RyeOsInputState};
+    use crate::ui::model::{InputBufferKey, RyeOsDockEdge, RyeOsInputState};
+    use crate::view_set::ViewSet;
     use serde_json::json;
 
     fn core() -> RyeOsCore {
-        RyeOsCore::new(
-            BrowserSession {
-                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-                session_id: "session:test".into(),
-                user_principal_id: Some("fp:operator".into()),
-                surface_attachment_id: "attachment:test".into(),
-                binding_attachments: vec![crate::ui::UiBindingAttachment {
-                    binding_attachment_id: "attachment:test".into(),
-                    binding_generation: 1,
-                    binding_digest: "binding-generation-one".into(),
-                    surface_ref: "surface:test/work".into(),
-                    surface_generation: "surface-generation-one".into(),
-                    effective_surface: json!({
-                        "name": "Work", "tiles": ["view:test/one", "view:test/two"],
-                        "views": {
-                            "view:test/one": {
-                                "widget": "text",
-                                "sources": {"default": {
-                                    "ref": "service:test/one",
-                                    "params": {"subject": "@facet:selection.work.id"}
-                                }}
-                            },
-                            "view:test/two": { "widget": "text" }
-                        }
-                    }),
-                    project_path: None,
-                    posture: Default::default(),
-                    binding_request_bounds: crate::ui::UiBindingRequestBounds {
-                        max_request_bytes: 64 * 1024,
-                        max_input_bytes: 16 * 1024,
-                    },
-                }],
-                ..Default::default()
-            },
+        use crate::ui::reducer::test_support::*;
+        let mut session = session_with_surface_and_docks(
+            json!({
+                "name":"Work","view_sets":[{"schema":2,"id":"work","title":"Work",
+                    "root":{"type":"group","views":["view:test/one","view:test/two"],"active":0}}],"views":{
+                    "view:test/one":{"widget":"text","sources":{"default":{"ref":"service:test/one","params":{"subject":"@facet:selection.work.id"}}}},
+                    "view:test/two":{"widget":"text"},
+                    "view:test/subject-dock":{"widget":"rows","sources":{"default":{"ref":"service:test/subject-dock","params":{"thread":"@facet:selection.work.thread"}}}}
+                }
+            }),
+            json!({"left":{"content":"view:test/one","open":false,"size":24},
+            "bottom":{"content":"view:test/subject-dock","open":false,"size":9}}),
+        );
+        session.session_id = "session:test".into();
+        session.user_principal_id = Some("fp:operator".into());
+        session.binding_attachments[0].binding_attachment_id = "attachment:test".into();
+        session.presentations[0].surfaces[0]
+            .binding
+            .binding_attachment_id = "attachment:test".into();
+        for tab in &mut session.presentations[0].surfaces[0].mount_manifest.tabs {
+            tab.binding.binding_attachment_id = "attachment:test".into();
+        }
+        core_for_presentation(
+            session,
+            FIXTURE_PRESENTATION_ID,
             BrowserViewport::default(),
             0,
         )
     }
 
-    fn add_subject_dock(core: &mut RyeOsCore) -> crate::ids::RyeOsViewInstanceKey {
-        let view_ref = "view:test/subject-dock";
-        core.binding_attachments
-            .get_mut("attachment:test")
-            .unwrap()
-            .views
-            .insert(
-                view_ref.into(),
-                serde_json::from_value(json!({
-                    "widget": "rows",
-                    "sources": {"default": {
-                        "ref": "service:test/subject-dock",
-                        "params": {"thread": "@facet:selection.work.thread"}
-                    }}
-                }))
+    fn set(core: &RyeOsCore, index: usize) -> &ViewSet {
+        &core.active_surface().unwrap().view_sets()[index]
+    }
+
+    fn draft_key(core: &RyeOsCore, index: usize) -> String {
+        let set = set(core, index);
+        let tile = set.tiles.values().next().unwrap();
+        InputBufferKey::new(
+            tile.instance_key.clone(),
+            tile.view.view_ref.clone(),
+            "line",
+            core.binding_attachment_for_instance(&tile.instance_key)
                 .unwrap(),
-            );
-        core.view_sets[core.active_view_set].docks.bottom = Some(RyeOsDockSlotState {
-            visible: true,
-            size: 9,
-            content: RyeOsDockContent::View {
-                view_ref: view_ref.into(),
-            },
-        });
-        let instance = super::super::model::dock_view_instance_key(
-            core.view_sets[core.active_view_set].id,
-            super::super::model::RyeOsDockEdge::Bottom,
-        );
-        core.stamp_instance_binding(instance.clone(), "attachment:test");
-        instance
+        )
+        .storage_key()
+    }
+
+    fn add_subject_dock(core: &mut RyeOsCore) -> crate::ids::RyeOsViewInstanceKey {
+        core.presentation
+            .as_mut()
+            .unwrap()
+            .dock_mut("bottom")
+            .unwrap()
+            .visible = true;
+        core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
+            .unwrap()
     }
 
     #[test]
     fn arrangement_round_trip_allocates_fresh_ids_and_never_saves_drafts() {
+        use crate::ui::reducer::test_support::{
+            claim_fixture_producer, pending_prefix, settle_pending_prefix,
+        };
         let mut source = core();
-        source.view_sets[0].input_buffers.insert(
-            "test".into(),
+        let producer = claim_fixture_producer(&mut source);
+        settle_pending_prefix(&mut source, &producer);
+        let draft = draft_key(&source, 0);
+        source.input_buffers.insert(
+            draft,
             RyeOsInputState {
                 text: "private-unsent-draft".into(),
                 ..Default::default()
             },
         );
-        let ids = source.view_sets[0].tile_ids();
-        source.view_sets[0].move_tile_to_group(ids[1], ids[0], 1);
+        let ids = set(&source, 0).tile_ids();
+        fn group_for(
+            root: &crate::layout::LayoutTree,
+            tile: crate::ids::TileId,
+        ) -> Option<crate::ids::ViewGroupId> {
+            match root {
+                crate::layout::LayoutTree::Group { group_id, tabs, .. } => {
+                    tabs.contains(&tile).then_some(*group_id)
+                }
+                crate::layout::LayoutTree::Split { first, second, .. } => {
+                    group_for(first, tile).or_else(|| group_for(second, tile))
+                }
+            }
+        }
+        let tab = set(&source, 0).id;
+        let surface = source.active_surface().unwrap().id().clone();
+        let group = group_for(set(&source, 0).root.as_ref().unwrap(), ids[0]).unwrap();
+        source.prepare_composition_mutation(
+            super::super::composition_operation::CompositionMutation::MoveView {
+                source: super::super::composition_operation::CompositionTileTarget {
+                    surface_instance_id: surface.clone(),
+                    view_set_id: tab,
+                    tile_id: ids[1],
+                },
+                destination: super::super::composition_operation::CompositionTileTarget {
+                    surface_instance_id: surface,
+                    view_set_id: tab,
+                    tile_id: ids[0],
+                },
+                placement: super::super::composition_operation::CompositionPlacement::GroupTab {
+                    group_id: group,
+                    before: None,
+                },
+            },
+        );
+        settle_pending_prefix(&mut source, &producer);
+        let default_mount = set(&source, 0).tiles[&ids[0]].instance_key.clone();
+        source.prepare_composition_mutation(
+            super::super::composition_operation::CompositionMutation::FocusView {
+                mount: default_mount,
+            },
+        );
+        settle_pending_prefix(&mut source, &producer);
         let encoded = source.export_layout_preferences().unwrap();
         assert!(!encoded.contains("private-unsent-draft"));
         assert!(!encoded.contains("binding_digest"));
         let mut target = core();
+        let target_producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &target_producer);
         let seat_before = target.seat.fold().snapshot();
-        let effects = target.restore_layout_preferences(&encoded).unwrap();
+        let live_before = set(&target, 0).root.clone();
+        assert!(
+            target
+                .restore_layout_preferences(&encoded)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(set(&target, 0).root, live_before);
+        target.acknowledge_seat_prefix(&target_producer, pending_prefix(&target));
+        assert_eq!(
+            set(&target, 0).root,
+            live_before,
+            "first ACK cannot install restored layout"
+        );
+        let effects = settle_pending_prefix(&mut target, &target_producer);
         assert!(effects.iter().all(|effect| !matches!(
             effect.kind,
             super::super::effect::RyeOsEffectKind::InvokeBinding { .. }
         )));
         assert_eq!(target.seat.fold().snapshot(), seat_before);
         assert_eq!(
-            target.view_sets[0]
+            set(&target, 0)
                 .root
                 .as_ref()
                 .unwrap()
@@ -924,9 +1016,9 @@ mod tests {
                 .len(),
             1
         );
-        assert!(target.view_sets[0].input_buffers.is_empty());
+        assert!(target.input_buffers.is_empty());
         assert!(
-            target.view_sets[0]
+            set(&target, 0)
                 .tile_ids()
                 .iter()
                 .all(|id| !ids.contains(id))
@@ -937,8 +1029,8 @@ mod tests {
     fn management_capture_omits_only_its_mount_without_changing_live_layout() {
         let source = core();
         let original = source.export_layout_preferences().unwrap();
-        let ids = source.view_sets[0].tile_ids();
-        let instance = &source.view_sets[0].tiles[&ids[0]].instance_key;
+        let ids = set(&source, 0).tile_ids();
+        let instance = &set(&source, 0).tiles[&ids[0]].instance_key;
         let template = source
             .capture_view_set_template("saved".into(), "Saved".into(), Some(instance))
             .unwrap();
@@ -951,7 +1043,7 @@ mod tests {
     #[test]
     fn refused_preferences_leave_live_layout_unchanged() {
         let mut target = core();
-        let original = target.view_sets[0].root.clone();
+        let original = set(&target, 0).root.clone();
         let mut saved: serde_json::Value =
             serde_json::from_str(&target.export_layout_preferences().unwrap()).unwrap();
         saved["scope"]["principal"] = json!("fp:someone-else");
@@ -960,7 +1052,7 @@ mod tests {
                 .restore_layout_preferences(&saved.to_string())
                 .is_err()
         );
-        assert_eq!(target.view_sets[0].root, original);
+        assert_eq!(set(&target, 0).root, original);
         let mut saved: serde_json::Value =
             serde_json::from_str(&target.export_layout_preferences().unwrap()).unwrap();
         saved["view_sets"][0]["seed"]["slots"] =
@@ -970,7 +1062,7 @@ mod tests {
                 .restore_layout_preferences(&saved.to_string())
                 .is_err()
         );
-        assert_eq!(target.view_sets[0].root, original);
+        assert_eq!(set(&target, 0).root, original);
         assert!(
             target
                 .restore_layout_preferences(&" ".repeat(MAX_LAYOUT_PREFERENCE_BYTES + 1))
@@ -979,27 +1071,39 @@ mod tests {
     }
 
     #[test]
-    fn management_capture_checks_slot_mount_and_preserves_other_instances() {
-        use super::super::model::{RyeOsDockEdge, dock_view_instance_key};
+    fn management_capture_checks_shared_mount_and_preserves_tab_instances() {
         let mut source = core();
-        let instance = dock_view_instance_key(source.view_sets[0].id, RyeOsDockEdge::Left);
+        let presentation = source.presentation.as_ref().unwrap().id();
+        let missing = crate::ids::RyeOsViewInstanceKey::shared_dock(presentation, "right").unwrap();
+        assert!(
+            source
+                .capture_view_set_template("saved".into(), "Saved".into(), Some(&missing))
+                .is_err()
+        );
+        let instance = source
+            .shared_dock_instance_key(RyeOsDockEdge::Left)
+            .unwrap();
         assert!(
             source
                 .capture_view_set_template("saved".into(), "Saved".into(), Some(&instance))
-                .is_err()
+                .is_err(),
+            "a global dock does not inherit the active tab as an insertion target"
         );
-        source.view_sets[0].docks.left = Some(RyeOsDockSlotState {
-            visible: true,
-            size: 24,
-            content: RyeOsDockContent::View {
-                view_ref: "view:test/one".into(),
-            },
-        });
+        source.open_dialog("launcher");
+        let instance = source.presentation.as_ref().unwrap().dialogs()["launcher"]
+            .view()
+            .instance_key()
+            .clone();
         let original = source.export_layout_preferences().unwrap();
         let template = source
             .capture_view_set_template("saved".into(), "Saved".into(), Some(&instance))
             .unwrap();
-        assert!(template.composition.slots.left.is_none());
+        assert!(
+            serde_json::to_value(&template.composition)
+                .unwrap()
+                .get("slots")
+                .is_none()
+        );
         assert!(
             serde_json::to_string(&template)
                 .unwrap()
@@ -1020,7 +1124,7 @@ mod tests {
             .get_mut("attachment:test")
             .unwrap()
             .descriptor
-            .surface_generation = "surface-generation-two".into();
+            .root_generation = "surface-generation-two".into();
 
         assert_ne!(source_key, successor.layout_preference_key().unwrap());
         assert!(successor.restore_layout_preferences(&saved).is_err());
@@ -1030,15 +1134,13 @@ mod tests {
     fn unrelated_binding_generation_does_not_retire_layout() {
         let source = core();
         let source_key = source.layout_preference_key().unwrap();
-
         let mut successor = core();
+        let mut unrelated = successor.binding_attachments["attachment:test"].clone();
+        unrelated.descriptor.binding_attachment_id = "unrelated".into();
+        unrelated.descriptor.binding_digest = "unrelated-generation-two".into();
         successor
             .binding_attachments
-            .get_mut("attachment:test")
-            .unwrap()
-            .descriptor
-            .binding_digest = "binding-generation-two".into();
-
+            .insert("unrelated".into(), unrelated);
         assert_eq!(source_key, successor.layout_preference_key().unwrap());
     }
 
@@ -1050,7 +1152,7 @@ mod tests {
             .get_mut("attachment:test")
             .unwrap()
             .descriptor
-            .surface_generation
+            .root_generation
             .clear();
 
         assert!(target.layout_preference_key().is_err());
@@ -1060,30 +1162,29 @@ mod tests {
     #[test]
     fn mixed_attachment_mounts_cannot_be_exported_as_surface_preferences() {
         let mut target = core();
-        let instance = target.view_sets[0]
+        let instance = set(&target, 0)
             .tiles
             .values()
             .next()
             .unwrap()
             .instance_key
             .clone();
+        let mut unrelated = target.binding_attachments["attachment:test"].clone();
+        unrelated.descriptor.binding_attachment_id = "attachment:project".into();
+        unrelated.descriptor.binding_digest = "project-binding".into();
         target
-            .instance_binding_attachments
-            .insert(instance, "attachment:project".into());
-
+            .binding_attachments
+            .insert("attachment:project".into(), unrelated);
+        target.stamp_instance_binding(instance, "attachment:project");
         assert!(target.export_layout_preferences().is_err());
     }
 
     #[test]
     fn reusable_template_opens_unresolved_without_serializing_a_pin() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut target = core();
-        let instance = target.view_sets[0]
-            .tiles
-            .values()
-            .next()
-            .unwrap()
-            .instance_key
-            .clone();
+        let tile = set(&target, 0).root.as_ref().unwrap().tile_ids()[0];
+        let instance = set(&target, 0).tiles[&tile].instance_key.clone();
         target.selection_attachments.insert(
             instance,
             super::super::attachment::SelectionAttachment::Pinned {
@@ -1101,10 +1202,19 @@ mod tests {
         assert!(!encoded.contains("fingerprint"));
 
         let mut reopened = core();
+        let producer = claim_fixture_producer(&mut reopened);
+        settle_pending_prefix(&mut reopened, &producer);
+        let before = reopened.view_sets().count();
         reopened
             .open_saved_view_set_template_in_active_context(&template)
             .unwrap();
-        let unresolved_instance = center_mounts(&reopened.view_sets[1]).unwrap()[0].clone();
+        assert_eq!(
+            reopened.view_sets().count(),
+            before,
+            "preparation cannot mount a tab"
+        );
+        settle_pending_prefix(&mut reopened, &producer);
+        let unresolved_instance = center_mounts(&set(&reopened, 1)).unwrap()[0].clone();
         assert!(matches!(
             reopened.selection_attachments.get(&unresolved_instance),
             Some(super::super::attachment::SelectionAttachment::RequiredSubject {
@@ -1117,7 +1227,7 @@ mod tests {
             .unwrap();
         assert_eq!(recaptured.relationships, template.relationships);
 
-        let before_strict = reopened.view_sets.len();
+        let before_strict = reopened.view_sets().count();
         assert!(
             reopened
                 .open_saved_view_set_template_with_relationships(
@@ -1129,13 +1239,28 @@ mod tests {
                 .unwrap_err()
                 .contains("required fresh subject is missing")
         );
-        assert_eq!(reopened.view_sets.len(), before_strict);
+        assert_eq!(reopened.view_sets().count(), before_strict);
 
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "subject_tile_0".into(),
             BTreeMap::from([("selection.work.id".into(), json!("fresh-work"))]),
         );
+        let mut unused = inputs.clone();
+        unused.insert("unused_input".into(), BTreeMap::new());
+        let seat_before = reopened.seat.events().len();
+        assert!(
+            reopened
+                .open_saved_view_set_template_with_relationships(
+                    &template,
+                    "attachment:test",
+                    &unused,
+                    &BTreeMap::new(),
+                )
+                .unwrap_err()
+                .contains("not used")
+        );
+        assert_eq!(reopened.seat.events().len(), seat_before);
         reopened
             .open_saved_view_set_template_with_relationships(
                 &template,
@@ -1144,7 +1269,9 @@ mod tests {
                 &BTreeMap::new(),
             )
             .unwrap();
-        let reopened_instance = center_mounts(&reopened.view_sets[2]).unwrap()[0].clone();
+        assert_eq!(reopened.view_sets().count(), before_strict);
+        settle_pending_prefix(&mut reopened, &producer);
+        let reopened_instance = center_mounts(&set(&reopened, 2)).unwrap()[0].clone();
         let Some(super::super::attachment::SelectionAttachment::Pinned { values, .. }) =
             reopened.selection_attachments.get(&reopened_instance)
         else {
@@ -1155,82 +1282,78 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_dock_save_open_save_preserves_the_exact_requirement() {
+    fn shared_dock_subjects_never_enter_saved_tab_composition() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut source = core();
         let dock = add_subject_dock(&mut source);
         source.selection_attachments.insert(
-            dock,
+            dock.clone(),
             super::super::attachment::SelectionAttachment::RequiredSubject {
-                input: "subject_slot_bottom".into(),
+                input: "shared_subject".into(),
                 facets: vec!["selection.work.thread".into()],
             },
         );
         let template = source
-            .export_active_view_set_template("dock-set".into(), "Dock set".into())
+            .export_active_view_set_template("saved".into(), "Saved".into())
             .unwrap();
-
+        let encoded = serde_json::to_value(&template).unwrap();
+        assert!(encoded["composition"].get("slots").is_none());
+        assert!(!encoded.to_string().contains("shared_subject"));
         let mut reopened = core();
-        add_subject_dock(&mut reopened);
+        let producer = claim_fixture_producer(&mut reopened);
+        settle_pending_prefix(&mut reopened, &producer);
         reopened
             .open_saved_view_set_template(&template, "attachment:test")
             .unwrap();
-        let reopened_dock = super::super::model::dock_view_instance_key(
-            reopened.view_sets[reopened.active_view_set].id,
-            super::super::model::RyeOsDockEdge::Bottom,
-        );
-        assert!(matches!(
-            reopened.selection_attachments.get(&reopened_dock),
-            Some(super::super::attachment::SelectionAttachment::RequiredSubject {
-                input,
-                facets,
-            }) if input == "subject_slot_bottom" && facets == &["selection.work.thread"]
-        ));
-        let recaptured = reopened
-            .export_active_view_set_template("dock-set-again".into(), "Dock set again".into())
-            .unwrap();
-        assert_eq!(recaptured.relationships, template.relationships);
+        settle_pending_prefix(&mut reopened, &producer);
+        assert!(!reopened.presentation.as_ref().unwrap().docks()["bottom"].visible);
+        assert!(source.selection_attachments.contains_key(&dock));
     }
 
     #[test]
     fn restore_does_not_discard_input_in_an_inactive_view_set() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut target = core();
+        let producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &producer);
         let saved = target.export_layout_preferences().unwrap();
-        target.view_sets[0].input_buffers.insert(
-            "draft".into(),
+        let draft = draft_key(&target, 0);
+        target.input_buffers.insert(
+            draft,
             RyeOsInputState {
                 text: "keep me".into(),
                 ..Default::default()
             },
         );
         target.new_view_set();
-        let ids: Vec<_> = target
-            .view_sets
-            .iter()
-            .map(|view_set| view_set.id)
-            .collect();
+        settle_pending_prefix(&mut target, &producer);
+        let ids: Vec<_> = target.view_sets().map(|view_set| view_set.id).collect();
         assert!(target.restore_layout_preferences(&saved).is_err());
         assert_eq!(
             target
-                .view_sets
-                .iter()
+                .view_sets()
                 .map(|view_set| view_set.id)
                 .collect::<Vec<_>>(),
             ids
         );
-        assert_eq!(target.view_sets[0].input_buffers["draft"].text, "keep me");
+        assert_eq!(target.input_buffers[&draft_key(&target, 0)].text, "keep me");
     }
 
     #[test]
     fn reusable_template_opens_fresh_and_never_carries_session_state() {
+        use crate::ui::reducer::test_support::{
+            claim_fixture_producer, pending_prefix, settle_pending_prefix,
+        };
         let mut source = core();
-        source.view_sets[0].input_buffers.insert(
-            "draft".into(),
+        let draft = draft_key(&source, 0);
+        source.input_buffers.insert(
+            draft,
             RyeOsInputState {
                 text: "private draft".into(),
                 ..Default::default()
             },
         );
-        let source_ids = source.view_sets[0].tile_ids();
+        let source_ids = set(&source, 0).tile_ids();
         let template = source
             .export_active_view_set_template("development".into(), "Development".into())
             .unwrap();
@@ -1239,14 +1362,34 @@ mod tests {
         assert!(!encoded.contains("session:test"));
 
         let mut target = core();
-        let effects = target
+        let producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &producer);
+        let preparation = target
             .open_saved_view_set_template(&template, "attachment:test")
             .unwrap();
-        assert_eq!(target.view_sets.len(), 2);
-        assert_eq!(target.active_view_set, 1);
-        assert!(target.view_sets[1].input_buffers.is_empty());
+        assert!(preparation.is_empty());
+        assert_eq!(
+            target.view_sets().count(),
+            1,
+            "template preparation is not publication"
+        );
+        target.acknowledge_seat_prefix(&producer, pending_prefix(&target));
+        assert_eq!(
+            target.view_sets().count(),
+            1,
+            "prepared template ACK only retains its completion"
+        );
+        let effects = settle_pending_prefix(&mut target, &producer);
+        assert_eq!(target.view_sets().count(), 2);
+        assert_eq!(target.active_view_set().unwrap().id, set(&target, 1).id);
+        assert!(!target.input_buffers.keys().any(|key| {
+            set(&target, 1)
+                .tiles
+                .values()
+                .any(|tile| InputBufferKey::storage_key_belongs_to(key, &tile.instance_key))
+        }));
         assert!(
-            target.view_sets[1]
+            set(&target, 1)
                 .tile_ids()
                 .iter()
                 .all(|id| !source_ids.contains(id))
@@ -1259,18 +1402,24 @@ mod tests {
 
     #[test]
     fn reusable_cross_set_follow_requires_explicit_saved_set_resolution() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut source = core();
-        let captured_set = source.view_sets[0].id;
-        let instance = center_mounts(&source.view_sets[0]).unwrap()[0].clone();
+        let producer = claim_fixture_producer(&mut source);
+        settle_pending_prefix(&mut source, &producer);
+        let captured_set = set(&source, 0).id;
+        let instance = center_mounts(&set(&source, 0)).unwrap()[0].clone();
         source.new_view_set();
-        let followed_set = source.view_sets[1].id;
-        source.selection_attachments.insert(
+        settle_pending_prefix(&mut source, &producer);
+        let followed_set = set(&source, 1).id;
+        source.switch_view_set_tab(0);
+        settle_pending_prefix(&mut source, &producer);
+        source.prepare_subject_operation(
             instance,
             super::super::attachment::SelectionAttachment::FollowViewSet {
                 view_set_id: followed_set,
             },
         );
-        source.switch_view_set_tab(0);
+        settle_pending_prefix(&mut source, &producer);
 
         let template = source
             .capture_view_set_template_with_relationships(
@@ -1288,15 +1437,31 @@ mod tests {
         assert_ne!(captured_set, followed_set);
 
         let mut target = core();
-        let target_followed = target.view_sets[0].id;
-        let before = target.view_sets.len();
+        let target_producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &target_producer);
+        let target_followed = set(&target, 0).id;
+        let before = target.view_sets().count();
         assert!(
             target
                 .open_saved_view_set_template(&template, "attachment:test")
                 .unwrap_err()
                 .contains("required saved view set is not open")
         );
-        assert_eq!(target.view_sets.len(), before);
+        assert_eq!(target.view_sets().count(), before);
+        assert!(
+            target
+                .open_saved_view_set_template_with_relationships(
+                    &template,
+                    "attachment:test",
+                    &BTreeMap::new(),
+                    &BTreeMap::from([
+                        ("support".into(), target_followed),
+                        ("unused_set".into(), target_followed)
+                    ]),
+                )
+                .unwrap_err()
+                .contains("not used")
+        );
         target
             .open_saved_view_set_template_with_relationships(
                 &template,
@@ -1305,7 +1470,9 @@ mod tests {
                 &BTreeMap::from([("support".into(), target_followed)]),
             )
             .unwrap();
-        let reopened_instance = center_mounts(&target.view_sets[1]).unwrap()[0].clone();
+        assert_eq!(target.view_sets().count(), before);
+        settle_pending_prefix(&mut target, &target_producer);
+        let reopened_instance = center_mounts(&set(&target, 1)).unwrap()[0].clone();
         assert_eq!(
             target.selection_attachments.get(&reopened_instance),
             Some(
@@ -1317,23 +1484,82 @@ mod tests {
     }
 
     #[test]
+    fn reusable_template_refuses_a_mismatched_captured_insertion_binding() {
+        let mut target = core();
+        let template = target
+            .export_active_view_set_template("saved".into(), "Saved".into())
+            .unwrap();
+        let destination = super::super::presentation_state::PresentationInsertionDestination {
+            surface_instance_id: target.active_surface().unwrap().id().clone(),
+            view_set_id: target.active_view_set().unwrap().id,
+        };
+        // The shared root is admitted, but is not this tab's insertion context.
+        let other_attachment = target
+            .data
+            .session
+            .as_ref()
+            .unwrap()
+            .root_attachment_id
+            .clone();
+        assert_ne!(
+            target.insertion_attachment_id(destination.view_set_id),
+            Some(other_attachment.as_str())
+        );
+        let before = target.seat.events().len();
+        let result = target.open_saved_view_set_template_with_policy_at(
+            &template,
+            &other_attachment,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            RequiredSubjectMountPolicy::AllowUnresolved,
+            &destination,
+        );
+        assert!(result.unwrap_err().contains("captured destination tab"));
+        assert_eq!(target.seat.events().len(), before);
+    }
+
+    #[test]
+    fn reusable_template_refuses_a_missing_captured_destination_without_preparing() {
+        let mut target = core();
+        let template = target
+            .export_active_view_set_template("saved".into(), "Saved".into())
+            .unwrap();
+        let destination = super::super::presentation_state::PresentationInsertionDestination {
+            surface_instance_id: target.active_surface().unwrap().id().clone(),
+            view_set_id: crate::ids::ViewSetId::new(u64::MAX),
+        };
+        let before = target.seat.events().len();
+        let result = target.open_saved_view_set_template_with_policy_at(
+            &template,
+            "attachment:test",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            RequiredSubjectMountPolicy::AllowUnresolved,
+            &destination,
+        );
+        assert!(result.unwrap_err().contains("captured insertion tab"));
+        assert_eq!(target.seat.events().len(), before);
+    }
+
+    #[test]
     fn reusable_template_refuses_an_unresolved_insertion_attachment() {
         let mut target = core();
         let template = target
             .export_active_view_set_template("development".into(), "Development".into())
             .unwrap();
-        let set_count = target.view_sets.len();
+        let set_count = target.view_sets().count();
 
         assert!(
             target
                 .open_saved_view_set_template(&template, "attachment:revoked")
                 .is_err()
         );
-        assert_eq!(target.view_sets.len(), set_count);
+        assert_eq!(target.view_sets().count(), set_count);
     }
 
     #[test]
     fn reusable_template_revalidates_views_before_mutating_open_sets() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let source = core();
         let mut template = source
             .export_active_view_set_template("development".into(), "Development".into())
@@ -1344,31 +1570,40 @@ mod tests {
             active: 0,
         });
         let mut target = core();
-        let before = target.view_sets.len();
+        let producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &producer);
+        let before = target.view_sets().count();
         assert!(
             target
                 .open_saved_view_set_template(&template, "attachment:test")
                 .is_err()
         );
-        assert_eq!(target.view_sets.len(), before);
+        assert_eq!(target.view_sets().count(), before);
     }
 
     #[test]
     fn reusable_template_cannot_exceed_the_open_view_set_limit() {
+        use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut target = core();
+        let producer = claim_fixture_producer(&mut target);
+        settle_pending_prefix(&mut target, &producer);
         let template = target
             .export_active_view_set_template("development".into(), "Development".into())
             .unwrap();
-        while target.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS {
+        while target.view_sets().count() < crate::surface::view_sets::MAX_VIEW_SETS {
+            let before = target.view_sets().count();
             target.new_view_set();
+            assert_eq!(target.view_sets().count(), before);
+            settle_pending_prefix(&mut target, &producer);
+            assert_eq!(target.view_sets().count(), before + 1);
         }
-        let before = target.view_sets.len();
+        let before = target.view_sets().count();
 
         assert!(
             target
                 .open_saved_view_set_template(&template, "attachment:test")
                 .is_err()
         );
-        assert_eq!(target.view_sets.len(), before);
+        assert_eq!(target.view_sets().count(), before);
     }
 }

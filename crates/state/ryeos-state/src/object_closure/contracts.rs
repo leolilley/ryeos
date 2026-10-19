@@ -494,7 +494,8 @@ fn validate_state_manifest(value: &Value) -> anyhow::Result<()> {
 
 fn validate_thread_event(value: &Value) -> anyhow::Result<()> {
     let object = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())?;
-    object.validate()
+    object.validate()?;
+    super::validate_registered_event(value)
 }
 
 fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
@@ -1415,6 +1416,13 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
                 &mut links.object_edges,
             )?;
         }
+    }
+    if let Some(registered) = super::links_registered_event(value)? {
+        links.object_edges.extend(registered.object_edges);
+        links.blob_hashes.extend(registered.blob_hashes);
+        links
+            .large_object_hashes
+            .extend(registered.large_object_hashes);
     }
     Ok(links)
 }

@@ -536,6 +536,33 @@ pub enum ThreadSort {
     Watch,
 }
 
+/// Position in one projection-candidate listing. This is a locator, never
+/// authorization evidence: every returned row still needs signed validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadListCursor {
+    pub created_at: String,
+    pub thread_id: String,
+    pub watch_terminal: bool,
+}
+
+impl ThreadListCursor {
+    pub fn from_position(created_at: &str, thread_id: &str, status: &str) -> Self {
+        Self {
+            created_at: created_at.to_owned(),
+            thread_id: thread_id.to_owned(),
+            watch_terminal: TERMINAL_STATUSES.contains(&status),
+        }
+    }
+
+    pub fn from_row(row: &ThreadRow) -> Self {
+        Self::from_position(&row.created_at, &row.thread_id, &row.status)
+    }
+}
+
+/// One raw projection candidate page is bounded independently of any caller's
+/// desired number of signed, authorized results.
+pub const MAX_THREAD_CANDIDATE_PAGE: usize = 256;
+
 pub fn list_threads_filtered(
     db: &ProjectionDb,
     limit: usize,
@@ -600,12 +627,40 @@ pub fn list_threads_query(
     filter: &ThreadListFilter,
     sort: ThreadSort,
 ) -> anyhow::Result<Vec<ThreadRow>> {
+    list_threads_query_after(db, limit, filter, sort, None)
+}
+
+/// Read the next bounded page of *candidate* rows. The cursor follows the
+/// SQL ordering exactly, including the thread-id tie-breaker and Watch's
+/// active/terminal partition. It is not a signed listing or a stable snapshot
+/// across concurrent projection changes.
+pub fn list_threads_candidate_page(
+    db: &ProjectionDb,
+    limit: usize,
+    filter: &ThreadListFilter,
+    sort: ThreadSort,
+    after: Option<&ThreadListCursor>,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    anyhow::ensure!(
+        (1..=MAX_THREAD_CANDIDATE_PAGE).contains(&limit),
+        "thread candidate page limit must be between 1 and {MAX_THREAD_CANDIDATE_PAGE}"
+    );
+    list_threads_query_after(db, limit, filter, sort, after)
+}
+
+fn list_threads_query_after(
+    db: &ProjectionDb,
+    limit: usize,
+    filter: &ThreadListFilter,
+    sort: ThreadSort,
+    after: Option<&ThreadListCursor>,
+) -> anyhow::Result<Vec<ThreadRow>> {
     db.with_sql(|connection| {
         // Terminal statuses inlined from the shared constant (stable substrate
         // vocabulary, not user input), so `active` = status NOT terminal.
         let order = match sort {
-            ThreadSort::Default => "ORDER BY created_at".to_string(),
-            ThreadSort::Newest => "ORDER BY created_at DESC".to_string(),
+            ThreadSort::Default => "ORDER BY created_at, thread_id".to_string(),
+            ThreadSort::Newest => "ORDER BY created_at DESC, thread_id DESC".to_string(),
             ThreadSort::Watch => {
                 let terminal_in = TERMINAL_STATUSES
                     .iter()
@@ -613,7 +668,7 @@ pub fn list_threads_query(
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC"
+                    "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC, thread_id DESC"
                 )
             }
         };
@@ -622,7 +677,7 @@ pub fn list_threads_query(
         // The owner-scope `principal` is EXACT (an authorization boundary must not
         // widen by substring); the dashboard facets are substring (contains) so a
         // type-to-filter box narrows as the operator types.
-        let mut conditions: Vec<&str> = Vec::new();
+        let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
         // `thread_facets.value` is a BLOB, so bind the facet value as bytes to match
         // (a TEXT param would compare unequal to the stored BLOB). Precomputed here so
@@ -630,24 +685,26 @@ pub fn list_threads_query(
         let facet_value_bytes: Option<Vec<u8>> =
             filter.facet.as_ref().map(|(_, v)| v.as_bytes().to_vec());
         if let Some(principal) = &filter.principal {
-            conditions.push("requested_by = ?");
+            conditions.push("requested_by = ?".into());
             params.push(principal);
         }
         if let Some(status) = &filter.status {
-            conditions.push("status LIKE '%' || ? || '%'");
+            conditions.push("status LIKE '%' || ? || '%'".into());
             params.push(status);
         }
         if let Some(kind) = &filter.kind {
-            conditions.push("kind LIKE '%' || ? || '%'");
+            conditions.push("kind LIKE '%' || ? || '%'".into());
             params.push(kind);
         }
         if let Some(requested_by) = &filter.requested_by {
-            conditions.push("requested_by LIKE '%' || ? || '%'");
+            conditions.push("requested_by LIKE '%' || ? || '%'".into());
             params.push(requested_by);
         }
         if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
-            conditions
-                .push("thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)");
+            conditions.push(
+                "thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)"
+                    .into(),
+            );
             params.push(key);
             params.push(value_bytes);
         }
@@ -655,7 +712,7 @@ pub fn list_threads_query(
             // Active = not terminal. The six terminal statuses are stable substrate
             // vocabulary (see TERMINAL_STATUSES), inlined as a fixed placeholder
             // list so this stays a borrowed &str condition.
-            conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)");
+            conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)".into());
             for status in TERMINAL_STATUSES.iter() {
                 params.push(status);
             }
@@ -666,7 +723,7 @@ pub fn list_threads_query(
             }
             // Keep the literal, case-sensitive semantics of Rust starts_with;
             // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
-            conditions.push("substr(item_ref, 1, length(?)) != ?");
+            conditions.push("substr(item_ref, 1, length(?)) != ?".into());
             params.push(prefix);
             params.push(prefix);
         }
@@ -675,8 +732,57 @@ pub fn list_threads_query(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
         if let Some(project_root) = &project_root {
-            conditions.push("project_root = ?");
+            conditions.push("project_root = ?".into());
             params.push(project_root);
+        }
+        let cursor_rank = after.map(|cursor| i64::from(cursor.watch_terminal));
+        if let Some(cursor) = after {
+            anyhow::ensure!(
+                !cursor.created_at.is_empty() && !cursor.thread_id.is_empty(),
+                "thread candidate cursor has an empty ordering coordinate"
+            );
+            match sort {
+                ThreadSort::Default => {
+                    conditions
+                        .push("(created_at > ? OR (created_at = ? AND thread_id > ?))".into());
+                    params.extend([
+                        &cursor.created_at as &dyn rusqlite::types::ToSql,
+                        &cursor.created_at,
+                        &cursor.thread_id,
+                    ]);
+                }
+                ThreadSort::Newest => {
+                    conditions
+                        .push("(created_at < ? OR (created_at = ? AND thread_id < ?))".into());
+                    params.extend([
+                        &cursor.created_at as &dyn rusqlite::types::ToSql,
+                        &cursor.created_at,
+                        &cursor.thread_id,
+                    ]);
+                }
+                ThreadSort::Watch => {
+                    let terminal_in = TERMINAL_STATUSES
+                        .iter()
+                        .map(|s| format!("'{s}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let rank = format!("CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END");
+                    conditions.push(format!(
+                        "({rank} > ? OR ({rank} = ? AND \
+                         (created_at < ? OR (created_at = ? AND thread_id < ?))))"
+                    ));
+                    let rank = cursor_rank
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("cursor rank missing for a cursor"))?;
+                    params.extend([
+                        rank as &dyn rusqlite::types::ToSql,
+                        rank,
+                        &cursor.created_at,
+                        &cursor.created_at,
+                        &cursor.thread_id,
+                    ]);
+                }
+            }
         }
         let where_clause = if conditions.is_empty() {
             String::new()
@@ -691,7 +797,8 @@ pub fn list_threads_query(
         let rows = stmt
             .query_map(params.as_slice(), ThreadRow::from_row)
             .context("query list_threads_query")?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("decode list_threads_query rows")
     })
 }
 
@@ -1138,6 +1245,7 @@ pub fn replay_events_bounded(
         None,
         limit,
         max_serialized_bytes,
+        false,
     )
 }
 
@@ -1162,6 +1270,31 @@ pub fn replay_events_through_bounded(
         Some(through_seq),
         limit,
         max_serialized_bytes,
+        false,
+    )
+}
+
+/// Locate the most recent bounded page for one execution thread, optionally
+/// ending at a chain cut. Rows are returned in chronological order; `has_more`
+/// means older rows were not included. The caller must authenticate every
+/// locator against canonical signed content.
+pub fn recent_thread_events_bounded(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: &str,
+    through_seq: Option<i64>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<ReplayEventRowsPage> {
+    replay_events_range_bounded(
+        db,
+        chain_root_id,
+        Some(thread_id),
+        None,
+        through_seq,
+        limit,
+        max_serialized_bytes,
+        true,
     )
 }
 
@@ -1173,6 +1306,7 @@ fn replay_events_range_bounded(
     through_seq: Option<i64>,
     limit: usize,
     max_serialized_bytes: usize,
+    newest_first: bool,
 ) -> anyhow::Result<ReplayEventRowsPage> {
     db.with_sql(|connection| {
         if limit == 0 {
@@ -1214,7 +1348,11 @@ fn replay_events_range_bounded(
             params.push(Box::new(seq));
         }
 
-        sql.push_str(" ORDER BY chain_seq LIMIT ?");
+        sql.push_str(if newest_first {
+            " ORDER BY chain_seq DESC LIMIT ?"
+        } else {
+            " ORDER BY chain_seq LIMIT ?"
+        });
         let query_limit = limit
             .checked_add(1)
             .context("replay_events_bounded limit overflow")?;
@@ -1277,6 +1415,9 @@ fn replay_events_range_bounded(
             rows.push(event);
         }
 
+        if newest_first {
+            rows.reverse();
+        }
         Ok(ReplayEventRowsPage { rows, has_more })
     })
 }
@@ -1897,6 +2038,32 @@ pub fn thread_events_by_type_operation_id(
             .context("query thread operation event lookup")?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("decode thread operation event lookup")
+    })
+}
+
+/// Bounded singleton-invariant lookup on the existing thread/event-type index.
+/// At most two rows are returned: two prove a duplicate without scanning the
+/// complete thread history.
+pub fn thread_events_by_type(
+    db: &ProjectionDb,
+    thread_id: &str,
+    event_type: &str,
+) -> anyhow::Result<Vec<EventRow>> {
+    db.with_sql(|connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, \
+                        thread_seq, event_type, durability, ts, prev_chain_event_hash, \
+                        prev_thread_event_hash, payload \
+                 FROM events WHERE thread_id = ?1 AND event_type = ?2 \
+                 ORDER BY thread_seq LIMIT 2",
+            )
+            .context("prepare singleton thread event lookup")?;
+        let rows = statement
+            .query_map(rusqlite::params![thread_id, event_type], EventRow::from_row)
+            .context("query singleton thread event lookup")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("decode singleton thread event lookup")
     })
 }
 
@@ -4484,6 +4651,175 @@ mod tests {
         assert_eq!(
             top.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
             ["T-new-run"]
+        );
+    }
+
+    #[test]
+    fn recent_bounded_thread_page_keeps_live_tail_and_late_cut_anchor() {
+        let db = test_db();
+        for seq in 1..=7_i64 {
+            let event_hash = format!("{seq:064x}");
+            db.with_sql(|connection| Ok(connection.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-recent', ?, 'T-recent', ?, 'step', 'durable', '2026-01-01T00:00:00Z', X'7B7D')",
+                (&event_hash, seq, seq),
+            )?))
+            .unwrap();
+        }
+        let live =
+            recent_thread_events_bounded(&db, "chain-recent", "T-recent", None, 3, 1024 * 1024)
+                .unwrap();
+        assert_eq!(
+            live.rows
+                .iter()
+                .map(|row| row.chain_seq)
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7]
+        );
+        assert!(live.has_more);
+
+        let cut =
+            recent_thread_events_bounded(&db, "chain-recent", "T-recent", Some(6), 3, 1024 * 1024)
+                .unwrap();
+        assert_eq!(
+            cut.rows.iter().map(|row| row.chain_seq).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        assert!(cut.has_more);
+        assert!(
+            recent_thread_events_bounded(&db, "chain-recent", "T-recent", None, 0, 1024).is_err()
+        );
+    }
+
+    #[test]
+    fn singleton_event_lookup_returns_two_rows_per_exact_type() {
+        let db = test_db();
+        for (seq, thread_id, event_type) in [
+            (1_i64, "T-1", "marker.a"),
+            (2, "T-1", "marker.b"),
+            (3, "T-1", "marker.b"),
+            (4, "T-1", "marker.b"),
+            (5, "T-2", "marker.b"),
+        ] {
+            let event_hash = format!("{seq:064x}");
+            db.with_sql(|connection| Ok(connection.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-A', ?, ?, ?, ?, 'durable', '2026-01-01T00:00:00Z', X'7B7D')",
+                rusqlite::params![&event_hash, seq, thread_id, seq, event_type],
+            )?))
+            .unwrap();
+        }
+        let rows = thread_events_by_type(&db, "T-1", "marker.b").unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.chain_seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(
+            thread_events_by_type(&db, "T-1", "marker.a").unwrap().len(),
+            1
+        );
+        assert!(
+            thread_events_by_type(&db, "T-1", "marker.")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            thread_events_by_type(&db, "T-1", "marker.b-suffix")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn candidate_pages_follow_complete_sort_tuple_without_skipping_equal_timestamps() {
+        let db = test_db();
+        for (id, status, created_at) in [
+            ("T-a", "running", "2026-01-01T00:00:00Z"),
+            ("T-b", "running", "2026-01-01T00:00:00Z"),
+            ("T-c", "completed", "2026-02-01T00:00:00Z"),
+            ("T-d", "completed", "2026-02-01T00:00:00Z"),
+        ] {
+            insert_thread_at(&db, id, status, created_at);
+        }
+        for (sort, expected) in [
+            (ThreadSort::Default, ["T-a", "T-b", "T-c", "T-d"]),
+            (ThreadSort::Newest, ["T-d", "T-c", "T-b", "T-a"]),
+            (ThreadSort::Watch, ["T-b", "T-a", "T-d", "T-c"]),
+        ] {
+            let mut after = None;
+            let mut actual = Vec::new();
+            loop {
+                let page = list_threads_candidate_page(
+                    &db,
+                    1,
+                    &ThreadListFilter::default(),
+                    sort,
+                    after.as_ref(),
+                )
+                .unwrap();
+                let Some(row) = page.first() else { break };
+                after = Some(ThreadListCursor::from_row(row));
+                actual.push(row.thread_id.as_str().to_owned());
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn candidate_page_preserves_filters_and_rejects_bad_limits_and_cursors() {
+        let db = test_db();
+        insert_thread_full(&db, "T-one", "running", "directive", "fp:one");
+        insert_thread_full(&db, "T-two", "running", "directive", "fp:two");
+        let filter = ThreadListFilter {
+            principal: Some("fp:one".into()),
+            active_only: true,
+            ..Default::default()
+        };
+        let page = list_threads_candidate_page(&db, 2, &filter, ThreadSort::Watch, None).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].thread_id, "T-one");
+        assert!(list_threads_candidate_page(&db, 0, &filter, ThreadSort::Watch, None).is_err());
+        assert!(
+            list_threads_candidate_page(
+                &db,
+                MAX_THREAD_CANDIDATE_PAGE + 1,
+                &filter,
+                ThreadSort::Watch,
+                None,
+            )
+            .is_err()
+        );
+        let empty_cursor = ThreadListCursor {
+            created_at: String::new(),
+            thread_id: "T-one".into(),
+            watch_terminal: false,
+        };
+        assert!(
+            list_threads_candidate_page(&db, 1, &filter, ThreadSort::Default, Some(&empty_cursor))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_page_propagates_projection_row_decode_failure() {
+        let db = test_db();
+        insert_thread_at(&db, "T-bad", "running", "2026-01-01T00:00:00Z");
+        db.with_sql(|connection| {
+            Ok(connection.execute(
+                "UPDATE threads SET project_authority_json = 'not-json' WHERE thread_id = 'T-bad'",
+                [],
+            )?)
+        })
+        .unwrap();
+        assert!(
+            list_threads_candidate_page(
+                &db,
+                1,
+                &ThreadListFilter::default(),
+                ThreadSort::Default,
+                None,
+            )
+            .is_err()
         );
     }
 

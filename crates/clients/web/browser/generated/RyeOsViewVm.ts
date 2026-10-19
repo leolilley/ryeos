@@ -5,6 +5,8 @@ import type { RyeOsRowDetailVm } from "./RyeOsRowDetailVm";
 import type { RyeOsRowVm } from "./RyeOsRowVm";
 import type { RyeOsSceneModel } from "./RyeOsSceneModel";
 import type { RyeOsSectionVm } from "./RyeOsSectionVm";
+import type { RyeOsSourceStatusVm } from "./RyeOsSourceStatusVm";
+import type { RyeOsTableCoverageVm } from "./RyeOsTableCoverageVm";
 import type { RyeOsTableRowVm } from "./RyeOsTableRowVm";
 import type { RyeOsTextLineVm } from "./RyeOsTextLineVm";
 import type { RyeOsTextPositionVm } from "./RyeOsTextPositionVm";
@@ -19,13 +21,13 @@ export type RyeOsViewVm =
    * The view definition names the response fields; this primitive does not
    * know about files, knowledge items or any other product-specific owner.
    */
-  | { type: "document"; title: string; path: string; content: string; truncated: boolean; provenance: string }
+  | { type: "document"; title: string; source_status?: RyeOsSourceStatusVm | null; path: string; content: string; truncated: boolean; provenance: string }
   /**
    * The generic content widget surface: every bound view renders
    * through rows (typed widget variants arrive with the render pass).
    */
-  | { type: "rows"; title: string; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsRowVm[] }
-  | { type: "timeline"; title: string; provenance?: string | null; affordance_hints: string[]; entries: RyeOsTimelineEntryVm[]; entry_ids: string[]; entry_cursors: bigint[]; entry_arrived_at_ms: (bigint | null)[]; entry_indents: number[]; selected?: bigint | null; fold_section?: bigint | null; entry_expandable?: boolean[]; entry_expanded?: boolean[]; entry_details?: RyeOsRowDetailVm[][] }
+  | { type: "rows"; title: string; source_status?: RyeOsSourceStatusVm | null; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsRowVm[] }
+  | { type: "timeline"; title: string; source_status?: RyeOsSourceStatusVm | null; provenance?: string | null; affordance_hints: string[]; entries: RyeOsTimelineEntryVm[]; entry_ids: string[]; entry_cursors: bigint[]; entry_arrived_at_ms: (bigint | null)[]; entry_indents: number[]; selected?: bigint | null; fold_section?: bigint | null; entry_expandable?: boolean[]; entry_expanded?: boolean[]; entry_details?: RyeOsRowDetailVm[][] }
   | { type: "map"; scene: RyeOsSceneModel }
   | { type: "atlas"; scene: RyeOsSceneModel }
   /**
@@ -45,6 +47,6 @@ export type RyeOsViewVm =
    * the bound view (no fire-sword). Rows carry per-row intents like the rows
    * widget.
    */
-  | { type: "table"; title: string; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsTableRowVm[] }
+  | { type: "table"; title: string; source_status?: RyeOsSourceStatusVm | null; columns: string[]; total_rows: bigint; coverage?: RyeOsTableCoverageVm | null; provenance?: string | null; affordance_hints: string[]; rows: RyeOsTableRowVm[] }
   | { type: "placeholder"; title: string; message: string }
   | { type: "required_subject"; title: string; input: string; facets: string[]; actions: RyeOsTileIntentVm[] };

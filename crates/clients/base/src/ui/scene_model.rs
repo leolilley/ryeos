@@ -418,12 +418,12 @@ pub(crate) fn build_scene_model_for_instance(
     let selection = if let Some(instance) = instance {
         core.facet_value_for_instance(instance, crate::ui::seat::KEY_SELECTION)
     } else {
-        core.seat
-            .fold()
-            .get(&crate::ui::seat::selection_facet_key(
-                core.view_sets[core.active_view_set].id,
-            ))
-            .cloned()
+        core.active_view_set().and_then(|set| {
+            core.seat
+                .fold()
+                .get(&crate::ui::seat::selection_facet_key(set.id))
+                .cloned()
+        })
     };
     let mut scene = RyeOsSceneModel {
         generation: core.scene_frame(),
@@ -505,7 +505,7 @@ pub(crate) fn build_scene_model_for_instance(
             [scale_for_count(dimension.schedules.enabled), 1.0, 1.0],
             "#b8bb26",
             Some(format!(
-                "{} enabled / {} schedules",
+                "{} enabled / {} caller-owned schedules",
                 dimension.schedules.enabled, dimension.schedules.total
             )),
             if dimension.schedules.enabled > 0 {
@@ -744,7 +744,10 @@ pub(crate) fn build_scene_model_for_instance(
             [3.8, 0.0, 1.6],
             [scale_for_count(dimension.schedules.total), 1.0, 1.0],
             "#b8bb26",
-            Some(format!("{} schedules", dimension.schedules.total)),
+            Some(format!(
+                "{} caller-owned schedules",
+                dimension.schedules.total
+            )),
             RyeOsTone::Good,
         ));
     }

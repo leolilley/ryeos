@@ -61,6 +61,8 @@ pub use live_close::{
     quote_live_projection_source_transfer, quote_live_schema_source_retirement,
     quote_normal_state_root_membership,
 };
+#[cfg(test)]
+mod anchored_append_tests;
 mod destination_join;
 mod original_close;
 #[cfg(test)]
@@ -1845,6 +1847,119 @@ pub struct AuthoritativeThreadAppendAnchorReadback {
 pub struct AuthoritativeThreadAppendHistoryReadback {
     pub anchor: AuthoritativeThreadAppendAnchorReadback,
     pub events: Vec<(String, ThreadEvent)>,
+}
+
+/// Opaque, state-authenticated fixed endpoint for a resumable thread-event
+/// read. Its fields are deliberately not caller-constructible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeThreadEventReadAnchor {
+    chain_root_id: String,
+    thread_id: String,
+    chain_head_hash: String,
+    snapshot_hash: String,
+    thread_last_event_hash: Option<String>,
+    thread_last_seq: u64,
+}
+
+impl AuthoritativeThreadEventReadAnchor {
+    pub fn chain_root_id(&self) -> &str {
+        &self.chain_root_id
+    }
+
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub fn tip(&self) -> Option<(&str, u64)> {
+        self.thread_last_event_hash
+            .as_deref()
+            .map(|hash| (hash, self.thread_last_seq))
+    }
+}
+
+/// State-minted continuation for the next bounded slice of one exact anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeThreadEventReadProgress {
+    chain_root_id: String,
+    thread_id: String,
+    chain_head_hash: String,
+    snapshot_hash: String,
+    next_event_hash: String,
+    next_thread_seq: u64,
+}
+
+/// Events newest first, plus the continuation when older events remain.
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadEventReadPage {
+    pub events: Vec<(String, ThreadEvent)>,
+    pub progress: Option<AuthoritativeThreadEventReadProgress>,
+}
+
+#[derive(Debug)]
+pub enum ConditionalThreadEventAppendResult {
+    Committed(CommittedWrite<AppendResult>),
+    Conflict,
+}
+
+/// One anchored append: the exact thread frontier the caller read must still
+/// be current under the chain lock that publishes the events.
+pub struct AnchoredThreadAppend<'a> {
+    pub chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub events: Vec<ThreadEvent>,
+    pub snapshot_updates: Vec<SnapshotUpdate>,
+    pub signer: &'a dyn Signer,
+    pub runtime_liveness: &'a dyn RuntimeLivenessInspector,
+    pub expected: &'a AuthoritativeThreadEventReadAnchor,
+}
+
+/// Parameters of one append whose chain lock the caller already holds.
+struct LockedAppend<'a> {
+    chain_root_id: &'a str,
+    thread_id: &'a str,
+    events: Vec<ThreadEvent>,
+    snapshot_updates: Vec<SnapshotUpdate>,
+    signer: &'a dyn Signer,
+    runtime_liveness: Option<&'a dyn RuntimeLivenessInspector>,
+    expected: Option<&'a AuthoritativeThreadEventReadAnchor>,
+}
+
+/// A target append conditional on both its own and a counterpart chain's exact
+/// frontier. The counterpart is never modified.
+pub struct TwoAnchorThreadAppend<'a> {
+    pub chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub events: Vec<ThreadEvent>,
+    pub signer: &'a dyn Signer,
+    pub runtime_liveness: &'a dyn RuntimeLivenessInspector,
+    pub expected: &'a AuthoritativeThreadEventReadAnchor,
+    pub counterpart: &'a AuthoritativeThreadEventReadAnchor,
+    /// Kind the target thread's signed snapshot must carry.
+    pub required_target_kind: &'a str,
+}
+
+/// A retired chain identity an append depends on: the fence store must still
+/// record it as retired with this exact retained closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredChainDependency {
+    pub chain_root_id: String,
+    pub manifest_hash: String,
+}
+
+/// Every additional chain a mixed-cut append excludes: live chains by exact
+/// frontier and retired chains by fence. A chain appears in only one list.
+pub struct MixedCutDependencies<'a> {
+    pub current_anchors: &'a [AuthoritativeThreadEventReadAnchor],
+    pub retired: &'a [RetiredChainDependency],
+}
+
+/// Borrowed signed data captured while both exact chain locks remain held.
+/// This is not a lock handle, writer grant or reusable admission token.
+pub struct TwoAnchorAdmissionView<'a> {
+    pub target: &'a ThreadSnapshot,
+    pub counterpart: &'a ThreadSnapshot,
+    pub target_thread_ids: &'a [String],
+    pub counterpart_thread_ids: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -5378,15 +5493,21 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.append_events_inner(
+        match self.append_events_inner(
             chain_root_id,
             thread_id,
             events,
             snapshot_updates,
             signer,
             None,
+            None,
             &guard,
-        )
+        )? {
+            ConditionalThreadEventAppendResult::Committed(committed) => Ok(committed),
+            ConditionalThreadEventAppendResult::Conflict => {
+                anyhow::bail!("unconditional append reported an anchor conflict")
+            }
+        }
     }
 
     // Admission authority, signer, liveness proof, and the held CAS guard stay
@@ -5402,15 +5523,83 @@ impl StateDb {
         runtime_liveness: &dyn RuntimeLivenessInspector,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
-        self.append_events_inner(
+        match self.append_events_inner(
             chain_root_id,
             thread_id,
             events,
             snapshot_updates,
             signer,
             Some(runtime_liveness),
+            None,
+            cas_mutation_guard,
+        )? {
+            ConditionalThreadEventAppendResult::Committed(committed) => Ok(committed),
+            ConditionalThreadEventAppendResult::Conflict => {
+                anyhow::bail!("unconditional append reported an anchor conflict")
+            }
+        }
+    }
+
+    /// Append only while `request.expected` is still the thread's exact signed
+    /// frontier, checked under the chain lock that publishes the events. A
+    /// moved frontier or head returns `Conflict` and writes nothing.
+    pub fn append_events_admitted_if_anchor(
+        &self,
+        request: AnchoredThreadAppend<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        Self::ensure_anchor_identity(&request)?;
+        self.append_events_inner(
+            request.chain_root_id,
+            request.thread_id,
+            request.events,
+            request.snapshot_updates,
+            request.signer,
+            Some(request.runtime_liveness),
+            Some(request.expected),
             cas_mutation_guard,
         )
+    }
+
+    /// The anchored append for a caller that already holds this chain's lock
+    /// (for example inside a retention-evidence publication that holds both
+    /// chains' locks). The lock must be this store's exact lock for the chain.
+    pub fn append_events_admitted_if_anchor_under_lock(
+        &self,
+        request: AnchoredThreadAppend<'_>,
+        chain_lock: &crate::chain::ChainLock,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        Self::ensure_anchor_identity(&request)?;
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        anyhow::ensure!(
+            request
+                .events
+                .iter()
+                .all(|event| event.durability.is_cas_stored()),
+            "StateDb::append_events cannot persist ephemeral events"
+        );
+        self.append_events_under_chain_lock(
+            LockedAppend {
+                chain_root_id: request.chain_root_id,
+                thread_id: request.thread_id,
+                events: request.events,
+                snapshot_updates: request.snapshot_updates,
+                signer: request.signer,
+                runtime_liveness: Some(request.runtime_liveness),
+                expected: Some(request.expected),
+            },
+            chain_lock,
+        )
+    }
+
+    fn ensure_anchor_identity(request: &AnchoredThreadAppend<'_>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            request.expected.chain_root_id == request.chain_root_id
+                && request.expected.thread_id == request.thread_id,
+            "conditional append anchor belongs to another thread"
+        );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5422,8 +5611,9 @@ impl StateDb {
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        expected: Option<&AuthoritativeThreadEventReadAnchor>,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
-    ) -> anyhow::Result<CommittedWrite<AppendResult>> {
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::append_events cannot persist ephemeral events");
         }
@@ -5435,38 +5625,108 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
+        self.append_events_under_chain_lock(
+            LockedAppend {
+                chain_root_id,
+                thread_id,
+                events,
+                snapshot_updates,
+                signer,
+                runtime_liveness,
+                expected,
+            },
+            &chain_lock,
+        )
+    }
+
+    fn append_events_under_chain_lock(
+        &self,
+        request: LockedAppend<'_>,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        let LockedAppend {
+            chain_root_id,
+            thread_id,
+            events,
+            snapshot_updates,
+            signer,
+            runtime_liveness,
+            expected,
+        } = request;
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        // A stale anchor must refuse before any pending retirement is cancelled.
+        if let Some(expected) = expected {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            if !chain::thread_append_anchor_matches_under_lock(
+                &self.cas_root,
+                &self.refs_root,
+                self.trust_store.as_ref(),
+                &mut cache,
+                chain_lock,
+                chain::ExpectedThreadAppendAnchor {
+                    chain_root_id,
+                    thread_id,
+                    chain_head_hash: &expected.chain_head_hash,
+                    thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                    thread_last_seq: expected.thread_last_seq,
+                },
+            )? {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+        }
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
             ProspectiveChainMutation::UpdateSnapshots(&snapshot_updates),
-            &chain_lock,
+            chain_lock,
         )?;
         let cancelled_remove = self.converge_pending_before_set_locked(
             chain_root_id,
             invalidates_retirement,
             runtime_liveness,
-            &chain_lock,
+            chain_lock,
         )?;
         let mut cache = self.head_cache.lock().expect("head_cache lock");
-        let result = match chain::append_events_with_trust_under_lock(
-            chain::AppendEventsInput {
-                cas_root: &self.cas_root,
-                refs_root: &self.refs_root,
-                chain_root_id,
-                thread_id,
-                events,
-                snapshot_updates: snapshot_updates.clone(),
-                signer,
-            },
-            self.trust_store.as_ref(),
-            &mut cache,
-            &chain_lock,
-        ) {
-            Ok(result) => result,
+        let input = chain::AppendEventsInput {
+            cas_root: &self.cas_root,
+            refs_root: &self.refs_root,
+            chain_root_id,
+            thread_id,
+            events,
+            snapshot_updates: snapshot_updates.clone(),
+            signer,
+        };
+        let appended = match expected {
+            Some(expected) => chain::append_events_with_trust_under_lock_if_anchor(
+                input,
+                self.trust_store.as_ref(),
+                &mut cache,
+                chain_lock,
+                chain::ExpectedThreadAppendAnchor {
+                    chain_root_id,
+                    thread_id,
+                    chain_head_hash: &expected.chain_head_hash,
+                    thread_last_event_hash: expected.thread_last_event_hash.as_deref(),
+                    thread_last_seq: expected.thread_last_seq,
+                },
+            ),
+            None => chain::append_events_with_trust_under_lock(
+                input,
+                self.trust_store.as_ref(),
+                &mut cache,
+                chain_lock,
+            )
+            .map(chain::ConditionalAppendResult::Appended),
+        };
+        let result = match appended {
+            Ok(chain::ConditionalAppendResult::Appended(result)) => result,
+            Ok(chain::ConditionalAppendResult::Conflict) => {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
             Err(error) => {
                 let error = self.failed_write_after_cancelled_remove(
                     chain_root_id,
                     cancelled_remove.as_ref(),
-                    &chain_lock,
+                    chain_lock,
                     error,
                 );
                 self.note_pending_transition_error(chain_root_id, "append_events", &error);
@@ -5476,7 +5736,7 @@ impl StateDb {
         if let Err(error) = self.mark_pending_set_applying_locked(
             chain_root_id,
             &result.chain_state_hash,
-            &chain_lock,
+            chain_lock,
         ) {
             self.note_pending_transition_error(chain_root_id, "append_events", &error);
             return Err(error);
@@ -5515,13 +5775,15 @@ impl StateDb {
         );
 
         let committed_hash = result.chain_state_hash.clone();
-        Ok(self.committed_write_locked(
-            result,
-            chain_root_id,
-            &committed_hash,
-            "append_events",
-            projected,
-            &chain_lock,
+        Ok(ConditionalThreadEventAppendResult::Committed(
+            self.committed_write_locked(
+                result,
+                chain_root_id,
+                &committed_hash,
+                "append_events",
+                projected,
+                chain_lock,
+            ),
         ))
     }
 
@@ -6334,6 +6596,439 @@ impl StateDb {
                 events: readback.events,
             })
         })
+    }
+
+    /// Capture one immutable thread-event frontier from the trust-verified
+    /// signed head. The chain lock is released before this returns; later pages
+    /// authenticate the fixed CAS predecessor path rather than a moving head.
+    pub fn capture_thread_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<Option<AuthoritativeThreadEventReadAnchor>> {
+        self.ensure_cas_mutation_guard(guard)?;
+        let chain_lock = self.acquire_chain_lock(chain_root_id)?;
+        let readback = {
+            let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+            chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut head_cache,
+            )?
+        };
+        drop(chain_lock);
+        self.ensure_cas_mutation_guard(guard)?;
+        Ok(readback.map(|readback| AuthoritativeThreadEventReadAnchor {
+            chain_root_id: chain_root_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            chain_head_hash: readback.chain_head_hash,
+            snapshot_hash: readback.snapshot_hash,
+            thread_last_event_hash: readback.thread_last_event_hash,
+            thread_last_seq: readback.thread_last_seq,
+        }))
+    }
+
+    /// Authenticate at most one caller-bounded slice, newest first, from an
+    /// immutable anchor. Event bytes are hash-bound to the signed head; running
+    /// a registered payload contract over them is the caller's job.
+    /// No chain lock is retained while walking event objects.
+    /// Exhaustion of a bound returns opaque progress rather than treating a
+    /// partial walk as absence.
+    pub fn read_thread_event_page(
+        &self,
+        anchor: &AuthoritativeThreadEventReadAnchor,
+        progress: Option<&AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<AuthoritativeThreadEventReadPage> {
+        self.ensure_cas_mutation_guard(guard)?;
+        anyhow::ensure!(
+            max_events > 0 && max_bytes > 0,
+            "authoritative thread event page bounds must be positive"
+        );
+        let (mut next_hash, mut next_seq) = match progress {
+            Some(progress)
+                if progress.chain_root_id == anchor.chain_root_id
+                    && progress.thread_id == anchor.thread_id
+                    && progress.chain_head_hash == anchor.chain_head_hash
+                    && progress.snapshot_hash == anchor.snapshot_hash
+                    && progress.next_thread_seq > 0 =>
+            {
+                (
+                    Some(progress.next_event_hash.clone()),
+                    progress.next_thread_seq,
+                )
+            }
+            Some(_) => anyhow::bail!("thread event progress belongs to another fixed anchor"),
+            None => (
+                anchor.thread_last_event_hash.clone(),
+                anchor.thread_last_seq,
+            ),
+        };
+        if next_seq == 0 {
+            anyhow::ensure!(
+                next_hash.is_none(),
+                "thread event anchor extends before sequence one"
+            );
+            return Ok(AuthoritativeThreadEventReadPage {
+                events: Vec::new(),
+                progress: None,
+            });
+        }
+        let cas = self.pinned_cas()?;
+        let mut events = Vec::new();
+        let mut inspected_bytes = 0u64;
+        while next_seq != 0 && (events.len() as u64) < max_events {
+            let hash = next_hash
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("thread event anchor ended before its sequence"))?;
+            let remaining = max_bytes.saturating_sub(inspected_bytes);
+            let limit = (crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES as u64).min(remaining);
+            if limit == 0 {
+                next_hash = Some(hash);
+                break;
+            }
+            let (file, size) = cas
+                .open_object(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("thread event page CAS object is absent: {hash}"))?;
+            if size > limit {
+                anyhow::ensure!(
+                    !events.is_empty(),
+                    "thread event page object exceeds the byte work bound; \
+                     increase the per-page byte budget"
+                );
+                next_hash = Some(hash);
+                break;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(file, limit + 1), &mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() as u64 <= limit && lillux::sha256_hex(&bytes) == hash,
+                "thread event page object changed or exceeded its byte bound"
+            );
+            let event: ThreadEvent =
+                serde_json::from_slice(&bytes).context("decode bounded thread event page")?;
+            let canonical = lillux::canonical_json(&event.to_value())
+                .context("canonicalize bounded thread event page")?;
+            anyhow::ensure!(
+                canonical.as_bytes() == bytes.as_slice(),
+                "thread event page object is not canonically encoded"
+            );
+            event.validate()?;
+            anyhow::ensure!(
+                event.chain_root_id == anchor.chain_root_id
+                    && event.thread_id == anchor.thread_id
+                    && event.thread_seq == next_seq,
+                "thread event page differs from its fixed anchor"
+            );
+            inspected_bytes = inspected_bytes
+                .checked_add(canonical.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("thread event page byte count overflow"))?;
+            next_hash.clone_from(&event.prev_thread_event_hash);
+            events.push((hash, event));
+            next_seq -= 1;
+        }
+        let progress = if next_seq == 0 {
+            anyhow::ensure!(
+                next_hash.is_none(),
+                "thread event history extends before sequence one"
+            );
+            None
+        } else {
+            Some(AuthoritativeThreadEventReadProgress {
+                chain_root_id: anchor.chain_root_id.clone(),
+                thread_id: anchor.thread_id.clone(),
+                chain_head_hash: anchor.chain_head_hash.clone(),
+                snapshot_hash: anchor.snapshot_hash.clone(),
+                next_event_hash: next_hash.ok_or_else(|| {
+                    anyhow::anyhow!("thread event page ended before sequence {next_seq}")
+                })?,
+                next_thread_seq: next_seq,
+            })
+        };
+        self.ensure_cas_mutation_guard(guard)?;
+        Ok(AuthoritativeThreadEventReadPage { events, progress })
+    }
+
+    /// Exact signed membership for nonterminal as well as terminal chains.
+    /// The caller retains the chain lock through any structural owner check.
+    pub fn authoritative_chain_thread_ids_under_lock(
+        &self,
+        chain_root_id: &str,
+        chain_lock: &crate::chain::ChainLock,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        ensure_state_chain_lock(&self.refs_root, chain_lock, chain_root_id)?;
+        let Some(head) = chain_lock.read_verified_head(self.trust_store.as_ref())? else {
+            return Ok(None);
+        };
+        let cas = self.pinned_cas()?;
+        crate::chain::validate_authoritative_history_with_cas(
+            &cas,
+            chain_root_id,
+            &head.target_hash,
+            None,
+        )?;
+        let chain_state: crate::ChainState = load_hashed_cas_object(&cas, &head.target_hash)?;
+        chain_state.validate()?;
+        anyhow::ensure!(
+            chain_state.chain_root_id == chain_root_id,
+            "signed chain root differs from {chain_root_id}"
+        );
+        let mut thread_ids = Vec::with_capacity(chain_state.threads.len());
+        for (thread_id, entry) in &chain_state.threads {
+            let snapshot: ThreadSnapshot = load_hashed_cas_object(&cas, &entry.snapshot_hash)?;
+            snapshot.validate()?;
+            anyhow::ensure!(
+                snapshot.thread_id == *thread_id
+                    && snapshot.chain_root_id == chain_root_id
+                    && snapshot.status == entry.status,
+                "signed chain member {thread_id} contradicts its snapshot"
+            );
+            thread_ids.push(thread_id.clone());
+        }
+        Ok(Some(thread_ids))
+    }
+
+    /// Append events to a running target thread only while two exact retained
+    /// chain frontiers remain current. Both chain locks are acquired in root-ID
+    /// order and held through target publication; the counterpart is never
+    /// modified. This is a serialization primitive, not domain authorization.
+    /// Missing heads and pending publications are refused as conflicts, never
+    /// repaired here.
+    pub fn append_running_events_admitted_if_two_anchors(
+        &self,
+        request: TwoAnchorThreadAppend<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.append_running_events_admitted_if_two_anchors_with_admission(
+            request,
+            cas_mutation_guard,
+            |_| Ok(true),
+        )
+    }
+
+    /// Domain admission under both ordered chain locks, after the exact
+    /// frontiers and signed target state are checked, immediately before
+    /// publication. `admit` may read caller-owned state but must not reenter
+    /// StateDb or acquire either chain lock. `false` is a clean conflict; an
+    /// error publishes nothing and leaves retry policy with the caller.
+    pub fn append_running_events_admitted_if_two_anchors_with_admission(
+        &self,
+        request: TwoAnchorThreadAppend<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        self.append_running_events_admitted_if_mixed_cut_with_admission(
+            request,
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+            },
+            cas_mutation_guard,
+            admit,
+        )
+    }
+
+    /// Two-anchor append that also excludes every further live or retired
+    /// chain the caller's read depended on. Live dependencies must still match
+    /// their exact frontier; retired dependencies must still be headless,
+    /// unpending and fenced with the same retained closure.
+    pub fn append_running_events_admitted_if_mixed_cut_with_admission(
+        &self,
+        request: TwoAnchorThreadAppend<'_>,
+        dependencies: MixedCutDependencies<'_>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        admit: impl FnOnce(TwoAnchorAdmissionView<'_>) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<ConditionalThreadEventAppendResult> {
+        let TwoAnchorThreadAppend {
+            chain_root_id,
+            thread_id,
+            events,
+            signer,
+            runtime_liveness,
+            expected,
+            counterpart,
+            required_target_kind,
+        } = request;
+        let MixedCutDependencies {
+            current_anchors,
+            retired,
+        } = dependencies;
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        anyhow::ensure!(
+            expected.chain_root_id == chain_root_id
+                && expected.thread_id == thread_id
+                && counterpart.chain_root_id != chain_root_id
+                && !events.is_empty()
+                && events.iter().all(|event| event.durability.is_cas_stored()),
+            "two-anchor append requires distinct exact chains and durable events"
+        );
+        let mut live = BTreeMap::new();
+        for anchor in current_anchors.iter().chain([expected, counterpart]) {
+            anyhow::ensure!(
+                !anchor.chain_root_id.is_empty(),
+                "append dependency has empty chain identity"
+            );
+            if let Some(prior) = live.insert(anchor.chain_root_id.as_str(), anchor) {
+                anyhow::ensure!(
+                    prior == anchor,
+                    "append dependencies have conflicting exact live cuts"
+                );
+            }
+        }
+        let mut retired_cuts = BTreeMap::new();
+        for dependency in retired {
+            anyhow::ensure!(
+                !dependency.chain_root_id.is_empty()
+                    && !live.contains_key(dependency.chain_root_id.as_str()),
+                "append dependency mixes live and retired cuts"
+            );
+            if let Some(prior) = retired_cuts.insert(dependency.chain_root_id.as_str(), dependency)
+            {
+                anyhow::ensure!(
+                    prior == dependency,
+                    "append dependencies have conflicting retired cuts"
+                );
+            }
+        }
+        let roots = live
+            .keys()
+            .chain(retired_cuts.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut locks = BTreeMap::new();
+        for root in roots {
+            locks.insert(root, self.acquire_existing_chain_lock(root)?);
+        }
+        let lock_for = |root: &str| {
+            locks
+                .get(root)
+                .ok_or_else(|| anyhow::anyhow!("append dependency lock was not acquired"))
+        };
+        for (root, dependency) in &retired_cuts {
+            let lock = lock_for(root)?;
+            if self.recovery.read_pending(root)?.is_some()
+                || lock
+                    .read_verified_head(self.trust_store.as_ref())?
+                    .is_some()
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            match self.recovery.retired_chain_fence(root)? {
+                crate::recovery::RetiredChainFence::Retired { manifest_hash } => {
+                    anyhow::ensure!(
+                        manifest_hash == dependency.manifest_hash,
+                        "retired append dependency differs from its recorded fence"
+                    );
+                }
+                crate::recovery::RetiredChainFence::Absent
+                | crate::recovery::RetiredChainFence::Released { .. } => {
+                    return Ok(ConditionalThreadEventAppendResult::Conflict);
+                }
+            }
+        }
+        let (target_snapshot, counterpart_snapshot) = {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            for anchor in live.values() {
+                let lock = lock_for(&anchor.chain_root_id)?;
+                let current = if self.recovery.read_pending(&anchor.chain_root_id)?.is_some() {
+                    None
+                } else {
+                    chain::capture_authoritative_thread_event_read_anchor_with_trust(
+                        &self.cas_root,
+                        &self.refs_root,
+                        lock,
+                        &anchor.chain_root_id,
+                        &anchor.thread_id,
+                        self.trust_store.as_ref(),
+                        &mut cache,
+                    )?
+                };
+                if current.is_none_or(|current| {
+                    current.chain_head_hash != anchor.chain_head_hash
+                        || current.snapshot_hash != anchor.snapshot_hash
+                        || current.thread_last_event_hash != anchor.thread_last_event_hash
+                        || current.thread_last_seq != anchor.thread_last_seq
+                }) {
+                    return Ok(ConditionalThreadEventAppendResult::Conflict);
+                }
+            }
+            let Some(target) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                lock_for(chain_root_id)?,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            };
+            if target.chain_root_id != chain_root_id
+                || target.thread_id != thread_id
+                || target.status != crate::objects::ThreadStatus::Running
+                || target.kind_name != required_target_kind
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            let Some(other) = chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                lock_for(&counterpart.chain_root_id)?,
+                &counterpart.chain_root_id,
+                &counterpart.thread_id,
+                self.trust_store.as_ref(),
+                &mut cache,
+            )?
+            else {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            };
+            if other.chain_root_id != counterpart.chain_root_id
+                || other.thread_id != counterpart.thread_id
+            {
+                return Ok(ConditionalThreadEventAppendResult::Conflict);
+            }
+            (target, other)
+        };
+        let target_lock = lock_for(chain_root_id)?;
+        let target_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(chain_root_id, target_lock)?
+            .ok_or_else(|| anyhow::anyhow!("two-anchor target lost signed membership"))?;
+        let counterpart_thread_ids = self
+            .authoritative_chain_thread_ids_under_lock(
+                &counterpart.chain_root_id,
+                lock_for(&counterpart.chain_root_id)?,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("two-anchor counterpart lost signed membership"))?;
+        if !admit(TwoAnchorAdmissionView {
+            target: &target_snapshot,
+            counterpart: &counterpart_snapshot,
+            target_thread_ids: &target_thread_ids,
+            counterpart_thread_ids: &counterpart_thread_ids,
+        })? {
+            return Ok(ConditionalThreadEventAppendResult::Conflict);
+        }
+        // Every dependency lock stays held until this append returns; the
+        // helper reuses the held target lock and never reacquires it.
+        self.append_events_under_chain_lock(
+            LockedAppend {
+                chain_root_id,
+                thread_id,
+                events,
+                snapshot_updates: Vec::new(),
+                signer,
+                runtime_liveness: Some(runtime_liveness),
+                expected: Some(expected),
+            },
+            target_lock,
+        )
     }
 
     /// Read one root publication and its canonical predecessor genesis under

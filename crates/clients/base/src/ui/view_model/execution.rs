@@ -1,5 +1,5 @@
 use super::super::event::RyeOsUiIntent;
-use super::{RyeOsCore, RyeOsTone, RyeOsViewVm, bound_view_vm};
+use super::{RyeOsCore, RyeOsTone, RyeOsViewVm, view_vm_for_instance};
 
 // Keep the established `ui::view_model::RyeOsTimelineEntryVm` path stable
 // while grouping execution presentation behind this module.
@@ -98,42 +98,38 @@ pub(super) fn retry_intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIn
 #[cfg(test)]
 mod facet_scope_tests {
     use super::*;
-    use crate::ui::model::BrowserViewport;
-    use crate::ui::reducer::test_support::session;
-    use crate::view_set::{ViewSet, ViewSpec};
+    use crate::ui::reducer::test_support::{core as fixture_core, session_with_surface};
     use serde_json::json;
 
     #[test]
     fn facet_backed_views_resolve_their_mount_not_active_or_global_selection() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        for value in ["first", "second"] {
-            let set = ViewSet::from_tiling(
-                core.view_sets[0].tiling.clone(),
-                vec![ViewSpec::bound("view:test/detail")],
-            );
+        let mut core = fixture_core(session_with_surface(json!({
+            "name":"Facet scopes",
+            "views":{"view:test/detail":{"widget":"rows"}},
+            "view_sets":[
+                {"schema":2,"id":"first","title":"First","root":{"type":"group","views":["view:test/detail"],"active":0}},
+                {"schema":2,"id":"second","title":"Second","root":{"type":"group","views":["view:test/detail"],"active":0}}
+            ]
+        })));
+        let mut instances = Vec::new();
+        let sets = core
+            .active_surface()
+            .unwrap()
+            .view_sets()
+            .iter()
+            .map(|set| (set.id, set.tiles[&set.focused_tile].instance_key.clone()))
+            .collect::<Vec<_>>();
+        for ((id, instance), value) in sets.into_iter().zip(["first", "second"]) {
+            instances.push(instance);
             core.seat.append_facet(
-                crate::ui::seat::selection_facet_key(set.id),
+                crate::ui::seat::selection_facet_key(id),
                 json!({"summary": value}),
             );
-            core.view_sets.push(set);
         }
         core.seat
             .append_facet("selection", json!({"summary": "wrong-global"}));
-        let first = core.view_sets[core.view_sets.len() - 2]
-            .tiles
-            .values()
-            .next()
-            .unwrap()
-            .instance_key
-            .clone();
-        let second = core.view_sets[core.view_sets.len() - 1]
-            .tiles
-            .values()
-            .next()
-            .unwrap()
-            .instance_key
-            .clone();
-        core.active_view_set = core.view_sets.len() - 1;
+        let first = &instances[0];
+        let second = &instances[1];
         assert_eq!(
             facet_backed_response(&core, &first, "selection.summary"),
             Some(json!("first"))
@@ -142,5 +138,53 @@ mod facet_scope_tests {
             facet_backed_response(&core, &second, "selection.summary"),
             Some(json!("second"))
         );
+    }
+}
+
+/// Map a thread/chain status to a tone (the same status→tone vocabulary the
+/// list/detail tone blocks declare, in code here for the summary header). Matches
+/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
+/// not a silently-neutral string.
+pub(super) fn status_tone(status: &str) -> RyeOsTone {
+    use super::super::dto::ThreadStatus;
+    match ThreadStatus::from_wire(status) {
+        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
+        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
+        ThreadStatus::Cancelled => RyeOsTone::Warn,
+        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
+        ThreadStatus::Unknown => RyeOsTone::Neutral,
+    }
+}
+
+/// The timeline entry under the point in the focused feed lens, if the focused
+/// view is a timeline with a point on an entry. The single home for reading the
+/// focused feed entry — both the Enter intent and command-overlay secondary
+/// intents derive from it.
+pub(super) fn focused_timeline_entry(
+    core: &RyeOsCore,
+    instance: &crate::ids::RyeOsViewInstanceKey,
+) -> Option<RyeOsTimelineEntryVm> {
+    if let RyeOsViewVm::Timeline {
+        entries, selected, ..
+    } = view_vm_for_instance(core, &instance)?
+    {
+        return selected.and_then(|i| entries.into_iter().nth(i));
+    }
+    None
+}
+
+/// The focused feed entry's secondary affordance — the retry a recoverable
+/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
+/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
+/// so Enter stays inspect.
+pub(super) fn retry_intent_for_focused_row(
+    core: &RyeOsCore,
+    instance: &crate::ids::RyeOsViewInstanceKey,
+) -> Option<RyeOsUiIntent> {
+    match focused_timeline_entry(core, instance)? {
+        RyeOsTimelineEntryVm::Line {
+            secondary_intent, ..
+        } => secondary_intent,
+        _ => None,
     }
 }

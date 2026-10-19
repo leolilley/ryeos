@@ -30,10 +30,19 @@
     oncompositionend={(event) => { composing = false; emitInput(event.currentTarget); }}
     oninput={(event) => emitInput(event.currentTarget)}
     onkeydown={(event) => {
-      if (event.key === "Enter" && model.live_filter && !composing) {
+      if (composing || event.isComposing) return;
+      if ((event.key === "ArrowUp" || event.key === "ArrowDown") && model.live_filter
+        && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
         event.preventDefault();
-        dispatch({ type: "activate_focused" });
-      } else if (event.key === "Enter" && !event.shiftKey && !composing && model.submit_enabled) {
+        event.stopPropagation();
+        dispatch({ type: "input_at", address: model.address, action: {
+          type: "navigate_selection", delta: event.key === "ArrowDown" ? 1 : -1,
+        } });
+      } else if (event.key === "Enter" && model.live_filter) {
+        event.preventDefault();
+        event.stopPropagation();
+        dispatch({ type: "input_at", address: model.address, action: { type: "activate_selection" } });
+      } else if (event.key === "Enter" && !event.shiftKey && model.submit_enabled) {
         event.preventDefault();
         dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: event.altKey } });
       }
