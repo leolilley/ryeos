@@ -213,7 +213,7 @@ jobs:
       - name: Scan commits introduced from next
         run: |
           base="$(git merge-base HEAD origin/next)"
-          gitleaks git --redact --exit-code=2 --log-opts="$base..HEAD"
+          gitleaks git --redact --verbose --exit-code=2 --log-opts="$base..HEAD"
 
   test:
     name: Workspace tests
