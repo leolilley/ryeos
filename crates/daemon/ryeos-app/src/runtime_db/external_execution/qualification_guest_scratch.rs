@@ -477,7 +477,7 @@ fn retire_absent_reserved(
                 .is_none(),
         "Q absent-child recovery cannot prove the original child absent"
     );
-    let now = i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+    let now = lillux::time::timestamp_millis().max(current.updated_at_ms);
     let mut intent = current.clone();
     intent.phase = QualificationGuestScratchPhase::CleanupIntent;
     intent.cleanup_basis = Some(QualificationGuestScratchCleanupBasis::NoAllocation);
@@ -603,7 +603,7 @@ impl RuntimeDb {
             let occurrence = qualified
                 .occurrence
                 .context("Q guest scratch lost its bound occurrence")?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let record = QualificationGuestScratchRecord {
                 placement_thread_id: placement.clone(),
                 qualification_operation_id: qualification_operation_id.to_owned(),
@@ -653,7 +653,7 @@ impl RuntimeDb {
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::Created;
             next.updated_at_ms =
-                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+                lillux::time::timestamp_millis().max(current.updated_at_ms);
             let raw = canonical(&next)?;
             ensure!(
                 tx.execute(
@@ -699,8 +699,7 @@ impl RuntimeDb {
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::CleanupIntent;
             next.cleanup_basis = Some(basis);
-            next.updated_at_ms =
-                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            next.updated_at_ms = lillux::time::timestamp_millis().max(current.updated_at_ms);
             require_cleanup_basis(&tx, &next)?;
             let next = transition(&tx, &current, &next)?;
             tx.commit()?;
@@ -728,8 +727,7 @@ impl RuntimeDb {
             require_cleanup_basis(&tx, &current)?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::Removed;
-            next.updated_at_ms =
-                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            next.updated_at_ms = lillux::time::timestamp_millis().max(current.updated_at_ms);
             next.removed_at_ms = Some(next.updated_at_ms);
             let next = transition(&tx, &current, &next)?;
             tx.commit()?;
@@ -754,8 +752,7 @@ impl RuntimeDb {
             require_cleanup_basis(&tx, &current)?;
             let mut next = current.clone();
             next.phase = QualificationGuestScratchPhase::Closed;
-            next.updated_at_ms =
-                i64::try_from(lillux::time::timestamp_millis())?.max(current.updated_at_ms);
+            next.updated_at_ms = lillux::time::timestamp_millis().max(current.updated_at_ms);
             next.closed_at_ms = Some(next.updated_at_ms);
             let next = transition(&tx, &current, &next)?;
             tx.commit()?;

@@ -395,8 +395,7 @@ mod custody_drop_tests {
         let before = lillux::custody::abandoned_custody().count(KIND);
         let checkout = checkout
             .try_into_metadata_root()
-            .err()
-            .expect("an unretired lease is refused");
+            .expect_err("an unretired lease is refused");
         drop(checkout);
         assert_eq!(lillux::custody::abandoned_custody().count(KIND), before + 1);
         let root = Arc::new(lease(LeaseCustody::Retired))

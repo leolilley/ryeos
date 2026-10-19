@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn the_manifest_pins_the_fixture_spec_and_schema_digests() {
         let manifest = include_str!("../../../../bundles/modal-sandbox/.ai/manifest.source.yaml");
-        let spec = include_bytes!("../fixtures/provider-spec.json");
+        let spec = include_bytes!("../fixtures/provider-spec.declared.json");
         assert!(manifest.contains(&format!("sha256: \"{}\"", lillux::sha256_hex(spec))));
         assert!(manifest.contains(&format!(
             "settings_schema_digest: \"{}\"",

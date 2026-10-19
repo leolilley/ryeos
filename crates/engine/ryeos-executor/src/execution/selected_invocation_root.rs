@@ -807,7 +807,7 @@ mod tests {
     fn same_whole_box_restores_on_error_and_unwind_before_child_drop() {
         let (slot, drops) = mechanical_slot();
         let original = slot.lock().unwrap().owner.as_deref().unwrap() as *const DropProbe;
-        let error = (|| -> Result<(), ()> {
+        let error: Result<(), ()> = {
             let loan = SlotCore::begin_loan(&slot, &7, 11).unwrap();
             assert_eq!(
                 loan.frame.as_ref().unwrap().owner.as_ref() as *const DropProbe,
@@ -815,7 +815,7 @@ mod tests {
             );
             assert!(slot.lock().unwrap().owner.is_none());
             Err(())
-        })();
+        };
         assert!(error.is_err());
         {
             let mut state = slot.lock().unwrap();

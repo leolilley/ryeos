@@ -1,21 +1,93 @@
 //! Application composition for durable CAS object contracts owned above state.
 
 use ryeos_state::object_closure::{
-    ObjectContractRegistration, RegisteredObjectEdge, RegisteredObjectExpectation,
-    RegisteredObjectLinks,
+    EventPayloadContractRegistration, ObjectContractRegistration, RegisteredObjectEdge,
+    RegisteredObjectExpectation, RegisteredObjectLinks,
 };
+use ryeos_state::objects::ThreadEvent;
 use serde_json::Value;
 use std::sync::OnceLock;
 
+/// Outcome of the single process-wide object-contract installation.
+static OBJECTS: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Selectors of the event contracts the single process-wide event
+/// installation registered, or the refusal it produced.
+static EVENTS: OnceLock<Result<Vec<&'static str>, String>> = OnceLock::new();
+
+/// Ensure the application object contracts are installed. This never touches
+/// the event-contract set: that belongs to the composition root and is
+/// installed separately, so calling this first cannot foreclose it.
 pub fn install() -> anyhow::Result<()> {
-    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
-    INSTALLED
-        .get_or_init(|| install_once().map_err(|error| error.to_string()))
+    OBJECTS
+        .get_or_init(|| install_objects().map_err(|error| error.to_string()))
         .clone()
         .map_err(anyhow::Error::msg)
 }
 
-fn install_once() -> anyhow::Result<()> {
+/// Install the application object contracts together with the domain event
+/// payload contracts the composition root owns. The event set installs once
+/// per process: repeating the same selector set is accepted, a different one
+/// is refused rather than merged or replaced.
+pub fn install_with_event_contracts(
+    events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<()> {
+    install()?;
+    let mut requested: Vec<&'static str> = events.iter().map(|event| event.event_type).collect();
+    requested.sort_unstable();
+    let installed = EVENTS
+        .get_or_init(|| {
+            ryeos_state::object_closure::install_event_payload_contracts(events)
+                .map(|()| requested.clone())
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        installed == requested,
+        "application event contracts were already installed with a different selector set"
+    );
+    Ok(())
+}
+
+/// The composition's judgement of one retained evidence event: it decides
+/// what the event means for a retiring chain, which State never does.
+pub type RetainedEvidenceValidator = fn(&ThreadEvent) -> anyhow::Result<()>;
+
+/// The single process-wide validator the composition root installed.
+static EVIDENCE_VALIDATOR: OnceLock<RetainedEvidenceValidator> = OnceLock::new();
+
+/// Install the composition's retained-evidence validator. It installs once
+/// per process: repeating the same validator is accepted, a different one is
+/// refused rather than replaced.
+pub fn install_retained_evidence_validator(
+    validator: RetainedEvidenceValidator,
+) -> anyhow::Result<()> {
+    let installed = EVIDENCE_VALIDATOR.get_or_init(|| validator);
+    anyhow::ensure!(
+        std::ptr::fn_addr_eq(*installed, validator),
+        "a retained-evidence validator was already installed with a different function"
+    );
+    Ok(())
+}
+
+/// Test validator shared by every test of this process: the installation is
+/// process-wide, so all tests must install the same function.
+#[cfg(test)]
+pub(crate) fn accept_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// The installed validator, or a refusal: retained evidence is never admitted
+/// without the composition that owns its meaning.
+pub fn retained_evidence_validator() -> anyhow::Result<RetainedEvidenceValidator> {
+    EVIDENCE_VALIDATOR
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no composition installed a retained-evidence validator"))
+}
+
+fn install_objects() -> anyhow::Result<()> {
     ryeos_state::object_closure::install_object_contracts(vec![
         registration(
             ryeos_bundle_publication_contract::BUNDLE_CATALOG_PUBLICATION_KIND,
@@ -382,6 +454,36 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
+    fn accept_any_event(_: &Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn no_event_links(_: &Value) -> Result<RegisteredObjectLinks, String> {
+        Ok(RegisteredObjectLinks::default())
+    }
+
+    fn event_set(selector: &'static str) -> Vec<EventPayloadContractRegistration> {
+        vec![EventPayloadContractRegistration {
+            event_type: selector,
+            validate: accept_any_event,
+            links: no_event_links,
+        }]
+    }
+
+    #[test]
+    fn bare_install_leaves_event_set_open_and_a_different_set_is_refused() {
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        let refused = install_with_event_contracts(event_set("contract.second_consumer.event.v1"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("different selector set"));
+        let installed = ryeos_state::object_closure::current_event_payload_selectors();
+        assert!(installed.contains(&"contract.first_consumer.event.v1"));
+        assert!(!installed.contains(&"contract.second_consumer.event.v1"));
+    }
+
     #[test]
     fn composed_registry_contains_all_application_contracts() {
         install().unwrap();
@@ -472,5 +574,21 @@ mod tests {
                 .iter()
                 .all(|edge| edge.hash != predecessor)
         );
+    }
+
+    fn refuse_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+        anyhow::bail!("refused")
+    }
+
+    #[test]
+    fn retained_evidence_validator_installs_once_and_refuses_a_different_one() {
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        let refused = install_retained_evidence_validator(refuse_evidence).unwrap_err();
+        assert!(refused.to_string().contains("different function"));
+        assert!(std::ptr::fn_addr_eq(
+            retained_evidence_validator().unwrap(),
+            accept_evidence as RetainedEvidenceValidator
+        ));
     }
 }

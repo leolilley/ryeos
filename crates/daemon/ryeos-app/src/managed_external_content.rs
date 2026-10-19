@@ -1459,19 +1459,23 @@ mod tests {
 
     #[test]
     fn staging_cleanup_budget_covers_every_portable_whole_tree_entry() {
-        assert!(
-            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
-                >= MAX_PORTABLE_ARCHIVES * MAX_PORTABLE_ARCHIVE_ENTRIES
-                    + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
-        );
+        const {
+            assert!(
+                MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                    >= MAX_PORTABLE_ARCHIVES * MAX_PORTABLE_ARCHIVE_ENTRIES
+                        + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
+            )
+        };
     }
 
     #[test]
     fn staging_cleanup_budget_covers_mixed_mapped_and_whole_tree_shapes() {
-        assert!(
-            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
-                >= MAX_MAPPED_ACTIVATION_STAGING_ENTRIES
-                    + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES
-        );
+        const {
+            assert!(
+                MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                    >= MAX_MAPPED_ACTIVATION_STAGING_ENTRIES
+                        + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES
+            )
+        };
     }
 }

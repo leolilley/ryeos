@@ -4016,6 +4016,12 @@ impl LiveStateStoreOutsideCustody {
         }
     }
 
+    /// Forward the finalizer's operator-target retirement to the retained source.
+    ///
+    /// # Safety
+    /// Durable account work has completed and the exact same sealed registry
+    /// reports every non-operator descriptor receipt. `prepay` is the original
+    /// outside authority; no resident/native owner is consulted here.
     #[cfg(target_os = "linux")]
     pub unsafe fn retire_finalizer_operator_targets(
         &mut self,
@@ -4031,6 +4037,13 @@ impl LiveStateStoreOutsideCustody {
         }
     }
 
+    /// Forward the finalizer's operator parent-descriptor retirement to the
+    /// retained source.
+    ///
+    /// # Safety
+    /// The operator target was retired in this same registry. `issue_inputs`
+    /// binds the original outside grant to its retained operator membership
+    /// and parent.
     #[cfg(target_os = "linux")]
     pub unsafe fn retire_finalizer_operator_parent_descriptor(
         &mut self,

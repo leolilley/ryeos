@@ -380,14 +380,9 @@ fn is_bundle_publisher_floor_excluded(relative: &str) -> bool {
     };
 
     match classify_project_ai_path(relative, None) {
-        ProjectAiPathClass::NodeOwned { prefix }
-            if matches!(
-                prefix,
-                NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT
-            ) =>
-        {
-            false
-        }
+        ProjectAiPathClass::NodeOwned {
+            prefix: NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT,
+        } => false,
         _ => is_durable_content_capture_floor_excluded(relative),
     }
 }

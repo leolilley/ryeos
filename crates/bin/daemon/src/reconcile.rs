@@ -4389,6 +4389,7 @@ mod tests {
             supports_interrupt: false,
             supports_continuation: false,
             supports_operator_followup: false,
+            retirement_fence: false,
         };
         assert!(is_daemon_owned_non_execution_thread(
             &seat,

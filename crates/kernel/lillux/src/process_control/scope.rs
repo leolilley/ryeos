@@ -2606,7 +2606,6 @@ mod tests {
         );
         // Fixture directory retirement only after actual local proof; not App
         // reservation clearing, refunded funding or enclosing root qualification.
-        drop(ledger);
         drop(storage);
         provider.retire(&recovery, Duration::from_secs(5)).unwrap();
     }

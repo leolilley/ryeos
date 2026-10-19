@@ -340,7 +340,7 @@ impl SchedulerResetPreview<'_> {
                 *self.inspection_closed.borrow_mut() = Some(Arc::clone(closed));
                 closed
                     .require_original()
-                    .and_then(|()| accounting)
+                    .and(accounting)
                     .map(Some)
                     .map_err(|error| {
                         self.quota_claim.retain_failure(
@@ -903,6 +903,8 @@ pub struct ExecutionHistoryResetReport {
     pub project_heads: usize,
     pub chain_ref_artifacts: usize,
     pub pending_transitions: usize,
+    pub retirement_fences: usize,
+    pub evidence_obligations: usize,
     pub runtime_rows: RuntimeThreadHistoryAccounting,
     pub thread_runtime_artifacts: usize,
     pub scheduler_journal_artifacts: usize,
@@ -2494,6 +2496,8 @@ fn run_execution_history_reset_owned(
             project_heads: project_heads_preview,
             chain_ref_artifacts: authoritative_preview.chain_ref_artifacts,
             pending_transitions: authoritative_preview.pending_transitions,
+            retirement_fences: authoritative_preview.retirement_fences,
+            evidence_obligations: authoritative_preview.evidence_obligations,
             runtime_rows: runtime_preview,
             thread_runtime_artifacts: thread_runtime_preview,
             scheduler_journal_artifacts: scheduler_journal_preview,
@@ -2890,7 +2894,6 @@ fn run_execution_history_reset_owned(
             )?;
         }
     }
-    drop(permit);
     operational_db
         .close(Arc::clone(&native_factory))
         .context("close original Operational mutation before terminal census")?;
@@ -3026,7 +3029,6 @@ fn run_execution_history_reset_owned(
         &state_acknowledgement,
         operation.reference(),
     )?;
-    drop(final_ack_authority);
     // Every mutation is acknowledged. End only the borrowed mutation
     // authority; the policy owner, the StateLock and the claim's StateLock
     // lease stay held until this function returns.
@@ -3110,6 +3112,8 @@ fn run_execution_history_reset_owned(
         project_heads,
         chain_ref_artifacts: authoritative.chain_ref_artifacts,
         pending_transitions: authoritative.pending_transitions,
+        retirement_fences: authoritative.retirement_fences,
+        evidence_obligations: authoritative.evidence_obligations,
         runtime_rows: completed_runtime_accounting(runtime_schema_reset_required, runtime_rows),
         thread_runtime_artifacts,
         scheduler_journal_artifacts,
@@ -4627,7 +4631,7 @@ mod tests {
             lillux_sqlite::OriginalNativeDomain::NodeScheduler,
             sql,
         );
-        drop(host.release());
+        let _ = host.release();
     }
 
     #[cfg(target_os = "linux")]

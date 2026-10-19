@@ -1360,6 +1360,14 @@ pub struct ThreadEdgeRecord {
     pub metadata: Option<Value>,
 }
 
+/// What a fenced-kind chain's retirement keeps, decided by the composition
+/// that owns the kind's meaning after it has qualified the chain.
+#[derive(Debug, Clone, Default)]
+pub struct FencedChainRetirementPlan {
+    pub counterpart_roots: BTreeSet<String>,
+    pub evidence: Vec<ryeos_state::state_db::RetirementEvidenceRef>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TerminalChainRetirement {
     pub candidate_chains: usize,
@@ -2118,6 +2126,10 @@ pub struct StateStore {
     write_barrier: WriteBarrier,
     process_attachment_admission_open: AtomicBool,
     process_attachment_admission_closed: tokio::sync::Notify,
+    /// Kinds whose terminal chains retire only through a fence, installed once
+    /// by the composition that declares them. The ordinary retention path
+    /// leaves their chains alone; the fenced path refuses without this set.
+    fenced_chain_kinds: std::sync::OnceLock<ryeos_state::FencedChainKinds>,
     /// Exact process attachments currently recorded in durable runtime state.
     ///
     /// Durable `thread_runtime.process_identity` rows remain authoritative and
@@ -4147,6 +4159,26 @@ fn persisted_event_from_authoritative(
     })
 }
 
+fn execution_event_candidate_matches(
+    candidate: &PersistedEventRecord,
+    signed: &PersistedEventRecord,
+) -> bool {
+    // `event_id` is a rebuildable SQLite row coordinate, not part of the
+    // signed event. Every fact and braid coordinate a consumer reads must
+    // agree with the authenticated object.
+    candidate.event_hash == signed.event_hash
+        && candidate.chain_root_id == signed.chain_root_id
+        && candidate.chain_seq == signed.chain_seq
+        && candidate.thread_id == signed.thread_id
+        && candidate.thread_seq == signed.thread_seq
+        && candidate.event_type == signed.event_type
+        && candidate.storage_class == signed.storage_class
+        && candidate.ts == signed.ts
+        && candidate.prev_chain_event_hash == signed.prev_chain_event_hash
+        && candidate.prev_thread_event_hash == signed.prev_thread_event_hash
+        && candidate.payload == signed.payload
+}
+
 fn persisted_event_storage_class(
     durability: ryeos_state::objects::EventDurability,
 ) -> Result<&'static str> {
@@ -5596,6 +5628,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
+            fenced_chain_kinds: std::sync::OnceLock::new(),
             attached_processes: Mutex::new(attached_processes),
             live_workers: Mutex::new(live_workers),
             selected_invocations: Mutex::new(
@@ -5646,6 +5679,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: _,
             process_attachment_admission_closed,
+            fenced_chain_kinds,
             attached_processes,
             live_workers,
             selected_invocations,
@@ -5667,6 +5701,7 @@ impl StateStore {
             projection_health,
             write_barrier,
             process_attachment_admission_closed,
+            fenced_chain_kinds,
             attached_processes,
             live_workers,
             selected_invocations,
@@ -5715,19 +5750,23 @@ impl StateStore {
         lease_authority: Arc<dyn lillux_sqlite::OriginalNativeProjectionLeaseAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Self> {
-        Self::new_in_process_native_with_bundle_admission_trust(
-            app_root,
-            runtime_state_dir,
-            runtime_db_path,
-            signer,
-            write_barrier,
-            head_trust,
-            BundleAdmissionTrust::unbound(),
-            exclusion,
-            factory,
-            lease_authority,
-            deadline,
-        )
+        // SAFETY: the caller upholds the contract of this constructor, which is
+        // the same contract the bound constructor requires.
+        unsafe {
+            Self::new_in_process_native_with_bundle_admission_trust(
+                app_root,
+                runtime_state_dir,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                head_trust,
+                BundleAdmissionTrust::unbound(),
+                exclusion,
+                factory,
+                lease_authority,
+                deadline,
+            )
+        }
     }
 
     /// [`Self::new_in_process_native`] bound to the Bundle admission trust a
@@ -5882,6 +5921,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             process_attachment_admission_closed: tokio::sync::Notify::new(),
+            fenced_chain_kinds: std::sync::OnceLock::new(),
             attached_processes: Mutex::new(attached_processes),
             live_workers: Mutex::new(live_workers),
             selected_invocations: Mutex::new(
@@ -14610,13 +14650,22 @@ impl StateStore {
         surface: &str,
         client_ref: &str,
     ) -> Result<()> {
+        // A seat lease belongs to a thread of a kind whose profile declares a
+        // retirement fence; the kind comes from installed profile data. The
+        // fenced kinds stand for the seat kinds in this tranche because the
+        // only fenced kind is the seat profile; the seat writers will make
+        // the seat-lease kind its own declared datum.
+        let fenced = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread = g
             .state_db
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("seat thread {thread_id} does not exist"))?;
-        if thread.kind != "seat_session"
+        if !fenced.contains(&thread.kind)
             || thread.status != ThreadStatus::Running.as_str()
             || thread.requested_by.as_deref() != Some(owner)
             || thread.item_ref != surface
@@ -14669,7 +14718,7 @@ impl StateStore {
     fn inspect_terminal_chain_pins<F>(
         g: &Inner,
         chain: &ryeos_state::AuthoritativeTerminalChain,
-        scheduler_pin_count: &F,
+        pin_count: &F,
     ) -> Result<runtime_db::ChainRecoveryPins>
     where
         F: Fn(&[String]) -> Result<u64>,
@@ -14712,7 +14761,7 @@ impl StateStore {
                     .ok_or_else(|| anyhow!("child-link recovery pin count overflow"))?;
             }
         }
-        pins.scheduler_fires = scheduler_pin_count(&chain.thread_ids)?;
+        pins.scheduler_fires = pin_count(&chain.thread_ids)?;
         Ok(pins)
     }
 
@@ -14765,7 +14814,7 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: &F,
+        pin_count: &F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
@@ -14874,7 +14923,7 @@ impl StateStore {
                 continue;
             };
             let due = chain.is_due_at(now)?;
-            let pins = Self::inspect_terminal_chain_pins(&g, &chain, scheduler_pin_count)?;
+            let pins = Self::inspect_terminal_chain_pins(&g, &chain, pin_count)?;
             if !due || !pins.is_empty() {
                 result.pending_retirements_recovered += 1;
                 if !dry_run {
@@ -14908,13 +14957,12 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: F,
+        pin_count: F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
     {
-        let result =
-            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count);
+        let result = self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count);
         match self
             .lock()
             .and_then(|g| Ok(g.state_db.pending_chain_transitions()?.len()))
@@ -14935,14 +14983,14 @@ impl StateStore {
         &self,
         now: &str,
         dry_run: bool,
-        scheduler_pin_count: F,
+        pin_count: F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
     {
         const CANDIDATE_BATCH: usize = 128;
         let mut result =
-            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count)?;
+            self.recover_pending_terminal_chain_removals_with(now, dry_run, &pin_count)?;
         let mut cursor: Option<ryeos_state::DueTerminalChainCursor> = None;
         loop {
             let candidates = {
@@ -14987,6 +15035,20 @@ impl StateStore {
                 {
                     continue;
                 }
+                if let Some(fenced) = self.fenced_chain_kinds.get() {
+                    let root = g
+                        .state_db
+                        .get_thread(&candidate.chain_root_id)?
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "due chain {} has no root thread row",
+                                candidate.chain_root_id
+                            )
+                        })?;
+                    if fenced.contains(&root.kind) {
+                        continue;
+                    }
+                }
                 let Some(chain) = g.state_db.authoritative_terminal_chain_under_lock(
                     &candidate.chain_root_id,
                     &chain_lock,
@@ -15000,7 +15062,7 @@ impl StateStore {
                 {
                     continue;
                 }
-                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &scheduler_pin_count)?;
+                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &pin_count)?;
                 if !pins.is_empty() {
                     continue;
                 }
@@ -15025,6 +15087,176 @@ impl StateStore {
             }
         }
         Ok(result)
+    }
+
+    /// Install the kinds that retire through a fence. Once per Store: the
+    /// same set again is accepted, a different one is refused.
+    pub fn install_fenced_chain_kinds(&self, kinds: &ryeos_state::FencedChainKinds) -> Result<()> {
+        let installed = self.fenced_chain_kinds.get_or_init(|| kinds.clone());
+        anyhow::ensure!(
+            installed == kinds,
+            "fenced chain kinds were already installed with a different set"
+        );
+        Ok(())
+    }
+
+    /// One bounded keyset slice of fenced-kind chains whose retention has
+    /// elapsed. A scheduling hint only: `retire_fenced_chain` requalifies.
+    pub fn due_fenced_chain_retirement_slice(
+        &self,
+        now: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let kinds = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let g = self.lock()?;
+        self.require_selected_bulk_exclusion(&g)?;
+        g.state_db
+            .projection()
+            .due_fenced_chain_retirement_slice(kinds, now, after, limit)
+    }
+
+    /// Finish the head half of every interrupted fenced retirement: a fence
+    /// whose chain still has a head gets its Remove prepared and the head
+    /// unlinked. The caller holds the exclusive retention exclusion.
+    pub fn replay_fenced_chain_retirements(
+        &self,
+    ) -> Result<ryeos_state::state_db::FencedRetirementReplay> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        self.require_selected_bulk_exclusion(&g)?;
+        g.state_db
+            .replay_fenced_chain_retirements(permit.cas_guard())
+    }
+
+    /// Retire one fenced-kind chain to a retained closure, or finish an
+    /// interrupted retirement of it. The caller decides which counterparts and
+    /// evidence events the closure keeps; State derives every coordinate, and
+    /// the composition's installed validator judges each retained event. The
+    /// caller holds the retention exclusion whose pin count it passes.
+    pub fn retire_fenced_chain<F>(
+        &self,
+        chain_root_id: &str,
+        now: &str,
+        plan: &FencedChainRetirementPlan,
+        pin_count: F,
+    ) -> Result<TerminalChainRetirement>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        let kinds = self
+            .fenced_chain_kinds
+            .get()
+            .ok_or_else(|| anyhow!("fenced chain kinds are not installed"))?;
+        let validator = crate::object_contracts::retained_evidence_validator()?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        self.require_selected_bulk_exclusion(&g)?;
+        let root = g
+            .state_db
+            .get_thread(chain_root_id)?
+            .ok_or_else(|| anyhow!("chain {chain_root_id} has no root thread row"))?;
+        anyhow::ensure!(
+            kinds.contains(&root.kind),
+            "chain {chain_root_id} is not of a fenced kind"
+        );
+        // Owner and evidence counterparts are locked together in sorted
+        // order, the one order every multi-chain path uses.
+        let mut lock_ids: BTreeSet<&str> = plan
+            .evidence
+            .iter()
+            .map(|reference| reference.counterpart_root.as_str())
+            .collect();
+        anyhow::ensure!(
+            !lock_ids.contains(chain_root_id),
+            "a retired chain cannot be its own counterpart"
+        );
+        lock_ids.insert(chain_root_id);
+        let mut owner_lock = None;
+        let mut counterpart_locks = Vec::new();
+        for id in lock_ids {
+            let lock = g.state_db.acquire_chain_lock(id)?;
+            if id == chain_root_id {
+                owner_lock = Some(lock);
+            } else {
+                counterpart_locks.push(lock);
+            }
+        }
+        let owner_lock = owner_lock.ok_or_else(|| anyhow!("owner chain lock was not acquired"))?;
+        let counterpart_refs: Vec<&ChainLock> = counterpart_locks.iter().collect();
+        let chain = match g
+            .state_db
+            .authoritative_terminal_chain_under_lock(chain_root_id, &owner_lock)?
+        {
+            Some(chain) => {
+                anyhow::ensure!(
+                    chain.is_due_at(now)?,
+                    "chain {chain_root_id} is not due for retirement"
+                );
+                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &pin_count)?;
+                anyhow::ensure!(
+                    pins.is_empty(),
+                    "chain {chain_root_id} is still pinned: {pins:?}"
+                );
+                chain
+            }
+            None => g
+                .state_db
+                .pending_removed_terminal_chain_under_lock(chain_root_id, &owner_lock)?
+                .ok_or_else(|| {
+                    anyhow!("chain {chain_root_id} is neither live nor a pending Remove")
+                })?,
+        };
+        let runtime_paths =
+            inspect_thread_runtime_files(self.thread_runtime_authority()?, &chain.thread_ids)?;
+        let deleted_rows = std::cell::Cell::new(0usize);
+        let deleted_files = std::cell::Cell::new(0usize);
+        let cleanup = || -> Result<()> {
+            let selected_permit = self.selected_mutation_permit(
+                &g,
+                SelectedMutationOperation::DeleteChain(&chain.chain_root_id, &chain.thread_ids),
+            )?;
+            deleted_rows.set(
+                deleted_rows.get()
+                    + g.runtime_db.delete_chain_runtime(
+                        &selected_permit,
+                        &chain.chain_root_id,
+                        &chain.thread_ids,
+                    )?,
+            );
+            self.refresh_attached_process_registry_locked(&g)?;
+            deleted_files.set(deleted_files.get() + delete_thread_runtime_files(&runtime_paths)?);
+            Ok(())
+        };
+        let report = g.state_db.retire_chain(
+            chain_root_id,
+            &owner_lock,
+            permit.cas_guard(),
+            ryeos_state::state_db::ChainRetirement {
+                counterpart_roots: plan.counterpart_roots.clone(),
+                evidence: plan.evidence.clone(),
+                counterpart_locks: &counterpart_refs,
+                validator: &validator,
+                runtime_cleanup: &cleanup,
+            },
+        )?;
+        tracing::info!(
+            chain_root_id,
+            manifest_hash = report.manifest_hash,
+            stored_manifest = report.stored_manifest,
+            "fenced chain retired"
+        );
+        Ok(TerminalChainRetirement {
+            candidate_chains: 1,
+            retired_chains: 1,
+            deleted_projection_rows: 0,
+            deleted_runtime_rows: deleted_rows.get(),
+            deleted_runtime_files: deleted_files.get(),
+            pending_retirements_recovered: usize::from(!report.stored_manifest),
+        })
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
@@ -16695,7 +16927,7 @@ impl StateStore {
         self.lock()?.runtime_db.activate_external_lease_record(
             placement,
             activation,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16709,7 +16941,7 @@ impl StateStore {
         self.lock()?.runtime_db.hold_external_lease_ready_frame(
             placement,
             frame,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16723,7 +16955,7 @@ impl StateStore {
         self.lock()?.runtime_db.hold_external_lease_report_frame(
             placement,
             frame,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16737,7 +16969,7 @@ impl StateStore {
         self.lock()?.runtime_db.admit_external_lease_with_ready(
             placement,
             admission,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16752,7 +16984,7 @@ impl StateStore {
         self.lock()?.runtime_db.refuse_external_lease_and_cancel(
             placement,
             reason,
-            i64::try_from(lillux::time::timestamp_millis())?,
+            lillux::time::timestamp_millis(),
         )
     }
 
@@ -16769,7 +17001,7 @@ impl StateStore {
             .refuse_activated_external_lease_and_cancel(
                 placement,
                 reason,
-                i64::try_from(lillux::time::timestamp_millis())?,
+                lillux::time::timestamp_millis(),
             )
     }
 
@@ -21808,7 +22040,6 @@ impl StateStore {
         let deleted =
             g.runtime_db
                 .release_thread_launch_claim(&selected_permit, thread_id, claim_id)?;
-        drop(selected_permit);
         if deleted {
             // Same Store guard owns this set: no lock, allocation or fallible
             // acknowledgment separates durable deletion and exact retirement.
@@ -21830,7 +22061,7 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let mut g = self.lock()?;
         // Occupancy refusal precedes every LostOwner/Exhausted shortcut.
-        let selected_permit = self.selected_mutation_permit(
+        self.selected_mutation_permit(
             &g,
             SelectedMutationOperation::Rotate(
                 thread_id,
@@ -21864,9 +22095,8 @@ impl StateStore {
         if g.active_launch_owners.contains(&next_active_owner) {
             bail!("rotated launch owner collides with an active daemon owner");
         }
-        // Finish the immutable permit borrow before reserving the Store-owned
-        // set, then revalidate occupancy under this unchanged guard.
-        drop(selected_permit);
+        // Reserve the Store-owned set, then revalidate occupancy under this
+        // unchanged guard.
         g.active_launch_owners
             .try_reserve(1)
             .map_err(|error| anyhow!("cannot reserve replacement active owner: {error}"))?;
@@ -21891,7 +22121,6 @@ impl StateStore {
                 max_attempts,
                 &next_owner,
             )?;
-        drop(selected_permit);
         if matches!(
             &outcome,
             runtime_db::RuntimeRecoveryClaimRotation::Rotated { .. }
@@ -23994,6 +24223,153 @@ impl StateStore {
         })
     }
 
+    /// Locate a recent bounded thread page for an execution Field. The rows
+    /// remain projection candidates until the caller authenticates them from
+    /// the fixed signed thread history. This deliberately takes only the store
+    /// lock and reads SQL rows: it never touches CAS, so it holds no CAS guard.
+    pub fn recent_thread_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        through_seq: Option<i64>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<PersistedEventPage> {
+        let g = self.lock()?;
+        let page = queries::recent_thread_events_bounded(
+            g.state_db.projection(),
+            chain_root_id,
+            thread_id,
+            through_seq,
+            limit,
+            max_serialized_bytes,
+        )?;
+        drop(g);
+        let events = page
+            .rows
+            .into_iter()
+            .map(persisted_event_from_projection_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PersistedEventPage {
+            events,
+            has_more: page.has_more,
+        })
+    }
+
+    /// Capture one opaque, signed-head-derived endpoint for bounded history
+    /// reads. The chain lock and CAS guard are held only during this capture.
+    pub fn capture_thread_event_read_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ryeos_state::AuthoritativeThreadEventReadAnchor>> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .capture_thread_event_read_anchor(chain_root_id, thread_id, &guard)
+            .context("capture authoritative thread event read anchor")
+    }
+
+    /// Read one newest-first bounded slice from a fixed authenticated endpoint.
+    /// `progress: None` starts at the anchor tip; a returned `Some` token means
+    /// the authenticated interval is incomplete, never that an event is absent.
+    pub fn read_thread_event_page(
+        &self,
+        anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+        progress: Option<&ryeos_state::AuthoritativeThreadEventReadProgress>,
+        max_events: u64,
+        max_bytes: u64,
+    ) -> Result<ryeos_state::AuthoritativeThreadEventReadPage> {
+        let guard = self.state_authority.acquire_shared_guard()?;
+        let g = self.lock()?;
+        g.state_db
+            .read_thread_event_page(anchor, progress, max_events, max_bytes, &guard)
+            .context("read bounded authoritative thread event page")
+    }
+
+    /// Authenticate one bounded projection-located execution page against
+    /// fixed signed thread histories. Projection fields are only search
+    /// coordinates: every returned record is rebuilt from CAS, and a
+    /// contradictory projected field refuses the whole page. The per-thread
+    /// history walk advances in small pages without a guessed seat/history
+    /// lifetime ceiling or a lock held across the complete walk.
+    pub fn authenticate_execution_event_candidates(
+        &self,
+        chain_root_id: &str,
+        candidates: &[PersistedEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        const MAX_CANDIDATES: usize = 2_000;
+        const MAX_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+        const PAGE_EVENTS: u64 = 64;
+        const PAGE_BYTES: u64 = 2 * 1024 * 1024;
+
+        if candidates.len() > MAX_CANDIDATES {
+            bail!("execution event candidate page exceeds its item bound");
+        }
+        let mut encoded_bytes = 0usize;
+        let mut by_thread = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            encoded_bytes = encoded_bytes
+                .checked_add(serde_json::to_vec(candidate)?.len())
+                .ok_or_else(|| anyhow!("execution event candidate byte count overflow"))?;
+            if encoded_bytes > MAX_CANDIDATE_BYTES {
+                bail!("execution event candidate page exceeds its byte bound");
+            }
+            let Some(hash) = candidate.event_hash.as_deref() else {
+                bail!("execution event candidate has no CAS hash");
+            };
+            if candidate.chain_root_id != chain_root_id
+                || candidate.thread_id.is_empty()
+                || candidate.chain_seq < 1
+                || candidate.thread_seq < 1
+                || !lillux::valid_hash(hash)
+                || hash.bytes().any(|byte| byte.is_ascii_uppercase())
+                || by_thread
+                    .entry(&candidate.thread_id)
+                    .or_default()
+                    .insert(hash, index)
+                    .is_some()
+            {
+                bail!("execution event candidate has contradictory coordinates");
+            }
+        }
+        let mut authenticated = vec![None; candidates.len()];
+        for (thread_id, pending) in &mut by_thread {
+            let anchor = self
+                .capture_thread_event_read_anchor(chain_root_id, thread_id)?
+                .ok_or_else(|| anyhow!("execution event candidate thread is absent"))?;
+            let mut progress = None;
+            loop {
+                let page = self.read_thread_event_page(
+                    &anchor,
+                    progress.as_ref(),
+                    PAGE_EVENTS,
+                    PAGE_BYTES,
+                )?;
+                for (hash, event) in page.events {
+                    if let Some(index) = pending.remove(hash.as_str()) {
+                        let signed = persisted_event_from_authoritative(hash, event)?;
+                        if !execution_event_candidate_matches(&candidates[index], &signed) {
+                            bail!("execution event projection contradicts signed content");
+                        }
+                        authenticated[index] = Some(signed);
+                    }
+                }
+                progress = page.progress;
+                if progress.is_none() || pending.is_empty() {
+                    break;
+                }
+            }
+            if !pending.is_empty() {
+                bail!("execution event candidate is absent from signed thread history");
+            }
+        }
+        authenticated
+            .into_iter()
+            .map(|record| record.ok_or_else(|| anyhow!("execution event proof is incomplete")))
+            .collect()
+    }
+
     pub fn chain_event_navigation(
         &self,
         chain_root_id: &str,
@@ -24761,6 +25137,163 @@ mod tests {
         let mut malformed = row;
         malformed.payload = b"invalid JSON".to_vec();
         assert!(persisted_event_from_projection_row(malformed).is_err());
+    }
+
+    fn append_indexed(
+        store: &TestStateStore,
+        thread_id: &str,
+        count: usize,
+    ) -> Vec<PersistedEventRecord> {
+        let authored = (0..count)
+            .map(|index| NewEventRecord {
+                event_type: "test.history.event".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"index": index}),
+            })
+            .collect::<Vec<_>>();
+        store
+            .append_events(thread_id, thread_id, &authored)
+            .expect("append events")
+    }
+
+    #[test]
+    fn anchored_page_reads_ignore_later_appends_and_refuse_unbounded_work() {
+        let store = test_store();
+        let thread_id = "T-anchored-page";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        append_indexed(&store, thread_id, 2);
+        let anchor = store
+            .capture_thread_event_read_anchor(thread_id, thread_id)
+            .unwrap()
+            .expect("thread anchor exists");
+        let (tip_hash, tip_seq) = anchor.tip().expect("anchor has a tip");
+        let tip_hash = tip_hash.to_owned();
+        let later = append_indexed(&store, thread_id, 1);
+        let later_hash = later[0].event_hash.clone().unwrap();
+
+        assert!(
+            store
+                .read_thread_event_page(&anchor, None, 0, 1024)
+                .is_err()
+        );
+        assert!(store.read_thread_event_page(&anchor, None, 1, 0).is_err());
+        assert!(store.read_thread_event_page(&anchor, None, 1, 1).is_err());
+
+        let mut progress = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = store
+                .read_thread_event_page(&anchor, progress.as_ref(), 1, 1024 * 1024)
+                .unwrap();
+            assert!(page.events.len() <= 1);
+            observed.extend(page.events.into_iter().map(|(hash, _)| hash));
+            progress = page.progress;
+            if progress.is_none() {
+                break;
+            }
+        }
+        assert_eq!(observed.len() as u64, tip_seq);
+        assert_eq!(observed.first(), Some(&tip_hash));
+        assert!(!observed.contains(&later_hash));
+        assert!(
+            store
+                .capture_thread_event_read_anchor(thread_id, "T-absent-thread")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recent_thread_events_decode_through_the_durability_helper() {
+        let store = test_store();
+        let thread_id = "T-recent-events";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let appended = append_indexed(&store, thread_id, 3);
+        let page = store
+            .recent_thread_events(thread_id, thread_id, None, 2, 1024 * 1024)
+            .unwrap();
+        assert!(page.has_more);
+        assert_eq!(page.events.len(), 2);
+        assert!(
+            page.events
+                .iter()
+                .all(|event| event.storage_class == "indexed")
+        );
+        assert_eq!(page.events[1].event_hash, appended[2].event_hash);
+        assert!(
+            store
+                .recent_thread_events(thread_id, thread_id, None, 0, 1024)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_candidate_proof_returns_signed_records_across_bounded_pages() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-page";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let records = append_indexed(&store, thread_id, 70);
+        let candidates = vec![records[0].clone(), records[69].clone(), records[35].clone()];
+        let authenticated = store
+            .authenticate_execution_event_candidates(thread_id, &candidates)
+            .unwrap();
+        assert_eq!(authenticated.len(), candidates.len());
+        for (candidate, signed) in candidates.iter().zip(&authenticated) {
+            assert!(execution_event_candidate_matches(candidate, signed));
+        }
+        assert_eq!(authenticated[0].payload["index"], 0);
+        assert_eq!(authenticated[1].payload["index"], 69);
+        assert_eq!(authenticated[2].payload["index"], 35);
+    }
+
+    #[test]
+    fn execution_candidate_proof_refuses_contradicted_or_malformed_candidates() {
+        let store = test_store();
+        let thread_id = "T-execution-candidate-refusal";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let candidate = append_indexed(&store, thread_id, 1).remove(0);
+        let refuses = |mutate: &dyn Fn(&mut PersistedEventRecord)| {
+            let mut changed = candidate.clone();
+            mutate(&mut changed);
+            store
+                .authenticate_execution_event_candidates(thread_id, &[changed])
+                .is_err()
+        };
+        assert!(!refuses(&|_| {}));
+        assert!(refuses(
+            &|c| c.payload["index"] = json!("projection-forgery")
+        ));
+        assert!(refuses(&|c| c.thread_id = "T-foreign".into()));
+        assert!(refuses(&|c| c.chain_root_id = "T-foreign".into()));
+        assert!(refuses(&|c| c.storage_class = "journal".into()));
+        assert!(refuses(&|c| c.ts = "2001-01-01T00:00:00Z".into()));
+        assert!(refuses(&|c| c.event_hash = None));
+        assert!(refuses(&|c| c.event_hash = Some("A".repeat(64))));
+        assert!(refuses(&|c| c.event_hash = Some("c".repeat(64))));
+        assert!(refuses(&|c| c.chain_seq = 0));
+        // The same hash named twice in one thread is contradictory input.
+        assert!(
+            store
+                .authenticate_execution_event_candidates(
+                    thread_id,
+                    &[candidate.clone(), candidate.clone()]
+                )
+                .is_err()
+        );
+        let too_many = vec![candidate; 2_001];
+        assert!(
+            store
+                .authenticate_execution_event_candidates(thread_id, &too_many)
+                .is_err()
+        );
     }
 
     #[test]
@@ -25838,7 +26371,6 @@ mod tests {
                 .release_thread_launch_claim(&permit, "T", "claim")
                 .unwrap()
         );
-        drop(permit);
         drop(g);
         test_native::with_store_host(|host| runtime_db::test_native::retire(host, other_db));
     }
@@ -26173,6 +26705,146 @@ mod tests {
                 .unwrap()
                 .thread_runtime,
             0
+        );
+    }
+
+    fn fenced_kind_chain(store: &StateStore, thread: &str) {
+        let mut record = thread_record(thread, thread);
+        record.kind = "fenced_test_kind".to_string();
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        store.create_thread_for_test(&record).unwrap();
+        finish_workspace_test_thread(store, thread);
+    }
+
+    fn fenced_test_kinds() -> ryeos_state::FencedChainKinds {
+        ryeos_state::FencedChainKinds::new(["fenced_test_kind".to_string()]).unwrap()
+    }
+
+    #[test]
+    fn ordinary_retention_leaves_fenced_kind_chains_for_the_fenced_path() {
+        let store = test_store();
+        crate::object_contracts::install_retained_evidence_validator(
+            crate::object_contracts::accept_evidence,
+        )
+        .unwrap();
+        let thread = "T-fenced-kind";
+        fenced_kind_chain(&store, thread);
+        store
+            .install_fenced_chain_kinds(&fenced_test_kinds())
+            .unwrap();
+        let now = "2099-01-01T00:00:00Z";
+
+        let ordinary = store
+            .retire_due_terminal_chains(now, false, |_| Ok(0))
+            .unwrap();
+        assert_eq!(ordinary.retired_chains, 0);
+        {
+            let g = store.lock().unwrap();
+            let lock = g.state_db.acquire_chain_lock(thread).unwrap();
+            assert!(
+                g.state_db
+                    .authoritative_terminal_chain_under_lock(thread, &lock)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            store
+                .due_fenced_chain_retirement_slice(now, None, 8)
+                .unwrap(),
+            vec![thread.to_string()]
+        );
+
+        // A pinned chain is refused, not retired around its pin.
+        let plan = FencedChainRetirementPlan::default();
+        assert!(
+            store
+                .retire_fenced_chain(thread, now, &plan, |_| Ok(1))
+                .is_err()
+        );
+        let retired = store
+            .retire_fenced_chain(thread, now, &plan, |_| Ok(0))
+            .unwrap();
+        assert_eq!(retired.retired_chains, 1);
+        let g = store.lock().unwrap();
+        let lock = g.state_db.acquire_chain_lock(thread).unwrap();
+        assert!(
+            g.state_db
+                .authoritative_terminal_chain_under_lock(thread, &lock)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            g.state_db
+                .pending_chain_transition(thread)
+                .unwrap()
+                .is_none()
+        );
+        // The retirement is complete and not repeatable as a fresh one.
+        drop(lock);
+        drop(g);
+        assert!(
+            store
+                .retire_fenced_chain(thread, now, &plan, |_| Ok(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fenced_retirement_refuses_an_unfenced_kind_and_a_different_kind_set() {
+        let store = test_store();
+        crate::object_contracts::install_retained_evidence_validator(
+            crate::object_contracts::accept_evidence,
+        )
+        .unwrap();
+        let now = "2099-01-01T00:00:00Z";
+        let plan = FencedChainRetirementPlan::default();
+        // Nothing installed: the fenced path refuses rather than assuming.
+        assert!(
+            store
+                .due_fenced_chain_retirement_slice(now, None, 8)
+                .is_err()
+        );
+        assert!(
+            store
+                .retire_fenced_chain("T-any", now, &plan, |_| Ok(0))
+                .is_err()
+        );
+
+        store
+            .install_fenced_chain_kinds(&fenced_test_kinds())
+            .unwrap();
+        store
+            .install_fenced_chain_kinds(&fenced_test_kinds())
+            .unwrap();
+        let other = ryeos_state::FencedChainKinds::new(["other_kind".to_string()]).unwrap();
+        assert!(store.install_fenced_chain_kinds(&other).is_err());
+
+        let thread = "T-ordinary-kind";
+        let mut record = thread_record(thread, thread);
+        record.captured_history_policy.as_mut().unwrap().retention =
+            ryeos_state::objects::ThreadHistoryRetention::TerminalFor { seconds: 60 };
+        store.create_thread_for_test(&record).unwrap();
+        finish_workspace_test_thread(&store, thread);
+        assert!(
+            store
+                .retire_fenced_chain(thread, now, &plan, |_| Ok(0))
+                .is_err()
+        );
+        assert!(
+            store
+                .due_fenced_chain_retirement_slice(now, None, 8)
+                .unwrap()
+                .is_empty()
+        );
+        // The ordinary kind still retires through the ordinary path.
+        assert_eq!(
+            store
+                .retire_due_terminal_chains(now, false, |_| Ok(0))
+                .unwrap()
+                .retired_chains,
+            1
         );
     }
 
@@ -26635,7 +27307,7 @@ mod tests {
             .unwrap()
             .owner;
         let binding=crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         ExternalAllocationReservation {
             schema: runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: thread.into(),
@@ -28329,7 +29001,7 @@ mod tests {
                 "P-project-fence",
                 "credential-enrollment:project-fence",
                 "credential-login:project-fence",
-                i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+                lillux::time::timestamp_millis() + 60_000,
             )
             .expect("begin credential enrollment");
         let credential_generation = store

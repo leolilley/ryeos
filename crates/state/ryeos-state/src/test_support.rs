@@ -312,7 +312,7 @@ pub fn shared_test_host() -> std::rc::Rc<TestNativeHost> {
 /// releases it through its census.
 pub fn release_shared_test_host(host: std::rc::Rc<TestNativeHost>) {
     if let Ok(host) = std::rc::Rc::try_unwrap(host) {
-        drop(host.release());
+        let _ = host.release();
     }
 }
 
@@ -484,61 +484,6 @@ impl Drop for TestProjection {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_state_opens_live_and_reopens_established() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime_state_dir = dir.path().join("runtime-state");
-        let state = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
-        assert!(
-            state
-                .projection()
-                .projection_instance_id()
-                .unwrap()
-                .is_some()
-        );
-        state.close().unwrap();
-        assert!(runtime_state_dir.join(OPERATIONAL_DB_FILENAME).is_file());
-        let reopened = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
-        drop(reopened);
-    }
-
-    #[test]
-    fn refused_live_open_settles_into_the_census() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime_state_dir = dir.path().join("runtime-state");
-        TestState::open(&runtime_state_dir, Arc::new(TrustStore::new()))
-            .unwrap()
-            .close()
-            .unwrap();
-        std::fs::remove_file(runtime_state_dir.join(OPERATIONAL_DB_FILENAME)).unwrap();
-        let host = TestNativeHost::acquire_with(TEST_STATE_ENVELOPE);
-        // Read under the host's serial guard, so no other host test can
-        // abandon an opening between the two reads.
-        let before = crate::state_db::abandoned_live_openings();
-        let refusal =
-            live_state_open_refusal(&host, &runtime_state_dir, Arc::new(TrustStore::new()));
-        assert!(
-            refusal.contains("established live Operational database is absent"),
-            "{refusal}"
-        );
-        let (issued, recorded) = host.ticket_census();
-        assert_eq!(
-            issued as usize, recorded,
-            "every issued ticket reaches the census"
-        );
-        drop(host.release());
-        assert_eq!(
-            crate::state_db::abandoned_live_openings(),
-            before,
-            "nothing was abandoned"
-        );
-    }
-}
-
 /// A stopped-node State on this thread's shared test host, opened the way an
 /// offline maintenance command opens it: the established authority roots
 /// under the caller's runtime namespace lock, with a transient projection on
@@ -704,4 +649,59 @@ pub fn abandoned_custody_serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_opens_live_and_reopens_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_state_dir = dir.path().join("runtime-state");
+        let state = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
+        assert!(
+            state
+                .projection()
+                .projection_instance_id()
+                .unwrap()
+                .is_some()
+        );
+        state.close().unwrap();
+        assert!(runtime_state_dir.join(OPERATIONAL_DB_FILENAME).is_file());
+        let reopened = TestState::open(&runtime_state_dir, Arc::new(TrustStore::new())).unwrap();
+        drop(reopened);
+    }
+
+    #[test]
+    fn refused_live_open_settles_into_the_census() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_state_dir = dir.path().join("runtime-state");
+        TestState::open(&runtime_state_dir, Arc::new(TrustStore::new()))
+            .unwrap()
+            .close()
+            .unwrap();
+        std::fs::remove_file(runtime_state_dir.join(OPERATIONAL_DB_FILENAME)).unwrap();
+        let host = TestNativeHost::acquire_with(TEST_STATE_ENVELOPE);
+        // Read under the host's serial guard, so no other host test can
+        // abandon an opening between the two reads.
+        let before = crate::state_db::abandoned_live_openings();
+        let refusal =
+            live_state_open_refusal(&host, &runtime_state_dir, Arc::new(TrustStore::new()));
+        assert!(
+            refusal.contains("established live Operational database is absent"),
+            "{refusal}"
+        );
+        let (issued, recorded) = host.ticket_census();
+        assert_eq!(
+            issued as usize, recorded,
+            "every issued ticket reaches the census"
+        );
+        let _ = host.release();
+        assert_eq!(
+            crate::state_db::abandoned_live_openings(),
+            before,
+            "nothing was abandoned"
+        );
+    }
 }

@@ -868,7 +868,7 @@ pub(super) fn close_placement_after_terminal_tx(
         "external relay terminal closure requires provider settlement"
     );
     super::validate_lifecycle_evidence(tx, &allocation)?;
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     tx.execute(
         "UPDATE external_execution_relay_transfer
          SET phase='terminal_closed',updated_at_ms=MAX(updated_at_ms,?2)
@@ -963,7 +963,7 @@ impl RuntimeDb {
                 );
                 anyhow::bail!("external relay semantic application is indeterminate; cleanup required");
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < intent.deadline_ms,
                 "external relay semantic application deadline expired"
@@ -1034,7 +1034,7 @@ impl RuntimeDb {
                     request_digest,
                     lillux::sha256_hex(&bytes),
                     bytes,
-                    i64::try_from(lillux::time::timestamp_millis())?
+                    lillux::time::timestamp_millis()
                 ],
             )?;
             ensure!(
@@ -1199,7 +1199,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(prior);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < intent.deadline_ms,
                 "external relay deadline expired before reservation"
@@ -1241,7 +1241,7 @@ impl RuntimeDb {
                         && prior.phase == RelayTransferPhase::UploadPossible),
                 "external relay read is outside its transfer phase"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < intent.deadline_ms && prior.read_attempts < 128,
                 "external relay read budget or deadline expired"
@@ -1280,7 +1280,7 @@ impl RuntimeDb {
                 prior.phase == RelayTransferPhase::Reserved,
                 "external relay upload was already possible; use exact readback"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < intent.deadline_ms,
                 "external relay upload deadline expired"
@@ -1354,7 +1354,7 @@ impl RuntimeDb {
                             && prior.phase == RelayTransferPhase::UploadPossible)),
                 "external relay readback has no prior download claim"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < intent.deadline_ms,
                 "external relay readback arrived after deadline"
@@ -1421,7 +1421,7 @@ fn quarantine_in_transaction(conn: &Connection, intent: &RelayTransferIntent) ->
             == Some(intent.occurrence_id.as_str()),
         "external relay quarantine has no unsettled original occurrence"
     );
-    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let now = lillux::time::timestamp_millis();
     conn.execute(
         "UPDATE external_execution_relay_transfer SET phase='quarantined',updated_at_ms=?5
          WHERE placement_thread_id=?1 AND kind=?2 AND sequence=?3 AND direction=?4

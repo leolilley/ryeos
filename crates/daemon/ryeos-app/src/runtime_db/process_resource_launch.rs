@@ -199,7 +199,7 @@ impl RuntimeDb {
                     expected.owner_coordinate,
                     before,
                     after,
-                    i64::try_from(lillux::time::timestamp_millis())?
+                    lillux::time::timestamp_millis()
                 ],
             )?;
             if changed != 1 {

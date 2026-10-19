@@ -391,7 +391,6 @@ fn control_buffer(count: usize) -> Vec<usize> {
 
 /// Kernel readiness wait, not a timer-based inspection loop. EINTR, readiness
 /// races and every subsequent I/O attempt share the caller's original expiry.
-
 fn send_packet(
     fd: RawFd,
     payload: &[u8],
@@ -470,7 +469,7 @@ unsafe fn collect_rights(message: &libc::msghdr, files: &mut Vec<File>) -> io::R
         let bytes = length - prefix;
         if rights {
             let count = bytes / size_of::<RawFd>();
-            malformed |= bytes % size_of::<RawFd>() != 0;
+            malformed |= !bytes.is_multiple_of(size_of::<RawFd>());
             for index in 0..count {
                 let fd = unsafe {
                     std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>().add(index))

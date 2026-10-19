@@ -1814,16 +1814,14 @@ impl RyeOsCore {
         // previous subject after the new request settles.
         self.deferred_source_fetches.remove(&source_key);
         self.data.source_errors.remove(&source_key);
-        let Some((request, request_bounds)) = self.compiled_binding_operation_for_attachment(
+        let (request, request_bounds) = self.compiled_binding_operation_for_attachment(
             attachment_id,
             super::binding::UiBindingCoordinate::Source {
                 view_ref: view_ref.to_string(),
                 channel: channel.to_string(),
             },
             super::binding::UiBindingPayload::SourceParameters { params },
-        ) else {
-            return None;
-        };
+        )?;
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
             request,
@@ -1936,7 +1934,7 @@ impl RyeOsCore {
         if self.instance_has_unresolved_required_subject(&instance) {
             return None;
         }
-        let Some((request, request_bounds)) = self.compiled_binding_operation(
+        let (request, request_bounds) = self.compiled_binding_operation(
             &instance,
             super::binding::UiBindingCoordinate::Source {
                 view_ref: deferred.view_ref,
@@ -1945,9 +1943,7 @@ impl RyeOsCore {
             super::binding::UiBindingPayload::SourceParameters {
                 params: deferred.params,
             },
-        ) else {
-            return None;
-        };
+        )?;
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.to_string(),
             request,

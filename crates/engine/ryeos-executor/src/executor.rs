@@ -1307,7 +1307,10 @@ mod tests {
                 .unwrap()
                 .contains("SERVICE-SUCCESS-SECRET")
         );
-        assert_eq!(success.unwrap(), live_success, "live result is unchanged");
+        assert!(
+            matches!(&success, Ok(value) if *value == live_success),
+            "live result is unchanged"
+        );
 
         let failure: Result<Value> = Err(anyhow::anyhow!("SERVICE-FAILURE-SECRET"));
         let (terminal, retention_error) =
@@ -1324,10 +1327,7 @@ mod tests {
                 .contains("SERVICE-FAILURE-SECRET")
         );
         assert!(
-            failure
-                .unwrap_err()
-                .to_string()
-                .contains("SERVICE-FAILURE-SECRET")
+            matches!(&failure, Err(error) if error.to_string().contains("SERVICE-FAILURE-SECRET"))
         );
     }
 

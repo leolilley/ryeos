@@ -409,7 +409,7 @@ impl RuntimeDb {
                 "snapshot parent already began another provider sequence"
             );
             ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
@@ -473,7 +473,7 @@ impl RuntimeDb {
                 "snapshot parent began another provider sequence"
             );
             ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
                 "snapshot upload deadline expired"
@@ -544,7 +544,7 @@ impl RuntimeDb {
                 "snapshot parent already bound or began another provider sequence"
             );
             ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms <= parent.intent.attempt_deadline_ms
@@ -599,7 +599,7 @@ impl RuntimeDb {
                 "snapshot parent already bound or began another provider sequence"
             );
             ensure_bootstrap_not_terminating(&tx, &parent.intent)?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms && now < parent.intent.attempt_deadline_ms,
                 "snapshot create deadline expired"
@@ -675,7 +675,7 @@ impl RuntimeDb {
                 ) && parent.phase == super::runtime_snapshot::RuntimeSnapshotPhase::Reserved,
                 "snapshot create locator did not follow its one attempt claim"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now >= record.updated_at_ms
                     && now
@@ -743,7 +743,7 @@ impl RuntimeDb {
                 record.phase == RuntimeSnapshotStagePhase::AttemptPending,
                 "snapshot create quarantine requires a pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             let changed = tx.execute(
                 "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -792,7 +792,7 @@ impl RuntimeDb {
                 ),
                 "snapshot upload receipt did not follow one attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now >= record.updated_at_ms
                     && receipt.completed_at_ms
@@ -854,7 +854,7 @@ impl RuntimeDb {
                 record.phase == RuntimeSnapshotStagePhase::AttemptPending,
                 "snapshot upload quarantine requires a pending attempt"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE runtime_snapshot_stage SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -879,7 +879,7 @@ mod tests {
     };
 
     fn parent() -> RuntimeSnapshotIntent {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
@@ -956,7 +956,7 @@ mod tests {
             source_response_sha256: "b".repeat(64),
             provider_response_sha256: "c".repeat(64),
             provider_status: 204,
-            completed_at_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+            completed_at_ms: lillux::time::timestamp_millis(),
         }
     }
 
@@ -1054,9 +1054,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Accepted(_)
         ));
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -1086,9 +1084,7 @@ mod tests {
                 .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -1161,9 +1157,7 @@ mod tests {
             .unwrap(),
             RuntimeSnapshotStageClaim::Reconcile(_)
         ));
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -1214,9 +1208,7 @@ mod tests {
                 .unwrap(),
             bound,
         );
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]
@@ -1260,9 +1252,7 @@ mod tests {
             super::super::runtime_snapshot::RuntimeSnapshotPhase::Reserved
         );
         assert!(parent_record.locator.is_none());
-        db.conn
-            .with_sql(|connection| validate_current(connection))
-            .unwrap();
+        db.conn.with_sql(validate_current).unwrap();
     }
 
     #[test]

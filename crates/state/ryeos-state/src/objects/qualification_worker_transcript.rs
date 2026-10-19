@@ -669,7 +669,9 @@ mod tests {
     #[test]
     fn fixture_content_is_required_nullable_and_current() {
         let (manifest, bytes) = manifest_and_chunk();
-        manifest.verify_chunks(&[bytes.clone()]).unwrap();
+        manifest
+            .verify_chunks(std::slice::from_ref(&bytes))
+            .unwrap();
         let mut missing = manifest.to_value().unwrap();
         missing.as_object_mut().unwrap().remove("fixture_capture");
         assert!(QualificationWorkerTranscriptManifest::from_current_value(&missing).is_err());
@@ -930,7 +932,7 @@ mod tests {
         assert!(changed.validate().is_err());
         let mut changed = manifest.clone();
         changed.chunks[0].blob_hash = "0".repeat(64);
-        assert!(changed.verify_chunks(&[bytes.clone()]).is_err());
+        assert!(changed.verify_chunks(std::slice::from_ref(&bytes)).is_err());
         let mut changed = bytes;
         changed[0] = b' ';
         assert!(manifest.verify_chunks(&[changed]).is_err());
@@ -976,7 +978,11 @@ mod tests {
         assert!(same_request.validate().is_err());
         let mut substituted_digest = manifest.clone();
         substituted_digest.setup_final_response_digest = "0".repeat(64);
-        assert!(substituted_digest.verify_chunks(&[bytes.clone()]).is_err());
+        assert!(
+            substituted_digest
+                .verify_chunks(std::slice::from_ref(&bytes))
+                .is_err()
+        );
 
         // Update the outer hashes too: the retained setup digest and bound,
         // required field and current schema must each reject independently.

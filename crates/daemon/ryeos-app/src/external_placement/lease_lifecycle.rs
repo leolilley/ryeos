@@ -53,7 +53,7 @@ const OVERDUE_LEASE_REFUSAL: &str =
 /// placements that could not be refused, with the reason; the periodic pass
 /// that calls this tries them again.
 pub(super) fn refuse_overdue_external_leases(state: &AppState) -> Result<Vec<(String, String)>> {
-    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let now_ms = lillux::time::timestamp_millis();
     let mut failures = Vec::new();
     for record in state.state_store.overdue_external_lease_records(now_ms)? {
         if let Err(error) = super::lease_ready_gate::refuse_activated_lease(
@@ -258,7 +258,7 @@ pub(crate) fn admit_turn_on_external_lease(
         .external_lease_budget
         .as_ref()
         .map(|budget| budget.turn_end_margin_seconds);
-    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let now_ms = lillux::time::timestamp_millis();
     let refusal = match margin_seconds {
         Some(margin_seconds) => deadline_fits_lease(
             "turn refused",

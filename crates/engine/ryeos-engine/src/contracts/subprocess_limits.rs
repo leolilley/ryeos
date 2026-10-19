@@ -18,6 +18,36 @@ pub struct ExecutionSubprocessLimits {
     pub max_stderr_bytes: Option<u64>,
 }
 
+impl ExecutionSubprocessLimits {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+            ("max_stdout_bytes", self.max_stdout_bytes),
+            ("max_stderr_bytes", self.max_stderr_bytes),
+        ] {
+            anyhow::ensure!(value != Some(0), "{name} must be positive when selected");
+        }
+        Ok(())
+    }
+
+    /// Preserve the native owner's exact units and enforcement semantics.
+    pub fn to_native(self) -> anyhow::Result<lillux::SubprocessLimits> {
+        self.validate()?;
+        Ok(lillux::SubprocessLimits {
+            max_open_files: self.max_open_files,
+            max_address_space_bytes: self.max_address_space_bytes,
+            max_cpu_seconds: self.max_cpu_seconds,
+            max_processes: self.max_processes,
+            deny_process_creation: self.deny_process_creation,
+            max_stdout_bytes: self.max_stdout_bytes,
+            max_stderr_bytes: self.max_stderr_bytes,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ExecutionSubprocessLimits;
@@ -47,35 +77,5 @@ mod tests {
         let mut unknown = exact;
         unknown["aggregate_cpu_seconds"] = serde_json::json!(3);
         assert!(serde_json::from_value::<ExecutionSubprocessLimits>(unknown).is_err());
-    }
-}
-
-impl ExecutionSubprocessLimits {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        for (name, value) in [
-            ("max_open_files", self.max_open_files),
-            ("max_address_space_bytes", self.max_address_space_bytes),
-            ("max_cpu_seconds", self.max_cpu_seconds),
-            ("max_processes", self.max_processes),
-            ("max_stdout_bytes", self.max_stdout_bytes),
-            ("max_stderr_bytes", self.max_stderr_bytes),
-        ] {
-            anyhow::ensure!(value != Some(0), "{name} must be positive when selected");
-        }
-        Ok(())
-    }
-
-    /// Preserve the native owner's exact units and enforcement semantics.
-    pub fn to_native(self) -> anyhow::Result<lillux::SubprocessLimits> {
-        self.validate()?;
-        Ok(lillux::SubprocessLimits {
-            max_open_files: self.max_open_files,
-            max_address_space_bytes: self.max_address_space_bytes,
-            max_cpu_seconds: self.max_cpu_seconds,
-            max_processes: self.max_processes,
-            deny_process_creation: self.deny_process_creation,
-            max_stdout_bytes: self.max_stdout_bytes,
-            max_stderr_bytes: self.max_stderr_bytes,
-        })
     }
 }

@@ -2270,6 +2270,7 @@ mod tests {
                         supports_interrupt: false,
                         supports_continuation: true,
                         supports_operator_followup: false,
+                        retirement_fence: false,
                     },
                 )
                 .with_test_profile(
@@ -2279,6 +2280,7 @@ mod tests {
                         supports_interrupt: true,
                         supports_continuation: true,
                         supports_operator_followup: true,
+                        retirement_fence: false,
                     },
                 ),
         );
@@ -3511,7 +3513,7 @@ mod tests {
             .with_admitted_execution_closure(execution_closure)
             .with_execution_realization_hash("e".repeat(64))
             .with_sealed_root_request(sealed.clone());
-        let launch_metadata = with_retained_execution_realization(&state, launch_metadata);
+        let launch_metadata = with_retained_execution_realization(state, launch_metadata);
         state
             .threads
             .create_managed_root_for_test(&parent, &launch_metadata)

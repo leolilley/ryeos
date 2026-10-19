@@ -217,8 +217,8 @@ mod tests {
             "object_hashes": [hash.clone()], "blob_hashes": [hash.clone()]
         }))
         .unwrap();
-        assert_eq!(batch.object_hashes, [hash.clone()]);
-        assert_eq!(batch.blob_hashes, [hash.clone()]);
+        assert_eq!(batch.object_hashes, std::slice::from_ref(&hash));
+        assert_eq!(batch.blob_hashes, std::slice::from_ref(&hash));
         assert!(batch.blob_chunk.is_none());
         let chunk: Request = serde_json::from_value(serde_json::json!({
             "blob_chunk": {"hash": hash, "offset": 0, "length": 64}

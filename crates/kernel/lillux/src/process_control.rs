@@ -1151,7 +1151,7 @@ mod linux {
                 continue;
             }
             observed_live.insert(pid);
-            if !retained.contains_key(&pid) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = retained.entry(pid) {
                 let member = match pin_expected(pid, stat.start_time_ticks, stat.process_group) {
                     Ok(member) => member,
                     Err(error) if error.contains("vanished") || error.contains("changed") => {
@@ -1159,7 +1159,7 @@ mod linux {
                     }
                     Err(error) => return Err(error),
                 };
-                retained.insert(pid, member);
+                slot.insert(member);
             }
             let after = match read_process_stat(pid) {
                 Ok(after) => after,
@@ -1286,7 +1286,7 @@ mod linux {
         if matches!(target.state, 'Z' | 'X') {
             return Err("exact target exited during identity capture".to_owned());
         }
-        let group_leader_pid = expected_group_leader.unwrap_or_else(|| target.process_group as u32);
+        let group_leader_pid = expected_group_leader.unwrap_or(target.process_group as u32);
         if group_leader_pid <= 1 || i64::from(group_leader_pid) != target.process_group {
             return Err("exact target is not in the required process group".to_owned());
         }

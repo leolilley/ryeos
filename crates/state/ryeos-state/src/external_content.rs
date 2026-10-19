@@ -305,7 +305,7 @@ pub struct DigestOnlyExternalContentSink;
 impl ExternalContentBlobSink for DigestOnlyExternalContentSink {
     fn store_file(
         &mut self,
-        mut file: std::fs::File,
+        file: std::fs::File,
         path: &str,
         expected_size: u64,
     ) -> anyhow::Result<(String, u64)> {
@@ -1511,8 +1511,7 @@ mod tests {
                 "content capture admitted {path}"
             );
             assert!(
-                LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds.clone())
-                    .is_err(),
+                LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds).is_err(),
                 "large-content capture admitted {path}"
             );
         }

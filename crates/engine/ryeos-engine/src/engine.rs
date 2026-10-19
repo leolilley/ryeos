@@ -998,6 +998,37 @@ where
     })
 }
 
+fn validate_effective_content_bounds(
+    canonical_ref: &str,
+    source: &str,
+    composed: &Value,
+    max_source_bytes: usize,
+    max_composed_bytes: usize,
+) -> Result<(), EngineError> {
+    let refused = |reason: String| EngineError::EffectiveItemCompositionFailed {
+        canonical_ref: canonical_ref.to_owned(),
+        reason,
+    };
+    if max_source_bytes == 0 || max_composed_bytes == 0 {
+        return Err(refused(
+            "effective content byte bounds must be nonzero".into(),
+        ));
+    }
+    if source.len() > max_source_bytes {
+        return Err(refused(format!(
+            "resolved source exceeds {max_source_bytes}-byte content bound"
+        )));
+    }
+    let composed_bytes = serde_json::to_vec(composed)
+        .map_err(|error| refused(format!("measure composed content: {error}")))?;
+    if composed_bytes.len() > max_composed_bytes {
+        return Err(refused(format!(
+            "composed JSON exceeds {max_composed_bytes}-byte content bound"
+        )));
+    }
+    Ok(())
+}
+
 impl CheckedEngineGeneration<'_> {
     /// Exact process-local identity of the immutable admitted engine/bundle
     /// generation held by this guard. Downstream coherent-batch consumers
@@ -1020,6 +1051,34 @@ impl CheckedEngineGeneration<'_> {
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
         self.engine.effective_item_current(request)
+    }
+
+    /// Resolve once under this checked generation, then bound the exact resolved
+    /// root body and composed JSON before a consumer decodes its own schema.
+    /// Diagnostic source paths are never opened to measure content. The bounds
+    /// limit what is decoded after resolution; resolution has already read the
+    /// body.
+    pub fn effective_item_with_content_bounds(
+        &self,
+        request: EffectiveItemRequest,
+        project_content: Option<&dyn crate::project_content::AuthoritativeProjectContent>,
+        max_source_bytes: usize,
+        max_composed_bytes: usize,
+    ) -> Result<EffectiveItem, EngineError> {
+        let output = match project_content {
+            Some(content) => self
+                .engine
+                .effective_resolution_output_under_project_authority_current(&request, content)?,
+            None => self.engine.effective_resolution_output_current(&request)?,
+        };
+        validate_effective_content_bounds(
+            &request.item_ref.to_string(),
+            &output.root.raw_content,
+            &output.composed.composed,
+            max_source_bytes,
+            max_composed_bytes,
+        )?;
+        self.engine.effective_item_from_output(request, output)
     }
 
     /// Resolve a complete execution definition while this exact installed
@@ -4592,6 +4651,45 @@ mod tests {
     struct CountingGenerationLifeline {
         begins: AtomicUsize,
         checks: AtomicUsize,
+    }
+
+    #[test]
+    fn effective_content_bounds_measure_exact_utf8_and_serialized_json() {
+        let composed = serde_json::json!({ "text": "é\n" });
+        let bytes = serde_json::to_vec(&composed).unwrap().len();
+        assert!(
+            super::validate_effective_content_bounds("config:test/body", "é", &composed, 2, bytes)
+                .is_ok()
+        );
+        let source_error =
+            super::validate_effective_content_bounds("config:test/body", "é", &composed, 1, bytes)
+                .unwrap_err();
+        assert!(matches!(
+            source_error,
+            EngineError::EffectiveItemCompositionFailed { .. }
+        ));
+        assert!(
+            super::validate_effective_content_bounds(
+                "config:test/body",
+                "é",
+                &composed,
+                2,
+                bytes - 1
+            )
+            .is_err()
+        );
+        for (source_bound, composed_bound) in [(0, 4), (1, 0)] {
+            assert!(
+                super::validate_effective_content_bounds(
+                    "config:test/body",
+                    "",
+                    &serde_json::Value::Null,
+                    source_bound,
+                    composed_bound
+                )
+                .is_err()
+            );
+        }
     }
 
     impl crate::isolation::IsolationGenerationLifeline for CountingGenerationLifeline {

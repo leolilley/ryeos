@@ -723,7 +723,7 @@ fn validate_external_content_contract(
         .kinds
         .get(kind)
         .and_then(|schema| schema.external_content_contract());
-    let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
     ryeos_engine::external_content::authored_external_content_shape(
         &resolution.composed.composed,

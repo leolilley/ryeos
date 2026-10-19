@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-18T05:27:56Z:19a71db3138a007b2bf47e1e61ee125935dabef96a97d200dd4bdd47f9885e90:qjOTi1U+w8hqAdtuB0wdjTlFEZFDD8LIXFeXReGnTo7YAZO88tl8qGZqHCb58pNKLp8tpZiZ8HyxHZ/Ik+jXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T08:51:55Z:02adfe0e5768751b7732ab0efe4b4badf2c6557254ebfa38c16ef20adde262b5:FT8AG7T5zf9Q0oEm2kv3UqtPOG7vP8ZEtTBA/ZvuSWKsA4YbJ6ZL38FoSAIyd9QAfzK3/S4gYvjX94v7fbM9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -155,6 +155,18 @@ payload_ownership:
         - binary: ryeos-knowledge-runtime
           cargo_package: ryeos-knowledge-runtime
           build_class: release
+          cargo_features: []
+    - bundle_name: modal-sandbox
+      bundle_sets: [release-artifacts]
+      host_features: []
+      payloads:
+        - binary: ryeos-modal-guest-launcher
+          cargo_package: modal-guest-launcher
+          build_class: static
+          cargo_features: []
+        - binary: ryeos-modal-sandbox-lifecycle-adapter
+          cargo_package: ryeos-modal-sandbox-lifecycle-adapter
+          build_class: static
           cargo_features: []
     - bundle_name: render-sandbox
       bundle_sets: [f5r-controller, release-artifacts]

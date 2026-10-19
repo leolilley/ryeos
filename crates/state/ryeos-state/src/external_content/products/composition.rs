@@ -1275,8 +1275,8 @@ mod tests {
             canonicalize_product_selection_inputs(vec![dependency.clone(), root.clone()]).unwrap();
         assert_eq!(canonical, vec![root.clone(), dependency.clone()]);
         validate_product_selection_inputs(&canonical).unwrap();
-        assert!(validate_product_selection_inputs(&vec![dependency, root.clone()]).is_err());
-        assert!(validate_product_selection_inputs(&vec![root.clone(), root]).is_err());
+        assert!(validate_product_selection_inputs(&[dependency, root.clone()]).is_err());
+        assert!(validate_product_selection_inputs(&[root.clone(), root]).is_err());
         assert!(
             serde_json::from_value::<ProductSelectionInput>(json!({
                 "target":{"kind":"root"},

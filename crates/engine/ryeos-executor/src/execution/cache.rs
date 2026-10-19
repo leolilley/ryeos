@@ -101,10 +101,10 @@ impl GenerationRetirement<'_> {
                 anyhow::bail!("materialization generation changed during retirement");
             }
         }
-        if let Some(markers) = root.open_child_directory(OsStr::new(".complete"))? {
-            if let Some(marker) = markers.open_pinned_regular(name, true)? {
-                markers.remove_pinned_regular_if_same(&marker)?;
-            }
+        if let Some(markers) = root.open_child_directory(OsStr::new(".complete"))?
+            && let Some(marker) = markers.open_pinned_regular(name, true)?
+        {
+            markers.remove_pinned_regular_if_same(&marker)?;
         }
         Ok(())
     }

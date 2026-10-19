@@ -15,9 +15,15 @@ from pathlib import Path
 DEFAULT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 API = "https://api.render.com/v1"
 FARM_SERVICE_ID = "srv-datiea7avr4c73dm14fg"
-SERVICE_PREFIX = "ryeos-f5r-s9-"
+SERVICE_PREFIXES = ("ryeos-f5r-s9-", "ryeos-r9-")
+SERVICE_PREFIX = SERVICE_PREFIXES[0]
+IMAGE_REPOS = {
+    "f5r-controller": "ghcr.io/leolilley/ryeos-f5r-controller",
+    "standard": "ghcr.io/leolilley/ryeos-standard",
+}
+DEFAULT_READY_PATH = "/_ryeos/ready"
 FORBIDDEN_WORDS = ("farm", "snap-track")
-IMAGE_RE = re.compile(r"^(?P<path>ghcr\.io/leolilley/ryeos-f5r-controller)@(?P<digest>sha256:[0-9a-f]{64})$")
+IMAGE_RE = re.compile(r"^(?P<path>[a-z0-9./-]+)@(?P<digest>sha256:[0-9a-f]{64})$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TERMINAL_OK = {"live"}
 TERMINAL_BAD = {"build_failed", "update_failed", "canceled", "pre_deploy_failed", "deactivated"}
@@ -158,14 +164,15 @@ def guard_id(service_id):
 
 
 def require_prefix(name):
-    if not name.startswith(SERVICE_PREFIX):
-        raise Refusal(f"service name must start with {SERVICE_PREFIX}")
+    if not name.startswith(SERVICE_PREFIXES):
+        raise Refusal("service name must start with one of " + ", ".join(SERVICE_PREFIXES))
 
 
 def build_payload(args, owner_id, credential_id):
     match = IMAGE_RE.match(args.image)
-    if not match:
-        raise Refusal("--image must be ghcr.io/leolilley/ryeos-f5r-controller@sha256:<64hex>")
+    allowed = IMAGE_REPOS[args.image_repo]
+    if not match or match.group("path") != allowed:
+        raise Refusal(f"--image must be {allowed}@sha256:<64hex>")
     if not DIGEST_RE.match(args.substrate_digest):
         raise Refusal("--substrate-digest must be sha256:<64hex>")
     image_path = match.group("path")
@@ -181,20 +188,22 @@ def build_payload(args, owner_id, credential_id):
     image = {"ownerId": owner_id, "imagePath": args.image}
     if credential_id:
         image["registryCredentialId"] = credential_id
+    details = {
+        "env": "image",
+        "autoDeploy": "no",
+        "plan": args.plan,
+        "region": args.region,
+        "healthCheckPath": DEFAULT_READY_PATH,
+        "numInstances": 1,
+    }
+    if not args.no_disk:
+        details["disk"] = {"name": "ryeos-data", "mountPath": "/data", "sizeGB": args.disk_gb}
     return {
         "type": "web_service",
         "name": args.name,
         "ownerId": owner_id,
         "image": image,
-        "serviceDetails": {
-            "env": "image",
-            "autoDeploy": "no",
-            "plan": args.plan,
-            "region": args.region,
-            "healthCheckPath": "/_ryeos/ready",
-            "numInstances": 1,
-            "disk": {"name": "ryeos-data", "mountPath": "/data", "sizeGB": args.disk_gb},
-        },
+        "serviceDetails": details,
         "envVars": [{"key": k, "value": v} for k, v in env],
     }
 
@@ -244,20 +253,20 @@ def service_url(service):
     return details.get("url") or service.get("url")
 
 
-def ready_probe(api, url):
+def ready_probe(api, url, path=DEFAULT_READY_PATH):
     if not url:
         return {"url": None, "status": None}
     target = url if url.startswith("http") else "https://" + url
-    request = urllib.request.Request(target + "/_ryeos/ready", method="GET")
+    request = urllib.request.Request(target + path, method="GET")
     try:
         with api._opener(request, 30) as resp:
             status = resp.status
     except urllib.error.HTTPError as err:
         status = err.code
     except (urllib.error.URLError, OSError) as err:
-        api._log(f"GET /_ryeos/ready -> error {type(err).__name__}")
+        api._log(f"GET {path} -> error {type(err).__name__}")
         return {"url": target, "status": None}
-    api._log(f"GET /_ryeos/ready -> {status}")
+    api._log(f"GET {path} -> {status}")
     return {"url": target, "status": status}
 
 
@@ -349,8 +358,9 @@ def cmd_status(args, api):
         "name": service.get("name"),
         "suspended": service.get("suspended"),
         "url": url,
+        "healthCheckPath": (service.get("serviceDetails") or {}).get("healthCheckPath"),
         "deployStatus": deploy.get("status"),
-        "ready": ready_probe(api, url),
+        "ready": ready_probe(api, url, args.ready_path),
     }))
     return 0
 
@@ -409,6 +419,8 @@ def parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("deploy")
     d.add_argument("--image", required=True)
+    d.add_argument("--image-repo", choices=sorted(IMAGE_REPOS), default="f5r-controller")
+    d.add_argument("--no-disk", action="store_true")
     d.add_argument("--substrate-digest", required=True)
     d.add_argument("--substrate-protocol", type=int, default=1)
     d.add_argument("--name", default=SERVICE_PREFIX + datetime.date.today().strftime("%Y%m%d"))
@@ -424,6 +436,7 @@ def parser():
     d.add_argument("--out", required=True)
     s = sub.add_parser("status")
     s.add_argument("--service-id", required=True)
+    s.add_argument("--ready-path", default=DEFAULT_READY_PATH)
     t = sub.add_parser("teardown")
     t.add_argument("--service-id", required=True)
     t.add_argument("--registry-credential-id")

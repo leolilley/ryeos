@@ -584,7 +584,7 @@ mod strict_project_bundle_tests {
         let project = fixture.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let publisher = key(44);
-        let node_trust = trust(&[publisher.clone()]);
+        let node_trust = trust(std::slice::from_ref(&publisher));
         write(
             &installed,
             ".ai/manifest.yaml",

@@ -1308,7 +1308,9 @@ impl ReleasedLiveOperationalStartup {
         if let Some(released) = &p.schema_released {
             released.terminal(factory)?;
         }
-        if p.initialization_retirement.is_none() {
+        if let Some(retirement) = p.initialization_retirement.as_ref() {
+            retirement.require_factory_witness(&Arc::downgrade(factory))?;
+        } else {
             let retirement = capture_initialization_retirement(
                 p.custody.initialization_phase,
                 p.custody.initialization.as_ref(),
@@ -1318,11 +1320,6 @@ impl ReleasedLiveOperationalStartup {
             )?;
             p.initialization_retirement = Some(retirement);
             drop(p.custody.initialization.take());
-        } else {
-            p.initialization_retirement
-                .as_ref()
-                .expect("checked failed-start initialization receipt")
-                .require_factory_witness(&Arc::downgrade(factory))?;
         }
         if let Some((index, _)) = &p.native_failure {
             anyhow::ensure!(

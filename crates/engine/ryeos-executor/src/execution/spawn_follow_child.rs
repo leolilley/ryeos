@@ -526,10 +526,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 }
                 existing.child_thread_id
             }
-            None if !re_drive => {
-                let child_id = new_thread_id();
-                child_id
-            }
+            None if !re_drive => new_thread_id(),
             None => {
                 bail!("follow: persisted cohort is missing child index {item_index}");
             }

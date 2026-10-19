@@ -64,7 +64,7 @@ pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
         .with_context(|| format!("failed to read signing key: {}", path.display()))?;
     let pem = std::str::from_utf8(&bytes)
         .with_context(|| format!("signing key is not UTF-8: {}", path.display()))?;
-    SigningKey::from_pkcs8_pem(&pem)
+    SigningKey::from_pkcs8_pem(pem)
         .with_context(|| format!("failed to decode signing key: {}", path.display()))
 }
 

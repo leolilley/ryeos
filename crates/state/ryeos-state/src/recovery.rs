@@ -34,6 +34,12 @@ pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
 pub const RECOVERY_DIRECTORY_NAME: &str = "recovery";
 /// The CAS mutation lock inside [`RECOVERY_DIRECTORY_NAME`].
 pub const CAS_MUTATION_LOCK_FILENAME: &str = "cas-mutation.lock";
+mod retired_chain_closure;
+mod retirement_evidence;
+pub use retired_chain_closure::{
+    EvidenceValidator, RetiredChainClosure, RetiredChainClosureDraft, read_retired_chain_closure,
+};
+pub use retirement_evidence::{RetiredChainFence, RetirementEvidenceDiscard};
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
@@ -391,6 +397,9 @@ pub(crate) fn sweep_interrupted_state_publications(
         if let Some(directory) = directory {
             removed += sweep_state_temporaries_in(&directory)?;
         }
+    }
+    for directory in RecoveryStore::retirement_evidence_sweep_directories(thread_projection)? {
+        removed += sweep_state_temporaries_in(&directory)?;
     }
     Ok(removed)
 }
@@ -3354,6 +3363,10 @@ impl RecoveryStore {
         validate_chain_root_id(chain_root_id)?;
         validate_optional_hash("expected_previous_hash", expected_previous_hash)?;
         validate_hash("target_hash", target_hash)?;
+        anyhow::ensure!(
+            self.retired_chain_fence(chain_root_id)? == RetiredChainFence::Absent,
+            "chain {chain_root_id} is fenced as retired and can never publish a head again"
+        );
 
         if let Some((existing, _existing_file)) = self.read_pending_with_file(chain_root_id)? {
             match existing.operation {
@@ -3447,6 +3460,10 @@ impl RecoveryStore {
         self.ensure_chain_lock(chain_lock, chain_root_id)?;
         validate_chain_root_id(chain_root_id)?;
         validate_hash("target_hash", target_hash)?;
+        anyhow::ensure!(
+            self.retired_chain_fence(chain_root_id)? == RetiredChainFence::Absent,
+            "chain {chain_root_id} is fenced as retired and can never publish a head again"
+        );
 
         let (current, current_file) = self
             .read_pending_with_file(chain_root_id)?
@@ -3764,7 +3781,7 @@ fn decode_durable_upload_bytes(bytes: &[u8], path: &Path) -> Result<DurableCasUp
     Ok(record)
 }
 
-fn validate_chain_root_id(value: &str) -> Result<()> {
+pub(crate) fn validate_chain_root_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 255
         || value == "."
@@ -4942,7 +4959,7 @@ mod tests {
         // The temporary-name scratch bounds the longest name a State writer
         // can generate: maximal pid and sequence digits.
         let longest = format!(".secure.tmp.{}.{}.{}", "x".repeat(16), u32::MAX, u64::MAX);
-        assert!(longest.len() as u64 + 1 <= ACK_TEMP_NAME_SCRATCH_BYTES);
+        assert!((longest.len() as u64) < ACK_TEMP_NAME_SCRATCH_BYTES);
         // The joined-path term is the directory's own path plus the name.
         let joined = store.root().join(THREAD_HISTORY_DISCARD_MARKER);
         assert!(

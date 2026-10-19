@@ -1166,8 +1166,9 @@ fn interrupted_recovery_pair(
         seen.len() == interrupted.len(),
         "scheduler interrupted inventory is not one complete lineage"
     );
-    if leaf.phase_records.len() <= 9 && leaf.generation_intent.recovery.is_some() {
-        let binding = leaf.generation_intent.recovery.as_ref().unwrap();
+    if leaf.phase_records.len() <= 9
+        && let Some(binding) = leaf.generation_intent.recovery.as_ref()
+    {
         let parent = interrupted
             .iter()
             .find(|e| e.generation_intent.generation == binding.parent_generation)

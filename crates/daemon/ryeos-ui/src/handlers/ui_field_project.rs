@@ -141,9 +141,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         })
         .unwrap_or_else(|| "project:node".to_string());
     let admission = project_query_identity.as_deref().map(|root| {
-        ryeos_app::admission_events::read_admission_events(
+        ryeos_app::admission_events::read_admission_events_for_principal(
             &state.state_store,
             root,
+            caller.principal_id(),
             MAX_ADMISSION_FACTS,
         )
     });
@@ -166,7 +167,7 @@ fn project_facts(
     project_identity: String,
     projections: &BTreeMap<String, EffectiveProgramProjection>,
     projection_warnings: Vec<String>,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<super::ui_field::FieldFactsDocument> {
     let subject = FieldFactSubject {
         kind: "project".to_string(),
@@ -400,12 +401,13 @@ fn project_facts(
 
 const MAX_ADMISSION_FACTS: usize = 50;
 
-/// Project the newest admission events (finalizer decisions) for this
-/// project as `admission:` facts. History unavailability degrades to a
-/// warning — admission evidence must never take the project document down.
+/// Project the newest admission events (finalizer decisions) the calling
+/// principal owns for this project as `admission:` facts. History
+/// unavailability degrades to a warning — admission evidence must never take
+/// the project document down.
 fn add_admission_facts(
     builder: &mut FieldFactsBuilder,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<()> {
     let Some(read) = admission else {
         return Ok(());
@@ -420,7 +422,7 @@ fn add_admission_facts(
             return Ok(());
         }
     };
-    if page.next_cursor.is_some() {
+    if page.incomplete {
         builder.mark_truncated();
         builder.warn(
             "admission_history_truncated",

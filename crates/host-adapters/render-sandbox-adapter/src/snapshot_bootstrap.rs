@@ -270,7 +270,7 @@ pub(crate) fn observe_source_readiness(
     );
     let (url, target) = crate::api_url(
         &spec,
-        RouteName::SandboxById,
+        RouteName::ById,
         Some(&request.occurrence.occurrence_id),
         &settings,
         None,
@@ -319,7 +319,7 @@ pub(crate) fn observe_source_readiness(
                         &settings.region,
                         request.intent.maximum_lifetime_seconds,
                     )?,
-                    i64::try_from(lillux::time::timestamp_millis())?,
+                    lillux::time::timestamp_millis(),
                 ) =>
             {
                 RuntimeSnapshotBootstrapReadinessAdapterResponse::Running {
@@ -329,7 +329,7 @@ pub(crate) fn observe_source_readiness(
                         occurrence_id: sandbox.id,
                         provider_response_sha256: lillux::sha256_hex(&body),
                         observed_created_at: sandbox.created_at,
-                        observed_at_ms: i64::try_from(lillux::time::timestamp_millis())?,
+                        observed_at_ms: lillux::time::timestamp_millis(),
                     },
                 }
             }
@@ -417,8 +417,8 @@ pub(crate) fn terminate_source_sandbox(
             == settings.owner_id,
         "bootstrap termination changed original owner scope"
     );
-    let mutation = RouteName::SandboxTerminateById;
-    let observation = RouteName::SandboxById;
+    let mutation = RouteName::TerminateById;
+    let observation = RouteName::ById;
     for route in [mutation, observation] {
         let (url, target) = crate::api_url(
             &spec,

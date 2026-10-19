@@ -194,9 +194,11 @@ pub(crate) fn verify_retained_lifecycle_closure(
         .get_object_bounded(root_hash, 64 * 1024)?
         .context("retained lifecycle artifact root is absent")?;
     let source = RetainedLifecycleArtifacts::from_value(&root)?;
-    let mut limits = ryeos_state::object_closure::ObjectClosureLimits::default();
-    limits.max_blob_bytes = 1024 * 1024 * 1024;
-    limits.max_total_blob_bytes = 4 * 1024 * 1024 * 1024 + 16 * 1024 * 1024;
+    let limits = ryeos_state::object_closure::ObjectClosureLimits {
+        max_blob_bytes: 1024 * 1024 * 1024,
+        max_total_blob_bytes: 4 * 1024 * 1024 * 1024 + 16 * 1024 * 1024,
+        ..Default::default()
+    };
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         cas,
         [root_hash.to_owned()],

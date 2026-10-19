@@ -1349,7 +1349,7 @@ pub(crate) fn controller_rlimit_plan(
 }
 
 fn display_rlimit(value: u64) -> String {
-    if value == libc::RLIM_INFINITY as u64 {
+    if value == libc::RLIM_INFINITY {
         "unlimited".to_owned()
     } else {
         value.to_string()
@@ -1381,8 +1381,8 @@ pub(crate) fn install_controller_rlimits(
             ));
         }
         Ok(ProcessRlimit {
-            soft: limit.rlim_cur as u64,
-            hard: limit.rlim_max as u64,
+            soft: limit.rlim_cur,
+            hard: limit.rlim_max,
         })
     };
     let memlock = current_rlimit(resources[0].0, resources[0].1)?;
@@ -3007,6 +3007,204 @@ fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+// One physical limit installer shared by execution and controller leaves.
+// The caller supplies the exact retained leaf and its admission authority.
+fn install_empty_scope_resource_limits(
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    limits.validate()?;
+    let events = open_control(directory, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("cannot change resource limits on a populated process scope".to_owned());
+    }
+    // Open every required controller before the first mutation. A host
+    // that did not delegate memory and pids cannot silently downgrade the
+    // admitted product to rlimits or an unbounded cgroup.
+    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
+    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
+    let processes = open_control(directory, c"pids.max", libc::O_RDWR)?;
+    for (control, name, value) in [
+        (
+            &memory,
+            "memory.max",
+            limits.maximum_memory_bytes.to_string(),
+        ),
+        // The memory ceiling includes no separately available swap budget.
+        (&swap, "memory.swap.max", "0".to_owned()),
+        (&processes, "pids.max", limits.maximum_processes.to_string()),
+    ] {
+        write_control(control, value.as_bytes())?;
+        if read_control(control)?.trim() != value {
+            return Err(format!("{name} did not retain the exact resource ceiling"));
+        }
+    }
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("process scope became populated during resource configuration".to_owned());
+    }
+    Ok(())
+}
+
+fn require_protected_ancestor_placement(directory: &File) -> Result<(), String> {
+    let metadata = directory.metadata().map_err(display)?;
+    let placement = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
+    let control = placement.metadata().map_err(display)?;
+    if metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || control.uid() != 0
+        || control.mode() & 0o022 != 0
+    {
+        return Err("outside node ancestor placement must remain administrator-only".to_owned());
+    }
+    Ok(())
+}
+
+fn require_protected_node_limit_controls(directory: &File) -> Result<(), String> {
+    for name in [c"memory.max", c"memory.swap.max", c"pids.max"] {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        let metadata = control.metadata().map_err(display)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(
+                "enclosing node resource controls must remain administrator-owned".to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_scope_resource_limits(
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    limits.validate()?;
+    for (name, expected) in [
+        (c"memory.max", limits.maximum_memory_bytes.to_string()),
+        (c"memory.swap.max", "0".to_owned()),
+        (c"pids.max", limits.maximum_processes.to_string()),
+    ] {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        if read_control(&control)?.trim() != expected {
+            return Err("existing enclosing node limits differ from admitted envelope".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn enable_node_resource_controllers(
+    directory: &File,
+    actual_cgroup_root: bool,
+) -> Result<(), String> {
+    let available = open_control(directory, c"cgroup.controllers", libc::O_RDONLY)?;
+    let subtree = open_control(directory, c"cgroup.subtree_control", libc::O_RDWR)?;
+    let metadata = subtree.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err("node subtree controller selection must remain administrator-owned".to_owned());
+    }
+    let available = read_control(&available)?;
+    if !["memory", "pids"].iter().all(|required| {
+        available
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
+        return Err("node enclosing resource controllers are not available".to_owned());
+    }
+    let enabled = read_control(&subtree)?;
+    if ["memory", "pids"].iter().all(|required| {
+        enabled
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
+        return Ok(());
+    }
+    if !actual_cgroup_root {
+        let members = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
+        if !read_control(&members)?.trim().is_empty() {
+            return Err("cannot enable domain controllers around direct node members".to_owned());
+        }
+    }
+    write_control(&subtree, b"+memory +pids")?;
+    let enabled = read_control(&subtree)?;
+    if !["memory", "pids"].iter().all(|required| {
+        enabled
+            .split_ascii_whitespace()
+            .any(|name| name == *required)
+    }) {
+        return Err("node memory/process controllers were not retained".to_owned());
+    }
+    Ok(())
+}
+
+fn effective_oci_node_limits(
+    directory: &File,
+    requested: super::scope::ProcessScopeResourceLimits,
+) -> Result<super::scope::ProcessScopeResourceLimits, String> {
+    requested.validate()?;
+    require_protected_node_limit_controls(directory)?;
+    let finite_min = |name: &CStr, requested: u64| -> Result<u64, String> {
+        let control = open_control(directory, name, libc::O_RDONLY)?;
+        let current = read_control(&control)?;
+        if current.trim() == "max" {
+            return Ok(requested);
+        }
+        let current: u64 = current
+            .trim()
+            .parse()
+            .map_err(|_| "invalid existing OCI resource ceiling")?;
+        if current == 0 {
+            return Err("existing OCI resource ceiling is zero".to_owned());
+        }
+        Ok(current.min(requested))
+    };
+    let limits = super::scope::ProcessScopeResourceLimits {
+        maximum_memory_bytes: finite_min(c"memory.max", requested.maximum_memory_bytes)?,
+        maximum_processes: u32::try_from(finite_min(
+            c"pids.max",
+            u64::from(requested.maximum_processes),
+        )?)
+        .map_err(|_| "effective OCI process ceiling overflow")?,
+    };
+    for (name, maximum) in [
+        (c"memory.current", limits.maximum_memory_bytes),
+        (c"pids.current", u64::from(limits.maximum_processes)),
+        (c"memory.swap.current", 0),
+    ] {
+        let usage: u64 = read_control(&open_control(directory, name, libc::O_RDONLY)?)?
+            .trim()
+            .parse()
+            .map_err(|_| "invalid OCI resource usage")?;
+        if usage > maximum {
+            return Err("held OCI usage exceeds effective node envelope".to_owned());
+        }
+    }
+    Ok(limits)
+}
+
+fn install_held_oci_node_limits(
+    directory: &File,
+    limits: super::scope::ProcessScopeResourceLimits,
+) -> Result<(), String> {
+    // Only the original held-init prestart path uses this populated-subtree
+    // installer, after proving its exact init leaf and no foreign descendants.
+    let effective = effective_oci_node_limits(directory, limits)?;
+    if effective != limits {
+        return Err("OCI resource ceiling changed during preparation".to_owned());
+    }
+    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
+    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
+    let pids = open_control(directory, c"pids.max", libc::O_RDWR)?;
+    for (control, value) in [
+        (&memory, limits.maximum_memory_bytes.to_string()),
+        (&swap, "0".to_owned()),
+        (&pids, limits.maximum_processes.to_string()),
+    ] {
+        write_control(control, value.as_bytes())?;
+        if read_control(control)?.trim() != value {
+            return Err("OCI effective ceiling was not retained".to_owned());
+        }
+    }
+    require_scope_resource_limits(directory, limits)
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -3102,7 +3300,7 @@ pub(super) mod tests {
     #[test]
     fn controller_rlimits_cover_the_resident_region_and_never_lower() {
         const MIB: u64 = 1024 * 1024;
-        let infinity = libc::RLIM_INFINITY as u64;
+        let infinity = libc::RLIM_INFINITY;
         let ceiling = super::super::CONTROLLER_MEMLOCK_CEILING_BYTES;
         let limits = super::super::scope::ProcessScopeResourceLimits {
             maximum_memory_bytes: 4096 * MIB,
@@ -3714,9 +3912,9 @@ pub(super) mod tests {
         scope.install_resource_limits(limits).unwrap();
         let fd = scope.directory.try_clone_descriptor().unwrap();
         for (name, expected) in [
-            (c"memory.max".as_ref(), "67108864"),
-            (c"memory.swap.max".as_ref(), "0"),
-            (c"pids.max".as_ref(), "4"),
+            (c"memory.max", "67108864"),
+            (c"memory.swap.max", "0"),
+            (c"pids.max", "4"),
         ] {
             let control = open_control(&fd, name, libc::O_RDONLY).unwrap();
             assert_eq!(read_control(&control).unwrap().trim(), expected);
@@ -4199,202 +4397,4 @@ pub(super) mod tests {
         assert!(removed, "successful qualification left unexpected cgroups");
         true
     }
-}
-
-// One physical limit installer shared by execution and controller leaves.
-// The caller supplies the exact retained leaf and its admission authority.
-fn install_empty_scope_resource_limits(
-    directory: &File,
-    limits: super::scope::ProcessScopeResourceLimits,
-) -> Result<(), String> {
-    limits.validate()?;
-    let events = open_control(directory, c"cgroup.events", libc::O_RDONLY)?;
-    if parse_events(&read_control(&events)?)?.populated {
-        return Err("cannot change resource limits on a populated process scope".to_owned());
-    }
-    // Open every required controller before the first mutation. A host
-    // that did not delegate memory and pids cannot silently downgrade the
-    // admitted product to rlimits or an unbounded cgroup.
-    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
-    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
-    let processes = open_control(directory, c"pids.max", libc::O_RDWR)?;
-    for (control, name, value) in [
-        (
-            &memory,
-            "memory.max",
-            limits.maximum_memory_bytes.to_string(),
-        ),
-        // The memory ceiling includes no separately available swap budget.
-        (&swap, "memory.swap.max", "0".to_owned()),
-        (&processes, "pids.max", limits.maximum_processes.to_string()),
-    ] {
-        write_control(control, value.as_bytes())?;
-        if read_control(control)?.trim() != value {
-            return Err(format!("{name} did not retain the exact resource ceiling"));
-        }
-    }
-    if parse_events(&read_control(&events)?)?.populated {
-        return Err("process scope became populated during resource configuration".to_owned());
-    }
-    Ok(())
-}
-
-fn require_protected_ancestor_placement(directory: &File) -> Result<(), String> {
-    let metadata = directory.metadata().map_err(display)?;
-    let placement = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
-    let control = placement.metadata().map_err(display)?;
-    if metadata.uid() != 0
-        || metadata.mode() & 0o022 != 0
-        || control.uid() != 0
-        || control.mode() & 0o022 != 0
-    {
-        return Err("outside node ancestor placement must remain administrator-only".to_owned());
-    }
-    Ok(())
-}
-
-fn require_protected_node_limit_controls(directory: &File) -> Result<(), String> {
-    for name in [c"memory.max", c"memory.swap.max", c"pids.max"] {
-        let control = open_control(directory, name, libc::O_RDONLY)?;
-        let metadata = control.metadata().map_err(display)?;
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-            return Err(
-                "enclosing node resource controls must remain administrator-owned".to_owned(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn require_scope_resource_limits(
-    directory: &File,
-    limits: super::scope::ProcessScopeResourceLimits,
-) -> Result<(), String> {
-    limits.validate()?;
-    for (name, expected) in [
-        (c"memory.max", limits.maximum_memory_bytes.to_string()),
-        (c"memory.swap.max", "0".to_owned()),
-        (c"pids.max", limits.maximum_processes.to_string()),
-    ] {
-        let control = open_control(directory, name, libc::O_RDONLY)?;
-        if read_control(&control)?.trim() != expected {
-            return Err("existing enclosing node limits differ from admitted envelope".to_owned());
-        }
-    }
-    Ok(())
-}
-
-fn enable_node_resource_controllers(
-    directory: &File,
-    actual_cgroup_root: bool,
-) -> Result<(), String> {
-    let available = open_control(directory, c"cgroup.controllers", libc::O_RDONLY)?;
-    let subtree = open_control(directory, c"cgroup.subtree_control", libc::O_RDWR)?;
-    let metadata = subtree.metadata().map_err(display)?;
-    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
-        return Err("node subtree controller selection must remain administrator-owned".to_owned());
-    }
-    let available = read_control(&available)?;
-    if !["memory", "pids"].iter().all(|required| {
-        available
-            .split_ascii_whitespace()
-            .any(|name| name == *required)
-    }) {
-        return Err("node enclosing resource controllers are not available".to_owned());
-    }
-    let enabled = read_control(&subtree)?;
-    if ["memory", "pids"].iter().all(|required| {
-        enabled
-            .split_ascii_whitespace()
-            .any(|name| name == *required)
-    }) {
-        return Ok(());
-    }
-    if !actual_cgroup_root {
-        let members = open_control(directory, c"cgroup.procs", libc::O_RDONLY)?;
-        if !read_control(&members)?.trim().is_empty() {
-            return Err("cannot enable domain controllers around direct node members".to_owned());
-        }
-    }
-    write_control(&subtree, b"+memory +pids")?;
-    let enabled = read_control(&subtree)?;
-    if !["memory", "pids"].iter().all(|required| {
-        enabled
-            .split_ascii_whitespace()
-            .any(|name| name == *required)
-    }) {
-        return Err("node memory/process controllers were not retained".to_owned());
-    }
-    Ok(())
-}
-
-fn effective_oci_node_limits(
-    directory: &File,
-    requested: super::scope::ProcessScopeResourceLimits,
-) -> Result<super::scope::ProcessScopeResourceLimits, String> {
-    requested.validate()?;
-    require_protected_node_limit_controls(directory)?;
-    let finite_min = |name: &CStr, requested: u64| -> Result<u64, String> {
-        let control = open_control(directory, name, libc::O_RDONLY)?;
-        let current = read_control(&control)?;
-        if current.trim() == "max" {
-            return Ok(requested);
-        }
-        let current: u64 = current
-            .trim()
-            .parse()
-            .map_err(|_| "invalid existing OCI resource ceiling")?;
-        if current == 0 {
-            return Err("existing OCI resource ceiling is zero".to_owned());
-        }
-        Ok(current.min(requested))
-    };
-    let limits = super::scope::ProcessScopeResourceLimits {
-        maximum_memory_bytes: finite_min(c"memory.max", requested.maximum_memory_bytes)?,
-        maximum_processes: u32::try_from(finite_min(
-            c"pids.max",
-            u64::from(requested.maximum_processes),
-        )?)
-        .map_err(|_| "effective OCI process ceiling overflow")?,
-    };
-    for (name, maximum) in [
-        (c"memory.current", limits.maximum_memory_bytes),
-        (c"pids.current", u64::from(limits.maximum_processes)),
-        (c"memory.swap.current", 0),
-    ] {
-        let usage: u64 = read_control(&open_control(directory, name, libc::O_RDONLY)?)?
-            .trim()
-            .parse()
-            .map_err(|_| "invalid OCI resource usage")?;
-        if usage > maximum {
-            return Err("held OCI usage exceeds effective node envelope".to_owned());
-        }
-    }
-    Ok(limits)
-}
-
-fn install_held_oci_node_limits(
-    directory: &File,
-    limits: super::scope::ProcessScopeResourceLimits,
-) -> Result<(), String> {
-    // Only the original held-init prestart path uses this populated-subtree
-    // installer, after proving its exact init leaf and no foreign descendants.
-    let effective = effective_oci_node_limits(directory, limits)?;
-    if effective != limits {
-        return Err("OCI resource ceiling changed during preparation".to_owned());
-    }
-    let memory = open_control(directory, c"memory.max", libc::O_RDWR)?;
-    let swap = open_control(directory, c"memory.swap.max", libc::O_RDWR)?;
-    let pids = open_control(directory, c"pids.max", libc::O_RDWR)?;
-    for (control, value) in [
-        (&memory, limits.maximum_memory_bytes.to_string()),
-        (&swap, "0".to_owned()),
-        (&pids, limits.maximum_processes.to_string()),
-    ] {
-        write_control(control, value.as_bytes())?;
-        if read_control(control)?.trim() != value {
-            return Err("OCI effective ceiling was not retained".to_owned());
-        }
-    }
-    require_scope_resource_limits(directory, limits)
 }

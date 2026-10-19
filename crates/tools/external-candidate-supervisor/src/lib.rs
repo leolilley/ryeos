@@ -530,7 +530,7 @@ mod tests {
             )
             .unwrap(),
             bootstrap_capability: STANDARD.encode([52_u8; 32]),
-            attachment_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap()
+            attachment_deadline_ms: lillux::time::timestamp_millis()
                 + 60_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
@@ -678,7 +678,7 @@ mod tests {
             serde_json::from_slice(request_body(request)).unwrap();
         attach.validate_shape().unwrap();
         assert_eq!(attach.bootstrap_capability, bootstrap.bootstrap_capability);
-        let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let issued_at_ms = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
             schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:
@@ -1028,8 +1028,7 @@ mod tests {
             format!("https://localhost:{port}"),
             vec![TEST_CA_DER.to_owned()],
         );
-        bootstrap.attachment_deadline_ms =
-            i64::try_from(lillux::time::timestamp_millis()).unwrap() + 100;
+        bootstrap.attachment_deadline_ms = lillux::time::timestamp_millis() + 100;
         let server_bootstrap = serde_json::to_value(&bootstrap).unwrap();
         let retained_response = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
         let retained_request = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
@@ -1107,10 +1106,7 @@ mod tests {
         else {
             panic!("ambiguous attachment did not recover its prepared authority")
         };
-        assert!(
-            i64::try_from(lillux::time::timestamp_millis()).unwrap()
-                >= recovered.bootstrap().attachment_deadline_ms
-        );
+        assert!(lillux::time::timestamp_millis() >= recovered.bootstrap().attachment_deadline_ms);
         let (binding, _) = attach_external_execution_channel_exact(
             recovered.bootstrap(),
             recovered.supervisor_signing_key(),

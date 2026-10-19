@@ -292,7 +292,7 @@ impl PendingNamespaceWatchdog {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let ms = remaining.as_millis().max(1).min(5_000) as i32;
+            let ms = remaining.as_millis().clamp(1, 5_000) as i32;
             let ready = unsafe { libc::poll(&mut poll, 1, ms) };
             if ready < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
@@ -448,7 +448,7 @@ unsafe fn receive_packet(
             (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS
         } {
             let data = length - minimum;
-            if data % std::mem::size_of::<i32>() != 0 {
+            if !data.is_multiple_of(std::mem::size_of::<i32>()) {
                 invalid = true;
             }
             for index in 0..data / std::mem::size_of::<i32>() {
@@ -578,8 +578,8 @@ unsafe fn child_main(inputs: [i32; 5], tag: [u8; 32]) -> ! {
             let pidfd_ok = signalled == 0 || unsafe { *libc::__errno_location() } == libc::ESRCH;
             let identity_ok = if stat_ok {
                 let stat = unsafe { stat.assume_init() };
-                message[41..49] == (stat.st_dev as u64).to_le_bytes()
-                    && message[49..57] == (stat.st_ino as u64).to_le_bytes()
+                message[41..49] == stat.st_dev.to_le_bytes()
+                    && message[49..57] == stat.st_ino.to_le_bytes()
             } else {
                 false
             };

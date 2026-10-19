@@ -76,12 +76,12 @@ pub struct RootTerminalSubordinateFailure {
 
 impl Drop for RootTerminalSubordinateFailure {
     fn drop(&mut self) {
-        if !self.reaped {
-            if let Some(child) = self.child.as_mut() {
-                // Child::kill requests exact-child termination. No wait,
-                // try_wait, task join or descendant settlement occurs here.
-                let _ = child.kill();
-            }
+        if !self.reaped
+            && let Some(child) = self.child.as_mut()
+        {
+            // Child::kill requests exact-child termination. No wait,
+            // try_wait, task join or descendant settlement occurs here.
+            let _ = child.kill();
         }
         // std::process::Child destruction does not wait. Pipe destruction
         // closes retained descriptors; it does not produce EOF/reap evidence.

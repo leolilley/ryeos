@@ -615,9 +615,9 @@ fn bundle_tree_has_newer(
             if bundle_tree_has_newer(bundle_root, &entry_path, published)? {
                 return Ok(true);
             }
-        } else if path == bundle_root && entry.file_name() == "PUBLISHER_TRUST.toml" {
-            continue;
-        } else if path == bundle_root.join(".ai") && entry.file_name() == "manifest.yaml" {
+        } else if (path == bundle_root && entry.file_name() == "PUBLISHER_TRUST.toml")
+            || (path == bundle_root.join(".ai") && entry.file_name() == "manifest.yaml")
+        {
             continue;
         } else if entry
             .metadata()?
@@ -632,7 +632,7 @@ fn bundle_tree_has_newer(
 
 /// Bundle validation is read-only: test harnesses require prepared artifacts and never
 /// rebuild, sign, or publish workspace bundles implicitly.
-
+///
 /// Walk the source roots that affect bundle binary contents and return
 /// `true` if a workspace manifest or production crate source has an mtime
 /// newer than `published`. Integration tests, benches, and examples cannot
@@ -750,10 +750,10 @@ pub struct DaemonHarness {
 
 #[derive(Clone, Copy)]
 enum FastBundleSelection {
-    PreparedCoreOnly,
-    PreparedCoreScheduling,
-    PreparedStandard,
-    PreparedFull,
+    CoreOnly,
+    CoreScheduling,
+    Standard,
+    Full,
 }
 
 impl DaemonHarness {
@@ -899,7 +899,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::PreparedStandard,
+            FastBundleSelection::Standard,
             |state_path, _user_space, fixture| {
                 fast_fixture::register_standard_composition(state_path, fixture)
             },
@@ -914,7 +914,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::PreparedCoreScheduling,
+            FastBundleSelection::CoreScheduling,
             |state_path, _user_space, fixture| {
                 fast_fixture::register_scheduling_bundle(state_path, fixture)
             },
@@ -930,7 +930,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::PreparedCoreOnly,
+            FastBundleSelection::CoreOnly,
             |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
@@ -958,7 +958,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::PreparedFull,
+            FastBundleSelection::Full,
             plant,
             tweak,
         )
@@ -980,7 +980,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             None,
-            FastBundleSelection::PreparedFull,
+            FastBundleSelection::Full,
             plant,
             tweak,
         )
@@ -1003,7 +1003,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             Some(user_key),
-            FastBundleSelection::PreparedFull,
+            FastBundleSelection::Full,
             plant,
             tweak,
         )
@@ -1026,16 +1026,16 @@ impl DaemonHarness {
 
         // Copy core bundle to temp so fast fixture writes don't pollute workspace.
         let (core_bundle_tmp, state_path) = match bundle_selection {
-            FastBundleSelection::PreparedCoreOnly => copy_core_to_temp_prepared(&["core"])?,
-            FastBundleSelection::PreparedCoreScheduling => {
+            FastBundleSelection::CoreOnly => copy_core_to_temp_prepared(&["core"])?,
+            FastBundleSelection::CoreScheduling => {
                 copy_core_to_temp_prepared(&["core", "scheduling"])?
             }
-            FastBundleSelection::PreparedStandard => copy_core_to_temp_prepared(
+            FastBundleSelection::Standard => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Standard
                     .exact_bundles()
                     .expect("Standard profile has an exact bundle inventory"),
             )?,
-            FastBundleSelection::PreparedFull => copy_core_to_temp_prepared(
+            FastBundleSelection::Full => copy_core_to_temp_prepared(
                 fast_fixture::FastFixtureProfile::Full
                     .exact_bundles()
                     .expect("Full profile has an exact bundle inventory"),
@@ -1043,12 +1043,10 @@ impl DaemonHarness {
         };
 
         let selected_profile = match bundle_selection {
-            FastBundleSelection::PreparedCoreOnly => fast_fixture::FastFixtureProfile::Core,
-            FastBundleSelection::PreparedCoreScheduling => {
-                fast_fixture::FastFixtureProfile::CoreScheduling
-            }
-            FastBundleSelection::PreparedStandard => fast_fixture::FastFixtureProfile::Standard,
-            FastBundleSelection::PreparedFull => fast_fixture::FastFixtureProfile::Full,
+            FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
+            FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
+            FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
+            FastBundleSelection::Full => fast_fixture::FastFixtureProfile::Full,
         };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
@@ -1081,7 +1079,7 @@ impl DaemonHarness {
         // The harness copies `bundles/core` to `state_path`. Register it
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-        if matches!(bundle_selection, FastBundleSelection::PreparedFull) {
+        if matches!(bundle_selection, FastBundleSelection::Full) {
             fast_fixture::register_full_composition(&state_path, &fixture)?;
         }
         plant(&state_path, user_space.path(), &fixture)?;
@@ -1934,7 +1932,7 @@ impl StandaloneHarness {
         let (mut node, fixture) = DaemonHarness::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::PreparedStandard,
+            FastBundleSelection::Standard,
             |state_path, _user_space, fixture| {
                 fast_fixture::register_standard_composition(state_path, fixture)?;
                 for bundle_name in bundle_names {

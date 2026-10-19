@@ -1,12 +1,14 @@
 //! Narrow scheduler observation and retained maintenance contracts.
 //! Concrete runtime, gate, database and classification belong to composition.
 
+use crate::retention_exclusion::{ThreadPinGuard, ThreadPinSource};
 pub use crate::thread_lifecycle::DurableThreadTerminal;
 use anyhow::Result;
 use ryeos_scheduler_contract::ProjectScheduleDeployParticipant;
 use ryeos_state::gc::retention::FireRetentionTarget;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub type SchedulerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
@@ -23,14 +25,18 @@ pub trait SchedulerParticipant: ProjectScheduleDeployParticipant + Send + Sync {
         observation: &DurableThreadTerminal<'_>,
     ) -> Result<TerminalObservationDisposition>;
     fn acquire_retention(&self) -> SchedulerFuture<'_, Box<dyn SchedulerRetentionGuard>>;
+    /// The one pin source this participant contributes to the composition's
+    /// retention exclusion. Its identity is stable and is the `source()` of
+    /// every guard this participant issues, including `acquire_retention`.
+    fn pin_source(self: Arc<Self>) -> Arc<dyn ThreadPinSource>;
 }
 
 /// Owns the service's runtime write gate until dropped. Implementations verify
 /// current projection before returning and bind all operations to the same
 /// descriptor-pinned runtime and DB. Failed mutation leaves repair required.
-pub trait SchedulerRetentionGuard: Send + Sync {
-    /// Called under StateStore's inner lock: short DB access only, no re-entry.
-    fn count_thread_pins(&self, thread_ids: &[String]) -> Result<u64>;
+/// `count_thread_pins` is called under StateStore's inner lock: short DB
+/// access only, no re-entry.
+pub trait SchedulerRetentionGuard: ThreadPinGuard {
     /// Exact retained scheduler snapshot roots for the existing CAS sweep.
     /// Uses the guard's current bound DB; unavailable interpretation is an
     /// error, not an empty root set. No raw DB or spec records cross this port.
@@ -72,7 +78,18 @@ mod tests {
             anyhow::bail!("test participant has no project schedule authority")
         }
     }
+    impl ThreadPinSource for ObservationOnly {
+        fn acquire_pins(
+            &self,
+            _: crate::retention_exclusion::ExclusionMode,
+        ) -> crate::retention_exclusion::PinFuture<'_, Box<dyn ThreadPinGuard>> {
+            Box::pin(async { anyhow::bail!("test participant holds no pin index") })
+        }
+    }
     impl SchedulerParticipant for ObservationOnly {
+        fn pin_source(self: Arc<Self>) -> Arc<dyn ThreadPinSource> {
+            self
+        }
         fn observe_terminal(
             &self,
             _: &DurableThreadTerminal<'_>,

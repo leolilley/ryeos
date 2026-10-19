@@ -272,17 +272,57 @@ fn projection_thread_status(state_path: &Path, thread_id: &str) -> Option<String
     .ok()
 }
 
-fn root_thread_id(state_path: &Path) -> Option<String> {
-    let db_path = common::selected_projection_path(state_path).ok()?;
+use anyhow::Context as _;
+use rusqlite::OptionalExtension;
+
+fn root_thread_id(state_path: &Path) -> anyhow::Result<Option<String>> {
+    let db_path = common::selected_projection_path(state_path)?;
     let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open projection {}", db_path.display()))?;
     conn.query_row(
         "SELECT thread_id FROM threads WHERE item_ref=?1 ORDER BY created_at ASC LIMIT 1",
         rusqlite::params![DIRECTIVE_REF],
         |row| row.get(0),
     )
-    .ok()
+    .optional()
+    .context("query the directive root thread")
+}
+
+/// Everything a reader can see when the root row never appears: the
+/// projection the generation points at and every thread row in it.
+fn describe_projection_threads(state_path: &Path) -> String {
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(error) => return format!("no selected projection: {error:#}"),
+    };
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => return format!("open {} failed: {error}", db_path.display()),
+    };
+    let mut statement = match conn.prepare("SELECT thread_id, item_ref, status FROM threads") {
+        Ok(statement) => statement,
+        Err(error) => return format!("prepare over {} failed: {error}", db_path.display()),
+    };
+    let rows = statement.query_map([], |row| {
+        Ok(format!(
+            "{} {} {}",
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?
+        ))
+    });
+    match rows {
+        Ok(rows) => format!(
+            "projection {}:\n{}",
+            db_path.display(),
+            rows.filter_map(Result::ok).collect::<Vec<_>>().join("\n")
+        ),
+        Err(error) => format!("query over {} failed: {error}", db_path.display()),
+    }
 }
 
 fn runtime_action_intents(state_path: &Path, chain_root_id: &str) -> Vec<(String, String)> {
@@ -452,15 +492,25 @@ async fn await_root_thread(
     harness: &mut DaemonHarness,
     request: &mut tokio::task::JoinHandle<Result<(u16, String), String>>,
 ) -> String {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The first execute on a cold node builds the request engine, verifies
+    // the bundle set and runs the directive's augmentation subprocess, which
+    // a slow debug host can stretch well past half a minute.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last_read_error = None;
     loop {
-        if let Some(thread_id) = root_thread_id(&harness.state_path) {
-            return thread_id;
+        match root_thread_id(&harness.state_path) {
+            Ok(Some(thread_id)) => return thread_id,
+            Ok(None) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
-        assert!(
-            Instant::now() < deadline,
-            "directive root thread did not appear"
-        );
+        if Instant::now() >= deadline {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            let pending = !request.is_finished();
+            let rows = describe_projection_threads(&harness.state_path);
+            panic!(
+                "directive root thread did not appear within 120 s (execute request still pending: {pending}; last read error: {last_read_error:?})\n{rows}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
         tokio::select! {
             result = &mut *request => {
                 let stderr = harness.drain_stderr_nonblocking().await;

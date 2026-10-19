@@ -415,7 +415,7 @@ mod tests {
             let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
             let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
             let supervisor = lillux::crypto::generate_signing_key();
-            let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+            let now = lillux::time::timestamp_millis();
             let startup_deadline =
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
             let reservation = ExternalAllocationReservation {

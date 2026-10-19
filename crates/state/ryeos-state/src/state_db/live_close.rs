@@ -645,7 +645,7 @@ impl ClosedLiveStatePhysicalCustody {
         super::live_native::prepay_state_native_source_retirement(factory, owners, prepay)?;
         terminal.require_original(factory)?;
         let receipt =
-            metadata_pins.into_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
+            metadata_pins.take_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
         // Infallible from here: each owner is moved out and ended explicitly;
         // the retained fields keep only empty values.
         let (previous, terminals, durable, selected) = std::mem::take(&mut *_native);
@@ -660,9 +660,8 @@ impl ClosedLiveStatePhysicalCustody {
         let (references, definitions) = std::mem::take(&mut *_schema);
         drop(references);
         drop(definitions);
-        let (leases, attempts) = std::mem::take(&mut *_leases);
+        let (leases, _) = std::mem::take(&mut *_leases);
         drop(leases);
-        drop(attempts);
         drop(std::mem::take(&mut *_refusal));
         drop(_factory.take());
         *native_retired = Some(receipt);

@@ -794,12 +794,12 @@ fn settle_unattached_runtime_failure(
                     summary_json: None,
                 },
                 launch_owner,
-            ) {
-                if !state.threads.get_thread(thread_id)?.is_some_and(|thread| {
-                    ryeos_app::state_store::is_terminal_status(&thread.status)
-                }) {
-                    return Err(finalize_error);
-                }
+            ) && !state
+                .threads
+                .get_thread(thread_id)?
+                .is_some_and(|thread| ryeos_app::state_store::is_terminal_status(&thread.status))
+            {
+                return Err(finalize_error);
             }
         }
         if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {

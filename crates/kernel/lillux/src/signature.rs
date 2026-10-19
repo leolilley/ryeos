@@ -195,7 +195,6 @@ pub fn sign_content_bounded(
     }
     append(newline.as_bytes())?;
     append(body.as_bytes())?;
-    drop(append);
     if used != expected {
         return Err("signature envelope differs from checked dimensions");
     }

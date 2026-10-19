@@ -6,10 +6,12 @@
 //! hardcoded Rust profile map.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use ryeos_engine::kind_registry::ThreadProfileDecl;
+use ryeos_state::FencedChainKinds;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +20,11 @@ pub struct ThreadKindProfile {
     pub supports_interrupt: bool,
     pub supports_continuation: bool,
     pub supports_operator_followup: bool,
+    /// Terminal chains of this kind retire through a fenced retained-evidence
+    /// manifest instead of immediate removal. Declared by the kind's signed
+    /// profile; the registry never names a kind.
+    #[serde(default)]
+    pub retirement_fence: bool,
 }
 
 impl From<&ThreadProfileDecl> for ThreadKindProfile {
@@ -27,6 +34,7 @@ impl From<&ThreadProfileDecl> for ThreadKindProfile {
             supports_interrupt: tp.supports_interrupt,
             supports_continuation: tp.supports_continuation,
             supports_operator_followup: tp.supports_operator_followup,
+            retirement_fence: tp.retirement_fence,
         }
     }
 }
@@ -34,6 +42,8 @@ impl From<&ThreadProfileDecl> for ThreadKindProfile {
 #[derive(Debug, Clone)]
 pub struct KindProfileRegistry {
     profiles: HashMap<String, ThreadKindProfile>,
+    /// Built once from the profiles that declare `retirement_fence`.
+    fenced_chain_kinds: OnceLock<FencedChainKinds>,
 }
 
 impl KindProfileRegistry {
@@ -73,7 +83,10 @@ impl KindProfileRegistry {
             "thread kind profiles loaded"
         );
 
-        Self { profiles }
+        Self {
+            profiles,
+            fenced_chain_kinds: OnceLock::new(),
+        }
     }
 
     /// Add a synthetic profile to a test harness that deliberately does not
@@ -86,7 +99,24 @@ impl KindProfileRegistry {
         profile: ThreadKindProfile,
     ) -> Self {
         self.profiles.insert(name.into(), profile);
+        self.fenced_chain_kinds = OnceLock::new();
         self
+    }
+
+    /// The thread kinds whose terminal chains retire through a fence, taken
+    /// from the profiles' declared flag and built once. A kind name the
+    /// fence set refuses is a refusal here, never a skipped kind.
+    pub fn fenced_chain_kinds(&self) -> anyhow::Result<&FencedChainKinds> {
+        if let Some(kinds) = self.fenced_chain_kinds.get() {
+            return Ok(kinds);
+        }
+        let kinds = FencedChainKinds::new(
+            self.profiles
+                .iter()
+                .filter(|(_, profile)| profile.retirement_fence)
+                .map(|(name, _)| name.clone()),
+        )?;
+        Ok(self.fenced_chain_kinds.get_or_init(|| kinds))
     }
 
     fn insert_internal_profiles(profiles: &mut HashMap<String, ThreadKindProfile>) {
@@ -99,18 +129,7 @@ impl KindProfileRegistry {
                 supports_interrupt: false,
                 supports_continuation: false,
                 supports_operator_followup: false,
-            },
-        );
-        // seat_session: the seat is itself a thread — braided, owned,
-        // replayable. Opened/settled via the seat services, never
-        // root-executed; reattach (continuation) arrives later.
-        profiles.insert(
-            "seat_session".to_string(),
-            ThreadKindProfile {
-                root_executable: false,
-                supports_interrupt: false,
-                supports_continuation: false,
-                supports_operator_followup: false,
+                retirement_fence: false,
             },
         );
     }
@@ -203,12 +222,14 @@ mod tests {
             supports_interrupt: true,
             supports_continuation: false,
             supports_operator_followup: false,
+            retirement_fence: true,
         };
         let profile = ThreadKindProfile::from(&decl);
         assert!(profile.root_executable);
         assert!(profile.supports_interrupt);
         assert!(!profile.supports_continuation);
         assert!(!profile.supports_operator_followup);
+        assert!(profile.retirement_fence);
     }
 
     #[test]
@@ -220,6 +241,7 @@ mod tests {
                 supports_interrupt: false,
                 supports_continuation: true,
                 supports_operator_followup: false,
+                retirement_fence: false,
             },
         );
         let profile = reg.get("graph_run").expect("synthetic graph profile");
@@ -227,5 +249,52 @@ mod tests {
         assert!(!profile.supports_interrupt);
         assert!(profile.supports_continuation);
         assert!(!profile.supports_operator_followup);
+    }
+
+    fn fenced_profile() -> ThreadKindProfile {
+        ThreadKindProfile {
+            root_executable: false,
+            supports_interrupt: false,
+            supports_continuation: false,
+            supports_operator_followup: false,
+            retirement_fence: true,
+        }
+    }
+
+    #[test]
+    fn fenced_kinds_come_only_from_the_declared_flag() {
+        let reg = KindProfileRegistry::build(None);
+        assert!(reg.fenced_chain_kinds().unwrap().is_empty());
+        let reg = reg.with_test_profile("fenced_kind", fenced_profile());
+        let kinds = reg.fenced_chain_kinds().unwrap();
+        assert!(kinds.contains("fenced_kind"));
+        assert!(!kinds.contains("system_task"));
+        // Built once: the same set answers every later call.
+        assert!(std::ptr::eq(kinds, reg.fenced_chain_kinds().unwrap()));
+    }
+
+    #[test]
+    fn no_kind_is_named_by_the_registry_itself() {
+        let reg = KindProfileRegistry::build(None);
+        assert!(!reg.is_valid("seat_session"));
+    }
+
+    #[test]
+    fn a_padded_fenced_kind_name_is_refused() {
+        let reg = KindProfileRegistry::build(None).with_test_profile(" padded", fenced_profile());
+        assert!(reg.fenced_chain_kinds().is_err());
+    }
+
+    #[test]
+    fn a_predecessor_profile_shape_with_unknown_fields_is_refused() {
+        let refused = serde_json::from_str::<ThreadKindProfile>(
+            r#"{"root_executable":false,"supports_interrupt":false,"supports_continuation":false,"supports_operator_followup":false,"seat":true}"#,
+        );
+        assert!(refused.is_err());
+        let defaulted = serde_json::from_str::<ThreadKindProfile>(
+            r#"{"root_executable":false,"supports_interrupt":false,"supports_continuation":false,"supports_operator_followup":false}"#,
+        )
+        .unwrap();
+        assert!(!defaulted.retirement_fence);
     }
 }

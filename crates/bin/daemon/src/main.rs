@@ -44,10 +44,6 @@ const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = process::ACCOUNTING_PUBLISHER_
 const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
 const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
 
-/// Quote the one-time StateLock owner conversion retained by the consuming
-/// native finalizer. The lock target and registry registration are charged by
-/// their own physical-custody owners.
-
 fn configured_bundle_publisher(
     policy: &ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy,
 ) -> Result<Option<Arc<dyn ryeos_app::bundle_publication::producer::BundlePublisherAuthority>>> {
@@ -1439,9 +1435,6 @@ impl DaemonSelectedComposition {
         Ok(())
     }
 
-    /// Drop the previous stop's latched-drain facts after reconciliation
-    /// applied them. The only write that removes them.
-
     /// Durably record the facts a latched drain deferred to the next start,
     /// as this run's provisional exit, before the cleanup chain. A refused
     /// write holds: the resume re-arm cannot be deferred without it.
@@ -1748,16 +1741,13 @@ impl DaemonSelectedComposition {
             .native_settled_reservation
             .take()
             .context("settled native reservation absent before final consumption")?;
-        let finalized = match settled.into_finalized() {
-            Ok(finalized) => finalized,
+        match settled.into_finalized() {
+            Ok(_finalized) => {}
             Err((settled, error)) => {
                 self.native_settled_reservation = Some(settled);
                 return Err(error);
             }
-        };
-        // Only a non-owning release record remains; no account, clock,
-        // registry or descriptor survives the final consumption above.
-        drop(finalized);
+        }
         #[cfg(target_os = "linux")]
         {
             self.native_operator_lock_registered = false;
@@ -4865,6 +4855,7 @@ async fn run(
                 app_state.install_scheduler_participant(scheduler_service.clone()
                     as Arc<dyn ryeos_app::scheduler_boundary::SchedulerParticipant>)?;
             }
+            app_state.seal_thread_pin_sources()?;
             // Move the completed AppState under outer custody before the
             // fallible generation arm and recovery sequence. This preserves
             // the exact pool allocation installed above.
@@ -8478,6 +8469,28 @@ async fn run_service_standalone(
         | ryeos_app::service_registry::StandaloneStateAccess::ReadOnlyExisting
         | ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => None,
     };
+    // Every composition seals its retention pin sources, with or without a
+    // stopped-node scheduler, before the service runs.
+    if let Err(error) = app_state.seal_thread_pin_sources() {
+        drop(app_state);
+        #[cfg(feature = "scheduling")]
+        let error = match (standalone_scheduler, standalone_native.as_ref()) {
+            (Some(scheduler), Some(host)) => match scheduler.settle(host) {
+                Ok(()) => error,
+                Err(settle) => ryeos_state::operational::CarriedOwners::carry(
+                    error.context(format!("stopped-node scheduler did not settle: {settle:#}")),
+                    settle,
+                ),
+            },
+            _ => error,
+        };
+        return Err(settle_standalone_setup_failure(
+            standalone_native,
+            standalone_state_access,
+            state_store,
+            error,
+        ));
+    }
 
     let ctx = ExecutionContext {
         principal_fingerprint: standalone_principal,

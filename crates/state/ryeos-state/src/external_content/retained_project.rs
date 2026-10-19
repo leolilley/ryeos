@@ -253,7 +253,7 @@ impl RetainedProjectContent {
 }
 
 fn verify_blob(cas: &lillux::CasStore, file: &ProjectFile) -> anyhow::Result<()> {
-    let (mut input, size) = cas
+    let (input, size) = cas
         .open_blob(&file.blob_hash)?
         .context("retained blob is missing")?;
     if size != file.size {

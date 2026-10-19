@@ -432,7 +432,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(record);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 observation.observed_at_ms <= now
                     && now.saturating_sub(observation.observed_at_ms) <= 300_000,
@@ -536,7 +536,7 @@ impl RuntimeDb {
                 return Ok(existing);
             }
             intent.validate()?;
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 intent.attempt_deadline_ms > now
                     && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
@@ -592,7 +592,7 @@ impl RuntimeDb {
                 }
                 SnapshotBootstrapPhase::Reserved => {}
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
                 now < record.intent.attempt_deadline_ms,
                 "bootstrap deadline expired"
@@ -613,7 +613,7 @@ impl RuntimeDb {
         &self,
         occurrence: &RuntimeSnapshotBootstrapOccurrence,
     ) -> Result<SnapshotBootstrapRecord> {
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        let now = lillux::time::timestamp_millis();
         self.bind_snapshot_bootstrap_occurrence_at(occurrence, now)
     }
 
@@ -683,7 +683,7 @@ impl RuntimeDb {
                 "bootstrap attempt is not uncertain"
             );
             if record.phase == SnapshotBootstrapPhase::AttemptPending {
-                let now = i64::try_from(lillux::time::timestamp_millis())?;
+                let now = lillux::time::timestamp_millis();
                 tx.execute(
                     "UPDATE runtime_snapshot_bootstrap SET phase='quarantined',updated_at_ms=?2
                  WHERE operation_id=?1 AND phase='attempt_pending'",
@@ -704,7 +704,7 @@ mod tests {
     use ryeos_external_execution_contract::runtime_snapshot_bootstrap::BOOTSTRAP_INTENT_SCHEMA;
 
     fn intent() -> RuntimeSnapshotBootstrapIntent {
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotBootstrapIntent {
             schema: BOOTSTRAP_INTENT_SCHEMA,
             operation_id: String::new(),
@@ -1090,7 +1090,7 @@ mod tests {
             occurrence_id: occurrence.occurrence_id.clone(),
             provider_response_sha256: "b".repeat(64),
             observed_created_at: "2026-09-29T00:00:00Z".into(),
-            observed_at_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap(),
+            observed_at_ms: lillux::time::timestamp_millis(),
         };
         {
             let db = crate::runtime_db::test_native::TestRuntime::open(&path);

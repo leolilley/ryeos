@@ -3551,7 +3551,7 @@ mod tests {
             binding.clone(),
             host.factory(),
             host.destination(),
-            &census(&host),
+            &census(host),
         )
         .unwrap();
         let store_identity = prepared.store_identity().clone();
@@ -3675,7 +3675,7 @@ mod tests {
             binding,
             host.factory(),
             host.destination(),
-            &census(&host),
+            &census(host),
         )
     }
 

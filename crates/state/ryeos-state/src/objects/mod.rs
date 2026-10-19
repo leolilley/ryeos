@@ -56,6 +56,7 @@ pub mod project_tree;
 pub mod qualification_fixture;
 pub mod qualification_worker_transcript;
 pub mod retained_lifecycle_artifacts;
+pub mod retired_chain;
 pub mod source_closure;
 pub mod source_manifest;
 pub mod state_anchor;
@@ -205,6 +206,11 @@ pub use retained_lifecycle_artifacts::{
     RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
     RetainedLifecycleArtifacts, RetainedLifecycleExecutable, RetainedLifecycleExecutableRole,
     RetainedLifecycleSpec, RetainedLifecycleSpecRole,
+};
+pub use retired_chain::{
+    EvidenceCoordinate, FencedChainKinds, MAX_RETIRED_CHAIN_CLOSURE_PAGE_BYTES,
+    MAX_RETIRED_CHAIN_CLOSURE_PAGE_ENTRIES, PrefixTip, RETIRED_CHAIN_CLOSURE_PAGE_KIND,
+    RETIRED_CHAIN_MANIFEST_KIND, RetiredChainClosurePage, RetiredChainManifest,
 };
 pub use source_closure::{
     EFFECTIVE_SOURCE_BINDING_KIND, EFFECTIVE_SOURCE_BINDING_SCHEMA, EffectiveSourceBinding,

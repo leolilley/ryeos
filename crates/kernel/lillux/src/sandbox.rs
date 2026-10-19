@@ -2830,7 +2830,7 @@ mod imp {
             validate_inherited_fd(mount.source_fd, "sandbox mount")?;
             descriptor_roles.insert(mount.source_fd);
             validate_absolute_path(&mount.destination, "sandbox mount destination")?;
-            if mount.destination == PathBuf::from("/") {
+            if mount.destination == std::path::Path::new("/") {
                 return Err("a descriptor mount cannot replace the private root".to_string());
             }
             if !destinations.insert(mount.destination.clone()) {
@@ -2844,7 +2844,7 @@ mod imp {
             }
             validate_absolute_path(&device.destination, "sandbox character-device destination")?;
             if !device.destination.starts_with("/dev")
-                || device.destination == PathBuf::from("/dev")
+                || device.destination == std::path::Path::new("/dev")
                 || !destinations.insert(device.destination.clone())
             {
                 return Err(
@@ -2866,7 +2866,7 @@ mod imp {
                 );
             }
             validate_absolute_path(&overlay.destination, "sandbox overlay destination")?;
-            if overlay.destination == PathBuf::from("/")
+            if overlay.destination == std::path::Path::new("/")
                 || !destinations.insert(overlay.destination.clone())
             {
                 return Err("sandbox overlay destination is invalid or duplicated".to_string());
@@ -2894,7 +2894,7 @@ mod imp {
                     &descendant.destination,
                     "sandbox overlay-descendant destination",
                 )?;
-                if descendant.destination == PathBuf::from("/")
+                if descendant.destination == std::path::Path::new("/")
                     || previous_destination
                         .is_some_and(|previous| previous >= &descendant.destination)
                     || !destinations.insert(descendant.destination.clone())
@@ -3487,7 +3487,7 @@ mod imp {
     }
 
     fn reanchor_overlay_descendant_source(
-        overlay_destination: &PathBuf,
+        overlay_destination: &Path,
         descendant: &LinuxSandboxOverlayDescendantMount,
     ) -> Result<crate::InheritedDescriptorAuthority, String> {
         let mounted = open_mount_target_no_symlinks(overlay_destination)?;
@@ -3679,7 +3679,7 @@ mod imp {
             .map_err(|error| format!("inspect admitted mount descriptor: {error}"))
     }
 
-    fn create_target(path: &PathBuf, kind: DescriptorKind) -> Result<(), String> {
+    fn create_target(path: &Path, kind: DescriptorKind) -> Result<(), String> {
         match kind {
             DescriptorKind::Directory => create_directory_target(path),
             DescriptorKind::Regular | DescriptorKind::UnixSocket => create_regular_target(path),
@@ -3687,7 +3687,7 @@ mod imp {
     }
 
     fn prepare_descriptor_mount_target(
-        destination: &PathBuf,
+        destination: &Path,
         kind: DescriptorKind,
         overlay_destination: Option<&PathBuf>,
         preceding_mounts: &[LinuxSandboxMount],
@@ -3718,7 +3718,7 @@ mod imp {
         }
     }
 
-    fn create_directory_target(path: &PathBuf) -> Result<(), String> {
+    fn create_directory_target(path: &Path) -> Result<(), String> {
         let parent = path
             .parent()
             .ok_or_else(|| "sandbox directory target has no parent".to_string())?;
@@ -3735,7 +3735,7 @@ mod imp {
         }
     }
 
-    fn create_regular_target(path: &PathBuf) -> Result<(), String> {
+    fn create_regular_target(path: &Path) -> Result<(), String> {
         let parent = path
             .parent()
             .ok_or_else(|| "sandbox file target has no parent".to_string())?;
@@ -3962,7 +3962,7 @@ mod imp {
         Ok(())
     }
 
-    fn prove_minimal_device_usable(target: &PathBuf) -> Result<(), String> {
+    fn prove_minimal_device_usable(target: &Path) -> Result<(), String> {
         let target = c_string(target.as_os_str(), "minimal device")?;
         let fd = unsafe {
             libc::open(
@@ -4269,7 +4269,7 @@ mod imp {
         digest_mount_tuples(observed)
     }
 
-    fn observe_final_mount_view(destination: &PathBuf) -> Result<(u8, bool), String> {
+    fn observe_final_mount_view(destination: &Path) -> Result<(u8, bool), String> {
         let mounted = open_mount_destination_beneath(Path::new("/"), destination)?;
         let observed = mount_source_stat(mounted.as_raw_fd())?;
         let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -4357,7 +4357,7 @@ mod imp {
     }
 
     fn verify_final_mount_view(
-        destination: &PathBuf,
+        destination: &Path,
         expected_kind: libc::mode_t,
         access: LinuxSandboxMountAccess,
         expected_inode: Option<(libc::dev_t, libc::ino_t)>,
@@ -4421,7 +4421,7 @@ mod imp {
         move_detached_mount_to_target(mount.as_raw_fd(), target_fd)
     }
 
-    fn bind_fd_to_path(fd: RawFd, target: &PathBuf, recursive: bool) -> Result<(), String> {
+    fn bind_fd_to_path(fd: RawFd, target: &Path, recursive: bool) -> Result<(), String> {
         let source = format!("/proc/self/fd/{fd}");
         mount_raw(
             Some(&source),
@@ -4434,7 +4434,7 @@ mod imp {
     }
 
     fn set_mount_attributes(
-        target: &PathBuf,
+        target: &Path,
         read_only: bool,
         deny_devices: bool,
         recursive: bool,
@@ -4528,7 +4528,7 @@ mod imp {
         }
     }
 
-    fn move_path_mount_to_target(source: &PathBuf, target_fd: RawFd) -> Result<(), String> {
+    fn move_path_mount_to_target(source: &Path, target_fd: RawFd) -> Result<(), String> {
         let source = c_string(source.as_os_str(), "mount move source")?;
         let result = unsafe {
             libc::syscall(
@@ -4550,7 +4550,7 @@ mod imp {
         }
     }
 
-    fn unmount_path(path: &PathBuf) -> Result<(), String> {
+    fn unmount_path(path: &Path) -> Result<(), String> {
         let path = c_string(path.as_os_str(), "unmount target")?;
         syscall_zero(
             unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) },
@@ -4624,7 +4624,7 @@ mod imp {
                 std::fs::write("/tmp/namespace-writable-probe", b"writable")
                     .map_err(|error| format!("private tmp lost writable access: {error}"))?;
                 if std::fs::read_link("/proc/self").map_err(|error| error.to_string())?
-                    != PathBuf::from("1")
+                    != std::path::Path::new("1")
                     || std::path::Path::new(&format!("/proc/{parent_pid}")).exists()
                     || (!nested
                         && (std::path::Path::new("/proc/sys").exists()
@@ -4751,7 +4751,7 @@ mod imp {
                 )
                 .map_err(|error| format!("mount nested isolated proc: {error}"))?;
                 if std::fs::read_link("/proc/self").map_err(|error| error.to_string())?
-                    != PathBuf::from("1")
+                    != std::path::Path::new("1")
                 {
                     return Err("nested proc lost its PID-local surface".to_owned());
                 }
@@ -4923,17 +4923,17 @@ mod imp {
         let scrub = occupancy
             .as_ref()
             .map(|watchdog| watchdog.target_scrub_descriptors());
-        if let Some(descriptors) = scrub {
-            if request.target_channels.iter().any(|(source, _)| {
+        if let Some(descriptors) = scrub
+            && request.target_channels.iter().any(|(source, _)| {
                 descriptors
                     .iter()
                     .any(|private| *private >= 0 && *source == *private as u32)
-            }) {
-                for descriptor in private_descriptors {
-                    close_fd(descriptor);
-                }
-                return Err("native target channel cannot adopt private watchdog custody".into());
+            })
+        {
+            for descriptor in private_descriptors {
+                close_fd(descriptor);
             }
+            return Err("native target channel cannot adopt private watchdog custody".into());
         }
         if let Some(watchdog) = occupancy.as_mut() {
             if let Err(error) = watchdog.require_original_window() {
@@ -5477,7 +5477,7 @@ mod imp {
         let mount_count = read_u32();
         if namespace_pid != 1
             || no_new_privs != 1
-            || seccomp_mode != libc::SECCOMP_MODE_FILTER as u32
+            || seccomp_mode != libc::SECCOMP_MODE_FILTER
             || mount_schema != u32::from(MOUNT_PREPARATION_SCHEMA)
             || mount_count > 4096
         {
@@ -6743,7 +6743,7 @@ mod imp {
         }
     }
 
-    fn validate_absolute_path(path: &PathBuf, label: &str) -> Result<(), String> {
+    fn validate_absolute_path(path: &Path, label: &str) -> Result<(), String> {
         let bytes = path.as_os_str().as_bytes();
         if !path.is_absolute() || bytes.contains(&0) || bytes.len() >= libc::PATH_MAX as usize {
             return Err(format!("{label} must be a bounded absolute NUL-free path"));
@@ -6762,7 +6762,7 @@ mod imp {
         Ok(())
     }
 
-    fn validate_relative_path(path: &PathBuf, label: &str) -> Result<(), String> {
+    fn validate_relative_path(path: &Path, label: &str) -> Result<(), String> {
         let bytes = path.as_os_str().as_bytes();
         let normalized = path.components().collect::<PathBuf>();
         if bytes.is_empty()
@@ -6783,13 +6783,13 @@ mod imp {
         left.starts_with(right) || right.starts_with(left)
     }
 
-    fn open_mount_target_no_symlinks(destination: &PathBuf) -> Result<File, String> {
+    fn open_mount_target_no_symlinks(destination: &Path) -> Result<File, String> {
         open_mount_destination_beneath(Path::new(ROOT), destination)
     }
 
     fn open_mount_destination_beneath(
         root_path: &Path,
-        destination: &PathBuf,
+        destination: &Path,
     ) -> Result<File, String> {
         validate_absolute_path(destination, "sandbox mount destination")?;
         let root = c_string(root_path.as_os_str(), "sandbox mount root")?;
@@ -6835,7 +6835,7 @@ mod imp {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn rooted(path: &PathBuf) -> Result<PathBuf, String> {
+    fn rooted(path: &Path) -> Result<PathBuf, String> {
         validate_absolute_path(path, "sandbox path")?;
         let relative = path
             .strip_prefix("/")
@@ -6843,7 +6843,7 @@ mod imp {
         Ok(PathBuf::from(ROOT).join(relative))
     }
 
-    fn ensure_directory_path(path: &PathBuf, label: &str) -> Result<(), String> {
+    fn ensure_directory_path(path: &Path, label: &str) -> Result<(), String> {
         let c_path = c_string(path.as_os_str(), label)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         syscall_zero(
@@ -6856,7 +6856,7 @@ mod imp {
         Ok(())
     }
 
-    fn ensure_regular_path(path: &PathBuf, label: &str) -> Result<(), String> {
+    fn ensure_regular_path(path: &Path, label: &str) -> Result<(), String> {
         let c_path = c_string(path.as_os_str(), label)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         syscall_zero(
@@ -6912,11 +6912,11 @@ mod imp {
         reserved: &BTreeSet<RawFd>,
         label: &str,
     ) -> Result<(), String> {
-        for index in 0..descriptors.len() {
-            if !reserved.contains(&descriptors[index]) {
+        for descriptor in descriptors.iter_mut() {
+            if !reserved.contains(descriptor) {
                 continue;
             }
-            let original = descriptors[index];
+            let original = *descriptor;
             let mut occupied_reservations = Vec::new();
             let replacement = loop {
                 let candidate =
@@ -6931,7 +6931,7 @@ mod imp {
                 break candidate;
             };
             close_fd(original);
-            descriptors[index] = replacement;
+            *descriptor = replacement;
         }
         Ok(())
     }
@@ -8342,7 +8342,7 @@ mod imp {
         }
 
         fn check_exec_nested_sandbox() {
-            assert_eq!(unsafe { libc::setsid() } < 0, false);
+            assert!(unsafe { libc::setsid() } >= 0);
             enter_mapped_user_namespace().unwrap();
             syscall_zero(
                 unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID) },

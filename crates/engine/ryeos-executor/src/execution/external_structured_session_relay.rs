@@ -3,8 +3,8 @@
 //! This has its own typed app entrypoints and owner lane. A Ready owner retains
 //! the pump ahead of the cleanup lifeline; dropping it always stops and joins.
 
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{Context as _, Result, ensure};

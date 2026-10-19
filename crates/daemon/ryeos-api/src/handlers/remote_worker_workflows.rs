@@ -1574,7 +1574,7 @@ async fn observe_target_completion(
     }
     let fetched = client
         .objects_get_with_total_timeout(
-            &[evidence.admitted_launch_capsule_hash.clone()],
+            std::slice::from_ref(&evidence.admitted_launch_capsule_hash),
             &[],
             STATUS_TIMEOUT,
         )

@@ -87,10 +87,13 @@ pub use objects::{
     Attestation, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
     CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
-    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState,
-    IncompatibleCurrentObjectSchema, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
-    parse_canonical_timestamp, thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot,
-    thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject,
+    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState, EvidenceCoordinate,
+    FencedChainKinds, IncompatibleCurrentObjectSchema, MAX_RETIRED_CHAIN_CLOSURE_PAGE_BYTES,
+    MAX_RETIRED_CHAIN_CLOSURE_PAGE_ENTRIES, MAX_TERMINAL_DURATION_SECONDS, PrefixTip,
+    RETIRED_CHAIN_CLOSURE_PAGE_KIND, RETIRED_CHAIN_MANIFEST_KIND, RetiredChainClosurePage,
+    RetiredChainManifest, ThreadHistoryRetention, parse_canonical_timestamp,
+    thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
+    thread_snapshot::UsageSubject,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
@@ -114,7 +117,8 @@ pub use project_observation::{
     ProjectObservationRequest, project_observation_id,
 };
 pub use projection::{
-    ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, MAX_DUE_FENCED_CHAIN_SLICE,
+    ProjectionDb,
 };
 pub use provider_call_observation::{
     PROVIDER_CALL_OBSERVATION_SCHEMA, ProviderCallObservationDraft,
@@ -123,27 +127,35 @@ pub use provider_call_observation::{
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
-    DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, HeadOperation,
-    PendingChainHeadTransition, PendingTransitionCursor, ProjectionRecoveryGeneration,
-    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredThreadHistoryDiscardMarker,
-    StagedCasRootHashes, StagedCasRootLease, ThreadHistoryDiscardAcknowledgementRefused,
-    ThreadHistoryDiscardOperationRef, TransitionPhase,
+    DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, EvidenceValidator,
+    HeadOperation, PendingChainHeadTransition, PendingTransitionCursor,
+    ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredChainClosure,
+    RetiredChainClosureDraft, RetiredChainFence, RetiredThreadHistoryDiscardMarker,
+    RetirementEvidenceDiscard, StagedCasRootHashes, StagedCasRootLease,
+    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
+    read_retired_chain_closure,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
 pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
-    AddThreadWithEventSuccessorRequest, AuthoritativeContinuationPredecessorReadback,
-    AuthoritativeRootBirthReadback, AuthoritativeRootGenesisReadback,
-    AuthoritativeRootThreadReadback, AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
+    AddThreadWithEventSuccessorRequest, AnchoredThreadAppend,
+    AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
+    AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
+    AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
     AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,
-    AuthoritativeThreadEventChainReadback, AuthoritativeThreadHistoryDiscardProgress,
-    AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
-    AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,
-    CommittedWrite, CreateChainWithEventSuccessorRequest, PendingRemoveHeadState,
-    PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
+    AuthoritativeThreadEventChainReadback, AuthoritativeThreadEventReadAnchor,
+    AuthoritativeThreadEventReadPage, AuthoritativeThreadEventReadProgress,
+    AuthoritativeThreadHistoryDiscardProgress, AuthoritativeThreadHistoryDiscardReport,
+    AuthoritativeThreadPairReadback, AuthoritativeThreadSnapshotReadback,
+    AuthoritativeThreadSnapshotWithLastEventReadback, CommittedWrite,
+    ConditionalThreadEventAppendResult, CreateChainWithEventSuccessorRequest, MixedCutDependencies,
+    PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority, PreparedOfflineProjection,
     ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
-    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector,
-    StateDb,
+    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RetiredChainDependency,
+    RuntimeLivenessInspector, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
+};
+pub use state_db::{
+    ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,
 };
 pub use sync::ImportAttribution;

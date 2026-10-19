@@ -684,7 +684,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(prior);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "INSERT INTO external_qualification_worker_command
              (placement_thread_id,accepted_root_id,accepted_capsule_hash,
@@ -770,7 +770,7 @@ impl RuntimeDb {
                     && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
                 "Q command lost its live connected channel before contact"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?.max(record.reserved_at_ms);
+            let now = lillux::time::timestamp_millis().max(record.reserved_at_ms);
             ensure!(
                 tx.execute(
                     "UPDATE external_qualification_worker_command
@@ -844,7 +844,7 @@ impl RuntimeDb {
                     && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
                 "Q command lost its live connected channel before contact"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?.max(
+            let now = lillux::time::timestamp_millis().max(
                 record
                     .setup_owner_send_settled_at_ms
                     .context("Q turn lost settled setup")?,
@@ -948,7 +948,7 @@ impl RuntimeDb {
                 "Q setup send has no exact successful Final to settle"
             );
             if record.setup_owner_send_settled_at_ms.is_none() {
-                let at = i64::try_from(lillux::time::timestamp_millis())?.max(
+                let at = lillux::time::timestamp_millis().max(
                     record
                         .setup_contacted_at_ms
                         .context("Q setup send has no possible contact")?,
@@ -1077,7 +1077,7 @@ impl RuntimeDb {
                     ),
                 "Q Worker turn is outside its possible-contact request"
             );
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             if start {
                 if !turn_start_is_exact_replay(
                     record.turn_id.as_deref(),
@@ -1198,7 +1198,7 @@ impl RuntimeDb {
             );
             if record.final_response_digest.is_none() {
                 let done = record.turn_completed_at_ms.is_some();
-                let now = i64::try_from(lillux::time::timestamp_millis())?
+                let now = lillux::time::timestamp_millis()
                     .max(record.contacted_at_ms.expect("possible contact checked"));
                 ensure!(
                     tx.execute(
@@ -1252,7 +1252,7 @@ impl RuntimeDb {
                 "Q Worker send has no exact successful Final to settle"
             );
             if record.owner_send_settled_at_ms.is_none() {
-                let at = i64::try_from(lillux::time::timestamp_millis())?
+                let at = lillux::time::timestamp_millis()
                     .max(record.contacted_at_ms.expect("possible contact checked"));
                 ensure!(
                     tx.execute(

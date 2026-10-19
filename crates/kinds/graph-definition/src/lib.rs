@@ -679,8 +679,7 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
     }
 
     if let Some(max) = node.max_concurrency {
-        let has_consumer = (node.node_type == NodeType::Foreach && node.parallel)
-            || (node.node_type == NodeType::Foreach && node.detach)
+        let has_consumer = (node.node_type == NodeType::Foreach && (node.parallel || node.detach))
             || follow_fanout;
         if !(1..=MAX_NODE_CONCURRENCY).contains(&max) || !has_consumer {
             bail!("node `{name}` has invalid or inert max_concurrency");

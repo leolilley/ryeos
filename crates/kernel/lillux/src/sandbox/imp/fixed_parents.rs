@@ -211,7 +211,7 @@ pub(super) fn install(
 fn populate(
     source: Option<&crate::PinnedDirectory>,
     branch: &Branch,
-    destination: &PathBuf,
+    destination: &std::path::Path,
     access: LinuxSandboxMountAccess,
     remaining: &mut usize,
 ) -> Result<(), String> {
@@ -292,14 +292,13 @@ fn populate(
         mkdir_one(path_string(&target)?, 0o755).map_err(|error| error.to_string())?;
         populate(original.as_ref(), child, &target, access, remaining)?;
     }
-    if let Some(source) = source {
-        if source
+    if let Some(source) = source
+        && source
             .entries_no_follow_bounded(entries.len())
             .map_err(|error| error.to_string())?
             != entries
-        {
-            return Err("source topology changed during filtered construction".into());
-        }
+    {
+        return Err("source topology changed during filtered construction".into());
     }
     // Nonrecursive: permitted child binds retain their separately admitted
     // access. Recursive read-only sealing would silently disable live writes.

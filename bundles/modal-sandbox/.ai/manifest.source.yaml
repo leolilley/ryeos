@@ -1,6 +1,6 @@
 name: modal-sandbox
 version: "0.1.0"
-description: "Modal sandbox lease lifecycle adapter over the signed RyeOS lease facade: create-once allocation with reconcile by name, terminate-then-observe; guest activation and the guest channel are not yet supported"
+description: "Modal sandbox lease lifecycle adapter over the signed RyeOS lease facade: create-once allocation with reconcile by name, terminate-then-observe; staged guest activation uploads the sealed guest runtime and runs it once through the Modal guest launcher; the guest channel is not yet supported"
 requires_kinds: []
 uses_kinds: []
 external_lifecycle_adapters:
@@ -11,12 +11,14 @@ external_lifecycle_adapters:
       - aarch64-unknown-linux-gnu
     adapter: ryeos-modal-sandbox-lifecycle-adapter
     supervisor: ryeos-external-candidate-supervisor
-    launcher: ryeos-external-candidate-launcher
+    launcher: ryeos-modal-guest-launcher
     provider_spec:
       path: specs/provider-spec.json
-      sha256: "c1d50b881f32892cdbe2c451e7b7fbd17996520f5b2defc6b9d62b46b417916b"
+      sha256: "6db004e147dfac6488f63fbd64c9c58e616e640ebf2a6af50cc68d47c6b00349"
     settings_schema_digest: "1789a6c8cd8d26db144511effbbc1478426e2a116aa5284f992c6d31eaef6095"
     capabilities:
       - exact_allocation_reconciliation
       - authoritative_no_occurrence
       - exact_terminal_observation
+      - supervisor_activation
+      - independent_guest_runtime_admission

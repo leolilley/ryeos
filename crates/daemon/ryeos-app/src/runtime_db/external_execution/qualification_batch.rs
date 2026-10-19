@@ -444,7 +444,7 @@ impl RuntimeDb {
             // Clamp only to the durable contact stage: receipt time does not
             // establish causality, and wall-clock regression must not make a
             // legitimate post-turn receipt look like a pre-turn observation.
-            let retained_at_ms = i64::try_from(lillux::time::timestamp_millis())?.max(
+            let retained_at_ms = lillux::time::timestamp_millis().max(
                 command
                     .contacted_at_ms
                     .or(command.setup_contacted_at_ms)

@@ -229,12 +229,11 @@ pub fn verify_admitted_source_tree(
                     let entry = expected.get(path.as_str()).ok_or_else(|| {
                         anyhow::anyhow!("admitted source has unexpected file {path}")
                     })?;
-                    let mut file =
-                        directory
-                            .open_regular(&actual.name, false)?
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("admitted source file {path} disappeared")
-                            })?;
+                    let file = directory
+                        .open_regular(&actual.name, false)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("admitted source file {path} disappeared")
+                        })?;
                     let (digest, metadata) =
                         lillux::digest_open_regular_file_stable_exact(&file, entry.size)?;
                     let expected_mode = match entry.mode {

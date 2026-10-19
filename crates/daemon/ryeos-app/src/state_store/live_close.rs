@@ -897,7 +897,6 @@ impl ClosedLiveStateStore {
         // handler controls and signer; none owns a descriptor.
         drop(_projection_health);
         drop(_barrier);
-        drop(_attachment_closed);
         drop(_attached);
         drop(_live_workers);
         drop(_selected);
@@ -2357,6 +2356,7 @@ fn advance_close(
                 write_barrier,
                 process_attachment_admission_open,
                 process_attachment_admission_closed,
+                fenced_chain_kinds: _,
                 attached_processes,
                 live_workers,
                 selected_invocations,

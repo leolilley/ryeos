@@ -292,11 +292,9 @@ mod tests {
         let mut valid = request();
         parse_observe(&valid, "T-root").unwrap();
         assert!(parse_observe(&valid, "T-other").is_err());
-        for field in ["qualification_operation_id"] {
-            let mut bad = valid.clone();
-            bad[field] = json!("invalid");
-            assert!(parse_observe(&bad, "T-root").is_err());
-        }
+        let mut bad = valid.clone();
+        bad["qualification_operation_id"] = json!("invalid");
+        assert!(parse_observe(&bad, "T-root").is_err());
         for value in [json!("/ambient/codex"), json!("x".repeat(16 * 1024))] {
             let mut bad = valid.clone();
             bad["executable"] = value;

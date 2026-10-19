@@ -1298,7 +1298,7 @@ mod drop_tests {
             state: Mutex::new(Held::new(
                 JOIN_STATE_KIND,
                 JoinState {
-                    parent: parent,
+                    parent,
                     leaves: Vec::with_capacity(1),
                     census_closed,
                     live_parent: None,

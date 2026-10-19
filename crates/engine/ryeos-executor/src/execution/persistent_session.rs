@@ -205,7 +205,7 @@ fn evidence_realizations(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(ryeos_engine::external_realization::RealizedExternalContentSet::new(entries)?)
+    ryeos_engine::external_realization::RealizedExternalContentSet::new(entries)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1668,7 +1668,7 @@ fn realization_set(
         .derived
         .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
         .ok_or_else(|| anyhow!("content dependency has no retained external realization"))?;
-    Ok(ryeos_engine::external_realization::RealizedExternalContentSet::from_value(value)?)
+    ryeos_engine::external_realization::RealizedExternalContentSet::from_value(value)
 }
 
 fn validate_dependency_search(
@@ -3034,14 +3034,7 @@ fn start_capsule_process(
         Ok(running) => running,
         Err(error) => {
             let mut error = error;
-            if ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity)
-                .is_ok()
-            {
-                if let Err(settlement) =
-                    ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
-                        &released_process_identity,
-                    )
-                    .and_then(|proposed| {
+            if ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity) .is_ok() && let Err(settlement) = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture( &released_process_identity, ) .and_then(|proposed| {
                         let evidence = state.state_store.prove_pooled_resource_owner_cleanup(
                             &pooled_owner_coordinate,
                             &released_process_identity,
@@ -3065,7 +3058,6 @@ fn start_capsule_process(
                     error = error.context(format!(
                         "settle pooled resource owner after release failure: {settlement:#}"
                     ));
-                }
             }
             if let Err(cleanup) = settle_launch_retirement(
                 ryeos_app::process::assert_reaped_process_group_absent(&released_process_identity),
@@ -3787,7 +3779,7 @@ fn spawn_capsule_process_held(
         private_runtime_view.path()
     };
     let bound = if state.isolation.is_enforced() {
-        super::external_content::bind_external_realizations(state, &resolution, &workspace)?
+        super::external_content::bind_external_realizations(state, &resolution, workspace)?
     } else if supports_private_descriptor_realizations(session_protocol) {
         super::external_content::bind_external_realizations_in_private_runtime_view_with_budget(
             state,
@@ -3851,7 +3843,7 @@ fn spawn_capsule_process_held(
         leases.extend(evidence_leases);
     }
     let source = if state.isolation.is_enforced() {
-        super::source_closure::bind_source(state, &resolution, &workspace, source_placement)?
+        super::source_closure::bind_source(state, &resolution, workspace, source_placement)?
     } else {
         super::source_closure::bind_source_in_private_workspace_with_budget(
             state,
@@ -3900,7 +3892,7 @@ fn spawn_capsule_process_held(
             capsule,
             &cas,
             &state.isolation,
-            &workspace,
+            workspace,
         )?;
     // Recovery has converted the CAS objects into an owned prepared plan.
     // Release the CAS flock (and its fork-sensitive lease) before the direct

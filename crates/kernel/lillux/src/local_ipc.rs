@@ -595,7 +595,9 @@ fn wait_unix_connect(
         }
         let timeout_ms = remaining
             .as_millis()
-            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .saturating_add(u128::from(
+                !remaining.subsec_nanos().is_multiple_of(1_000_000),
+            ))
             .min(i32::MAX as u128) as i32;
         let mut readiness = libc::pollfd {
             fd: descriptor,
@@ -836,7 +838,9 @@ impl OwnerPrivateLocalDuplexListener {
                 }
                 let timeout_ms = remaining
                     .as_millis()
-                    .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+                    .saturating_add(u128::from(
+                        !remaining.subsec_nanos().is_multiple_of(1_000_000),
+                    ))
                     .min(i32::MAX as u128) as i32;
                 let mut descriptor = libc::pollfd {
                     fd: self.listener.as_raw_fd(),
@@ -956,8 +960,8 @@ impl Drop for OwnerPrivateLocalDuplexListener {
         }
         // SAFETY: successful fstatat initialized the complete stat value.
         let observed = unsafe { observed.assume_init() };
-        if observed.st_dev as u64 != self.device
-            || observed.st_ino as u64 != self.inode
+        if observed.st_dev != self.device
+            || observed.st_ino != self.inode
             || observed.st_mode & libc::S_IFMT != libc::S_IFSOCK
         {
             return;
@@ -1086,7 +1090,7 @@ fn connect_local_until(
             ensure!(!interrupt.is_interrupted(), "local connect was interrupted");
             let remaining = deadline.remaining();
             ensure!(!remaining.is_zero(), "local connect deadline elapsed");
-            let timeout_ms = remaining.as_millis().min(10).max(1) as i32;
+            let timeout_ms = remaining.as_millis().clamp(1, 10) as i32;
             let mut poll = libc::pollfd {
                 fd: descriptor.as_raw_fd(),
                 events: libc::POLLOUT,

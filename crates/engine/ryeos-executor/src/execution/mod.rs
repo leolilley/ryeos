@@ -705,10 +705,9 @@ fn admitted_operational_shadow_paths(
         &capsule.execution_closure,
         state.isolation.is_enforced(),
     )? == source_closure::SourceMountPlacement::Project
+        && let Some(source_mount) = source_closure::admitted_source_mount(state, resolution)?
     {
-        if let Some(source_mount) = source_closure::admitted_source_mount(state, resolution)? {
-            paths.push(source_mount);
-        }
+        paths.push(source_mount);
     }
     if let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
         prepared_runtime_launch,

@@ -6273,12 +6273,12 @@ async fn run_claimed_thread_row_inner(
         .as_ref()
         .and_then(|metadata| metadata.effect_authority.clone());
     let thread_id = thread.thread_id.clone();
-    if launch_audit == LaunchAuditDisposition::AppendForAttempt {
-        if thread.runtime.process_identity.is_some() {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed recovery requires reconciliation to retire the prior process attachment"
-            )));
-        }
+    if launch_audit == LaunchAuditDisposition::AppendForAttempt
+        && thread.runtime.process_identity.is_some()
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed recovery requires reconciliation to retire the prior process attachment"
+        )));
     }
     // Lineage and borrower admission precede all workspace input contact.
     // Record operational lineage the instant we commit to launching a child, so a
@@ -7008,7 +7008,7 @@ async fn run_claimed_thread_row_inner(
         LaunchAuditDisposition::AppendForAttempt => {
             let launch_audit = launch_audit_records(
                 resolved,
-                &resolution,
+                resolution,
                 &prepared_launch,
                 &augmentation_audits,
                 &node_requirements_met_by,
@@ -7668,7 +7668,7 @@ async fn run_claimed_thread_row_inner(
         // saga. Its worker and managed controller have stopped, but the RyeOS
         // root remains running until its admitted retained-for-review policy
         // or the owner's publish/discard decision settles durably.
-        if let Some(candidate_snapshot_hash) = result_project_snapshot_hash.as_deref()
+        if let Some(candidate_snapshot_hash) = result_project_snapshot_hash
             && let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state == "freezing"
         {
@@ -7870,19 +7870,19 @@ async fn run_claimed_thread_row_inner(
         outputs: (!runtime_result.outputs.is_null()).then(|| runtime_result.outputs.clone()),
         ..meta
     };
-    if !hosted_candidate_workspace_closed {
-        if let Err(e) = super::thread_meta::write_thread_meta(
+    if !hosted_candidate_workspace_closed
+        && let Err(e) = super::thread_meta::write_thread_meta(
             runtime_state_root,
             &thread_id,
             &settled_meta,
             identity,
-        ) {
-            tracing::warn!(
-                thread_id = %thread_id,
-                error = %e,
-                "failed to update thread.json audit record to its settled status"
-            );
-        }
+        )
+    {
+        tracing::warn!(
+            thread_id = %thread_id,
+            error = %e,
+            "failed to update thread.json audit record to its settled status"
+        );
     }
 
     // Managed native runtimes own the same COW lifecycle as ordinary direct

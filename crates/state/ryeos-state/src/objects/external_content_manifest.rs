@@ -596,7 +596,7 @@ impl ExternalContentManifestObject {
         validate_internal_symlink_graph(
             self.entries
                 .iter()
-                .filter(|&entry| (entry.kind == ExternalContentManifestEntryKind::Symlink))
+                .filter(|&entry| entry.kind == ExternalContentManifestEntryKind::Symlink)
                 .map(|entry| {
                     (
                         entry.path.as_str(),

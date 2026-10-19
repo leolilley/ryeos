@@ -135,20 +135,17 @@ fn validate_testimony(record: &NativeTerminalTestimony) -> Result<(), String> {
     {
         return Err("native terminal held mount differs from its declared child".into());
     }
-    if let Some(applied) = &record.applied_launch {
-        if applied.owned_child_pid != identity.target_pid
+    if let Some(applied) = &record.applied_launch
+        && (applied.owned_child_pid != identity.target_pid
             || applied.namespace_pid != 1
             || !applied.no_new_privs
             || applied.seccomp_mode != 2
             || applied.post_release_mount_view.schema != record.held_mount.schema
             || applied.post_release_mount_view.mount_count != record.held_mount.mount_count
             || applied.post_release_mount_view.destination_access_sha256
-                != record.held_mount.destination_access_sha256
-        {
-            return Err(
-                "native terminal applied data differs from its declared held context".into(),
-            );
-        }
+                != record.held_mount.destination_access_sha256)
+    {
+        return Err("native terminal applied data differs from its declared held context".into());
     }
     match &record.exit {
         NativeTerminalExit::Code(code) if (0..=255).contains(code) => {}

@@ -478,6 +478,11 @@ pub fn run_gc_with_pinned_authority(
                 .pending_transition_object_roots()
                 .context("read pending chain-head transition roots before CAS sweep")?,
         );
+        operational_roots.extend(
+            recovery
+                .unreleased_retirement_manifest_roots()
+                .context("read retired chain closure roots before CAS sweep")?,
+        );
     }
     operational_roots.extend(staged_roots.object_hashes.iter().cloned());
 
@@ -1171,6 +1176,216 @@ mod tests {
         assert!(!unreachable_path.exists());
         assert_eq!(result.deleted_objects, 1);
         assert_eq!(result.roots_walked, 1);
+    }
+
+    fn captured_policy() -> crate::objects::CapturedThreadHistoryPolicy {
+        use crate::objects::{
+            CapturedEffectiveTrustClass, CapturedItemTrustClass,
+            CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+            CapturedThreadHistoryPolicy, ThreadHistoryRetention,
+        };
+        let hash = "a".repeat(64);
+        CapturedThreadHistoryPolicy {
+            retention: ThreadHistoryRetention::TerminalFor { seconds: 60 },
+            canonical_item_ref: "directive:test".to_string(),
+            item_content_hash: hash.clone(),
+            item_signer_fingerprint: Some(hash.clone()),
+            item_trust_class: CapturedItemTrustClass::Trusted,
+            kind_schema_content_hash: hash,
+            resolved_from: CapturedPolicyProvenance::ItemAuthored {
+                composed_path: "history".to_string(),
+                requested_seconds: 60,
+                effective_trust_class: CapturedEffectiveTrustClass::TrustedBundle,
+                minimum_clamp: None,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+            },
+        }
+    }
+
+    fn store_snapshot(cas: &lillux::CasStore, owner: &str) -> String {
+        let snapshot = crate::objects::thread_snapshot::ThreadSnapshotBuilder::new(
+            owner,
+            owner,
+            "directive",
+            "directive:test",
+            "directive-runtime",
+        )
+        .captured_history_policy(Some(captured_policy()))
+        .status(crate::objects::thread_snapshot::ThreadStatus::Completed)
+        .created_at("2026-01-01T00:00:00Z".to_string())
+        .updated_at("2026-01-01T00:00:00Z".to_string())
+        .finished_at(Some("2026-01-01T00:00:00Z".to_string()))
+        .build();
+        cas.store_object(&snapshot.to_value()).unwrap()
+    }
+
+    /// Store a real retirement closure for `owner` under a fresh snapshot and
+    /// return its manifest hash.
+    fn store_closure_for(
+        recovery: &crate::recovery::RecoveryStore,
+        cas: &lillux::CasStore,
+        guard: &crate::recovery::CasMutationGuard,
+        refs_root: &std::path::Path,
+        owner: &str,
+        counterpart: &str,
+    ) -> String {
+        let snapshot_hash = store_snapshot(cas, owner);
+        let lock = crate::chain::ChainLock::acquire(refs_root, owner).unwrap();
+        let draft = crate::recovery::RetiredChainClosureDraft {
+            chain_root_id: owner.to_string(),
+            retired_head_hash: "a".repeat(64),
+            snapshot_hash,
+            terminal_event_hash: None,
+            terminal_thread_seq: 0,
+            terminal_chain_seq: 0,
+            counterpart_roots: std::collections::BTreeSet::from([counterpart.to_string()]),
+            retained_evidence: Vec::new(),
+        };
+        let hash = recovery
+            .store_retired_chain_manifest(cas, guard, &lock, draft, &|_| Ok(()))
+            .unwrap();
+        recovery
+            .publish_retired_chain_fence(guard, &lock, owner, &hash)
+            .unwrap();
+        hash
+    }
+
+    #[test]
+    fn gc_roots_unreleased_retirement_manifests_and_drops_released_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        let cas_root = runtime_state_dir.join("objects");
+        let refs_root = runtime_state_dir.join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+        let cas = lillux::CasStore::new(cas_root.clone());
+        let recovery =
+            crate::recovery::RecoveryStore::from_runtime_state_dir(&runtime_state_dir).unwrap();
+        let (kept_hash, released_hash) = {
+            let guard =
+                crate::recovery::CasMutationGuard::acquire_shared(&runtime_state_dir).unwrap();
+            (
+                store_closure_for(&recovery, &cas, &guard, &refs_root, "T-kept", "T-peer"),
+                store_closure_for(&recovery, &cas, &guard, &refs_root, "T-released", "T-peer"),
+            )
+        };
+        let path = |hash: &str| lillux::shard_path(&cas_root, "objects", hash, ".json");
+        let loose = cas
+            .store_object(&serde_json::json!({
+                "kind": "source_manifest",
+                "item_source_hashes": {},
+            }))
+            .unwrap();
+
+        // GC no longer refuses with unsupported_objects: real manifests are
+        // registered kinds and their page and snapshot edges are followed.
+        let dry = run_gc(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams {
+                dry_run: true,
+                ..GcParams::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            dry.deleted_objects, 1,
+            "only the unrooted object is garbage"
+        );
+        assert!(path(&loose).is_file(), "dry run deletes nothing");
+
+        let result = run_gc(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+        )
+        .unwrap();
+        assert!(path(&kept_hash).is_file() && path(&released_hash).is_file());
+        assert!(!path(&loose).exists());
+        assert_eq!(result.roots_walked, 2);
+
+        // Release one fence (T-peer is fenced too): its closure stops being
+        // a root and is swept; the other stays.
+        {
+            let guard =
+                crate::recovery::CasMutationGuard::acquire_shared(&runtime_state_dir).unwrap();
+            store_closure_for(&recovery, &cas, &guard, &refs_root, "T-peer", "T-kept");
+            let lock = crate::chain::ChainLock::acquire(&refs_root, "T-released").unwrap();
+            recovery
+                .release_retired_chain(&cas, &guard, &lock, "T-released")
+                .unwrap();
+        }
+        let after = run_gc(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+        )
+        .unwrap();
+        assert!(path(&kept_hash).is_file());
+        assert!(!path(&released_hash).exists());
+        assert_eq!(
+            after.roots_walked, 2,
+            "kept manifest plus the peer's fence root"
+        );
+    }
+
+    #[test]
+    fn gc_collects_a_stored_retirement_closure_that_no_fence_roots() {
+        // R2/R3: a crash after the closure was stored but before the fence
+        // leaves ordinary garbage; the owner requalifies to the same hash.
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        let cas_root = runtime_state_dir.join("objects");
+        let refs_root = runtime_state_dir.join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+        let recovery =
+            crate::recovery::RecoveryStore::from_runtime_state_dir(&runtime_state_dir).unwrap();
+        let cas = lillux::CasStore::new(cas_root.clone());
+        let draft = || crate::recovery::RetiredChainClosureDraft {
+            chain_root_id: "T-owner".to_string(),
+            retired_head_hash: "a".repeat(64),
+            snapshot_hash: store_snapshot(&cas, "T-owner"),
+            terminal_event_hash: None,
+            terminal_thread_seq: 0,
+            terminal_chain_seq: 0,
+            counterpart_roots: std::collections::BTreeSet::from(["T-peer".to_string()]),
+            retained_evidence: Vec::new(),
+        };
+        let store = || {
+            let guard =
+                crate::recovery::CasMutationGuard::acquire_shared(&runtime_state_dir).unwrap();
+            let lock = crate::chain::ChainLock::acquire(&refs_root, "T-owner").unwrap();
+            let hash = recovery
+                .store_retired_chain_manifest(&cas, &guard, &lock, draft(), &|_| Ok(()))
+                .unwrap();
+            (guard, lock, hash)
+        };
+        let (guard, lock, hash) = store();
+        drop((guard, lock));
+        let manifest_path = lillux::shard_path(&cas_root, "objects", &hash, ".json");
+        assert!(manifest_path.is_file());
+        let result = run_gc(
+            &runtime_state_dir,
+            &crate::refs::TrustStore::new(),
+            None,
+            &GcParams::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.deleted_objects, 3,
+            "manifest, its page and its snapshot"
+        );
+        assert!(!manifest_path.exists());
+        let (guard, lock, again) = store();
+        assert_eq!(again, hash);
+        recovery
+            .publish_retired_chain_fence(&guard, &lock, "T-owner", &again)
+            .unwrap();
+        assert!(manifest_path.is_file());
     }
 
     fn count_objects(cas_root: &std::path::Path) -> usize {

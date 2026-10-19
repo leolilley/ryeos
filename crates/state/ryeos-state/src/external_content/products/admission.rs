@@ -659,7 +659,7 @@ mod tests {
             candidate.relationships.relationships[1].producer.parameters = json!({
                 "signed_manifest": "y".repeat(payload_bytes)
             });
-            if !candidate.validate().is_ok() {
+            if candidate.validate().is_err() {
                 continue;
             }
             let fact = CompactAdmittedProductRecipeFact::from_binding(&candidate).unwrap();

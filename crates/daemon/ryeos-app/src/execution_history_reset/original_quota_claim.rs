@@ -3131,8 +3131,8 @@ impl OriginalQuotaClaim {
             .copy_usage
             .try_lock()
             .map_err(|_| anyhow::anyhow!("original seal role snapshot busy or poisoned"))?;
-        for index in 0..2 {
-            if never_started[index] {
+        for (index, &never) in never_started.iter().enumerate() {
+            if never {
                 ensure!(
                     !used.destinations[index]
                         && !used.sql_admitted[index]
@@ -4547,8 +4547,8 @@ impl lillux_sqlite::SqliteInspectionCopyWork for OriginalCopyWork {
             .destination_roots
             .clone();
         let mut selected = None;
-        for store in 0..2 {
-            if let Some(root) = &roots[store]
+        for (store, slot) in roots.iter().enumerate() {
+            if let Some(root) = slot
                 && root.is_same_directory(destination)?
                 && self.claim._source_roots[store].is_same_directory(source)?
             {

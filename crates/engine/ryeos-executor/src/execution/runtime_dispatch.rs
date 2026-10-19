@@ -3033,12 +3033,11 @@ mod tests {
     fn inline_thread_run_gate_consumes_the_exact_preflight_class() {
         use crate::dispatch::RootDispatchClass;
 
-        for class in [RootDispatchClass::ManagedSubprocess] {
-            let error = enforce_inline_dispatch_class("alias:test/run", class, false).unwrap_err();
-            assert!(error.to_string().contains("exact admitted route"));
-            assert!(error.to_string().contains("managed thread run"));
-            enforce_inline_dispatch_class("graph:test/producer", class, true).unwrap();
-        }
+        let class = RootDispatchClass::ManagedSubprocess;
+        let error = enforce_inline_dispatch_class("alias:test/run", class, false).unwrap_err();
+        assert!(error.to_string().contains("exact admitted route"));
+        assert!(error.to_string().contains("managed thread run"));
+        enforce_inline_dispatch_class("graph:test/producer", class, true).unwrap();
         for class in [
             RootDispatchClass::TerminalSubprocess,
             RootDispatchClass::MethodDispatch,
@@ -3750,7 +3749,7 @@ mod tests {
             let item = format!("{kind}:test/subject");
             let required = format!("ryeos.execute.{kind}.test/subject");
             assert!(
-                enforce_test_callback_caps(&item, &[required.clone()], &auth).is_ok(),
+                enforce_test_callback_caps(&item, std::slice::from_ref(&required), &auth).is_ok(),
                 "{kind}"
             );
             assert!(

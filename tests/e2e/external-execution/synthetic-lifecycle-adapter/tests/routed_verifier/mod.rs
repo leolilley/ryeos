@@ -254,7 +254,7 @@ fn actual_codex_notifications_and_native_guest_agree() -> Result<()> {
             .iter()
             .any(|v| v["method"] == "turn/completed")
         {
-            app.next()?;
+            app.next_message()?;
         }
         std::fs::write(
             root.join("app-server-notifications.json"),

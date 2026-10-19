@@ -10642,11 +10642,15 @@ mod tests {
             shared_process_group: true,
             nested_sandbox: false,
         };
-        let expected = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        let expected =
+            expected_mount_preparation_commitments(&plan, std::slice::from_ref(&authority))
+                .unwrap();
         assert_eq!(expected.schema, 1);
         assert_eq!(expected.mount_count, 1);
         plan.mounts[0].access = IsolationMountAccess::Writable;
-        let writable = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        let writable =
+            expected_mount_preparation_commitments(&plan, std::slice::from_ref(&authority))
+                .unwrap();
         assert_ne!(
             writable.destination_access_sha256,
             expected.destination_access_sha256

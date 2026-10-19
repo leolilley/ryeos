@@ -366,17 +366,27 @@ pub fn spawn_isolated_peer(test: &str, argument: &str) -> IsolatedPeer {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("spawn isolated peer");
-    let mut stdin = child.stdin.take().expect("isolated peer stdin");
-    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("isolated peer stdout"));
-    writeln!(stdin, "{}", argument.replace('\n', " "))
-        .and_then(|()| stdin.flush())
-        .expect("hand the isolated peer its argument");
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        reap_failed_peer(&mut child);
+        panic!("isolated peer {name} has no piped stdin or stdout");
+    };
+    let mut stdout = std::io::BufReader::new(stdout);
+    if let Err(error) =
+        writeln!(stdin, "{}", argument.replace('\n', " ")).and_then(|()| stdin.flush())
+    {
+        reap_failed_peer(&mut child);
+        panic!("hand the isolated peer its argument: {error}");
+    }
     let mut seen = String::new();
     loop {
         let mut line = String::new();
-        let read = stdout
-            .read_line(&mut line)
-            .expect("read isolated peer stdout");
+        let read = match stdout.read_line(&mut line) {
+            Ok(read) => read,
+            Err(error) => {
+                reap_failed_peer(&mut child);
+                panic!("read isolated peer stdout: {error}");
+            }
+        };
         if read == 0 {
             let status = child.wait().expect("wait for isolated peer");
             panic!("isolated peer {name} exited ({status}) before it was ready:\n{seen}");
@@ -390,6 +400,12 @@ pub fn spawn_isolated_peer(test: &str, argument: &str) -> IsolatedPeer {
         }
         seen.push_str(&line);
     }
+}
+
+/// Kill and reap a peer whose handshake failed so no process outlives the panic.
+fn reap_failed_peer(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl IsolatedPeer {

@@ -456,11 +456,7 @@ pub fn satisfies(
         ));
     }
     let providers = entry.providers();
-    if !providers.is_empty()
-        && !providers
-            .iter()
-            .any(|provider| *provider == evidence.provider)
-    {
+    if !providers.is_empty() && !providers.contains(&evidence.provider) {
         return Err(format!(
             "{name} is proven here by {} ({grade}); the floor accepts only {}",
             evidence.provider,
@@ -1893,11 +1889,11 @@ mod linux {
         if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0 {
             return None;
         }
-        Some((limit.rlim_cur as u64, limit.rlim_max as u64))
+        Some((limit.rlim_cur, limit.rlim_max))
     }
 
     fn display_limit(value: u64) -> String {
-        if value == libc::RLIM_INFINITY as u64 {
+        if value == libc::RLIM_INFINITY {
             "unlimited".to_owned()
         } else {
             format!("{value} bytes")
@@ -1935,7 +1931,7 @@ mod linux {
         }
         match (status.as_deref().and_then(locked_bytes), memlock_limit()) {
             (Some(locked), Some((soft, hard))) => {
-                if soft == libc::RLIM_INFINITY as u64 || soft.saturating_sub(locked) >= bytes {
+                if soft == libc::RLIM_INFINITY || soft.saturating_sub(locked) >= bytes {
                     return Ok(ResidencyProof::Locked {
                         basis: format!(
                             "RLIMIT_MEMLOCK {} with {locked} bytes already locked leaves room for {bytes} bytes",

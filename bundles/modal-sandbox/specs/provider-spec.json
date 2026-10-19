@@ -52,7 +52,13 @@
       "route": "get_by_name",
       "bind_proof_profile": "modal_facade_observed_by_name_v1"
     },
-    "activate_supervisor": { "kind": "unsupported_pending" },
+    "activate_supervisor": {
+      "kind": "stage_then_upload_then_run_once",
+      "stage_route": "stage",
+      "seal_route": "stage_seal",
+      "upload_route": "upload",
+      "run_route": "run_once"
+    },
     "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
     "relay_file": { "kind": "unsupported_pending" },
     "snapshot": { "kind": "unsupported_pending" },

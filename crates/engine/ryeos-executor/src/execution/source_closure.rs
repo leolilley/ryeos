@@ -887,7 +887,7 @@ fn retained_source_records_for_projection(
             lillux::canonical_json(&binding_value)?.as_bytes(),
             lillux::canonical_json(&manifest_value)?.as_bytes(),
         )?;
-    records.validate_projection(&projection)?;
+    records.validate_projection(projection)?;
     Ok((records.binding().clone(), records.manifest().clone()))
 }
 

@@ -713,7 +713,11 @@ mod tests {
     use super::*;
 
     pub const FIXTURE: &[u8] = include_bytes!("../fixtures/provider-spec.json");
+    pub const DECLARED_FIXTURE: &[u8] = include_bytes!("../fixtures/provider-spec.declared.json");
     pub const SCHEMA: &[u8] = include_bytes!("../fixtures/settings.schema.json");
+    // The digest the bundle manifest pins for the bundled spec.
+    const BUNDLED_SPEC_SHA256: &str =
+        "6db004e147dfac6488f63fbd64c9c58e616e640ebf2a6af50cc68d47c6b00349";
 
     fn schema_digest() -> String {
         lillux::sha256_hex(SCHEMA)
@@ -758,9 +762,28 @@ mod tests {
     }
 
     #[test]
-    fn bundle_copy_is_byte_identical_to_the_fixture() {
+    fn bundle_copy_is_byte_identical_to_the_declared_fixture() {
         let bundle = include_bytes!("../../../../bundles/modal-sandbox/specs/provider-spec.json");
-        assert_eq!(bundle.as_slice(), FIXTURE);
+        assert_eq!(bundle.as_slice(), DECLARED_FIXTURE);
+        assert_eq!(lillux::sha256_hex(bundle), BUNDLED_SPEC_SHA256);
+    }
+
+    #[test]
+    fn the_bundled_spec_declares_staged_activation() {
+        let spec = ProviderSpec::parse(DECLARED_FIXTURE, &schema_digest()).unwrap();
+        assert!(spec.declares_activation());
+        let capabilities = spec.effective_capabilities();
+        for capability in [
+            LifecycleCapability::SupervisorActivation,
+            LifecycleCapability::IndependentGuestRuntimeAdmission,
+        ] {
+            assert!(capabilities.contains(&capability));
+        }
+        assert_eq!(
+            spec.guest_channel_profile().unwrap(),
+            GuestChannelProfile::UnsupportedPending
+        );
+        spec.require_guest_runtime_descriptor(true).unwrap();
     }
 
     #[test]
@@ -1073,7 +1096,7 @@ mod tests {
             );
         }
         assert!(RouteName::Stage.request_body_limit() <= TRANSPORT_IN_MEMORY_BODY_BYTES);
-        assert!(LAUNCHER_UPLOAD_BYTES <= UPLOAD_BYTES);
+        const _: () = assert!(LAUNCHER_UPLOAD_BYTES <= UPLOAD_BYTES);
         assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES) <= TRANSPORT_IN_MEMORY_BODY_BYTES);
         assert!(encoded_request_bytes(LAUNCHER_UPLOAD_BYTES + 1) > TRANSPORT_IN_MEMORY_BODY_BYTES);
     }

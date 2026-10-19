@@ -50,8 +50,8 @@ pub const TERMINAL_CONTROL_BYTES: u64 = 4096;
 /// Includes EOF, completion, native settlement and exact lifecycle receipts.
 /// The journal alone classifies correlated receipts; idle polls stay ordinary.
 /// Supervisor: EOF + settlement + completion Applied receipt + three EOF
-/// receipt replies + two settlement receipt replies = eight. Owner: completion
-/// + three EOF receipts + two settlement receipts = six. Scope claim/finish is
+/// receipt replies + two settlement receipt replies = eight. Owner: completion,
+/// three EOF receipts and two settlement receipts = six. Scope claim/finish is
 /// atomic; its externally visible receipts are Retained and Applied only.
 pub const Q_FINISH_FRAMES: u32 = 8;
 pub const Q_FINISH_BYTES: u64 = 128 * 1024;

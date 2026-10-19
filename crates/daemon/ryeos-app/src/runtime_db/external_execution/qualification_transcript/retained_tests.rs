@@ -129,9 +129,9 @@ impl<'a> Fixture<'a> {
             request_digest: binding.allocation_request_digest.clone(),
             max_active: 1,
             timeout_seconds: 60,
-            contact_deadline_ms: i64::try_from(now + 60_000).unwrap(),
-            startup_started_at_ms: i64::try_from(now).unwrap(),
-            startup_deadline_ms: i64::try_from(now + 60_000).unwrap(),
+            contact_deadline_ms: now + 60_000,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
         };
         reservation.validate().unwrap();
         let allocation_occurrence = ExternalAllocationOccurrence {
@@ -685,7 +685,7 @@ fn retained_null_fixture_publication_requires_native_application_and_replays_exa
         schema: 1, operation_id: String::new(), qualification_operation_id: owner.qualification_operation_id.clone(),
         occurrence_id: owner.qualification_occurrence.occurrence_id.clone(), owner_principal: owner.operator_principal.clone(),
         provider_id: qualification.intent.provider_id.clone(), provider_spec_digest: qualification.intent.provider_spec_digest.clone(),
-        attempt_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
+        attempt_deadline_ms: lillux::time::timestamp_millis() + 60_000,
     };
     termination.operation_id = termination.derived_operation_id().unwrap();
     fixture

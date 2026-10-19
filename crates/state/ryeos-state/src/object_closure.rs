@@ -131,6 +131,20 @@ pub struct ObjectContractRegistration {
     pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
 }
 
+/// Exact typed ThreadEvent contract owned above state. Callbacks receive the
+/// complete envelope, after the ordinary state-owned envelope validation, so
+/// the domain owner can prove its payload's relationship to the emitting
+/// thread.
+pub struct EventPayloadContractRegistration {
+    pub event_type: &'static str,
+    pub validate: fn(&Value) -> anyhow::Result<()>,
+    pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
+}
+
+/// Meaning-blind namespace: every event selector in this namespace requires an
+/// installed exact decoder, including before any installation.
+pub const REGISTERED_EVENT_SELECTOR_PREFIX: &str = "contract.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisteredObjectExpectation {
     Any,
@@ -189,6 +203,66 @@ pub fn install_object_contracts(
         .map_err(|_| anyhow::anyhow!("application object contracts were already installed"))
 }
 
+static REGISTERED_EVENT_CONTRACTS: OnceLock<Vec<EventPayloadContractRegistration>> =
+    OnceLock::new();
+
+/// Install the application-owned event payload contracts exactly once, before
+/// any closure walk or event append. Selectors must live in the reserved
+/// namespace, be canonical and be unique; repeated installation fails closed.
+pub fn install_event_payload_contracts(
+    events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<()> {
+    let events = validate_event_registrations(events)?;
+    REGISTERED_EVENT_CONTRACTS
+        .set(events)
+        .map_err(|_| anyhow::anyhow!("application event contracts were already installed"))
+}
+
+fn validate_event_registrations(
+    mut events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<Vec<EventPayloadContractRegistration>> {
+    events.sort_by_key(|registration| registration.event_type);
+    let mut prior = None;
+    for registration in &events {
+        if !canonical_registered_event_selector(registration.event_type) {
+            anyhow::bail!(
+                "registered event selector is not canonical/reserved: {}",
+                registration.event_type
+            );
+        }
+        if prior == Some(registration.event_type) {
+            anyhow::bail!(
+                "registered event selector {} is duplicated",
+                registration.event_type
+            );
+        }
+        prior = Some(registration.event_type);
+    }
+    Ok(events)
+}
+
+fn canonical_registered_event_selector(selector: &str) -> bool {
+    selector.len() <= 128
+        && selector
+            .strip_prefix(REGISTERED_EVENT_SELECTOR_PREFIX)
+            .is_some_and(|suffix| {
+                suffix.split('.').all(|segment| {
+                    !segment.is_empty()
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                        })
+                })
+            })
+}
+
+/// Event selectors the installed application contracts admit.
+pub fn current_event_payload_selectors() -> Vec<&'static str> {
+    REGISTERED_EVENT_CONTRACTS
+        .get()
+        .map(|events| events.iter().map(|contract| contract.event_type).collect())
+        .unwrap_or_default()
+}
+
 /// Exact object kinds the current closure decoder admits.
 ///
 /// Durable writers and maintenance coverage tests use this inventory so a new
@@ -244,6 +318,67 @@ fn registered_contract(kind: &str) -> Option<&'static ObjectContractRegistration
         .map(|index| &registrations[index])
 }
 
+fn event_contract_in<'a>(
+    table: Option<&'a [EventPayloadContractRegistration]>,
+    selector: &str,
+) -> Result<Option<&'a EventPayloadContractRegistration>, String> {
+    if !selector.starts_with(REGISTERED_EVENT_SELECTOR_PREFIX) {
+        return Ok(None);
+    }
+    if !canonical_registered_event_selector(selector) {
+        return Err("noncanonical reserved event selector".into());
+    }
+    table
+        .and_then(|events| {
+            events
+                .binary_search_by_key(&selector, |entry| entry.event_type)
+                .ok()
+                .map(|index| &events[index])
+        })
+        .map(Some)
+        .ok_or_else(|| format!("unregistered reserved event selector: {selector}"))
+}
+
+fn event_contract_for_value<'a>(
+    table: Option<&'a [EventPayloadContractRegistration]>,
+    value: &Value,
+) -> Result<Option<&'a EventPayloadContractRegistration>, String> {
+    let selector = value
+        .get("event_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing thread event selector".to_string())?;
+    event_contract_in(table, selector)
+}
+
+fn validate_registered_event(value: &Value) -> anyhow::Result<()> {
+    if let Some(contract) =
+        event_contract_for_value(REGISTERED_EVENT_CONTRACTS.get().map(Vec::as_slice), value)
+            .map_err(anyhow::Error::msg)?
+    {
+        (contract.validate)(value)?;
+    }
+    Ok(())
+}
+
+fn registered_event_links_in(
+    table: Option<&[EventPayloadContractRegistration]>,
+    value: &Value,
+) -> Result<Option<ContractLinks>, String> {
+    let Some(contract) = event_contract_for_value(table, value)? else {
+        return Ok(None);
+    };
+    // Diagnostic traversal also refuses unvalidated domain edges.
+    let envelope = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
+        .map_err(|error| error.to_string())?;
+    envelope.validate().map_err(|error| error.to_string())?;
+    (contract.validate)(value).map_err(|error| error.to_string())?;
+    convert_registered_links((contract.links)(value)?).map(Some)
+}
+
+fn links_registered_event(value: &Value) -> Result<Option<ContractLinks>, String> {
+    registered_event_links_in(REGISTERED_EVENT_CONTRACTS.get().map(Vec::as_slice), value)
+}
+
 fn decode_registered(value: &Value) -> anyhow::Result<Option<ContractLinks>> {
     let kind = value
         .get("kind")
@@ -274,7 +409,10 @@ fn registered_links(
     contract: &ObjectContractRegistration,
     value: &Value,
 ) -> Result<ContractLinks, String> {
-    let declared = (contract.links)(value)?;
+    convert_registered_links((contract.links)(value)?)
+}
+
+fn convert_registered_links(declared: RegisteredObjectLinks) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
     for edge in declared.object_edges {
         push_typed_hash(
@@ -1553,6 +1691,89 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use serde_json::json;
+
+    fn test_event_contract(selector: &'static str) -> EventPayloadContractRegistration {
+        EventPayloadContractRegistration {
+            event_type: selector,
+            validate: |event| {
+                if event["payload"]["owner"] != event["thread_id"] {
+                    anyhow::bail!("payload owner differs from emitting thread");
+                }
+                Ok(())
+            },
+            links: |event| {
+                Ok(RegisteredObjectLinks {
+                    object_edges: vec![RegisteredObjectEdge {
+                        hash: event["payload"]["evidence"]
+                            .as_str()
+                            .ok_or("missing evidence")?
+                            .to_owned(),
+                        expected: RegisteredObjectExpectation::Kind("thread_event"),
+                    }],
+                    ..Default::default()
+                })
+            },
+        }
+    }
+
+    #[test]
+    fn event_registration_is_exact_reserved_and_fail_closed_without_installation() {
+        assert!(event_contract_in(None, "contract.test.v1").is_err());
+        assert!(event_contract_in(None, "contract..v1").is_err());
+        assert!(event_contract_in(None, "ordinary_event").unwrap().is_none());
+        for selector in [
+            "ordinary_event",
+            "contract.",
+            "contract.Test.v1",
+            "contract.test-v1",
+        ] {
+            assert!(validate_event_registrations(vec![test_event_contract(selector)]).is_err());
+        }
+        assert!(
+            validate_event_registrations(vec![
+                test_event_contract("contract.test.v1"),
+                test_event_contract("contract.test.v1")
+            ])
+            .is_err()
+        );
+        let table =
+            validate_event_registrations(vec![test_event_contract("contract.test.v1")]).unwrap();
+        assert!(event_contract_in(Some(&table), "contract.test.v2").is_err());
+        assert!(
+            event_contract_in(Some(&table), "contract.test.v1")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn event_links_validate_envelope_owner_and_canonical_typed_evidence() {
+        let table =
+            validate_event_registrations(vec![test_event_contract("contract.test.v1")]).unwrap();
+        let mut event = json!({
+            "kind":"thread_event", "schema":crate::objects::SCHEMA_VERSION,
+            "chain_root_id":"T-one", "chain_seq":1, "thread_id":"T-one", "thread_seq":1,
+            "event_type":"contract.test.v1", "durability":"journal",
+            "ts":"2026-10-05T00:00:00Z", "prev_chain_event_hash":null,
+            "prev_thread_event_hash":null, "payload":{"owner":"T-one","evidence":h("ab")}
+        });
+        let links = registered_event_links_in(Some(&table), &event)
+            .unwrap()
+            .unwrap();
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(
+            links.object_edges[0].expected,
+            ExpectedObject::Kind("thread_event")
+        );
+        event["payload"]["owner"] = json!("T-other");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+        event["payload"]["owner"] = json!("T-one");
+        event["payload"]["evidence"] = json!("not-a-hash");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+        event["payload"]["evidence"] = json!(h("ab"));
+        event["thread_id"] = json!("");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+    }
 
     fn h(byte: &str) -> String {
         byte.repeat(32)

@@ -147,7 +147,7 @@ impl ExternalQualificationLocalWorker {
                     None,
                     body,
                     || deadline.has_elapsed(),
-                    |delta| on_delta(delta),
+                    on_delta,
                     Some(deadline),
                 )
             },
@@ -801,7 +801,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
         }) => {
             let death = attached_process
                 .as_ref()
-                .map(|identity| ryeos_app::process::assert_reaped_process_group_absent(identity));
+                .map(ryeos_app::process::assert_reaped_process_group_absent);
             if death.as_ref().is_some_and(Result::is_ok) {
                 let _ =
                     ryeos_app::external_qualification_local::settle_qualification_worker_process(

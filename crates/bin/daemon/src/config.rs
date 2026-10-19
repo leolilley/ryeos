@@ -197,6 +197,8 @@ pub enum HostInstallAction {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -238,7 +240,7 @@ mod tests {
         .unwrap();
         assert!(
             matches!(cli.command, Some(DaemonCommand::HostService { app_root })
-            if app_root == PathBuf::from("/home/example/.local/share/ryeos"))
+            if app_root.as_path() == Path::new("/home/example/.local/share/ryeos"))
         );
     }
 
@@ -255,7 +257,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(DaemonCommand::HostRuntime { binding })
-                if binding == PathBuf::from("/run/ryeos/host-runtime.json")
+                if binding.as_path() == Path::new("/run/ryeos/host-runtime.json")
         ));
     }
 
@@ -291,7 +293,7 @@ mod tests {
             Some(DaemonCommand::HostInstall {
                 package_root,
                 action: HostInstallAction::Acquire { prepared: true, args, .. },
-            }) if package_root == PathBuf::from("/usr/share/ryeos")
+            }) if package_root.as_path() == Path::new("/usr/share/ryeos")
                 && args == vec![OsString::from("--populate"), OsString::from("--all")]
         ));
     }
@@ -312,7 +314,7 @@ mod tests {
                 app_root,
                 schema_cut: true,
                 active_bundles,
-            }) if app_root == PathBuf::from("/home/example/.local/share/ryeos")
+            }) if app_root.as_path() == Path::new("/home/example/.local/share/ryeos")
                 && active_bundles.is_empty()
         ));
     }

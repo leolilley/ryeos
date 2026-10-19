@@ -17,7 +17,7 @@ pub(crate) struct CoordinateOnlyBackend {
 }
 
 impl CoordinateOnlyBackend {
-    pub(crate) fn new(
+    pub(crate) fn shared(
         backend_id: &str,
         artifact_hash: &str,
         settings_schema_digest: &str,

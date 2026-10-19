@@ -1396,7 +1396,7 @@ fn advance_taken_destination(
                 };
                 let lillux_sqlite::OriginalNativeOutsideBoundParts {
                     root,
-                    name,
+                    name: _,
                     mode,
                     domain,
                     authority,
@@ -1404,7 +1404,6 @@ fn advance_taken_destination(
                 } = parts;
                 // Coordinate facts and the dyn alias end; the concrete leaf
                 // keeps the same authority and root allocations.
-                drop(name);
                 let _ = (mode, domain);
                 drop(inspection);
                 drop(authority);
@@ -1592,7 +1591,7 @@ impl StateMetadataPinRetirement {
 
     /// Move the completed census into the non-owning receipt. Connection
     /// Weak identities are cleared; only pins, receipts and tickets remain.
-    pub(super) fn into_sources_retired(
+    pub(super) fn take_sources_retired(
         &mut self,
         factory: &Arc<OriginalNativeFactory>,
         projection_refusals: usize,
@@ -3009,7 +3008,7 @@ impl ReleasedLiveStatePhysicalCustody {
         prepay_state_native_source_retirement(factory, owners, prepay)?;
         terminal.require_original(factory)?;
         let receipt =
-            metadata_pins.into_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
+            metadata_pins.take_sources_retired(factory, _projection.2.len(), _refusal.is_some())?;
         // Infallible from here: each owner is moved out and ended explicitly;
         // the retained fields keep only empty values.
         if let Some(context) = std::mem::take(&mut *_context) {

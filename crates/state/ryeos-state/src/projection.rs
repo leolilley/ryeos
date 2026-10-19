@@ -31,7 +31,9 @@ mod retention;
 mod threads;
 pub(crate) use events::ProjectionEventConflict;
 pub use events::{project_event, project_thread_edge};
-pub use retention::{ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor};
+pub use retention::{
+    ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, MAX_DUE_FENCED_CHAIN_SLICE,
+};
 pub(crate) use retention::{TerminalMember, derive_terminal_retention, refresh_chain_retention};
 pub(crate) use threads::project_thread_snapshot_with_events_in_transaction;
 pub use threads::{

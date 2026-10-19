@@ -79,6 +79,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "qualification_fixture_capture",
     "qualification_worker_transcript",
     "retained_lifecycle_artifacts",
+    "retired_chain_closure_page",
+    "retired_chain_manifest",
     "ryeos.effective_source_binding",
     "ryeos.source_closure_manifest",
     "source_manifest",
@@ -224,6 +226,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
         validate: validate_retained_lifecycle_artifacts,
         links: links_retained_lifecycle_artifacts,
+    },
+    ObjectContract {
+        kind: crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND,
+        validate: validate_retired_chain_closure_page,
+        links: links_retired_chain_closure_page,
+    },
+    ObjectContract {
+        kind: crate::objects::RETIRED_CHAIN_MANIFEST_KIND,
+        validate: validate_retired_chain_manifest,
+        links: links_retired_chain_manifest,
     },
     ObjectContract {
         kind: crate::objects::EFFECTIVE_SOURCE_BINDING_KIND,
@@ -494,7 +506,8 @@ fn validate_state_manifest(value: &Value) -> anyhow::Result<()> {
 
 fn validate_thread_event(value: &Value) -> anyhow::Result<()> {
     let object = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())?;
-    object.validate()
+    object.validate()?;
+    super::validate_registered_event(value)
 }
 
 fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
@@ -1416,6 +1429,13 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             )?;
         }
     }
+    if let Some(registered) = super::links_registered_event(value)? {
+        links.object_edges.extend(registered.object_edges);
+        links.blob_hashes.extend(registered.blob_hashes);
+        links
+            .large_object_hashes
+            .extend(registered.large_object_hashes);
+    }
     Ok(links)
 }
 
@@ -1516,6 +1536,74 @@ fn links_guest_runtime_materialization_subject(value: &Value) -> Result<Contract
         None,
         &mut links.object_edges,
     )?;
+    Ok(links)
+}
+
+fn validate_retired_chain_manifest(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetiredChainManifest::from_value(value)?;
+    Ok(())
+}
+
+fn links_retired_chain_manifest(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::RetiredChainManifest::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &manifest.snapshot_hash,
+        ExpectedObject::Kind("thread_snapshot"),
+        None,
+        &mut links.object_edges,
+    )?;
+    if let Some(hash) = manifest.terminal_event_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind("thread_event"),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    if let Some(hash) = manifest.closure_page_head {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind(crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    Ok(links)
+}
+
+fn validate_retired_chain_closure_page(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetiredChainClosurePage::from_value(value)?;
+    Ok(())
+}
+
+fn links_retired_chain_closure_page(value: &Value) -> Result<ContractLinks, String> {
+    let page = crate::objects::RetiredChainClosurePage::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    if let Some(hash) = page.next_page_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind(crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    for coordinate in page.retained_evidence {
+        for hash in [
+            &coordinate.event_hash,
+            &coordinate.owner_tip.event_hash,
+            &coordinate.counterpart_tip.event_hash,
+        ] {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind("thread_event"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     Ok(links)
 }
 

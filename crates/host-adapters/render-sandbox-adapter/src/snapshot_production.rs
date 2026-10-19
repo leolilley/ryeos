@@ -566,7 +566,7 @@ fn send_snapshot_upload(
         source_response_sha256,
         provider_response_sha256: lillux::sha256_hex(&response_body),
         provider_status,
-        completed_at_ms: i64::try_from(lillux::time::timestamp_millis())?,
+        completed_at_ms: lillux::time::timestamp_millis(),
     })
 }
 

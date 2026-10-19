@@ -529,7 +529,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(ExternalConnectorPreparation::Prior(prior));
             }
-            expected.prepared_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
+            expected.prepared_at_ms = lillux::time::timestamp_millis();
             tx.execute(
                 "INSERT INTO external_execution_connector VALUES(
                 ?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,NULL,?10,NULL,NULL,NULL)",
@@ -609,7 +609,7 @@ impl RuntimeDb {
                             )?,
                         "external connector capability generation changed"
                     );
-                    let now = i64::try_from(lillux::time::timestamp_millis())?;
+                    let now = lillux::time::timestamp_millis();
                     ensure!(
                         tx.execute(
                             "UPDATE external_execution_connector
@@ -656,7 +656,7 @@ impl RuntimeDb {
                 tx.commit()?;
                 return Ok(record);
             }
-            let now = i64::try_from(lillux::time::timestamp_millis())?;
+            let now = lillux::time::timestamp_millis();
             tx.execute(
                 "UPDATE external_execution_connector SET state='closed',closed_at_ms=?2,close_reason=?3
               WHERE placement_thread_id=?1 AND state IN ('prepared','connected')",
@@ -1110,7 +1110,7 @@ mod tests {
             .unwrap();
         assert!(
             db.conn
-                .with_sql(|connection| validate_connectors(connection))
+                .with_sql(validate_connectors)
                 .unwrap_err()
                 .to_string()
                 .contains("capability generation")

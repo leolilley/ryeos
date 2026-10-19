@@ -4,9 +4,12 @@ use rusqlite::OptionalExtension;
 
 use super::ProjectionDb;
 use crate::objects::{
-    CapturedThreadHistoryPolicy, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
-    parse_canonical_timestamp,
+    CapturedThreadHistoryPolicy, FencedChainKinds, MAX_TERMINAL_DURATION_SECONDS,
+    ThreadHistoryRetention, parse_canonical_timestamp,
 };
+
+/// Largest slice of due fenced chains one call returns.
+pub const MAX_DUE_FENCED_CHAIN_SLICE: usize = 128;
 
 const TERMINAL_STATUSES_SQL: &str =
     "'completed','failed','cancelled','killed','timed_out','continued'";
@@ -162,6 +165,59 @@ pub(crate) fn refresh_chain_retention(
 }
 
 impl ProjectionDb {
+    /// Chains of the caller's fenced kinds whose terminal retention deadline
+    /// has passed, in root-id keyset order so the lifecycle owner can keep an
+    /// independent bounded cursor without rescanning an earlier deadline
+    /// prefix. Positive scheduling only: it is never retirement authority, and
+    /// the owner requalifies each candidate under its chain lock. With no
+    /// fenced kinds nothing is due.
+    pub fn due_fenced_chain_retirement_slice(
+        &self,
+        fenced_kinds: &FencedChainKinds,
+        now: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(
+            (1..=MAX_DUE_FENCED_CHAIN_SLICE).contains(&limit),
+            "due fenced chain slice exceeds the candidate batch bound"
+        );
+        let now = parse_canonical_timestamp(now)?.timestamp();
+        if fenced_kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_sql(|connection| {
+            let kind_placeholders = (0..fenced_kinds.iter().count())
+                .map(|index| format!("?{}", index + 4))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = connection.prepare(&format!(
+                "SELECT root.chain_root_id FROM chain_retention retention \
+                 JOIN threads root \
+                   ON root.thread_id=retention.chain_root_id AND root.chain_root_id=retention.chain_root_id \
+                 JOIN projection_meta meta ON meta.chain_root_id=retention.chain_root_id \
+                 WHERE root.kind IN ({kind_placeholders}) \
+                   AND retention.retire_after IS NOT NULL AND retention.retire_after <= ?1 \
+                   AND retention.terminal_at IS NOT NULL \
+                   AND (?2 IS NULL OR root.chain_root_id > ?2) \
+                   AND NOT EXISTS (SELECT 1 FROM threads member \
+                       WHERE member.chain_root_id=retention.chain_root_id \
+                         AND member.status NOT IN ({TERMINAL_STATUSES_SQL})) \
+                 ORDER BY root.chain_root_id LIMIT ?3"
+            ))?;
+            let mut values: Vec<rusqlite::types::Value> = vec![
+                now.into(),
+                after.map(str::to_owned).into(),
+                i64::try_from(limit)
+                    .context("due fenced chain limit exceeds i64")?
+                    .into(),
+            ];
+            values.extend(fenced_kinds.iter().map(|kind| kind.to_owned().into()));
+            let rows = statement.query_map(rusqlite::params_from_iter(values), |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+        })
+    }
+
     pub fn list_due_terminal_chains(
         &self,
         now: &str,
@@ -358,5 +414,123 @@ mod tests {
                     .contains("invalid canonical retention timestamp")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod due_fenced_slice_tests {
+    use super::*;
+    use crate::objects::thread_snapshot::{
+        CapturedEffectiveTrustClass, CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance,
+        CapturedPolicyProvenance, ThreadSnapshotBuilder, ThreadStatus,
+    };
+
+    fn project(db: &ProjectionDb, root: &str, kind: &str, status: ThreadStatus, seconds: u64) {
+        let hash = "a".repeat(64);
+        let policy = CapturedThreadHistoryPolicy {
+            retention: ThreadHistoryRetention::TerminalFor { seconds },
+            canonical_item_ref: "directive:test".to_string(),
+            item_content_hash: hash.clone(),
+            item_signer_fingerprint: Some(hash.clone()),
+            item_trust_class: CapturedItemTrustClass::Trusted,
+            kind_schema_content_hash: hash,
+            resolved_from: CapturedPolicyProvenance::ItemAuthored {
+                composed_path: "history".to_string(),
+                requested_seconds: seconds,
+                effective_trust_class: CapturedEffectiveTrustClass::TrustedBundle,
+                minimum_clamp: None,
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+            },
+        };
+        let terminal = status.is_terminal();
+        let stamp = || "2026-01-01T00:00:00Z".to_string();
+        let snapshot = ThreadSnapshotBuilder::new(root, root, kind, "directive:test", "runtime")
+            .captured_history_policy(Some(policy))
+            .status(status)
+            .created_at("2026-01-01T00:00:00Z".to_string())
+            .updated_at("2026-01-01T00:00:00Z".to_string())
+            .started_at((!terminal).then(stamp))
+            .finished_at(terminal.then(stamp))
+            .build();
+        crate::projection::project_thread_snapshot(db, &snapshot, root).unwrap();
+        db.update_projection_meta(&crate::projection::cursor::ProjectionMeta {
+            chain_root_id: root.to_string(),
+            indexed_chain_state_hash: "c".repeat(64),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+    }
+
+    fn kinds(names: &[&str]) -> FencedChainKinds {
+        FencedChainKinds::new(names.iter().map(|name| name.to_string())).unwrap()
+    }
+
+    #[test]
+    fn slice_is_root_ordered_bounded_and_limited_to_fenced_kinds() {
+        let db = crate::test_support::TestProjection::open();
+        for root in ["T-c", "T-a", "T-b", "T-e"] {
+            project(&db, root, "fenced_kind", ThreadStatus::Completed, 60);
+        }
+        project(&db, "T-d", "ordinary_kind", ThreadStatus::Completed, 60);
+        project(&db, "T-f", "fenced_kind", ThreadStatus::Running, 60);
+        project(
+            &db,
+            "T-g",
+            "fenced_kind",
+            ThreadStatus::Completed,
+            1_000_000_000,
+        );
+        let now = "2026-01-01T00:02:00Z";
+        let fenced = kinds(&["fenced_kind"]);
+        let all = db
+            .due_fenced_chain_retirement_slice(&fenced, now, None, 128)
+            .unwrap();
+        assert_eq!(all, ["T-a", "T-b", "T-c", "T-e"]);
+        let first = db
+            .due_fenced_chain_retirement_slice(&fenced, now, None, 2)
+            .unwrap();
+        assert_eq!(first, ["T-a", "T-b"]);
+        let rest = db
+            .due_fenced_chain_retirement_slice(&fenced, now, first.last().map(String::as_str), 2)
+            .unwrap();
+        assert_eq!(rest, ["T-c", "T-e"]);
+        // Not yet due before the deadline.
+        assert!(
+            db.due_fenced_chain_retirement_slice(&fenced, "2026-01-01T00:00:30Z", None, 128)
+                .unwrap()
+                .is_empty()
+        );
+        // Several kinds are a set; none means nothing is due.
+        let both = db
+            .due_fenced_chain_retirement_slice(
+                &kinds(&["fenced_kind", "ordinary_kind"]),
+                now,
+                None,
+                128,
+            )
+            .unwrap();
+        assert_eq!(both, ["T-a", "T-b", "T-c", "T-d", "T-e"]);
+        assert!(
+            db.due_fenced_chain_retirement_slice(&FencedChainKinds::default(), now, None, 128)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn slice_refuses_unbounded_or_empty_limits_and_noncanonical_time() {
+        let db = crate::test_support::TestProjection::open();
+        let fenced = kinds(&["fenced_kind"]);
+        let now = "2026-01-01T00:02:00Z";
+        for limit in [0, MAX_DUE_FENCED_CHAIN_SLICE + 1] {
+            assert!(
+                db.due_fenced_chain_retirement_slice(&fenced, now, None, limit)
+                    .is_err()
+            );
+        }
+        assert!(
+            db.due_fenced_chain_retirement_slice(&fenced, "2026-01-01T00:02:00+01:00", None, 1)
+                .is_err()
+        );
     }
 }
