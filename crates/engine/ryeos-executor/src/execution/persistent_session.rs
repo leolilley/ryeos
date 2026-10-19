@@ -2215,17 +2215,23 @@ fn admit_session_capsule(
         .map(|publication| publication.authority().try_clone())
         .transpose()?
         .unwrap_or(state.state_store.pinned_state_authority()?);
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let cas = authority.cas_store()?;
     let structured_session_profile = if wire.wire_protocol == "ryeos.structured-session" {
         let captured = captured_source
             .as_ref()
             .ok_or_else(|| anyhow!("structured-session worker has no admitted source closure"))?;
-        let profile =
-            ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
-                captured, &guard,
-            )?;
+        // The guard covers only the exact source reads. Qualification below
+        // may start handler processes, which a thread holding a CAS mutation
+        // guard cannot do, so the profile is the only product of this segment.
+        let profile = {
+            let guard = authority.acquire_shared_guard()?;
+            authority.ensure_guard(&guard)?;
+            let profile =
+                ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
+                    captured, &guard,
+                )?;
+            authority.ensure_guard(&guard)?;
+            profile
+        };
         if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty())
             && !state.isolation.is_enforced()
         {
@@ -2318,6 +2324,9 @@ fn admit_session_capsule(
             validate_session_process_control(state, session)?;
             (None, None)
         };
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
     let execution_closure = {
         let _permit = state
             .write_barrier
